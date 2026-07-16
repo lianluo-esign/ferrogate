@@ -43,7 +43,7 @@ impl FerroGateway {
         if path == "/admin/v1/plans" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_plans() {
+                    Ok(_) => match state.list_plans().await {
                         Ok(plans) => {
                             let body = AdminList::new(plans.iter().map(admin_plan).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
@@ -101,7 +101,7 @@ impl FerroGateway {
 
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_plan(id) {
+                Ok(_) => match state.get_plan(id).await {
                     Ok(Some(plan)) => {
                         let body = AdminPlanMutationResponse {
                             object: "plan",
@@ -221,7 +221,7 @@ impl FerroGateway {
             .clone()
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| slug.clone());
-        if state.get_plan(&id).ok().flatten().is_some() {
+        if state.get_plan(&id).await.ok().flatten().is_some() {
             return write_json_error(
                 session,
                 StatusCode::CONFLICT,
@@ -295,7 +295,7 @@ impl FerroGateway {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
-        let existing = state.get_plan(id).ok().flatten();
+        let existing = state.get_plan(id).await.ok().flatten();
         if !merge && existing.is_none() {
             return write_json_error(
                 session,
@@ -390,7 +390,7 @@ impl FerroGateway {
         success_status: StatusCode,
     ) -> PingoraResult<()> {
         let id = plan.id.clone();
-        match state.upsert_plan(plan.clone()) {
+        match state.upsert_plan(plan.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

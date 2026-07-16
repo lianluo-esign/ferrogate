@@ -486,7 +486,11 @@ impl AppState {
         webhook_url: &str,
         timeout: Duration,
     ) {
-        let policy = match self.repositories.get_quota_policy(scope_type, scope_id) {
+        let policy = match self
+            .repositories
+            .get_quota_policy(scope_type, scope_id)
+            .await
+        {
             Ok(Some(policy)) => policy,
             Ok(None) => return,
             Err(error) => {
@@ -765,22 +769,21 @@ mod tests {
             },
             ..Config::default()
         });
-        state
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: "tenant:tenant-budget-alerts".into(),
-                scope_type: QuotaScopeKind::Tenant,
-                scope_id: "tenant-budget-alerts".into(),
-                model_allowlist: vec![],
-                rpm_limit: None,
-                tpm_limit: None,
-                monthly_budget_usd: Some(1.0),
-                asset_storage_quota_bytes: None,
-                alert_threshold_pcts: vec![50, 90],
-                enabled: true,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
+        block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+            id: "tenant:tenant-budget-alerts".into(),
+            scope_type: QuotaScopeKind::Tenant,
+            scope_id: "tenant-budget-alerts".into(),
+            model_allowlist: vec![],
+            rpm_limit: None,
+            tpm_limit: None,
+            monthly_budget_usd: Some(1.0),
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: vec![50, 90],
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
 
         // 500_000 prompt tokens at $1/1M = $0.50 spend = 50% of the $1
         // budget: crosses the 50% tier, not yet the 90% one.
@@ -863,22 +866,21 @@ mod tests {
         // No alert_threshold_pcts configured -- backward compatible with
         // pre-#170 StoredQuotaPolicy rows/tests: a budget cap alone must
         // never imply implicit alert tiers.
-        state
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: "tenant:tenant-budget-alerts".into(),
-                scope_type: QuotaScopeKind::Tenant,
-                scope_id: "tenant-budget-alerts".into(),
-                model_allowlist: vec![],
-                rpm_limit: None,
-                tpm_limit: None,
-                monthly_budget_usd: Some(1.0),
-                asset_storage_quota_bytes: None,
-                alert_threshold_pcts: vec![],
-                enabled: true,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
+        block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+            id: "tenant:tenant-budget-alerts".into(),
+            scope_type: QuotaScopeKind::Tenant,
+            scope_id: "tenant-budget-alerts".into(),
+            model_allowlist: vec![],
+            rpm_limit: None,
+            tpm_limit: None,
+            monthly_budget_usd: Some(1.0),
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: vec![],
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
 
         // Spend well past 100% of budget -- the hard-deny is a separate
         // concern (auth.rs); this call itself must not fire any webhook.

@@ -278,6 +278,7 @@ impl FerroGateway {
         }
         if state
             .get_tenant_account(&tenant_id)
+            .await
             .ok()
             .flatten()
             .is_none()

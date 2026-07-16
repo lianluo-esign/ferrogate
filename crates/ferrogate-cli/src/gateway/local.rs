@@ -5419,11 +5419,13 @@ impl FerroGateway {
                 // tenant record.
                 let tenant_account_exists = state
                     .get_tenant_account(&self_hosted_tenant_id)
+                    .await
                     .ok()
                     .flatten()
                     .is_some();
                 let plan_grants_access = state
                     .resolve_tenant_plan(&self_hosted_tenant_id)
+                    .await
                     .ok()
                     .flatten()
                     .is_some_and(|plan| plan.self_hosted_workers_enabled);

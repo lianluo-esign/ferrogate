@@ -65,10 +65,12 @@ fn register_creates_a_working_session_and_gateway_key() {
     // already grants (see provision_gateway_api_key's doc comment).
     let gateway_api_key = body["gateway_api_key"].as_str().unwrap();
     let material = virtual_api_key_material(gateway_api_key).unwrap();
-    let candidates = console
-        .repositories
-        .find_api_key_records_by_prefix(&material.key_prefix)
-        .unwrap();
+    let candidates = block_on_sync_bridge(
+        console
+            .repositories
+            .find_api_key_records_by_prefix(&material.key_prefix),
+    )
+    .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].scopes,

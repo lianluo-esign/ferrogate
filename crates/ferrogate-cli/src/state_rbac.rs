@@ -14,27 +14,26 @@ impl AppState {
         permission_key: String,
         plan_enabled: fn(&StoredPlan) -> bool,
     ) -> bool {
-        // get_tenant_account/get_plan are still sync (not yet migrated to the
-        // async pool), so they stay in spawn_blocking to avoid stalling the
-        // tokio worker thread; list_permissions/list_tenant_role_bindings/
-        // get_role are async now (issue #221's rbac slice) and are awaited
-        // directly rather than blocked-on inside the closure.
-        let repositories = Arc::clone(&self.repositories);
-        let account_tenant_id = tenant_id.clone();
-        let (tenant_account_exists, plan_grants_access) = tokio::task::spawn_blocking(move || {
-            let account = repositories
-                .get_tenant_account(&account_tenant_id)
+        // get_tenant_account/get_plan are async now (issue #221's tenancy
+        // slice), same as list_permissions/list_tenant_role_bindings/get_role
+        // below -- all awaited directly, no spawn_blocking needed anymore.
+        let account = self
+            .repositories
+            .get_tenant_account(&tenant_id)
+            .await
+            .ok()
+            .flatten();
+        let tenant_account_exists = account.is_some();
+        let plan_grants_access = match account {
+            Some(account) => self
+                .repositories
+                .get_plan(&account.plan_id)
+                .await
                 .ok()
-                .flatten();
-            let tenant_account_exists = account.is_some();
-            let plan_grants_access = account
-                .as_ref()
-                .and_then(|account| repositories.get_plan(&account.plan_id).ok().flatten())
-                .is_some_and(|plan| plan_enabled(&plan));
-            (tenant_account_exists, plan_grants_access)
-        })
-        .await
-        .unwrap_or((true, false));
+                .flatten()
+                .is_some_and(|plan| plan_enabled(&plan)),
+            None => false,
+        };
 
         let permission_exists =
             self.repositories

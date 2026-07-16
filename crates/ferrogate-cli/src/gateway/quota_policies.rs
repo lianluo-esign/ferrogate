@@ -46,22 +46,24 @@ impl FerroGateway {
         if path == "/admin/v1/quota-policies" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(auth) => match state.list_quota_policies() {
+                    Ok(auth) => match state.list_quota_policies().await {
                         Ok(policies) => {
-                            let policies: Vec<_> = policies
-                                .into_iter()
-                                .filter(|policy| {
-                                    authorize_quota_policy_scope(
-                                        &state,
-                                        &auth,
-                                        policy.scope_type,
-                                        &policy.scope_id,
-                                    )
-                                    .is_ok()
-                                })
-                                .collect();
+                            let mut authorized = Vec::with_capacity(policies.len());
+                            for policy in policies {
+                                if authorize_quota_policy_scope(
+                                    &state,
+                                    &auth,
+                                    policy.scope_type,
+                                    &policy.scope_id,
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    authorized.push(policy);
+                                }
+                            }
                             let body =
-                                AdminList::new(policies.iter().map(admin_quota_policy).collect());
+                                AdminList::new(authorized.iter().map(admin_quota_policy).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                                 .await
                         }
@@ -151,7 +153,7 @@ impl FerroGateway {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
                 Ok(auth) => {
                     if let Err(error) =
-                        authorize_quota_policy_scope(&state, &auth, scope_type, scope_id)
+                        authorize_quota_policy_scope(&state, &auth, scope_type, scope_id).await
                     {
                         return write_json_error(
                             session,
@@ -162,7 +164,7 @@ impl FerroGateway {
                         )
                         .await;
                     }
-                    match state.get_quota_policy(scope_type, scope_id) {
+                    match state.get_quota_policy(scope_type, scope_id).await {
                         Ok(Some(policy)) => {
                             let body = AdminQuotaPolicyMutationResponse {
                                 object: "quota_policy",
@@ -231,7 +233,7 @@ impl FerroGateway {
                     }
                 };
                 if let Err(error) =
-                    authorize_quota_policy_scope(&state, &auth, scope_type, scope_id)
+                    authorize_quota_policy_scope(&state, &auth, scope_type, scope_id).await
                 {
                     return write_json_error(
                         session,
@@ -243,7 +245,7 @@ impl FerroGateway {
                     .await;
                 }
                 let target = format!("{scope_type_raw}/{scope_id}");
-                match state.delete_quota_policy(scope_type, scope_id) {
+                match state.delete_quota_policy(scope_type, scope_id).await {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -454,7 +456,7 @@ impl FerroGateway {
             scope_id,
             merge,
         } = scope;
-        if let Err(error) = authorize_quota_policy_scope(state, auth, scope_type, scope_id) {
+        if let Err(error) = authorize_quota_policy_scope(state, auth, scope_type, scope_id).await {
             return write_json_error(
                 session,
                 error.status,
@@ -492,7 +494,11 @@ impl FerroGateway {
             .await;
         }
         let now = now_unix_seconds();
-        let existing = state.get_quota_policy(scope_type, scope_id).ok().flatten();
+        let existing = state
+            .get_quota_policy(scope_type, scope_id)
+            .await
+            .ok()
+            .flatten();
         // Preserve the original created_at_unix across re-upserts of the
         // same scope; only a brand-new (scope_type, scope_id) gets `now`.
         let created_at_unix = existing
@@ -562,7 +568,7 @@ impl FerroGateway {
             }
         };
         let target = format!("{}/{scope_id}", scope_type.as_str());
-        match state.upsert_quota_policy(policy.clone()) {
+        match state.upsert_quota_policy(policy.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

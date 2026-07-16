@@ -221,10 +221,11 @@ impl ApiKeyAuthenticator for StorageApiKeyAuthenticator {
         let presented_key = presented_key.trim();
         let key_prefix = virtual_api_key_prefix(presented_key)?;
         let now_unix_seconds = (self.now_unix_seconds)();
-        let candidates = self
-            .repositories
-            .find_api_key_records_by_prefix(&key_prefix)
-            .ok()?;
+        let candidates = block_on_sync_bridge(
+            self.repositories
+                .find_api_key_records_by_prefix(&key_prefix),
+        )
+        .ok()?;
 
         candidates.into_iter().find_map(|api_key| {
             if !api_key_record_is_active(&api_key, now_unix_seconds)
@@ -1110,6 +1111,39 @@ fn storage_error(error: &ferrogate_storage::StorageError) -> HttpResponse {
     )
 }
 
+/// Bridges an async storage call into this crate's fully synchronous
+/// request path (issue #221): `serve`'s connection loop spawns a plain
+/// `std::thread::spawn` per connection with no tokio runtime anywhere in the
+/// chain, and admin-console/SCIM handlers are shared by ~15 call sites that
+/// would all need to become `async fn` (cascading into `route_request`,
+/// `handle_connection`, and `serve`'s accept loop) to avoid this. Mirrors
+/// `ferrogate-cli`'s `gateway::block_on_sync_bridge` -- same
+/// `Handle::try_current()` + multi-thread-flavor check, falling back to a
+/// dedicated `current_thread` runtime, kept as a small local copy since the
+/// two crates don't share this kind of helper.
+fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
+where
+    T: Send,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("sync-bridge runtime should build")
+                    .block_on(future)
+            })
+            .join()
+            .expect("sync-bridge runtime thread should not panic")
+    })
+}
+
 /// Handle a new organization signing itself up (issue #157): creates the
 /// tenant/project/workspace hierarchy, the owning admin user, and a durable
 /// gateway virtual API key, then issues a session -- all in one call so the
@@ -1164,7 +1198,9 @@ fn handle_admin_register(
         created_at_unix: now,
         updated_at_unix: now,
     };
-    if let Err(error) = console.repositories.upsert_tenant_account(tenant_account) {
+    if let Err(error) =
+        block_on_sync_bridge(console.repositories.upsert_tenant_account(tenant_account))
+    {
         return storage_error(&error);
     }
     let project = StoredProject {
@@ -1176,7 +1212,7 @@ fn handle_admin_register(
         created_at_unix: now,
         updated_at_unix: now,
     };
-    if let Err(error) = console.repositories.upsert_project(project) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_project(project)) {
         return storage_error(&error);
     }
     let workspace = StoredWorkspace {
@@ -1190,7 +1226,7 @@ fn handle_admin_register(
         created_at_unix: now,
         updated_at_unix: now,
     };
-    if let Err(error) = console.repositories.upsert_workspace(workspace) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_workspace(workspace)) {
         return storage_error(&error);
     }
     let user = StoredAdminUser {
@@ -1274,10 +1310,11 @@ fn handle_admin_login(console: &AdminConsoleState, payload: AdminLoginRequest) -
     let Some(membership) = memberships.first() else {
         return unauthorized("this account has no tenant membership");
     };
-    let tenant_account = match console
-        .repositories
-        .get_tenant_account(&membership.tenant_id)
-    {
+    let tenant_account = match block_on_sync_bridge(
+        console
+            .repositories
+            .get_tenant_account(&membership.tenant_id),
+    ) {
         Ok(Some(account)) => account,
         Ok(None) => return internal_error("tenant account for this membership no longer exists"),
         Err(error) => return storage_error(&error),
@@ -1439,10 +1476,11 @@ fn handle_admin_me(console: &AdminConsoleState, token: &str) -> HttpResponse {
     };
     let mut tenant_views = Vec::with_capacity(memberships.len());
     for membership in memberships {
-        match console
-            .repositories
-            .get_tenant_account(&membership.tenant_id)
-        {
+        match block_on_sync_bridge(
+            console
+                .repositories
+                .get_tenant_account(&membership.tenant_id),
+        ) {
             Ok(Some(account)) => tenant_views.push(AdminTenantView {
                 id: account.id,
                 name: account.name,
@@ -1847,7 +1885,7 @@ fn resolve_default_workspace(
     console: &AdminConsoleState,
     tenant_id: &str,
 ) -> Result<Option<StoredWorkspace>, ferrogate_storage::StorageError> {
-    let workspaces = console.repositories.list_workspaces()?;
+    let workspaces = block_on_sync_bridge(console.repositories.list_workspaces())?;
     Ok(workspaces
         .into_iter()
         .find(|workspace| workspace.tenant_id == tenant_id))
@@ -1910,7 +1948,7 @@ fn provision_gateway_api_key(
         expires_at_unix: None,
         revoked_at_unix: None,
     };
-    console.repositories.upsert_api_key_record(key)?;
+    block_on_sync_bridge(console.repositories.upsert_api_key_record(key))?;
     Ok(secret)
 }
 
@@ -1981,7 +2019,7 @@ fn handle_admin_scim_token_create(console: &AdminConsoleState, token: &str) -> H
         expires_at_unix: None,
         revoked_at_unix: None,
     };
-    if let Err(error) = console.repositories.upsert_api_key_record(key) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_api_key_record(key)) {
         return storage_error(&error);
     }
     HttpResponse::json(201, AdminScimTokenResponse { token: secret })
@@ -2700,11 +2738,12 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         }
     };
 
-    let tenant_account = match console.repositories.get_tenant_account(&flow.tenant_id) {
-        Ok(Some(account)) => account,
-        Ok(None) => return internal_error("tenant account no longer exists"),
-        Err(error) => return storage_error(&error),
-    };
+    let tenant_account =
+        match block_on_sync_bridge(console.repositories.get_tenant_account(&flow.tenant_id)) {
+            Ok(Some(account)) => account,
+            Ok(None) => return internal_error("tenant account no longer exists"),
+            Err(error) => return storage_error(&error),
+        };
     let workspace = match resolve_default_workspace(console, &flow.tenant_id) {
         Ok(Some(workspace)) => workspace,
         Ok(None) => return internal_error("no workspace found for this tenant"),

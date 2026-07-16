@@ -162,7 +162,7 @@ pub(crate) fn filter_by_tenant_scope<T>(
 /// resolved tenant differs from their own AND when resolution fails
 /// entirely (the referenced project/workspace/key doesn't exist) --
 /// "nonexistent means safe to touch" is explicitly the wrong default here.
-pub(crate) fn authorize_scoped_resource(
+pub(crate) async fn authorize_scoped_resource(
     state: &AppState,
     auth: &AuthContext,
     scope_type: ferrogate_storage::QuotaScopeKind,
@@ -176,16 +176,19 @@ pub(crate) fn authorize_scoped_resource(
         QuotaScopeKind::Tenant => Some(scope_id.to_string()),
         QuotaScopeKind::Project => state
             .get_project(scope_id)
+            .await
             .ok()
             .flatten()
             .map(|project| project.tenant_id),
         QuotaScopeKind::Workspace => state
             .get_workspace(scope_id)
+            .await
             .ok()
             .flatten()
             .map(|workspace| workspace.tenant_id),
         QuotaScopeKind::Key => state
             .get_virtual_api_key(scope_id)
+            .await
             .ok()
             .flatten()
             .map(|key| key.tenant_id),

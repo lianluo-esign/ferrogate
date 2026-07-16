@@ -78,7 +78,7 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(auth) => match state.list_tenant_accounts() {
+                Ok(auth) => match state.list_tenant_accounts().await {
                     Ok(tenants) => {
                         let tenants =
                             crate::auth::filter_by_tenant_scope(&auth, tenants, |tenant| {
@@ -184,7 +184,7 @@ impl FerroGateway {
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
-                match state.upsert_tenant_account(account.clone()) {
+                match state.upsert_tenant_account(account.clone()).await {
                     Ok(()) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -252,7 +252,7 @@ impl FerroGateway {
                         )
                         .await;
                     }
-                    match state.get_tenant_account(id) {
+                    match state.get_tenant_account(id).await {
                         Ok(Some(account)) => {
                             let body = AdminTenantAccountMutationResponse {
                                 object: "tenant_account",
@@ -333,7 +333,7 @@ impl FerroGateway {
                     Ok(payload) => payload,
                     Err(()) => return Ok(()),
                 };
-                let Some(existing) = state.get_tenant_account(id).ok().flatten() else {
+                let Some(existing) = state.get_tenant_account(id).await.ok().flatten() else {
                     return write_json_error(
                         session,
                         StatusCode::NOT_FOUND,
@@ -354,7 +354,7 @@ impl FerroGateway {
                         )
                         .await;
                     }
-                    if state.get_plan(plan_id).ok().flatten().is_none() {
+                    if state.get_plan(plan_id).await.ok().flatten().is_none() {
                         return write_json_error(
                             session,
                             StatusCode::BAD_REQUEST,
@@ -374,7 +374,7 @@ impl FerroGateway {
                     created_at_unix: existing.created_at_unix,
                     updated_at_unix: now_unix_seconds(),
                 };
-                match state.upsert_tenant_account(account.clone()) {
+                match state.upsert_tenant_account(account.clone()).await {
                     Ok(()) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -464,7 +464,7 @@ impl FerroGateway {
             )
             .await;
         }
-        let Some(account) = state.get_tenant_account(tenant_id).ok().flatten() else {
+        let Some(account) = state.get_tenant_account(tenant_id).await.ok().flatten() else {
             return write_json_error(
                 session,
                 StatusCode::NOT_FOUND,
@@ -490,7 +490,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let plan = state.resolve_tenant_plan(tenant_id).ok().flatten();
+        let plan = state.resolve_tenant_plan(tenant_id).await.ok().flatten();
         let body = crate::responses::AdminTenantResolvedDefaults {
             object: "tenant_resolved_defaults",
             tenant_id: tenant_id.to_string(),
@@ -524,7 +524,7 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(auth) => match state.list_projects() {
+                Ok(auth) => match state.list_projects().await {
                     Ok(projects) => {
                         let projects =
                             crate::auth::filter_by_tenant_scope(&auth, projects, |project| {
@@ -604,6 +604,7 @@ impl FerroGateway {
                 }
                 if state
                     .get_tenant_account(&tenant_id)
+                    .await
                     .ok()
                     .flatten()
                     .is_none()
@@ -657,7 +658,7 @@ impl FerroGateway {
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
-                match state.upsert_project(project.clone()) {
+                match state.upsert_project(project.clone()).await {
                     Ok(()) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -709,7 +710,7 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(auth) => match state.list_workspaces() {
+                Ok(auth) => match state.list_workspaces().await {
                     Ok(workspaces) => {
                         let workspaces =
                             crate::auth::filter_by_tenant_scope(&auth, workspaces, |workspace| {
@@ -777,7 +778,7 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                let Some(project) = state.get_project(&project_id).ok().flatten() else {
+                let Some(project) = state.get_project(&project_id).await.ok().flatten() else {
                     return write_json_error(
                         session,
                         StatusCode::NOT_FOUND,
@@ -839,7 +840,7 @@ impl FerroGateway {
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
-                match state.upsert_workspace(workspace.clone()) {
+                match state.upsert_workspace(workspace.clone()).await {
                     Ok(()) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -894,7 +895,7 @@ impl FerroGateway {
         if path == "/admin/v1/virtual-keys" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(auth) => match state.list_virtual_api_keys() {
+                    Ok(auth) => match state.list_virtual_api_keys().await {
                         Ok(keys) => {
                             let keys = crate::auth::filter_by_tenant_scope(&auth, keys, |key| {
                                 key.tenant_id.as_str()
@@ -970,7 +971,7 @@ impl FerroGateway {
         match (method.clone(), action) {
             (Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(auth) => match state.get_virtual_api_key(id) {
+                    Ok(auth) => match state.get_virtual_api_key(id).await {
                         Ok(Some(key)) => {
                             if let Err(error) =
                                 crate::auth::authorize_tenant_scope(&auth, &key.tenant_id)
@@ -1110,7 +1111,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let scope = match state.resolve_workspace_scope(&workspace_id) {
+        let scope = match state.resolve_workspace_scope(&workspace_id).await {
             Ok(Some(scope)) => scope,
             Ok(None) => {
                 return write_json_error(
@@ -1198,7 +1199,7 @@ impl FerroGateway {
             revoked_at_unix: None,
         };
 
-        match state.upsert_virtual_api_key(key.clone()) {
+        match state.upsert_virtual_api_key(key.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -1252,7 +1253,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let Some(mut key) = (match state.get_virtual_api_key(id) {
+        let Some(mut key) = (match state.get_virtual_api_key(id).await {
             Ok(key) => key,
             Err(error) => {
                 return write_json_error(
@@ -1315,7 +1316,7 @@ impl FerroGateway {
         key.rotated_at_unix = Some(now);
         key.updated_at_unix = now;
 
-        match state.upsert_virtual_api_key(key.clone()) {
+        match state.upsert_virtual_api_key(key.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -1367,7 +1368,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let Some(mut key) = (match state.get_virtual_api_key(id) {
+        let Some(mut key) = (match state.get_virtual_api_key(id).await {
             Ok(key) => key,
             Err(error) => {
                 return write_json_error(
@@ -1407,7 +1408,7 @@ impl FerroGateway {
         } else {
             "virtual_key.disable"
         };
-        match state.upsert_virtual_api_key(key.clone()) {
+        match state.upsert_virtual_api_key(key.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -1458,7 +1459,7 @@ impl FerroGateway {
                 .await;
             }
         };
-        let Some(mut key) = (match state.get_virtual_api_key(id) {
+        let Some(mut key) = (match state.get_virtual_api_key(id).await {
             Ok(key) => key,
             Err(error) => {
                 return write_json_error(
@@ -1495,7 +1496,7 @@ impl FerroGateway {
         key.revoked_at_unix = Some(now);
         key.updated_at_unix = now;
 
-        match state.upsert_virtual_api_key(key.clone()) {
+        match state.upsert_virtual_api_key(key.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

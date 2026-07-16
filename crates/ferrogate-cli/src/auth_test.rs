@@ -52,41 +52,38 @@ fn seed_durable_virtual_key(
     secret: &str,
     mutate: impl FnOnce(&mut StoredApiKey),
 ) {
-    state
-        .upsert_tenant_account(StoredTenantAccount {
-            id: "tenant-1".into(),
-            name: "Tenant 1".into(),
-            slug: "tenant-1".into(),
-            status: "active".into(),
-            plan_id: "free".into(),
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .upsert_project(StoredProject {
-            id: "project-1".into(),
-            tenant_id: "tenant-1".into(),
-            name: "Project 1".into(),
-            slug: "project-1".into(),
-            status: "active".into(),
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .upsert_workspace(StoredWorkspace {
-            id: "workspace-1".into(),
-            project_id: "project-1".into(),
-            tenant_id: "tenant-1".into(),
-            name: "Workspace 1".into(),
-            slug: "workspace-1".into(),
-            environment: "prod".into(),
-            status: "active".into(),
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_tenant_account(StoredTenantAccount {
+        id: "tenant-1".into(),
+        name: "Tenant 1".into(),
+        slug: "tenant-1".into(),
+        status: "active".into(),
+        plan_id: "free".into(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.upsert_project(StoredProject {
+        id: "project-1".into(),
+        tenant_id: "tenant-1".into(),
+        name: "Project 1".into(),
+        slug: "project-1".into(),
+        status: "active".into(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.upsert_workspace(StoredWorkspace {
+        id: "workspace-1".into(),
+        project_id: "project-1".into(),
+        tenant_id: "tenant-1".into(),
+        name: "Workspace 1".into(),
+        slug: "workspace-1".into(),
+        environment: "prod".into(),
+        status: "active".into(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
     let scope = ferrogate_core::WorkspaceScope::new("tenant-1", "project-1", "workspace-1");
     let mut tenant = TenantContext::default();
@@ -116,7 +113,7 @@ fn seed_durable_virtual_key(
         revoked_at_unix: None,
     };
     mutate(&mut key);
-    state.upsert_virtual_api_key(key).unwrap();
+    block_on(state.upsert_virtual_api_key(key)).unwrap();
 }
 
 fn bearer_headers(secret: &str) -> HeaderMap {
@@ -215,13 +212,15 @@ fn durable_virtual_key_rotation_invalidates_previous_secret() {
     .is_ok());
 
     // Simulate the admin rotate handler: same id, freshly derived material.
-    let mut key = state.get_virtual_api_key("vk-rotate").unwrap().unwrap();
+    let mut key = block_on(state.get_virtual_api_key("vk-rotate"))
+        .unwrap()
+        .unwrap();
     let material = ferrogate_auth::virtual_api_key_material(new_secret).unwrap();
     key.key_prefix = material.key_prefix;
     key.key_hash = material.key_hash;
     key.last4 = material.last4;
     key.rotated_at_unix = Some(2);
-    state.upsert_virtual_api_key(key).unwrap();
+    block_on(state.upsert_virtual_api_key(key)).unwrap();
 
     assert!(authenticate(
         &state,
@@ -323,22 +322,21 @@ fn quota_policy_disabled_at_any_scope_is_a_hard_deny() {
         ..Config::default()
     });
     seed_durable_virtual_key(&state, "vk-quota-deny", secret, |_| {});
-    state
-        .upsert_quota_policy(StoredQuotaPolicy {
-            id: "tenant:tenant-1".into(),
-            scope_type: QuotaScopeKind::Tenant,
-            scope_id: "tenant-1".into(),
-            model_allowlist: vec![],
-            rpm_limit: None,
-            tpm_limit: None,
-            monthly_budget_usd: None,
-            asset_storage_quota_bytes: None,
-            alert_threshold_pcts: vec![],
-            enabled: false,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "tenant:tenant-1".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "tenant-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
     let error =
         authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").unwrap_err();
@@ -359,22 +357,21 @@ fn quota_policy_rpm_composes_with_the_keys_own_limit_as_a_single_counter() {
     seed_durable_virtual_key(&state, "vk-quota-rpm", secret, |key| {
         key.request_limit_per_minute = Some(10);
     });
-    state
-        .upsert_quota_policy(StoredQuotaPolicy {
-            id: "tenant:tenant-1".into(),
-            scope_type: QuotaScopeKind::Tenant,
-            scope_id: "tenant-1".into(),
-            model_allowlist: vec![],
-            rpm_limit: Some(1),
-            tpm_limit: None,
-            monthly_budget_usd: None,
-            asset_storage_quota_bytes: None,
-            alert_threshold_pcts: vec![],
-            enabled: true,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "tenant:tenant-1".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "tenant-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: Some(1),
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
     assert!(authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").is_ok());
     let error =
@@ -394,22 +391,21 @@ fn quota_policy_model_allowlist_intersects_with_the_keys_own_allowlist() {
     seed_durable_virtual_key(&state, "vk-quota-models", secret, |key| {
         key.allowed_models = vec!["fast-chat".into(), "smart-chat".into()];
     });
-    state
-        .upsert_quota_policy(StoredQuotaPolicy {
-            id: "tenant:tenant-1".into(),
-            scope_type: QuotaScopeKind::Tenant,
-            scope_id: "tenant-1".into(),
-            model_allowlist: vec!["fast-chat".into()],
-            rpm_limit: None,
-            tpm_limit: None,
-            monthly_budget_usd: None,
-            asset_storage_quota_bytes: None,
-            alert_threshold_pcts: vec![],
-            enabled: true,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "tenant:tenant-1".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "tenant-1".into(),
+        model_allowlist: vec!["fast-chat".into()],
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
     let auth = authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1")
         .expect("request should authenticate");
@@ -464,22 +460,21 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
         ..Config::default()
     });
     seed_durable_virtual_key(&state, "vk-quota-budget", secret, |_| {});
-    state
-        .upsert_quota_policy(StoredQuotaPolicy {
-            id: "tenant:tenant-1".into(),
-            scope_type: QuotaScopeKind::Tenant,
-            scope_id: "tenant-1".into(),
-            model_allowlist: vec![],
-            rpm_limit: None,
-            tpm_limit: None,
-            monthly_budget_usd: Some(0.001),
-            asset_storage_quota_bytes: None,
-            alert_threshold_pcts: vec![],
-            enabled: true,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "tenant:tenant-1".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "tenant-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd: Some(0.001),
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
     assert!(
         authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").is_ok(),

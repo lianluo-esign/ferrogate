@@ -1669,7 +1669,11 @@ impl PostgresControlPlaneStore {
         }
     }
 
-    fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
+    fn tenancy_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
         let scopes_json = serialize_storage_document(&api_key.scopes)?;
         let allowed_models_json = serialize_storage_document(&api_key.allowed_models)?;
         let allowed_providers_json = serialize_storage_document(&api_key.allowed_providers)?;
@@ -1680,8 +1684,13 @@ impl PostgresControlPlaneStore {
         let rotated_at_unix = api_key.rotated_at_unix.map(saturating_i64);
         let expires_at_unix = api_key.expires_at_unix.map(saturating_i64);
         let revoked_at_unix = api_key.revoked_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.tenancy_operation("upsert api key record");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO api_keys \
                  (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
                   enabled, scopes_json, allowed_models_json, allowed_providers_json, \
@@ -1723,14 +1732,20 @@ impl PostgresControlPlaneStore {
                     &expires_at_unix,
                     &revoked_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        let operation = self.tenancy_operation("get api key record");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
                  rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
@@ -1738,13 +1753,19 @@ impl PostgresControlPlaneStore {
                  FROM api_keys WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         row.as_ref().map(api_key_from_row).transpose()
     }
 
-    fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        let operation = self.tenancy_operation("list api key records");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
                  rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
@@ -1752,16 +1773,22 @@ impl PostgresControlPlaneStore {
                  FROM api_keys ORDER BY id ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(api_key_from_row).collect()
     }
 
-    fn find_api_key_records_by_prefix(
+    async fn find_api_key_records_by_prefix(
         &self,
         key_prefix: &str,
     ) -> Result<Vec<StoredApiKey>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.tenancy_operation("find api key records by prefix");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
                  rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
@@ -1769,7 +1796,8 @@ impl PostgresControlPlaneStore {
                  FROM api_keys WHERE key_prefix = $1 ORDER BY id ASC",
                 &[&key_prefix],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(api_key_from_row).collect()
     }
 
@@ -1948,9 +1976,17 @@ impl PostgresControlPlaneStore {
         Ok(affected)
     }
 
-    fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+    async fn upsert_tenant_account(
+        &self,
+        account: &StoredTenantAccount,
+    ) -> Result<(), StorageError> {
+        let operation = self.tenancy_operation("upsert tenant account");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO tenants \
                  (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7) \
@@ -1966,36 +2002,57 @@ impl PostgresControlPlaneStore {
                     &account.created_at_unix,
                     &account.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
-        self.with_client(|client| {
-            let row = client.query_opt(
+    async fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError> {
+        let operation = self.tenancy_operation("get tenant account");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants WHERE id = $1",
                 &[&id],
-            )?;
-            Ok(row.as_ref().map(tenant_account_from_row))
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.as_ref().map(tenant_account_from_row))
     }
 
-    fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+    async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        let operation = self.tenancy_operation("list tenant accounts");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants ORDER BY id ASC",
                 &[],
-            )?;
-            Ok(rows.iter().map(tenant_account_from_row).collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows.iter().map(tenant_account_from_row).collect())
     }
 
-    fn upsert_project(&self, project: &StoredProject) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+    async fn upsert_project(&self, project: &StoredProject) -> Result<(), StorageError> {
+        let operation = self.tenancy_operation("upsert project");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO projects \
                  (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7) \
@@ -2011,36 +2068,54 @@ impl PostgresControlPlaneStore {
                     &project.created_at_unix,
                     &project.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
-        self.with_client(|client| {
-            let row = client.query_opt(
+    async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        let operation = self.tenancy_operation("get project");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
                  FROM projects WHERE id = $1",
                 &[&id],
-            )?;
-            Ok(row.as_ref().map(project_from_row))
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.as_ref().map(project_from_row))
     }
 
-    fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+    async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        let operation = self.tenancy_operation("list projects");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
                  FROM projects ORDER BY id ASC",
                 &[],
-            )?;
-            Ok(rows.iter().map(project_from_row).collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows.iter().map(project_from_row).collect())
     }
 
-    fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+    async fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
+        let operation = self.tenancy_operation("upsert workspace");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO workspaces \
                  (id, project_id, tenant_id, name, slug, environment, status, \
                   created_at_unix, updated_at_unix) \
@@ -2060,53 +2135,72 @@ impl PostgresControlPlaneStore {
                     &workspace.created_at_unix,
                     &workspace.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
-        self.with_client(|client| {
-            let row = client.query_opt(
+    async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        let operation = self.tenancy_operation("get workspace");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, project_id, tenant_id, name, slug, environment, status, \
                  created_at_unix, updated_at_unix FROM workspaces WHERE id = $1",
                 &[&id],
-            )?;
-            Ok(row.as_ref().map(workspace_from_row))
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.as_ref().map(workspace_from_row))
     }
 
-    fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        let operation = self.tenancy_operation("list workspaces");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, project_id, tenant_id, name, slug, environment, status, \
                  created_at_unix, updated_at_unix FROM workspaces ORDER BY id ASC",
                 &[],
-            )?;
-            Ok(rows.iter().map(workspace_from_row).collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows.iter().map(workspace_from_row).collect())
     }
 
-    fn resolve_workspace_scope(
+    async fn resolve_workspace_scope(
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceScope>, StorageError> {
-        self.with_client(|client| {
-            let row = client.query_opt(
+        let operation = self.tenancy_operation("resolve workspace scope");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT tenant_id, project_id, id FROM workspaces WHERE id = $1",
                 &[&workspace_id],
-            )?;
-            Ok(row.map(|row| {
-                WorkspaceScope::new(
-                    row.get::<_, String>(0),
-                    row.get::<_, String>(1),
-                    row.get::<_, String>(2),
-                )
-            }))
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(|row| {
+            WorkspaceScope::new(
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+            )
+        }))
     }
 
-    fn upsert_quota_policy(&self, policy: &StoredQuotaPolicy) -> Result<(), StorageError> {
+    async fn upsert_quota_policy(&self, policy: &StoredQuotaPolicy) -> Result<(), StorageError> {
         let model_allowlist_json = serialize_storage_document(&policy.model_allowlist)?;
         let alert_threshold_pcts_json = serialize_storage_document(&policy.alert_threshold_pcts)?;
         let rpm_limit = policy.rpm_limit.map(saturating_i64);
@@ -2114,8 +2208,13 @@ impl PostgresControlPlaneStore {
         let asset_storage_quota_bytes = policy.asset_storage_quota_bytes.map(saturating_i64);
         let created_at_unix = policy.created_at_unix;
         let updated_at_unix = policy.updated_at_unix;
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.tenancy_operation("upsert quota policy");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO quota_policies \
                  (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
                   monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
@@ -2142,56 +2241,75 @@ impl PostgresControlPlaneStore {
                     &alert_threshold_pcts_json,
                     &asset_storage_quota_bytes,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_quota_policy(
+    async fn get_quota_policy(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
     ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.tenancy_operation("get quota policy");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes \
                  FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         row.as_ref().map(quota_policy_from_row).transpose()
     }
 
-    fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        let operation = self.tenancy_operation("list quota policies");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes \
                  FROM quota_policies ORDER BY id ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(quota_policy_from_row).collect()
     }
 
-    fn delete_quota_policy(
+    async fn delete_quota_policy(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
     ) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute(
+        let operation = self.tenancy_operation("delete quota policy");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute(
                 "DELETE FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(affected > 0)
     }
 
-    fn upsert_plan(&self, plan: &StoredPlan) -> Result<(), StorageError> {
+    async fn upsert_plan(&self, plan: &StoredPlan) -> Result<(), StorageError> {
         let default_model_allowlist_json =
             serialize_storage_document(&plan.default_model_allowlist)?;
         let default_rpm_limit = plan.default_rpm_limit.map(saturating_i64);
@@ -2199,8 +2317,13 @@ impl PostgresControlPlaneStore {
         let admin_console_seats = plan.admin_console_seats.map(i64::from);
         let default_asset_storage_quota_bytes =
             plan.default_asset_storage_quota_bytes.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.tenancy_operation("upsert plan");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO plans \
                  (id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                   admin_console_seats, default_model_allowlist_json, default_rpm_limit, \
@@ -2239,14 +2362,20 @@ impl PostgresControlPlaneStore {
                     &default_asset_storage_quota_bytes,
                     &plan.extension_tools_enabled,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        let operation = self.tenancy_operation("get plan");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
@@ -2255,13 +2384,19 @@ impl PostgresControlPlaneStore {
                  FROM plans WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         row.as_ref().map(plan_from_row).transpose()
     }
 
-    fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        let operation = self.tenancy_operation("list plans");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
@@ -2270,7 +2405,8 @@ impl PostgresControlPlaneStore {
                  FROM plans ORDER BY id ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(plan_from_row).collect()
     }
 
@@ -7736,11 +7872,24 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.documents()?,
         };
+        // Same sync CLI migration tool as `import_migration_snapshot` below --
+        // no tokio runtime anywhere in its call chain, so bridge the one
+        // now-async call (`list_api_key_records`) with a dedicated
+        // current-thread runtime rather than making this export function
+        // (and its sync CLI caller) async.
+        let bridge_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                StorageError::Runtime(format!(
+                    "failed to build migration-export async bridge runtime: {error}"
+                ))
+            })?;
         Ok(StorageMigrationSnapshot {
             control_plane,
             guardrail_policy_revisions: self.list_guardrail_policy_revisions(None)?,
             guardrail_policy_bindings: self.list_guardrail_policy_bindings()?,
-            api_key_records: self.list_api_key_records()?,
+            api_key_records: bridge_runtime.block_on(self.list_api_key_records())?,
             tool_approvals: self.control_plane_tool_approval_documents()?,
             billing_events: self.billing_events(),
             usage_aggregates: self.usage_aggregates(),
@@ -7796,7 +7945,7 @@ impl RuntimeStorageRepositories {
             self.restore_guardrail_policy_binding(&policy_id, expected_generation, Some(binding))?;
         }
         for api_key in snapshot.api_key_records {
-            self.upsert_api_key_record(api_key)?;
+            bridge_runtime.block_on(self.upsert_api_key_record(api_key))?;
         }
         for (id, document_json) in snapshot.tool_approvals {
             self.upsert_control_plane_tool_approval(id, document_json)?;
@@ -7893,7 +8042,7 @@ impl RuntimeStorageRepositories {
 
     // --- Durable virtual API keys bound to workspaces ---
 
-    pub fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
+    pub async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -7902,36 +8051,36 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_api_key_record(&api_key)
+                control_plane.upsert_api_key_record(&api_key).await
             }
         }
     }
 
-    pub fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+    pub async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_api_key_record(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_api_key_record(id)
+                control_plane.get_api_key_record(id).await
             }
         }
     }
 
-    pub fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+    pub async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_api_key_records())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_api_key_records()
+                control_plane.list_api_key_records().await
             }
         }
     }
 
-    pub fn find_api_key_records_by_prefix(
+    pub async fn find_api_key_records_by_prefix(
         &self,
         key_prefix: &str,
     ) -> Result<Vec<StoredApiKey>, StorageError> {
@@ -7941,7 +8090,9 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.find_api_key_records_by_prefix(key_prefix))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.find_api_key_records_by_prefix(key_prefix)
+                control_plane
+                    .find_api_key_records_by_prefix(key_prefix)
+                    .await
             }
         }
     }
@@ -8111,7 +8262,10 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn upsert_tenant_account(&self, account: StoredTenantAccount) -> Result<(), StorageError> {
+    pub async fn upsert_tenant_account(
+        &self,
+        account: StoredTenantAccount,
+    ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8120,12 +8274,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_tenant_account(&account)
+                control_plane.upsert_tenant_account(&account).await
             }
         }
     }
 
-    pub fn get_tenant_account(
+    pub async fn get_tenant_account(
         &self,
         id: &str,
     ) -> Result<Option<StoredTenantAccount>, StorageError> {
@@ -8135,24 +8289,24 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_tenant_account(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_tenant_account(id)
+                control_plane.get_tenant_account(id).await
             }
         }
     }
 
-    pub fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+    pub async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_tenant_accounts())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_tenant_accounts()
+                control_plane.list_tenant_accounts().await
             }
         }
     }
 
-    pub fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
+    pub async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8161,32 +8315,36 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_project(&project)
+                control_plane.upsert_project(&project).await
             }
         }
     }
 
-    pub fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+    pub async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_project(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_project(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_project(id).await
+            }
         }
     }
 
-    pub fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+    pub async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_projects())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_projects(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_projects().await
+            }
         }
     }
 
-    pub fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
+    pub async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8195,34 +8353,38 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_workspace(&workspace)
+                control_plane.upsert_workspace(&workspace).await
             }
         }
     }
 
-    pub fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+    pub async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_workspace(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_workspace(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_workspace(id).await
+            }
         }
     }
 
-    pub fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+    pub async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_workspaces())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_workspaces(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_workspaces().await
+            }
         }
     }
 
     /// Resolve a workspace id to its full `tenant -> project -> workspace`
     /// attribution chain. Returns `None` when the workspace does not exist.
-    pub fn resolve_workspace_scope(
+    pub async fn resolve_workspace_scope(
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceScope>, StorageError> {
@@ -8232,14 +8394,14 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.resolve_workspace_scope(workspace_id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.resolve_workspace_scope(workspace_id)
+                control_plane.resolve_workspace_scope(workspace_id).await
             }
         }
     }
 
     // --- Multi-level quota/rate-limit policies (tenant/project/workspace/key) ---
 
-    pub fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+    pub async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
         validate_quota_policy(&policy)?;
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
@@ -8249,12 +8411,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_quota_policy(&policy)
+                control_plane.upsert_quota_policy(&policy).await
             }
         }
     }
 
-    pub fn get_quota_policy(
+    pub async fn get_quota_policy(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
@@ -8265,24 +8427,24 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_quota_policy(scope_type, scope_id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_quota_policy(scope_type, scope_id)
+                control_plane.get_quota_policy(scope_type, scope_id).await
             }
         }
     }
 
-    pub fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+    pub async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_quota_policies())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_quota_policies()
+                control_plane.list_quota_policies().await
             }
         }
     }
 
-    pub fn delete_quota_policy(
+    pub async fn delete_quota_policy(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
@@ -8293,7 +8455,9 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_quota_policy(scope_type, scope_id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_quota_policy(scope_type, scope_id)
+                control_plane
+                    .delete_quota_policy(scope_type, scope_id)
+                    .await
             }
         }
     }
@@ -8301,7 +8465,7 @@ impl RuntimeStorageRepositories {
     /// Creates or replaces a plan (issue #168). Plans are shared across
     /// tenants, so any authenticated admin-write caller may define one --
     /// same trust model as [`Self::upsert_quota_policy`].
-    pub fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+    pub async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8309,27 +8473,29 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_plan(&plan),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_plan(&plan).await
+            }
         }
     }
 
-    pub fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+    pub async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_plan(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_plan(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_plan(id).await,
         }
     }
 
-    pub fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+    pub async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_plans())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans().await,
         }
     }
 
@@ -10999,74 +11165,86 @@ mod tests {
     fn hierarchy_upsert_get_list_roundtrip() {
         let repositories = memory_repositories();
 
-        repositories
-            .upsert_tenant_account(sample_tenant("tenant-a", "tenant-a"))
+        block_on(repositories.upsert_tenant_account(sample_tenant("tenant-a", "tenant-a")))
             .unwrap();
-        repositories
-            .upsert_project(sample_project("project-a", "tenant-a", "core"))
+        block_on(repositories.upsert_project(sample_project("project-a", "tenant-a", "core")))
             .unwrap();
-        repositories
-            .upsert_workspace(sample_workspace("ws-dev", "project-a", "tenant-a", "dev"))
-            .unwrap();
+        block_on(repositories.upsert_workspace(sample_workspace(
+            "ws-dev",
+            "project-a",
+            "tenant-a",
+            "dev",
+        )))
+        .unwrap();
 
         assert_eq!(
-            repositories
-                .get_tenant_account("tenant-a")
+            block_on(repositories.get_tenant_account("tenant-a"))
                 .unwrap()
                 .unwrap()
                 .slug,
             "tenant-a"
         );
         assert_eq!(
-            repositories
-                .get_project("project-a")
+            block_on(repositories.get_project("project-a"))
                 .unwrap()
                 .unwrap()
                 .tenant_id,
             "tenant-a"
         );
-        let workspace = repositories.get_workspace("ws-dev").unwrap().unwrap();
+        let workspace = block_on(repositories.get_workspace("ws-dev"))
+            .unwrap()
+            .unwrap();
         assert_eq!(workspace.project_id, "project-a");
         assert_eq!(workspace.tenant_id, "tenant-a");
         assert_eq!(workspace.environment, "dev");
 
-        assert_eq!(repositories.list_tenant_accounts().unwrap().len(), 1);
-        assert_eq!(repositories.list_projects().unwrap().len(), 1);
-        assert_eq!(repositories.list_workspaces().unwrap().len(), 1);
+        assert_eq!(
+            block_on(repositories.list_tenant_accounts()).unwrap().len(),
+            1
+        );
+        assert_eq!(block_on(repositories.list_projects()).unwrap().len(), 1);
+        assert_eq!(block_on(repositories.list_workspaces()).unwrap().len(), 1);
     }
 
     #[test]
     fn hierarchy_upsert_overwrites_existing_record() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_workspace(sample_workspace("ws-dev", "project-a", "tenant-a", "dev"))
-            .unwrap();
+        block_on(repositories.upsert_workspace(sample_workspace(
+            "ws-dev",
+            "project-a",
+            "tenant-a",
+            "dev",
+        )))
+        .unwrap();
         let mut updated = sample_workspace("ws-dev", "project-a", "tenant-a", "dev");
         updated.name = "Renamed workspace".into();
         updated.status = "disabled".into();
-        repositories.upsert_workspace(updated).unwrap();
+        block_on(repositories.upsert_workspace(updated)).unwrap();
 
-        let stored = repositories.get_workspace("ws-dev").unwrap().unwrap();
+        let stored = block_on(repositories.get_workspace("ws-dev"))
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.name, "Renamed workspace");
         assert_eq!(stored.status, "disabled");
-        assert_eq!(repositories.list_workspaces().unwrap().len(), 1);
+        assert_eq!(block_on(repositories.list_workspaces()).unwrap().len(), 1);
     }
 
     #[test]
     fn resolve_workspace_scope_returns_full_attribution_chain() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_tenant_account(sample_tenant("tenant-a", "tenant-a"))
+        block_on(repositories.upsert_tenant_account(sample_tenant("tenant-a", "tenant-a")))
             .unwrap();
-        repositories
-            .upsert_project(sample_project("project-a", "tenant-a", "core"))
+        block_on(repositories.upsert_project(sample_project("project-a", "tenant-a", "core")))
             .unwrap();
-        repositories
-            .upsert_workspace(sample_workspace("ws-prod", "project-a", "tenant-a", "prod"))
-            .unwrap();
+        block_on(repositories.upsert_workspace(sample_workspace(
+            "ws-prod",
+            "project-a",
+            "tenant-a",
+            "prod",
+        )))
+        .unwrap();
 
-        let scope = repositories
-            .resolve_workspace_scope("ws-prod")
+        let scope = block_on(repositories.resolve_workspace_scope("ws-prod"))
             .unwrap()
             .expect("workspace resolves");
         assert_eq!(scope.tenant_id, "tenant-a");
@@ -11084,8 +11262,7 @@ mod tests {
     #[test]
     fn resolve_workspace_scope_unknown_workspace_is_none() {
         let repositories = memory_repositories();
-        assert!(repositories
-            .resolve_workspace_scope("missing")
+        assert!(block_on(repositories.resolve_workspace_scope("missing"))
             .unwrap()
             .is_none());
     }
@@ -11109,18 +11286,11 @@ mod tests {
     #[test]
     fn api_key_record_upsert_get_list_and_prefix_lookup_roundtrip() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
-            .unwrap();
-        repositories
-            .upsert_api_key_record(sample_api_key("key-b", "fg_live"))
-            .unwrap();
-        repositories
-            .upsert_api_key_record(sample_api_key("key-c", "fg_test"))
-            .unwrap();
+        block_on(repositories.upsert_api_key_record(sample_api_key("key-a", "fg_live"))).unwrap();
+        block_on(repositories.upsert_api_key_record(sample_api_key("key-b", "fg_live"))).unwrap();
+        block_on(repositories.upsert_api_key_record(sample_api_key("key-c", "fg_test"))).unwrap();
 
-        let key = repositories
-            .get_api_key_record("key-a")
+        let key = block_on(repositories.get_api_key_record("key-a"))
             .unwrap()
             .expect("api key is stored");
         assert_eq!(key.workspace_id, "ws-dev");
@@ -11129,10 +11299,12 @@ mod tests {
         assert_eq!(key.tenant.workspace_id.as_deref(), Some("ws-dev"));
         assert_eq!(key.tenant.api_key_id.as_deref(), Some("key-a"));
 
-        assert_eq!(repositories.list_api_key_records().unwrap().len(), 3);
-        let live_candidates = repositories
-            .find_api_key_records_by_prefix("fg_live")
-            .unwrap();
+        assert_eq!(
+            block_on(repositories.list_api_key_records()).unwrap().len(),
+            3
+        );
+        let live_candidates =
+            block_on(repositories.find_api_key_records_by_prefix("fg_live")).unwrap();
         assert_eq!(live_candidates.len(), 2);
         assert!(live_candidates
             .iter()
@@ -11142,62 +11314,63 @@ mod tests {
     #[test]
     fn api_key_record_upsert_overwrites_lifecycle_state() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
-            .unwrap();
+        block_on(repositories.upsert_api_key_record(sample_api_key("key-a", "fg_live"))).unwrap();
 
         let mut updated = sample_api_key("key-a", "fg_live");
         updated.enabled = false;
         updated.revoked_at_unix = Some(200);
         updated.updated_at_unix = 200;
-        repositories.upsert_api_key_record(updated).unwrap();
+        block_on(repositories.upsert_api_key_record(updated)).unwrap();
 
-        let stored = repositories.get_api_key_record("key-a").unwrap().unwrap();
+        let stored = block_on(repositories.get_api_key_record("key-a"))
+            .unwrap()
+            .unwrap();
         assert!(!stored.enabled);
         assert_eq!(stored.revoked_at_unix, Some(200));
-        assert_eq!(repositories.list_api_key_records().unwrap().len(), 1);
+        assert_eq!(
+            block_on(repositories.list_api_key_records()).unwrap().len(),
+            1
+        );
     }
 
     #[test]
     fn quota_policy_upsert_get_list_and_delete_roundtrip() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: quota_policy_id(QuotaScopeKind::Tenant, "tenant-a"),
-                scope_type: QuotaScopeKind::Tenant,
-                scope_id: "tenant-a".into(),
-                model_allowlist: vec!["fast-chat".into(), "smart-chat".into()],
-                rpm_limit: Some(1_000),
-                tpm_limit: Some(500_000),
-                monthly_budget_usd: Some(250.0),
-                asset_storage_quota_bytes: Some(104_857_600),
-                alert_threshold_pcts: vec![],
-                enabled: true,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
-        repositories
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: quota_policy_id(QuotaScopeKind::Key, "key-a"),
-                scope_type: QuotaScopeKind::Key,
-                scope_id: "key-a".into(),
-                model_allowlist: vec!["fast-chat".into()],
-                rpm_limit: Some(60),
-                tpm_limit: None,
-                monthly_budget_usd: None,
-                asset_storage_quota_bytes: None,
-                alert_threshold_pcts: vec![],
-                enabled: true,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
+        block_on(repositories.upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Tenant, "tenant-a"),
+            scope_type: QuotaScopeKind::Tenant,
+            scope_id: "tenant-a".into(),
+            model_allowlist: vec!["fast-chat".into(), "smart-chat".into()],
+            rpm_limit: Some(1_000),
+            tpm_limit: Some(500_000),
+            monthly_budget_usd: Some(250.0),
+            asset_storage_quota_bytes: Some(104_857_600),
+            alert_threshold_pcts: vec![],
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
+        block_on(repositories.upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Key, "key-a"),
+            scope_type: QuotaScopeKind::Key,
+            scope_id: "key-a".into(),
+            model_allowlist: vec!["fast-chat".into()],
+            rpm_limit: Some(60),
+            tpm_limit: None,
+            monthly_budget_usd: None,
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: vec![],
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
 
-        let tenant_policy = repositories
-            .get_quota_policy(QuotaScopeKind::Tenant, "tenant-a")
-            .unwrap()
-            .expect("tenant policy is stored");
+        let tenant_policy =
+            block_on(repositories.get_quota_policy(QuotaScopeKind::Tenant, "tenant-a"))
+                .unwrap()
+                .expect("tenant policy is stored");
         assert_eq!(tenant_policy.rpm_limit, Some(1_000));
         assert_eq!(tenant_policy.monthly_budget_usd, Some(250.0));
         assert_eq!(tenant_policy.asset_storage_quota_bytes, Some(104_857_600));
@@ -11206,60 +11379,60 @@ mod tests {
             vec!["fast-chat", "smart-chat"]
         );
 
-        assert!(repositories
-            .get_quota_policy(QuotaScopeKind::Workspace, "no-such-workspace")
-            .unwrap()
-            .is_none());
-        assert_eq!(repositories.list_quota_policies().unwrap().len(), 2);
+        assert!(block_on(
+            repositories.get_quota_policy(QuotaScopeKind::Workspace, "no-such-workspace")
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            block_on(repositories.list_quota_policies()).unwrap().len(),
+            2
+        );
 
-        assert!(repositories
-            .delete_quota_policy(QuotaScopeKind::Key, "key-a")
-            .unwrap());
-        assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
-        assert!(!repositories
-            .delete_quota_policy(QuotaScopeKind::Key, "key-a")
-            .unwrap());
+        assert!(block_on(repositories.delete_quota_policy(QuotaScopeKind::Key, "key-a")).unwrap());
+        assert_eq!(
+            block_on(repositories.list_quota_policies()).unwrap().len(),
+            1
+        );
+        assert!(!block_on(repositories.delete_quota_policy(QuotaScopeKind::Key, "key-a")).unwrap());
     }
 
     #[test]
     fn quota_policy_upsert_overwrites_existing_scope() {
         let repositories = memory_repositories();
-        repositories
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
-                scope_type: QuotaScopeKind::Workspace,
-                scope_id: "ws-a".into(),
-                model_allowlist: vec![],
-                rpm_limit: Some(100),
-                tpm_limit: None,
-                monthly_budget_usd: None,
-                asset_storage_quota_bytes: None,
-                alert_threshold_pcts: vec![],
-                enabled: true,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
+        block_on(repositories.upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
+            scope_type: QuotaScopeKind::Workspace,
+            scope_id: "ws-a".into(),
+            model_allowlist: vec![],
+            rpm_limit: Some(100),
+            tpm_limit: None,
+            monthly_budget_usd: None,
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: vec![],
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
 
-        repositories
-            .upsert_quota_policy(StoredQuotaPolicy {
-                id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
-                scope_type: QuotaScopeKind::Workspace,
-                scope_id: "ws-a".into(),
-                model_allowlist: vec!["fast-chat".into()],
-                rpm_limit: Some(50),
-                tpm_limit: Some(10_000),
-                monthly_budget_usd: Some(10.0),
-                asset_storage_quota_bytes: None,
-                alert_threshold_pcts: vec![],
-                enabled: false,
-                created_at_unix: 1,
-                updated_at_unix: 2,
-            })
-            .unwrap();
+        block_on(repositories.upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
+            scope_type: QuotaScopeKind::Workspace,
+            scope_id: "ws-a".into(),
+            model_allowlist: vec!["fast-chat".into()],
+            rpm_limit: Some(50),
+            tpm_limit: Some(10_000),
+            monthly_budget_usd: Some(10.0),
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: vec![],
+            enabled: false,
+            created_at_unix: 1,
+            updated_at_unix: 2,
+        }))
+        .unwrap();
 
-        let policy = repositories
-            .get_quota_policy(QuotaScopeKind::Workspace, "ws-a")
+        let policy = block_on(repositories.get_quota_policy(QuotaScopeKind::Workspace, "ws-a"))
             .unwrap()
             .unwrap();
         assert_eq!(policy.rpm_limit, Some(50));
@@ -11267,7 +11440,10 @@ mod tests {
         assert_eq!(policy.monthly_budget_usd, Some(10.0));
         assert_eq!(policy.asset_storage_quota_bytes, None);
         assert!(!policy.enabled);
-        assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
+        assert_eq!(
+            block_on(repositories.list_quota_policies()).unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -11560,16 +11736,16 @@ mod tests {
     #[test]
     fn migration_snapshot_includes_api_key_records() {
         let source = memory_repositories();
-        source
-            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
-            .unwrap();
+        block_on(source.upsert_api_key_record(sample_api_key("key-a", "fg_live"))).unwrap();
 
         let snapshot = source.export_migration_snapshot().unwrap();
         assert_eq!(snapshot.counts().api_key_records, 1);
 
         let target = memory_repositories();
         target.import_migration_snapshot(snapshot).unwrap();
-        let stored = target.get_api_key_record("key-a").unwrap().unwrap();
+        let stored = block_on(target.get_api_key_record("key-a"))
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.key_prefix, "fg_live");
         assert_eq!(stored.workspace_id, "ws-dev");
     }

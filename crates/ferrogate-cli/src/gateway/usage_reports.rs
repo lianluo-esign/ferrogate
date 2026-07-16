@@ -34,7 +34,9 @@ impl FerroGateway {
                         (Some(scope_type), Some(scope_id)) => {
                             if let Err(error) = crate::auth::authorize_scoped_resource(
                                 &state, &auth, scope_type, scope_id,
-                            ) {
+                            )
+                            .await
+                            {
                                 return write_json_error(
                                     session,
                                     error.status,
