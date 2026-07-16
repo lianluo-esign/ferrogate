@@ -12,6 +12,15 @@ use std::sync::{
 
 static IDENTITY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn mcp_storage_error_stage(error: &StorageError) -> Option<&'static str> {
+    match error {
+        StorageError::OperationDeadlineExceeded { stage, .. }
+        | StorageError::OperationCancelled { stage, .. }
+        | StorageError::OperationCommitOutcomeUnknown { stage, .. } => Some(stage),
+        _ => None,
+    }
+}
+
 async fn run_with_refresh_heartbeat<T, Work, Renew, RenewFuture>(
     work: Work,
     heartbeat_interval: Duration,
@@ -119,6 +128,54 @@ fn commit_started_storage_result_reconciles_success_before_secondary_deadline() 
         assert_eq!(metrics.mcp_refresh_response_deadline_total, 1);
         assert_eq!(metrics.mcp_refresh_storage_cancellation_total, 0);
         assert_eq!(metrics.mcp_refresh_late_reconciliation_total, 1);
+    });
+}
+
+#[test]
+fn async_precommit_response_deadline_aborts_the_storage_task() {
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let metrics = Arc::new(Mutex::new(GatewayMetricsAccumulator::default()));
+        let operation = StorageOperation::new("async claim", Duration::from_secs(1));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop_signal = DropSignal(task_dropped);
+            started_tx.send(()).expect("task started signal");
+            std::future::pending::<Result<(), StorageError>>().await
+        });
+        started_rx.await.expect("storage task did not start");
+
+        let error = reconcile_mcp_refresh_storage_after_deadline(
+            Arc::clone(&metrics),
+            "async claim",
+            operation,
+            task,
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            tracing::Span::current(),
+        )
+        .await
+        .expect_err("pre-commit async task must be cancelled");
+
+        assert_eq!(error.code, "mcp_identity_storage_deadline");
+        assert!(dropped.load(Ordering::SeqCst));
+        let metrics = metrics.lock().unwrap();
+        assert_eq!(metrics.mcp_refresh_response_deadline_total, 1);
+        assert_eq!(metrics.mcp_refresh_storage_cancellation_total, 1);
+        assert_eq!(metrics.mcp_refresh_late_reconciliation_total, 0);
     });
 }
 
@@ -549,9 +606,9 @@ fn bounded_error_audit_preserves_original_error_and_fences_late_side_effect() {
             Arc::new(tokio::sync::Semaphore::new(1)),
             original,
             Duration::from_millis(30),
-            move |operation| {
+            move |operation| async move {
                 while operation.remaining("test audit wait").is_ok() {
-                    std::thread::sleep(Duration::from_millis(2));
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 }
                 operation.check_active("test audit side effect")?;
                 observed.store(true, Ordering::SeqCst);

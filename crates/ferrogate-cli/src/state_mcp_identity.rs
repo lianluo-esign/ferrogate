@@ -857,13 +857,14 @@ impl AppState {
             };
             let primary_request = request.clone();
             let primary = self
-                .run_mcp_refresh_storage_with_budgets(
+                .run_mcp_refresh_async_storage_with_budgets(
                     "claim MCP refresh lease",
                     claim_operation_budget,
                     claim_response_budget,
-                    move |operation| {
+                    move |operation| async move {
                         repositories
                             .claim_mcp_oauth_refresh_with_operation(&primary_request, &operation)
+                            .await
                     },
                 )
                 .await;
@@ -1090,15 +1091,20 @@ impl AppState {
         let credential_id = credential.id.clone();
         let release_lease_id = lease_id.to_string();
         let _ = self
-            .run_mcp_refresh_storage("release failed MCP refresh lease", move |operation| {
-                repositories.release_mcp_oauth_refresh_with_operation(
-                    &tenant_id,
-                    &credential_id,
-                    &release_lease_id,
-                    "refresh_failed",
-                    &operation,
-                )
-            })
+            .run_mcp_refresh_async_storage(
+                "release failed MCP refresh lease",
+                move |operation| async move {
+                    repositories
+                        .release_mcp_oauth_refresh_with_operation(
+                            &tenant_id,
+                            &credential_id,
+                            &release_lease_id,
+                            "refresh_failed",
+                            &operation,
+                        )
+                        .await
+                },
+            )
             .await;
     }
 
@@ -1113,10 +1119,14 @@ impl AppState {
         let repositories = Arc::clone(&self.repositories);
         let persisted = next.clone();
         let completion = self
-            .run_mcp_refresh_completion_storage("complete MCP refresh lease", move |operation| {
-                repositories
-                    .complete_mcp_oauth_refresh_with_operation(persisted, &lease_id, &operation)
-            })
+            .run_mcp_refresh_async_completion_storage(
+                "complete MCP refresh lease",
+                move |operation| async move {
+                    repositories
+                        .complete_mcp_oauth_refresh_with_operation(persisted, &lease_id, &operation)
+                        .await
+                },
+            )
             .await;
         let completed = match completion {
             Ok(completed) => completed,
@@ -1197,8 +1207,10 @@ impl AppState {
         };
         let primary_request = request.clone();
         let primary = self
-            .run_mcp_refresh_storage("renew MCP refresh lease", move |operation| {
-                repositories.renew_mcp_oauth_refresh_with_operation(&primary_request, &operation)
+            .run_mcp_refresh_async_storage("renew MCP refresh lease", move |operation| async move {
+                repositories
+                    .renew_mcp_oauth_refresh_with_operation(&primary_request, &operation)
+                    .await
             })
             .await;
         let (outcome, reconciled) = match primary {
@@ -1464,16 +1476,17 @@ impl AppState {
             .map_err(storage_identity_error)
     }
 
-    async fn run_mcp_refresh_storage<T, F>(
+    async fn run_mcp_refresh_async_storage<T, F, Fut>(
         &self,
         operation_name: &'static str,
         action: F,
     ) -> Result<T, McpIdentityError>
     where
         T: Send + 'static,
-        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+        F: FnOnce(StorageOperation) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, StorageError>> + Send + 'static,
     {
-        self.run_mcp_refresh_storage_with_options(
+        self.run_mcp_refresh_async_storage_with_options(
             operation_name,
             Duration::from_secs(REFRESH_STORAGE_OPERATION_TIMEOUT_SECS),
             Duration::from_secs(REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS),
@@ -1483,37 +1496,17 @@ impl AppState {
         .await
     }
 
-    async fn run_mcp_refresh_storage_with_budgets<T, F>(
-        &self,
-        operation_name: &'static str,
-        operation_timeout: Duration,
-        response_timeout: Duration,
-        action: F,
-    ) -> Result<T, McpIdentityError>
-    where
-        T: Send + 'static,
-        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
-    {
-        self.run_mcp_refresh_storage_with_options(
-            operation_name,
-            operation_timeout,
-            response_timeout,
-            false,
-            action,
-        )
-        .await
-    }
-
-    async fn run_mcp_refresh_completion_storage<T, F>(
+    async fn run_mcp_refresh_async_completion_storage<T, F, Fut>(
         &self,
         operation_name: &'static str,
         action: F,
     ) -> Result<T, McpIdentityError>
     where
         T: Send + 'static,
-        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+        F: FnOnce(StorageOperation) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, StorageError>> + Send + 'static,
     {
-        self.run_mcp_refresh_storage_with_options(
+        self.run_mcp_refresh_async_storage_with_options(
             operation_name,
             Duration::from_secs(REFRESH_STORAGE_OPERATION_TIMEOUT_SECS),
             Duration::from_secs(REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS),
@@ -1523,7 +1516,29 @@ impl AppState {
         .await
     }
 
-    async fn run_mcp_refresh_storage_with_options<T, F>(
+    async fn run_mcp_refresh_async_storage_with_budgets<T, F, Fut>(
+        &self,
+        operation_name: &'static str,
+        operation_timeout: Duration,
+        response_timeout: Duration,
+        action: F,
+    ) -> Result<T, McpIdentityError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StorageOperation) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, StorageError>> + Send + 'static,
+    {
+        self.run_mcp_refresh_async_storage_with_options(
+            operation_name,
+            operation_timeout,
+            response_timeout,
+            false,
+            action,
+        )
+        .await
+    }
+
+    async fn run_mcp_refresh_async_storage_with_options<T, F, Fut>(
         &self,
         operation_name: &'static str,
         operation_timeout: Duration,
@@ -1533,7 +1548,8 @@ impl AppState {
     ) -> Result<T, McpIdentityError>
     where
         T: Send + 'static,
-        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+        F: FnOnce(StorageOperation) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, StorageError>> + Send + 'static,
     {
         let operation = if reconcile_commit {
             StorageOperation::new_reconcilable_commit(
@@ -1544,40 +1560,41 @@ impl AppState {
         } else {
             StorageOperation::new(operation_name, operation_timeout)
         };
-        let blocking_operation = operation.clone();
+        let task_operation = operation.clone();
         let operation_span = tracing::Span::current();
-        let blocking_span = operation_span.clone();
+        let task_span = operation_span.clone();
         tracing::debug!(
             operation = operation_name,
-            phase = "spawn_blocking_scheduled",
-            "scheduled MCP refresh storage operation"
+            phase = "async_task_scheduled",
+            "scheduled async MCP refresh storage operation"
         );
-        let mut task = tokio::task::spawn_blocking(move || {
-            blocking_span.in_scope(|| {
+        let mut task = tokio::spawn(
+            async move {
                 tracing::debug!(
                     operation = operation_name,
-                    phase = "spawn_blocking_enter",
-                    "entered MCP refresh blocking storage operation"
+                    phase = "async_task_enter",
+                    "entered async MCP refresh storage operation"
                 );
-                let result = action(blocking_operation);
+                let result = action(task_operation).await;
                 tracing::debug!(
                     operation = operation_name,
-                    phase = "spawn_blocking_exit",
+                    phase = "async_task_exit",
                     storage_result = match &result {
                         Ok(_) => "success",
                         Err(error) => mcp_storage_error_kind(error),
                     },
-                    "exited MCP refresh blocking storage operation"
+                    "exited async MCP refresh storage operation"
                 );
                 result
-            })
-        });
+            }
+            .instrument(task_span),
+        );
         match tokio::time::timeout(response_timeout, &mut task).await {
             Ok(joined) => {
                 let result = joined.map_err(|error| {
                     McpIdentityError::unavailable(
                         "mcp_identity_storage_unavailable",
-                        format!("failed to {operation_name}: blocking task failed: {error}"),
+                        format!("failed to {operation_name}: async storage task failed: {error}"),
                     )
                 })?;
                 if matches!(
@@ -1586,17 +1603,6 @@ impl AppState {
                         | StorageError::OperationCancelled { .. })
                 ) {
                     self.record_mcp_refresh_storage_cancellation();
-                    let storage_stage = result
-                        .as_ref()
-                        .err()
-                        .and_then(mcp_storage_error_stage)
-                        .unwrap_or("unknown");
-                    tracing::warn!(
-                        operation = operation_name,
-                        storage_stage,
-                        outcome = "storage_cancelled",
-                        "cancelled MCP refresh storage operation before commit"
-                    );
                 }
                 result.map_err(storage_identity_error)
             }
@@ -1627,8 +1633,10 @@ impl AppState {
             Arc::clone(&self.mcp_identity_error_audit_permits),
             original_error,
             MCP_IDENTITY_ERROR_AUDIT_TIMEOUT,
-            move |operation| {
-                repositories.append_mcp_identity_audit_event_with_operation(event, &operation)
+            move |operation| async move {
+                repositories
+                    .append_mcp_identity_audit_event_with_operation(event, &operation)
+                    .await
             },
         )
         .await
@@ -1692,7 +1700,7 @@ fn authorize_mcp_identity_outcome(
     }
 }
 
-async fn preserve_mcp_identity_error_after_bounded_audit<F>(
+async fn preserve_mcp_identity_error_after_bounded_audit<F, Fut>(
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     permits: Arc<tokio::sync::Semaphore>,
     original_error: McpIdentityError,
@@ -1700,7 +1708,8 @@ async fn preserve_mcp_identity_error_after_bounded_audit<F>(
     action: F,
 ) -> McpIdentityError
 where
-    F: FnOnce(StorageOperation) -> Result<(), StorageError> + Send + 'static,
+    F: FnOnce(StorageOperation) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), StorageError>> + Send + 'static,
 {
     let original_error_code = original_error.code;
     let permit = match permits.try_acquire_owned() {
@@ -1717,12 +1726,16 @@ where
         }
     };
     let operation = StorageOperation::new("record MCP identity error audit", timeout);
-    let blocking_operation = operation.clone();
+    let task_operation = operation.clone();
     let operation_span = tracing::Span::current();
-    let mut task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        operation_span.in_scope(|| action(blocking_operation))
-    });
+    let task_span = operation_span.clone();
+    let mut task = tokio::spawn(
+        async move {
+            let _permit = permit;
+            action(task_operation).await
+        }
+        .instrument(task_span),
+    );
     let response_wait = timeout.saturating_add(MCP_IDENTITY_ERROR_AUDIT_JOIN_GRACE);
 
     match tokio::time::timeout(response_wait, &mut task).await {
@@ -1765,6 +1778,37 @@ where
                 original_error_preserved = true,
                 "MCP identity error audit exceeded its bounded response budget"
             );
+            match cancel_outcome {
+                StorageOperationCancelOutcome::Cancelled
+                | StorageOperationCancelOutcome::AlreadyCancelled => {
+                    task.abort();
+                    let _ = task.await;
+                }
+                StorageOperationCancelOutcome::CommitStarted
+                | StorageOperationCancelOutcome::Finished => {
+                    tokio::spawn(
+                        async move {
+                            match task.await {
+                                Ok(Ok(())) => tracing::warn!(
+                                    audit_outcome = "late_commit_observed",
+                                    "observed MCP identity error audit commit after response deadline"
+                                ),
+                                Ok(Err(error)) => tracing::warn!(
+                                    audit_outcome = mcp_storage_error_kind(&error),
+                                    audit_error = %sanitize_mcp_storage_error(&error),
+                                    "observed MCP identity error audit failure after response deadline"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    audit_outcome = "task_error",
+                                    audit_error = %sanitize_mcp_reconciliation_text(&error.to_string()),
+                                    "observed MCP identity error audit task failure after response deadline"
+                                ),
+                            }
+                        }
+                        .instrument(operation_span),
+                    );
+                }
+            }
         }
     }
     original_error
@@ -1946,11 +1990,12 @@ async fn reconcile_mcp_refresh_storage_after_deadline<T: Send + 'static>(
             if let Ok(mut metrics) = metrics.lock() {
                 metrics.record_mcp_refresh_storage_cancellation();
             }
-            observe_mcp_refresh_storage_task(
+            task.abort();
+            let result = task.await;
+            trace_mcp_refresh_reconciliation_result(
                 operation_name,
-                task,
-                operation_span,
-                "late_cancel_policy_observed",
+                &result,
+                "async_precommit_task_aborted",
             );
             Err(McpIdentityError::unavailable(
                 "mcp_identity_storage_deadline",
@@ -1983,7 +2028,7 @@ async fn reconcile_mcp_refresh_storage_after_deadline<T: Send + 'static>(
                             McpIdentityError::unavailable(
                                 "mcp_identity_storage_unavailable",
                                 format!(
-                                    "failed to observe cancelled {operation_name}: blocking task failed: {error}"
+                                    "failed to observe cancelled {operation_name}: storage task failed: {error}"
                                 ),
                             )
                         })?
@@ -2026,7 +2071,7 @@ async fn reconcile_mcp_refresh_storage_after_deadline<T: Send + 'static>(
                             McpIdentityError::unavailable(
                                 "mcp_identity_storage_unavailable",
                                 format!(
-                                    "failed to reconcile {operation_name}: blocking task failed: {error}"
+                                    "failed to reconcile {operation_name}: storage task failed: {error}"
                                 ),
                             )
                         })?
@@ -2099,7 +2144,7 @@ fn trace_mcp_refresh_reconciliation_result<T>(
             storage_result = "task_error",
             error_detail = %sanitize_mcp_reconciliation_text(&error.to_string()),
             outcome,
-            "reconciled MCP refresh blocking task error after response deadline"
+            "reconciled MCP refresh task error after response deadline"
         ),
     }
 }
@@ -2115,15 +2160,6 @@ fn mcp_storage_error_kind(error: &StorageError) -> &'static str {
         StorageError::OperationDeadlineExceeded { .. } => "deadline_exceeded",
         StorageError::OperationCancelled { .. } => "cancelled",
         StorageError::OperationCommitOutcomeUnknown { .. } => "commit_outcome_unknown",
-    }
-}
-
-fn mcp_storage_error_stage(error: &StorageError) -> Option<&'static str> {
-    match error {
-        StorageError::OperationDeadlineExceeded { stage, .. }
-        | StorageError::OperationCancelled { stage, .. }
-        | StorageError::OperationCommitOutcomeUnknown { stage, .. } => Some(stage),
-        _ => None,
     }
 }
 

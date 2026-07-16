@@ -5,10 +5,8 @@
 // description: Unit tests for MCP identity storage, kept outside business logic.
 
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Barrier, Condvar, Mutex,
-    },
+    future::Future,
+    sync::{Arc, Barrier, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -17,6 +15,14 @@ use crate::{
     async_postgres::AsyncPostgresPool, PostgresClientPool, PostgresStorageConfig, PostgresTlsMode,
     StorageOperationCancelOutcome, StorageProviderKind, StorageSchemaEvidence, StoredAuditEvent,
 };
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
 
 fn audit_event(id: &str) -> StoredAuditEvent {
     StoredAuditEvent {
@@ -101,39 +107,10 @@ fn exhausted_postgres_store() -> PostgresControlPlaneStore {
         pool: Arc::new(PostgresClientPool {
             clients: Mutex::new(Vec::new()),
             available: Condvar::new(),
-            config: config.clone(),
         }),
         async_pool: Arc::new(AsyncPostgresPool::new(&config).expect("async test pool")),
         schema: StorageSchemaEvidence::postgres_expected(),
     }
-}
-
-#[test]
-fn exhausted_postgres_pool_returns_at_deadline_without_late_action() {
-    let store = exhausted_postgres_store();
-    let action_ran = Arc::new(AtomicBool::new(false));
-    let observed = Arc::clone(&action_ran);
-    let operation = StorageOperation::new("pool pressure test", Duration::from_millis(40));
-    let started = Instant::now();
-
-    let error = store
-        .pool
-        .acquire_until(&operation)
-        .map(|_| observed.store(true, Ordering::SeqCst))
-        .expect_err("empty pool must reach its declared deadline");
-
-    assert!(matches!(
-        error,
-        StorageError::OperationDeadlineExceeded {
-            operation: "pool pressure test",
-            stage: "pool acquisition",
-            commit_started: false,
-        }
-    ));
-    assert!(started.elapsed() >= Duration::from_millis(35));
-    assert!(started.elapsed() < Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(80));
-    assert!(!action_ran.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -199,28 +176,31 @@ fn postgres_identity_authorization_is_one_short_nonlocking_read() {
 }
 
 #[test]
-fn exhausted_postgres_pool_fences_mcp_identity_audit_without_late_write() {
+fn expired_operation_fences_async_mcp_identity_audit_without_late_write() {
     let store = exhausted_postgres_store();
-    let operation =
-        StorageOperation::new("record MCP identity error audit", Duration::from_millis(40));
+    let operation = StorageOperation::new("record MCP identity error audit", Duration::ZERO);
     let started = Instant::now();
 
-    let error = store
-        .append_mcp_identity_audit_event_with_operation(&audit_event("audit-deadline"), &operation)
-        .expect_err("empty pool must fence the audit append");
+    let error = block_on(store.append_mcp_identity_audit_event_with_operation(
+        &audit_event("audit-deadline"),
+        &operation,
+    ))
+    .expect_err("empty pool must fence the audit append");
 
     assert!(matches!(
         error,
         StorageError::OperationDeadlineExceeded {
             operation: "record MCP identity error audit",
-            stage: "pool acquisition",
+            stage: "audit pool acquisition",
             commit_started: false,
         }
     ));
-    assert!(started.elapsed() >= Duration::from_millis(35));
-    assert!(started.elapsed() < Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(80));
+    assert!(started.elapsed() < Duration::from_millis(100));
     assert!(store.pool.clients.lock().unwrap().is_empty());
+    assert_eq!(
+        store.async_pool.metrics_snapshot(),
+        crate::PostgresPoolMetricsSnapshot::default()
+    );
 }
 
 #[test]
@@ -230,9 +210,11 @@ fn in_memory_mcp_identity_audit_append_still_persists_when_operation_is_availabl
     let operation =
         StorageOperation::new("record MCP identity error audit", Duration::from_secs(1));
 
-    repositories
-        .append_mcp_identity_audit_event_with_operation(audit_event("audit-ok"), &operation)
-        .expect("available audit repository must persist");
+    block_on(
+        repositories
+            .append_mcp_identity_audit_event_with_operation(audit_event("audit-ok"), &operation),
+    )
+    .expect("available audit repository must persist");
 
     let events = repositories.audit_events();
     assert_eq!(events.len(), 1);
@@ -282,7 +264,7 @@ fn only_explicit_completion_operations_reconcile_commit_after_deadline() {
             "refresh completion CAS"
         )
         .unwrap(),
-        10_000
+        1_000
     );
     assert!(matches!(
         mcp_transaction_commit_outcome_unknown(&completion),
@@ -291,31 +273,6 @@ fn only_explicit_completion_operations_reconcile_commit_after_deadline() {
             stage: "transaction commit",
         }
     ));
-}
-
-#[test]
-fn discarded_pool_capacity_keeps_retrying_after_transient_reconnect_failure() {
-    let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let observed_attempts = Arc::clone(&attempts);
-    let waits = Arc::new(Mutex::new(Vec::new()));
-    let observed_waits = Arc::clone(&waits);
-
-    retry_mcp_pool_replenishment(
-        move || {
-            let attempt = observed_attempts.fetch_add(1, Ordering::SeqCst);
-            if attempt == 0 {
-                Err(StorageError::Runtime("transient reconnect failure".into()))
-            } else {
-                Ok(())
-            }
-        },
-        move |delay| observed_waits.lock().unwrap().push(delay),
-        |_, _| {},
-    );
-
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(*waits.lock().unwrap(), vec![Duration::from_millis(100)]);
-    assert_eq!(mcp_pool_replenish_backoff(100), Duration::from_secs(5));
 }
 
 #[test]
@@ -375,21 +332,20 @@ fn cancelled_refresh_renewal_and_completion_cannot_mutate_later() {
 
     let renewal = StorageOperation::new("cancelled renewal", Duration::from_secs(1));
     assert_eq!(renewal.cancel(), StorageOperationCancelOutcome::Cancelled);
-    let renewal_error = repositories
-        .renew_mcp_oauth_refresh_with_operation(
-            &McpRefreshRenewRequest {
-                tenant_id: "tenant".into(),
-                credential_id: "credential".into(),
-                expected_version: 1,
-                authorization_generation: 1,
-                lease_id: "owner".into(),
-                expected_lease_expires_at_unix: 20,
-                now_unix: 15,
-                lease_ttl_secs: 10,
-            },
-            &renewal,
-        )
-        .expect_err("cancelled renewal must be fenced");
+    let renewal_error = block_on(repositories.renew_mcp_oauth_refresh_with_operation(
+        &McpRefreshRenewRequest {
+            tenant_id: "tenant".into(),
+            credential_id: "credential".into(),
+            expected_version: 1,
+            authorization_generation: 1,
+            lease_id: "owner".into(),
+            expected_lease_expires_at_unix: 20,
+            now_unix: 15,
+            lease_ttl_secs: 10,
+        },
+        &renewal,
+    ))
+    .expect_err("cancelled renewal must be fenced");
     assert!(matches!(
         renewal_error,
         StorageError::OperationCancelled { .. }
@@ -403,9 +359,12 @@ fn cancelled_refresh_renewal_and_completion_cannot_mutate_later() {
         completion.cancel(),
         StorageOperationCancelOutcome::Cancelled
     );
-    let completion_error = repositories
-        .complete_mcp_oauth_refresh_with_operation(refreshed, "owner", &completion)
-        .expect_err("cancelled completion must be fenced");
+    let completion_error = block_on(repositories.complete_mcp_oauth_refresh_with_operation(
+        refreshed,
+        "owner",
+        &completion,
+    ))
+    .expect_err("cancelled completion must be fenced");
     assert!(matches!(
         completion_error,
         StorageError::OperationCancelled { .. }
@@ -447,8 +406,9 @@ fn in_memory_refresh_renewal_waiting_on_lock_past_deadline_cannot_extend_later()
     };
     let guard = store.lock().expect("memory control plane lock");
     let result = std::thread::scope(|scope| {
-        let renewal = scope
-            .spawn(|| repositories.renew_mcp_oauth_refresh_with_operation(&request, &operation));
+        let renewal = scope.spawn(|| {
+            block_on(repositories.renew_mcp_oauth_refresh_with_operation(&request, &operation))
+        });
         std::thread::sleep(Duration::from_millis(50));
         drop(guard);
         renewal.join().expect("renewal worker")
@@ -474,8 +434,8 @@ fn claim(
     now_unix: i64,
     lease_ttl_secs: i64,
 ) -> McpRefreshClaimOutcome {
-    repositories
-        .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+    block_on(
+        repositories.claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
             tenant_id: "tenant".into(),
             credential_id: "credential".into(),
             expected_version: 1,
@@ -483,8 +443,9 @@ fn claim(
             lease_id: lease_id.into(),
             now_unix,
             lease_ttl_secs,
-        })
-        .expect("refresh claim")
+        }),
+    )
+    .expect("refresh claim")
 }
 
 fn renew(
@@ -498,8 +459,8 @@ fn renew(
         .expect("credential lookup")
         .and_then(|credential| credential.refresh_lease_expires_at_unix)
         .unwrap_or(now_unix);
-    repositories
-        .renew_mcp_oauth_refresh(&McpRefreshRenewRequest {
+    block_on(
+        repositories.renew_mcp_oauth_refresh(&McpRefreshRenewRequest {
             tenant_id: "tenant".into(),
             credential_id: "credential".into(),
             expected_version: 1,
@@ -508,8 +469,9 @@ fn renew(
             expected_lease_expires_at_unix,
             now_unix,
             lease_ttl_secs,
-        })
-        .expect("refresh renewal")
+        }),
+    )
+    .expect("refresh renewal")
 }
 
 #[test]
@@ -524,8 +486,8 @@ fn refresh_lease_has_exactly_one_concurrent_winner() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            repositories
-                .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+            block_on(
+                repositories.claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
                     tenant_id: "tenant".into(),
                     credential_id: "credential".into(),
                     expected_version: 1,
@@ -533,8 +495,9 @@ fn refresh_lease_has_exactly_one_concurrent_winner() {
                     lease_id: lease_id.into(),
                     now_unix: 10,
                     lease_ttl_secs: 10,
-                })
-                .expect("refresh claim")
+                }),
+            )
+            .expect("refresh claim")
         }));
     }
     let outcomes = handles
@@ -766,8 +729,8 @@ fn postgres_refresh_claim_lock_conflict_is_a_short_conservative_busy() {
 fn nonpositive_refresh_claim_ttl_does_not_mutate_the_credential() {
     let repositories = repositories_with_credential();
     for lease_ttl_secs in [0, -1] {
-        let error = repositories
-            .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+        let error = block_on(
+            repositories.claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
                 tenant_id: "tenant".into(),
                 credential_id: "credential".into(),
                 expected_version: 1,
@@ -775,8 +738,9 @@ fn nonpositive_refresh_claim_ttl_does_not_mutate_the_credential() {
                 lease_id: "owner".into(),
                 now_unix: 10,
                 lease_ttl_secs,
-            })
-            .expect_err("nonpositive claim TTL must fail");
+            }),
+        )
+        .expect_err("nonpositive claim TTL must fail");
         assert!(error
             .to_string()
             .contains("refresh lease TTL must be greater than zero"));
@@ -888,9 +852,10 @@ fn refresh_lease_renewal_extends_exclusivity_until_safe_takeover() {
     );
     let mut stale = credential();
     stale.last_refresh_outcome = Some("refreshed".into());
-    assert!(!repositories
-        .complete_mcp_oauth_refresh(stale, "owner")
-        .expect("stale refresh completion"));
+    assert!(
+        !block_on(repositories.complete_mcp_oauth_refresh(stale, "owner"))
+            .expect("stale refresh completion")
+    );
 }
 
 #[test]
@@ -1064,8 +1029,8 @@ fn revoke_supersedes_refresh_lease_and_pending_flow() {
             },
         );
     }
-    let claim = repositories
-        .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+    let claim = block_on(
+        repositories.claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
             tenant_id: "tenant".into(),
             credential_id: "credential".into(),
             expected_version: 1,
@@ -1073,8 +1038,9 @@ fn revoke_supersedes_refresh_lease_and_pending_flow() {
             lease_id: "lease".into(),
             now_unix: 10,
             lease_ttl_secs: 10,
-        })
-        .expect("refresh claim");
+        }),
+    )
+    .expect("refresh claim");
     assert!(matches!(claim, McpRefreshClaimOutcome::Acquired(_)));
     assert_eq!(
         renew(&repositories, "lease", 11, 19),
@@ -1097,7 +1063,8 @@ fn revoke_supersedes_refresh_lease_and_pending_flow() {
     assert_eq!(flow.consumed_at_unix, Some(11));
     let mut stale = credential();
     stale.last_refresh_outcome = Some("refreshed".into());
-    assert!(!repositories
-        .complete_mcp_oauth_refresh(stale, "lease")
-        .expect("late refresh completion"));
+    assert!(
+        !block_on(repositories.complete_mcp_oauth_refresh(stale, "lease"))
+            .expect("late refresh completion")
+    );
 }

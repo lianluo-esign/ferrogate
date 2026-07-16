@@ -63,12 +63,12 @@ enum StorageCommitDeadlinePolicy {
     Reconcile { commit_timeout: Duration },
 }
 
-/// A deadline and commit fence shared by an async caller and blocking storage work.
+/// A deadline and commit fence shared by an async caller and its storage task.
 ///
-/// Cancellation wins directly while the operation is active. Once the blocking
-/// side acquires the commit fence, ordinary operations request PostgreSQL commit
-/// cancellation and report only the authoritative result or explicit pending
-/// reconciliation. Completion operations opt into late-result reconciliation.
+/// Cancellation wins directly while the operation is active. Once the storage
+/// task acquires the commit fence, callers preserve the operation token and
+/// report only the authoritative result or explicit pending reconciliation.
+/// Completion operations opt into late-result reconciliation.
 #[derive(Debug, Clone)]
 pub struct StorageOperation {
     inner: Arc<StorageOperationInner>,
@@ -501,6 +501,7 @@ const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.s
 const POSTGRES_SCHEMA_VERSION: u64 = 31;
 const POSTGRES_SCHEMA_NAME: &str = "031_mcp_pending_flow_lookup_index";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
+const POSTGRES_OPERATION_LOCK_TIMEOUT_MILLIS: u64 = 250;
 const PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY: &str =
     "SELECT source_attribute.attname, target_namespace.nspname = current_schema(), \
             target_relation.relname, \
@@ -1097,7 +1098,6 @@ struct PostgresControlPlaneStore {
 struct PostgresClientPool {
     clients: Mutex<Vec<PostgresClient>>,
     available: Condvar,
-    config: PostgresStorageConfig,
 }
 
 impl std::fmt::Debug for PostgresControlPlaneStore {
@@ -1127,7 +1127,6 @@ impl PostgresControlPlaneStore {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
-                config,
             }),
             async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
@@ -1166,7 +1165,6 @@ impl PostgresControlPlaneStore {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
-                config,
             }),
             async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
@@ -4172,61 +4170,6 @@ impl PostgresClientPool {
             self.available.notify_one();
         }
     }
-
-    fn acquire_until(&self, operation: &StorageOperation) -> Result<PostgresClient, StorageError> {
-        let mut clients = self.clients.lock().map_err(|_| {
-            StorageError::Postgres("postgres control-plane client pool mutex is poisoned".into())
-        })?;
-        tracing::debug!(
-            operation = operation.name(),
-            phase = "pool_acquire_enter",
-            available_clients = clients.len(),
-            "entered deadline-aware PostgreSQL pool acquisition"
-        );
-        loop {
-            operation.check_active("pool acquisition")?;
-            if let Some(client) = clients.pop() {
-                tracing::debug!(
-                    operation = operation.name(),
-                    phase = "pool_acquire_exit",
-                    outcome = "acquired",
-                    available_clients = clients.len(),
-                    "acquired PostgreSQL client before operation deadline"
-                );
-                return Ok(client);
-            }
-            let remaining = operation.remaining("pool acquisition")?;
-            tracing::debug!(
-                operation = operation.name(),
-                phase = "pool_acquire_wait",
-                ?remaining,
-                "waiting for PostgreSQL client until operation deadline"
-            );
-            let (next, wait) = self
-                .available
-                .wait_timeout(clients, remaining)
-                .map_err(|_| {
-                    StorageError::Postgres(
-                        "postgres control-plane client pool mutex is poisoned".into(),
-                    )
-                })?;
-            clients = next;
-            if wait.timed_out() && clients.is_empty() {
-                let _ = operation.cancel();
-                tracing::warn!(
-                    operation = operation.name(),
-                    phase = "pool_acquire_exit",
-                    outcome = "deadline",
-                    "PostgreSQL pool acquisition reached the operation deadline"
-                );
-                return Err(StorageError::OperationDeadlineExceeded {
-                    operation: operation.name(),
-                    stage: "pool acquisition",
-                    commit_started: false,
-                });
-            }
-        }
-    }
 }
 
 fn connect_postgres_transport(
@@ -4324,8 +4267,8 @@ fn initialize_postgres_session(
 ) -> Result<(), StorageError> {
     client
         .batch_execute(&format!(
-            "SET statement_timeout = {}",
-            config.statement_timeout_millis
+            "SET statement_timeout = {}; SET lock_timeout = {};",
+            config.statement_timeout_millis, POSTGRES_OPERATION_LOCK_TIMEOUT_MILLIS
         ))
         .map_err(postgres_error)?;
 

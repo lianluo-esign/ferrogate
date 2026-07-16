@@ -5,7 +5,7 @@
 // description: Durable, ciphertext-only per-user MCP OAuth credential repository.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{future::Future, time::Duration};
 
 use super::{
     AppendRepository, PostgresControlPlaneStore, PostgresRow, Repository,
@@ -165,32 +165,32 @@ pub trait McpCredentialRepository {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredMcpOauthCredential>, StorageError>;
-    fn claim_mcp_oauth_refresh(
+    async fn claim_mcp_oauth_refresh(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError>;
-    fn renew_mcp_oauth_refresh(
+    async fn renew_mcp_oauth_refresh(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError>;
-    fn complete_mcp_oauth_refresh(
+    async fn complete_mcp_oauth_refresh(
         &self,
         credential: StoredMcpOauthCredential,
         lease_id: &str,
     ) -> Result<bool, StorageError>;
-    fn release_mcp_oauth_refresh(
+    async fn release_mcp_oauth_refresh(
         &self,
         tenant_id: &str,
         credential_id: &str,
         lease_id: &str,
         outcome: &str,
     ) -> Result<bool, StorageError>;
-    fn claim_mcp_oauth_refresh_with_operation(
+    async fn claim_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshClaimRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshClaimOutcome, StorageError>;
-    fn renew_mcp_oauth_refresh_with_operation(
+    async fn renew_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshRenewRequest,
         operation: &StorageOperation,
@@ -203,13 +203,13 @@ pub trait McpCredentialRepository {
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError>;
-    fn complete_mcp_oauth_refresh_with_operation(
+    async fn complete_mcp_oauth_refresh_with_operation(
         &self,
         credential: StoredMcpOauthCredential,
         lease_id: &str,
         operation: &StorageOperation,
     ) -> Result<bool, StorageError>;
-    fn release_mcp_oauth_refresh_with_operation(
+    async fn release_mcp_oauth_refresh_with_operation(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -695,11 +695,7 @@ fn mcp_refresh_transaction_statement_timeout_millis(
     stage: &'static str,
 ) -> Result<i32, StorageError> {
     match operation {
-        Some(operation) => operation
-            .reconciliation_commit_timeout()
-            .map(mcp_statement_timeout_millis)
-            .map(Ok)
-            .unwrap_or_else(|| mcp_statement_timeout_for_operation(operation, stage)),
+        Some(operation) => mcp_statement_timeout_for_operation(operation, stage),
         None => Ok(MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS),
     }
 }
@@ -968,25 +964,6 @@ fn is_mcp_authorization_statement_timeout_code(code: Option<&postgres::error::Sq
     code == Some(&postgres::error::SqlState::QUERY_CANCELED)
 }
 
-fn prepare_mcp_storage_statement(
-    transaction: &mut postgres::Transaction<'_>,
-    operation: Option<&StorageOperation>,
-    stage: &'static str,
-) -> Result<(), StorageError> {
-    let Some(operation) = operation else {
-        return Ok(());
-    };
-    let timeout_millis = mcp_statement_timeout_for_operation(operation, stage)?;
-    let timeout = format!("{timeout_millis}ms");
-    transaction
-        .execute(
-            "SELECT set_config('statement_timeout', $1, true)",
-            &[&timeout],
-        )
-        .map_err(super::postgres_error)?;
-    operation.check_active(stage)
-}
-
 fn mcp_statement_timeout_for_operation(
     operation: &StorageOperation,
     stage: &'static str,
@@ -1007,21 +984,57 @@ fn mcp_transaction_commit_outcome_unknown(operation: &StorageOperation) -> Stora
     }
 }
 
-fn commit_mcp_storage_transaction(
-    transaction: postgres::Transaction<'_>,
-    operation: Option<&StorageOperation>,
+fn mcp_async_operation_deadline(operation: &StorageOperation, stage: &'static str) -> StorageError {
+    let _ = operation.cancel();
+    StorageError::OperationDeadlineExceeded {
+        operation: operation.name(),
+        stage,
+        commit_started: false,
+    }
+}
+
+async fn await_mcp_async_postgres_stage<T, F>(
+    operation: &StorageOperation,
+    stage: &'static str,
+    future: F,
+) -> Result<T, StorageError>
+where
+    F: Future<Output = Result<T, postgres::Error>>,
+{
+    let remaining = operation.remaining(stage)?;
+    match tokio::time::timeout(remaining, future).await {
+        Ok(Ok(output)) => {
+            operation.check_active(stage)?;
+            Ok(output)
+        }
+        Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+            Err(mcp_async_operation_deadline(operation, stage))
+        }
+        Ok(Err(error)) => Err(super::postgres_error(error)),
+        Err(_) => Err(mcp_async_operation_deadline(operation, stage)),
+    }
+}
+
+async fn rollback_mcp_async_storage_transaction(
+    transaction: deadpool_postgres::Transaction<'_>,
+    operation: &StorageOperation,
+    stage: &'static str,
 ) -> Result<(), StorageError> {
-    let Some(operation) = operation else {
-        return transaction.commit().map_err(super::postgres_error);
-    };
+    await_mcp_async_postgres_stage(operation, stage, transaction.rollback()).await
+}
+
+async fn commit_mcp_async_storage_transaction(
+    transaction: deadpool_postgres::Transaction<'_>,
+    operation: &StorageOperation,
+) -> Result<(), StorageError> {
     operation.begin_commit("before transaction commit")?;
-    let result = transaction.commit().map_err(|error| {
+    let result = transaction.commit().await.map_err(|error| {
         tracing::warn!(
             operation = operation.name(),
             storage_stage = "transaction commit",
             sqlstate = error.code().map(postgres::error::SqlState::code),
             outcome = "commit_outcome_unknown",
-            "PostgreSQL returned an error after the MCP refresh commit fence"
+            "PostgreSQL returned an error after the async MCP storage commit fence"
         );
         mcp_transaction_commit_outcome_unknown(operation)
     });
@@ -1029,133 +1042,15 @@ fn commit_mcp_storage_transaction(
     result
 }
 
-enum McpStorageWatchdogOutcome {
-    Disarmed,
-    CancellationRequested(Result<(), StorageError>),
-    CommitCancellationRequested(Result<(), StorageError>),
-    CommitAlreadyStarted,
-}
-
-struct McpStorageWatchdog {
-    disarm: std::sync::mpsc::SyncSender<()>,
-    thread: std::thread::JoinHandle<McpStorageWatchdogOutcome>,
-}
-
-impl McpStorageWatchdog {
-    fn start(
-        client: &postgres::Client,
-        operation: &StorageOperation,
-        config: &super::PostgresStorageConfig,
-    ) -> Result<Self, StorageError> {
-        let remaining = operation.remaining("storage cancellation watchdog setup")?;
-        let cancel_token = client.cancel_token();
-        let operation = operation.clone();
-        let config = config.clone();
-        let (disarm, receiver) = std::sync::mpsc::sync_channel(1);
-        let thread = std::thread::spawn(move || match receiver.recv_timeout(remaining) {
-            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                McpStorageWatchdogOutcome::Disarmed
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match operation.cancel() {
-                super::StorageOperationCancelOutcome::Cancelled
-                | super::StorageOperationCancelOutcome::AlreadyCancelled => {
-                    McpStorageWatchdogOutcome::CancellationRequested(cancel_mcp_storage_query(
-                        &cancel_token,
-                        &config,
-                    ))
-                }
-                super::StorageOperationCancelOutcome::CommitStarted
-                    if !operation.reconciles_commit_after_deadline() =>
-                {
-                    McpStorageWatchdogOutcome::CommitCancellationRequested(
-                        cancel_mcp_storage_query(&cancel_token, &config),
-                    )
-                }
-                super::StorageOperationCancelOutcome::CommitStarted
-                | super::StorageOperationCancelOutcome::Finished => {
-                    McpStorageWatchdogOutcome::CommitAlreadyStarted
-                }
-            },
-        });
-        Ok(Self { disarm, thread })
-    }
-
-    fn disarm_and_join(self) -> Result<McpStorageWatchdogOutcome, StorageError> {
-        let _ = self.disarm.send(());
-        self.thread
-            .join()
-            .map_err(|_| StorageError::Runtime("MCP storage cancellation watchdog panicked".into()))
-    }
-}
-
-fn cancel_mcp_storage_query(
-    token: &postgres::CancelToken,
-    config: &super::PostgresStorageConfig,
-) -> Result<(), StorageError> {
-    match config.tls_mode {
-        super::PostgresTlsMode::Disable => token
-            .cancel_query(postgres::NoTls)
-            .map_err(super::postgres_connection_error),
-        super::PostgresTlsMode::Prefer
-        | super::PostgresTlsMode::Require
-        | super::PostgresTlsMode::VerifyCa
-        | super::PostgresTlsMode::VerifyFull => token
-            .cancel_query(super::build_postgres_tls_connector(config)?)
-            .map_err(super::postgres_connection_error),
-    }
-}
-
 impl PostgresControlPlaneStore {
-    fn with_mcp_storage_operation<T: Send>(
-        &self,
-        operation: Option<&StorageOperation>,
-        action: impl FnOnce(&mut postgres::Client, Option<&StorageOperation>) -> Result<T, StorageError>
-            + Send,
-    ) -> Result<T, StorageError> {
-        if let Some(operation) = operation {
-            let mut client = self.pool.acquire_until(operation)?;
-            if let Err(error) = operation.check_active("before storage operation") {
-                self.pool.release(client);
-                return Err(error);
-            }
-            let watchdog = match McpStorageWatchdog::start(&client, operation, &self.pool.config) {
-                Ok(watchdog) => watchdog,
-                Err(error) => {
-                    self.pool.release(client);
-                    return Err(error);
-                }
-            };
-            let result = operation
-                .check_active("before transaction-local timeout setup")
-                .and_then(|_| action(&mut client, Some(operation)));
-            let watchdog_discard =
-                observe_mcp_storage_watchdog(operation.name(), watchdog.disarm_and_join());
-            if watchdog_discard {
-                let watchdog_error = StorageError::Runtime(
-                    "PostgreSQL cancellation watchdog retired the operation connection".into(),
-                );
-                replenish_mcp_pool_after_discard(
-                    Arc::clone(&self.pool),
-                    client,
-                    "retire a watchdog-cancelled connection",
-                    &watchdog_error,
-                    storage_result_kind(&result),
-                );
-                return normalize_mcp_storage_operation_result(result, operation);
-            }
-            self.pool.release(client);
-            normalize_mcp_storage_operation_result(result, operation)
-        } else {
-            self.with_client_storage(|client| action(client, None))
-        }
-    }
-
-    fn append_mcp_identity_audit_event_with_operation(
+    async fn append_mcp_identity_audit_event_with_operation(
         &self,
         event: &StoredAuditEvent,
         operation: &StorageOperation,
     ) -> Result<(), StorageError> {
-        operation.check_active("audit serialization")?;
+        // Serialization is pure CPU work; the first deadline-bounded stage is the
+        // pool acquisition below, matching authorize/claim/renew so an exhausted
+        // pool reports `audit pool acquisition` rather than a spurious pre-check.
         let audit_json = super::serialize_storage_document(event)?;
         let tenant_context_id = super::tenant_storage_key(&event.tenant);
         let workflow_version = event.workflow_version.map(|value| value.to_string());
@@ -1164,12 +1059,45 @@ impl PostgresControlPlaneStore {
                 .occurred_at_unix
                 .unwrap_or_else(super::now_unix_seconds),
         );
-        self.with_mcp_storage_operation(Some(operation), |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_storage_statement(&mut transaction, operation, "audit insert")?;
-            transaction
-                .execute(
-                    "INSERT INTO audit_events \
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("audit pool acquisition")?,
+            )
+            .await?;
+        let transaction = await_mcp_async_postgres_stage(
+            operation,
+            "audit transaction setup",
+            client.transaction(),
+        )
+        .await?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            await_mcp_async_postgres_stage(
+                operation,
+                "audit transaction setup",
+                transaction.batch_execute(search_path_sql),
+            )
+            .await?;
+        }
+        let statement_timeout = format!(
+            "{}ms",
+            mcp_statement_timeout_for_operation(operation, "audit transaction setup")?
+        );
+        await_mcp_async_postgres_stage(
+            operation,
+            "audit transaction setup",
+            transaction.execute(
+                "SELECT set_config('statement_timeout', $1, true)",
+                &[&statement_timeout],
+            ),
+        )
+        .await?;
+        let affected = await_mcp_async_postgres_stage(
+            operation,
+            "audit insert",
+            transaction.execute(
+                "INSERT INTO audit_events \
                      (id, request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
                       workflow_node_id, cluster_id, node_id, actor_api_key_id, tenant, action, target, \
                       outcome, occurred_at_unix, audit_json) \
@@ -1194,10 +1122,52 @@ impl PostgresControlPlaneStore {
                         &occurred_at_unix,
                         &audit_json,
                     ],
-                )
-                .map_err(super::postgres_error)?;
-            commit_mcp_storage_transaction(transaction, operation)
-        })
+            ),
+        )
+        .await?;
+        if affected == 0 {
+            rollback_mcp_async_storage_transaction(transaction, operation, "audit no-op rollback")
+                .await?;
+            return Ok(());
+        }
+        commit_mcp_async_storage_transaction(transaction, operation).await
+    }
+
+    async fn begin_mcp_async_refresh_transaction<'a>(
+        &self,
+        client: &'a mut deadpool_postgres::Object,
+        tenant_id: &str,
+        operation: &StorageOperation,
+        stage: &'static str,
+    ) -> Result<deadpool_postgres::Transaction<'a>, StorageError> {
+        let transaction =
+            await_mcp_async_postgres_stage(operation, stage, client.transaction()).await?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            await_mcp_async_postgres_stage(
+                operation,
+                stage,
+                transaction.batch_execute(search_path_sql),
+            )
+            .await?;
+        }
+        let lock_timeout = format!(
+            "{}ms",
+            mcp_refresh_mutation_lock_timeout_millis(Some(operation))?
+        );
+        let statement_timeout = format!(
+            "{}ms",
+            mcp_refresh_transaction_statement_timeout_millis(Some(operation), stage)?
+        );
+        await_mcp_async_postgres_stage(
+            operation,
+            stage,
+            transaction.execute(
+                mcp_refresh_transaction_setup_query(),
+                &[&tenant_id, &lock_timeout, &statement_timeout],
+            ),
+        )
+        .await?;
+        Ok(transaction)
     }
 
     async fn authorize_mcp_identity(
@@ -1475,22 +1445,23 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn claim_mcp_oauth_refresh(
+    async fn claim_mcp_oauth_refresh(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
-        self.claim_mcp_oauth_refresh_impl(request, None)
+        self.claim_mcp_oauth_refresh_impl(request, None).await
     }
 
-    fn claim_mcp_oauth_refresh_with_operation(
+    async fn claim_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshClaimRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
         self.claim_mcp_oauth_refresh_impl(request, Some(operation))
+            .await
     }
 
-    fn claim_mcp_oauth_refresh_impl(
+    async fn claim_mcp_oauth_refresh_impl(
         &self,
         request: &McpRefreshClaimRequest,
         operation: Option<&StorageOperation>,
@@ -1499,15 +1470,39 @@ impl PostgresControlPlaneStore {
         let expected_version = super::saturating_i64(request.expected_version);
         let generation = super::saturating_i64(request.authorization_generation);
         let query = postgres_refresh_claim_query();
-        self.with_mcp_storage_operation(operation, |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_refresh_transaction(
-                &mut transaction,
+        let default_operation = operation.is_none().then(|| {
+            StorageOperation::new(
+                "claim MCP refresh lease",
+                self.async_pool
+                    .statement_timeout()
+                    .min(Duration::from_millis(
+                        u64::try_from(MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS)
+                            .unwrap_or(u64::MAX),
+                    )),
+            )
+        });
+        let operation = operation
+            .or(default_operation.as_ref())
+            .expect("default MCP refresh claim operation");
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("refresh claim pool acquisition")?,
+            )
+            .await?;
+        let transaction = self
+            .begin_mcp_async_refresh_transaction(
+                &mut client,
                 &request.tenant_id,
                 operation,
-                "refresh claim CAS",
-            )?;
-            let claimed = match transaction.query_opt(
+                "refresh claim transaction setup",
+            )
+            .await?;
+        let query_timeout = operation.remaining("refresh claim CAS")?;
+        let claimed = match tokio::time::timeout(
+            query_timeout,
+            transaction.query_opt(
                 &query,
                 &[
                     &request.tenant_id,
@@ -1517,56 +1512,70 @@ impl PostgresControlPlaneStore {
                     &request.lease_id,
                     &request.lease_ttl_secs,
                 ],
-            ) {
-                Ok(claimed) => claimed,
-                Err(error) if is_mcp_refresh_lock_timeout(&error) => {
-                    transaction.rollback().map_err(super::postgres_error)?;
-                    tracing::info!(
-                        operation = operation
-                            .map(StorageOperation::name)
-                            .unwrap_or("claim MCP refresh lease"),
-                        storage_stage = "refresh claim CAS",
-                        outcome = "lock_conflict_busy",
-                        "mapped MCP refresh claim lock contention to waiter backoff"
-                    );
-                    return Ok(busy);
-                }
-                Err(error) => return Err(super::postgres_error(error)),
-            };
-            let Some(claimed) = claimed.as_ref() else {
-                commit_mcp_storage_transaction(transaction, operation)?;
-                tracing::debug!(
-                    operation = operation
-                        .map(StorageOperation::name)
-                        .unwrap_or("claim MCP refresh lease"),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(claimed)) => claimed,
+            Ok(Err(error)) if is_mcp_refresh_lock_timeout(&error) => {
+                rollback_mcp_async_storage_transaction(
+                    transaction,
+                    operation,
+                    "refresh claim lock-conflict rollback",
+                )
+                .await?;
+                tracing::info!(
+                    operation = operation.name(),
                     storage_stage = "refresh claim CAS",
-                    outcome = "cas_busy",
-                    "MCP refresh claim CAS did not acquire the lease"
+                    outcome = "lock_conflict_busy",
+                    "mapped async MCP refresh claim lock contention to waiter backoff"
                 );
                 return Ok(busy);
-            };
-            let outcome = McpRefreshClaimOutcome::Acquired(oauth_credential_from_row(claimed)?);
-            commit_mcp_storage_transaction(transaction, operation)?;
-            Ok(outcome)
-        })
+            }
+            Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+                return Err(mcp_async_operation_deadline(operation, "refresh claim CAS"));
+            }
+            Ok(Err(error)) => return Err(super::postgres_error(error)),
+            Err(_) => return Err(mcp_async_operation_deadline(operation, "refresh claim CAS")),
+        };
+        operation.check_active("after refresh claim CAS")?;
+        let Some(claimed) = claimed.as_ref() else {
+            rollback_mcp_async_storage_transaction(
+                transaction,
+                operation,
+                "refresh claim no-op rollback",
+            )
+            .await?;
+            tracing::debug!(
+                operation = operation.name(),
+                storage_stage = "refresh claim CAS",
+                outcome = "cas_busy",
+                "async MCP refresh claim CAS did not acquire the lease"
+            );
+            return Ok(busy);
+        };
+        let outcome = McpRefreshClaimOutcome::Acquired(oauth_credential_from_row(claimed)?);
+        commit_mcp_async_storage_transaction(transaction, operation).await?;
+        Ok(outcome)
     }
 
-    fn renew_mcp_oauth_refresh(
+    async fn renew_mcp_oauth_refresh(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
-        self.renew_mcp_oauth_refresh_impl(request, None)
+        self.renew_mcp_oauth_refresh_impl(request, None).await
     }
 
-    fn renew_mcp_oauth_refresh_with_operation(
+    async fn renew_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshRenewRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
         self.renew_mcp_oauth_refresh_impl(request, Some(operation))
+            .await
     }
 
-    fn renew_mcp_oauth_refresh_impl(
+    async fn renew_mcp_oauth_refresh_impl(
         &self,
         request: &McpRefreshRenewRequest,
         operation: Option<&StorageOperation>,
@@ -1574,15 +1583,39 @@ impl PostgresControlPlaneStore {
         let _ = require_refresh_lease_expiry(request.now_unix, request.lease_ttl_secs)?;
         let expected_version = super::saturating_i64(request.expected_version);
         let generation = super::saturating_i64(request.authorization_generation);
-        self.with_mcp_storage_operation(operation, |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_refresh_transaction(
-                &mut transaction,
+        let default_operation = operation.is_none().then(|| {
+            StorageOperation::new(
+                "renew MCP refresh lease",
+                self.async_pool
+                    .statement_timeout()
+                    .min(Duration::from_millis(
+                        u64::try_from(MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS)
+                            .unwrap_or(u64::MAX),
+                    )),
+            )
+        });
+        let operation = operation
+            .or(default_operation.as_ref())
+            .expect("default MCP refresh renewal operation");
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("refresh renewal pool acquisition")?,
+            )
+            .await?;
+        let transaction = self
+            .begin_mcp_async_refresh_transaction(
+                &mut client,
                 &request.tenant_id,
                 operation,
-                "refresh renewal CAS",
-            )?;
-            let renewed = match transaction.query_opt(
+                "refresh renewal transaction setup",
+            )
+            .await?;
+        let query_timeout = operation.remaining("refresh renewal CAS")?;
+        let renewed = match tokio::time::timeout(
+            query_timeout,
+            transaction.query_opt(
                 postgres_refresh_renewal_query(),
                 &[
                     &request.tenant_id,
@@ -1593,38 +1626,59 @@ impl PostgresControlPlaneStore {
                     &request.lease_ttl_secs,
                     &request.expected_lease_expires_at_unix,
                 ],
-            ) {
-                Ok(renewed) => renewed,
-                Err(error) if is_mcp_refresh_lock_timeout(&error) => {
-                    transaction.rollback().map_err(super::postgres_error)?;
-                    tracing::warn!(
-                        operation = operation
-                            .map(StorageOperation::name)
-                            .unwrap_or("renew MCP refresh lease"),
-                        storage_stage = "refresh renewal CAS",
-                        outcome = "lock_conflict_fenced",
-                        "fenced MCP refresh renewal after bounded lock contention"
-                    );
-                    return Ok(McpRefreshRenewOutcome::OwnershipChanged);
-                }
-                Err(error) => return Err(super::postgres_error(error)),
-            };
-            let outcome = classify_postgres_mcp_refresh_renewal(renewed.as_ref(), request);
-            if !matches!(outcome, McpRefreshRenewOutcome::Renewed { .. }) {
-                commit_mcp_storage_transaction(transaction, operation)?;
+            ),
+        )
+        .await
+        {
+            Ok(Ok(renewed)) => renewed,
+            Ok(Err(error)) if is_mcp_refresh_lock_timeout(&error) => {
+                rollback_mcp_async_storage_transaction(
+                    transaction,
+                    operation,
+                    "refresh renewal lock-conflict rollback",
+                )
+                .await?;
                 tracing::warn!(
-                    operation = operation
-                        .map(StorageOperation::name)
-                        .unwrap_or("renew MCP refresh lease"),
+                    operation = operation.name(),
                     storage_stage = "refresh renewal CAS",
-                    outcome = "cas_fenced",
-                    "classified an MCP refresh renewal that lost its mutation fence"
+                    outcome = "lock_conflict_fenced",
+                    "fenced async MCP refresh renewal after bounded lock contention"
                 );
-                return Ok(outcome);
+                return Ok(McpRefreshRenewOutcome::OwnershipChanged);
             }
-            commit_mcp_storage_transaction(transaction, operation)?;
-            Ok(outcome)
-        })
+            Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+                return Err(mcp_async_operation_deadline(
+                    operation,
+                    "refresh renewal CAS",
+                ));
+            }
+            Ok(Err(error)) => return Err(super::postgres_error(error)),
+            Err(_) => {
+                return Err(mcp_async_operation_deadline(
+                    operation,
+                    "refresh renewal CAS",
+                ));
+            }
+        };
+        operation.check_active("after refresh renewal CAS")?;
+        let outcome = classify_postgres_mcp_refresh_renewal(renewed.as_ref(), request);
+        if !matches!(outcome, McpRefreshRenewOutcome::Renewed { .. }) {
+            rollback_mcp_async_storage_transaction(
+                transaction,
+                operation,
+                "refresh renewal no-op rollback",
+            )
+            .await?;
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "refresh renewal CAS",
+                outcome = "cas_fenced",
+                "classified an async MCP refresh renewal that lost its mutation fence"
+            );
+            return Ok(outcome);
+        }
+        commit_mcp_async_storage_transaction(transaction, operation).await?;
+        Ok(outcome)
     }
 
     async fn read_mcp_refresh_authoritative_state(
@@ -1721,24 +1775,26 @@ impl PostgresControlPlaneStore {
         ))
     }
 
-    fn complete_mcp_oauth_refresh(
+    async fn complete_mcp_oauth_refresh(
         &self,
         credential: &StoredMcpOauthCredential,
         lease_id: &str,
     ) -> Result<bool, StorageError> {
         self.complete_mcp_oauth_refresh_impl(credential, lease_id, None)
+            .await
     }
 
-    fn complete_mcp_oauth_refresh_with_operation(
+    async fn complete_mcp_oauth_refresh_with_operation(
         &self,
         credential: &StoredMcpOauthCredential,
         lease_id: &str,
         operation: &StorageOperation,
     ) -> Result<bool, StorageError> {
         self.complete_mcp_oauth_refresh_impl(credential, lease_id, Some(operation))
+            .await
     }
 
-    fn complete_mcp_oauth_refresh_impl(
+    async fn complete_mcp_oauth_refresh_impl(
         &self,
         credential: &StoredMcpOauthCredential,
         lease_id: &str,
@@ -1748,15 +1804,39 @@ impl PostgresControlPlaneStore {
         let key_version = i64::from(credential.key_version);
         let expected_version = super::saturating_i64(credential.version);
         let generation = super::saturating_i64(credential.authorization_generation);
-        self.with_mcp_storage_operation(operation, |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_refresh_transaction(
-                &mut transaction,
+        let default_operation = operation.is_none().then(|| {
+            StorageOperation::new(
+                "complete MCP refresh lease",
+                self.async_pool
+                    .statement_timeout()
+                    .min(Duration::from_millis(
+                        u64::try_from(MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS)
+                            .unwrap_or(u64::MAX),
+                    )),
+            )
+        });
+        let operation = operation
+            .or(default_operation.as_ref())
+            .expect("default MCP refresh completion operation");
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("refresh completion pool acquisition")?,
+            )
+            .await?;
+        let transaction = self
+            .begin_mcp_async_refresh_transaction(
+                &mut client,
                 &credential.tenant_id,
                 operation,
-                "refresh completion CAS",
-            )?;
-            let affected = transaction.execute(
+                "refresh completion transaction setup",
+            )
+            .await?;
+        let affected = await_mcp_async_postgres_stage(
+            operation,
+            "refresh completion CAS",
+            transaction.execute(
                 "UPDATE mcp_oauth_credentials SET issuer=$3,subject=$4,token_type=$5, \
                  scopes_json=$6::text::jsonb,access_token_nonce=$7,access_token_ciphertext=$8, \
                  refresh_token_nonce=$9,refresh_token_ciphertext=$10,expires_at_unix=$11,key_version=$12, \
@@ -1772,13 +1852,23 @@ impl PostgresControlPlaneStore {
                     &credential.updated_at_unix,&credential.last_refresh_outcome,&expected_version,
                     &generation,&lease_id,
                 ],
-            ).map_err(super::postgres_error)?;
-            commit_mcp_storage_transaction(transaction, operation)?;
-            Ok(affected == 1)
-        })
+            ),
+        )
+        .await?;
+        if affected != 1 {
+            rollback_mcp_async_storage_transaction(
+                transaction,
+                operation,
+                "refresh completion no-op rollback",
+            )
+            .await?;
+            return Ok(false);
+        }
+        commit_mcp_async_storage_transaction(transaction, operation).await?;
+        Ok(true)
     }
 
-    fn release_mcp_oauth_refresh(
+    async fn release_mcp_oauth_refresh(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -1786,9 +1876,10 @@ impl PostgresControlPlaneStore {
         outcome: &str,
     ) -> Result<bool, StorageError> {
         self.release_mcp_oauth_refresh_impl(tenant_id, credential_id, lease_id, outcome, None)
+            .await
     }
 
-    fn release_mcp_oauth_refresh_with_operation(
+    async fn release_mcp_oauth_refresh_with_operation(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -1803,9 +1894,10 @@ impl PostgresControlPlaneStore {
             outcome,
             Some(operation),
         )
+        .await
     }
 
-    fn release_mcp_oauth_refresh_impl(
+    async fn release_mcp_oauth_refresh_impl(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -1813,25 +1905,57 @@ impl PostgresControlPlaneStore {
         outcome: &str,
         operation: Option<&StorageOperation>,
     ) -> Result<bool, StorageError> {
-        self.with_mcp_storage_operation(operation, |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_refresh_transaction(
-                &mut transaction,
+        let default_operation = operation.is_none().then(|| {
+            StorageOperation::new(
+                "release MCP refresh lease",
+                self.async_pool
+                    .statement_timeout()
+                    .min(Duration::from_millis(
+                        u64::try_from(MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS)
+                            .unwrap_or(u64::MAX),
+                    )),
+            )
+        });
+        let operation = operation
+            .or(default_operation.as_ref())
+            .expect("default MCP refresh release operation");
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("refresh release pool acquisition")?,
+            )
+            .await?;
+        let transaction = self
+            .begin_mcp_async_refresh_transaction(
+                &mut client,
                 tenant_id,
                 operation,
-                "refresh release CAS",
-            )?;
-            let affected = transaction
-                .execute(
-                    "UPDATE mcp_oauth_credentials SET refresh_lease_id=NULL, \
+                "refresh release transaction setup",
+            )
+            .await?;
+        let affected = await_mcp_async_postgres_stage(
+            operation,
+            "refresh release CAS",
+            transaction.execute(
+                "UPDATE mcp_oauth_credentials SET refresh_lease_id=NULL, \
                  refresh_lease_expires_at_unix=NULL,last_refresh_outcome=$4 \
                  WHERE tenant_id=$1 AND id=$2 AND refresh_lease_id=$3 AND revoked_at_unix IS NULL",
-                    &[&tenant_id, &credential_id, &lease_id, &outcome],
-                )
-                .map_err(super::postgres_error)?;
-            commit_mcp_storage_transaction(transaction, operation)?;
-            Ok(affected == 1)
-        })
+                &[&tenant_id, &credential_id, &lease_id, &outcome],
+            ),
+        )
+        .await?;
+        if affected != 1 {
+            rollback_mcp_async_storage_transaction(
+                transaction,
+                operation,
+                "refresh release no-op rollback",
+            )
+            .await?;
+            return Ok(false);
+        }
+        commit_mcp_async_storage_transaction(transaction, operation).await?;
+        Ok(true)
     }
 
     fn revoke_mcp_oauth_identity(
@@ -1899,14 +2023,16 @@ impl PostgresControlPlaneStore {
 }
 
 impl RuntimeStorageRepositories {
-    pub fn append_mcp_identity_audit_event_with_operation(
+    pub async fn append_mcp_identity_audit_event_with_operation(
         &self,
         event: StoredAuditEvent,
         operation: &StorageOperation,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.append_mcp_identity_audit_event_with_operation(&event, operation)
+                store
+                    .append_mcp_identity_audit_event_with_operation(&event, operation)
+                    .await
             }
             RuntimeControlPlaneBackend::Memory(_) => {
                 operation.begin_commit("in-memory MCP identity audit append")?;
@@ -1920,165 +2046,6 @@ impl RuntimeStorageRepositories {
             }
         }
     }
-}
-
-fn storage_result_kind<T>(result: &Result<T, StorageError>) -> &'static str {
-    match result {
-        Ok(_) => "success",
-        Err(StorageError::UnsupportedProvider { .. }) => "unsupported_provider",
-        Err(StorageError::Postgres(_)) => "postgres_error",
-        Err(StorageError::Runtime(_)) => "runtime_error",
-        Err(StorageError::Serialization(_)) => "serialization_error",
-        Err(StorageError::Conflict(_)) => "conflict",
-        Err(StorageError::NotFound(_)) => "not_found",
-        Err(StorageError::OperationDeadlineExceeded { .. }) => "deadline_exceeded",
-        Err(StorageError::OperationCancelled { .. }) => "cancelled",
-        Err(StorageError::OperationCommitOutcomeUnknown { .. }) => "commit_outcome_unknown",
-    }
-}
-
-fn normalize_mcp_storage_operation_result<T>(
-    result: Result<T, StorageError>,
-    operation: &StorageOperation,
-) -> Result<T, StorageError> {
-    match result {
-        Err(StorageError::Postgres(error)) if error.contains("statement timeout") => {
-            let _ = operation.cancel();
-            Err(StorageError::OperationDeadlineExceeded {
-                operation: operation.name(),
-                stage: "SQL execution",
-                commit_started: false,
-            })
-        }
-        Err(error @ StorageError::Postgres(_)) => match operation.remaining("after SQL error") {
-            Err(deadline @ StorageError::OperationDeadlineExceeded { .. })
-            | Err(deadline @ StorageError::OperationCancelled { .. }) => Err(deadline),
-            _ => Err(error),
-        },
-        result => result,
-    }
-}
-
-fn observe_mcp_storage_watchdog(
-    operation: &'static str,
-    outcome: Result<McpStorageWatchdogOutcome, StorageError>,
-) -> bool {
-    match outcome {
-        Ok(McpStorageWatchdogOutcome::Disarmed) => false,
-        Ok(McpStorageWatchdogOutcome::CommitAlreadyStarted) => {
-            tracing::debug!(
-                operation,
-                outcome = "watchdog_commit_started",
-                "MCP storage cancellation watchdog left commit reconciliation authoritative"
-            );
-            false
-        }
-        Ok(McpStorageWatchdogOutcome::CancellationRequested(Ok(()))) => {
-            tracing::warn!(
-                operation,
-                storage_stage = "SQL execution",
-                outcome = "watchdog_cancel_requested",
-                pool_action = "discard_and_replenish",
-                "MCP storage cancellation watchdog requested PostgreSQL query cancellation"
-            );
-            true
-        }
-        Ok(McpStorageWatchdogOutcome::CommitCancellationRequested(Ok(()))) => {
-            tracing::warn!(
-                operation,
-                storage_stage = "transaction commit",
-                outcome = "watchdog_commit_cancel_requested",
-                pool_action = "discard_and_replenish",
-                "MCP storage cancellation watchdog requested cancellation of an ambiguous commit"
-            );
-            true
-        }
-        Ok(McpStorageWatchdogOutcome::CancellationRequested(Err(error))) | Err(error) => {
-            tracing::warn!(
-                operation,
-                error_kind = storage_result_kind::<()>(&Err(error.clone())),
-                error_detail = %super::sanitize_storage_error(&error.to_string()),
-                outcome = "watchdog_cancel_failed",
-                "MCP storage cancellation watchdog could not confirm query cancellation"
-            );
-            true
-        }
-        Ok(McpStorageWatchdogOutcome::CommitCancellationRequested(Err(error))) => {
-            tracing::warn!(
-                operation,
-                error_kind = storage_result_kind::<()>(&Err(error.clone())),
-                error_detail = %super::sanitize_storage_error(&error.to_string()),
-                outcome = "watchdog_commit_cancel_failed",
-                "MCP storage cancellation watchdog could not confirm ambiguous commit cancellation"
-            );
-            true
-        }
-    }
-}
-
-fn replenish_mcp_pool_after_discard(
-    pool: Arc<super::PostgresClientPool>,
-    client: postgres::Client,
-    stage: &'static str,
-    error: &StorageError,
-    operation_result: &'static str,
-) {
-    tracing::warn!(
-        stage,
-        operation_result,
-        cleanup_error = %super::sanitize_storage_error(&error.to_string()),
-        pool_state = "replenishing",
-        "discarded a contaminated MCP storage client without overriding its authoritative operation result"
-    );
-    let _ = std::thread::spawn(move || {
-        drop(client);
-        retry_mcp_pool_replenishment(
-            || {
-                let replacement = super::connect_postgres_client(&pool.config)?;
-                pool.release(replacement);
-                Ok(())
-            },
-            std::thread::sleep,
-            |attempt, error| {
-                tracing::error!(
-                    stage,
-                    attempt,
-                    pool_state = "replenish_retry",
-                    error_detail = %super::sanitize_storage_error(&error.to_string()),
-                    "failed to replenish MCP storage pool; capacity remains scheduled for recovery"
-                );
-            },
-        );
-        tracing::info!(
-            stage,
-            pool_state = "restored",
-            "replenished MCP storage pool after discarding a contaminated client"
-        );
-    });
-}
-
-fn retry_mcp_pool_replenishment(
-    mut replenish: impl FnMut() -> Result<(), StorageError>,
-    mut wait: impl FnMut(std::time::Duration),
-    mut on_failure: impl FnMut(u32, &StorageError),
-) {
-    let mut attempt = 0_u32;
-    loop {
-        match replenish() {
-            Ok(()) => return,
-            Err(error) => {
-                attempt = attempt.saturating_add(1);
-                on_failure(attempt, &error);
-                wait(mcp_pool_replenish_backoff(attempt));
-            }
-        }
-    }
-}
-
-fn mcp_pool_replenish_backoff(attempt: u32) -> std::time::Duration {
-    let exponent = attempt.saturating_sub(1).min(6);
-    std::time::Duration::from_millis(100_u64.saturating_mul(1_u64 << exponent))
-        .min(std::time::Duration::from_secs(5))
 }
 
 fn authorization_generation_key(request: &McpIdentityAccessRequest) -> String {
@@ -2350,7 +2317,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn claim_mcp_oauth_refresh(
+    async fn claim_mcp_oauth_refresh(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
@@ -2361,11 +2328,13 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 })?;
                 claim_in_memory_mcp_oauth_refresh(&mut store, request, None)
             }
-            RuntimeControlPlaneBackend::Postgres(store) => store.claim_mcp_oauth_refresh(request),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.claim_mcp_oauth_refresh(request).await
+            }
         }
     }
 
-    fn renew_mcp_oauth_refresh(
+    async fn renew_mcp_oauth_refresh(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
@@ -2376,11 +2345,13 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 })?;
                 renew_in_memory_mcp_oauth_refresh(&mut store, request, None)
             }
-            RuntimeControlPlaneBackend::Postgres(store) => store.renew_mcp_oauth_refresh(request),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.renew_mcp_oauth_refresh(request).await
+            }
         }
     }
 
-    fn complete_mcp_oauth_refresh(
+    async fn complete_mcp_oauth_refresh(
         &self,
         credential: StoredMcpOauthCredential,
         lease_id: &str,
@@ -2393,12 +2364,14 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 complete_in_memory_mcp_oauth_refresh(&mut store, credential, lease_id, None)
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.complete_mcp_oauth_refresh(&credential, lease_id)
+                store
+                    .complete_mcp_oauth_refresh(&credential, lease_id)
+                    .await
             }
         }
     }
 
-    fn release_mcp_oauth_refresh(
+    async fn release_mcp_oauth_refresh(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -2420,19 +2393,23 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 )
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.release_mcp_oauth_refresh(tenant_id, credential_id, lease_id, outcome)
+                store
+                    .release_mcp_oauth_refresh(tenant_id, credential_id, lease_id, outcome)
+                    .await
             }
         }
     }
 
-    fn claim_mcp_oauth_refresh_with_operation(
+    async fn claim_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshClaimRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.claim_mcp_oauth_refresh_with_operation(request, operation)
+                store
+                    .claim_mcp_oauth_refresh_with_operation(request, operation)
+                    .await
             }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let mut store = store.lock().map_err(|_| {
@@ -2443,14 +2420,16 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn renew_mcp_oauth_refresh_with_operation(
+    async fn renew_mcp_oauth_refresh_with_operation(
         &self,
         request: &McpRefreshRenewRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.renew_mcp_oauth_refresh_with_operation(request, operation)
+                store
+                    .renew_mcp_oauth_refresh_with_operation(request, operation)
+                    .await
             }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let mut store = store.lock().map_err(|_| {
@@ -2511,7 +2490,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn complete_mcp_oauth_refresh_with_operation(
+    async fn complete_mcp_oauth_refresh_with_operation(
         &self,
         credential: StoredMcpOauthCredential,
         lease_id: &str,
@@ -2519,7 +2498,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
     ) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.complete_mcp_oauth_refresh_with_operation(&credential, lease_id, operation)
+                store
+                    .complete_mcp_oauth_refresh_with_operation(&credential, lease_id, operation)
+                    .await
             }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let mut store = store.lock().map_err(|_| {
@@ -2535,7 +2516,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn release_mcp_oauth_refresh_with_operation(
+    async fn release_mcp_oauth_refresh_with_operation(
         &self,
         tenant_id: &str,
         credential_id: &str,
@@ -2544,14 +2525,17 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         operation: &StorageOperation,
     ) -> Result<bool, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Postgres(store) => store
-                .release_mcp_oauth_refresh_with_operation(
-                    tenant_id,
-                    credential_id,
-                    lease_id,
-                    outcome,
-                    operation,
-                ),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store
+                    .release_mcp_oauth_refresh_with_operation(
+                        tenant_id,
+                        credential_id,
+                        lease_id,
+                        outcome,
+                        operation,
+                    )
+                    .await
+            }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let mut store = store.lock().map_err(|_| {
                     StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
