@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
     archived_revisions_json JSONB NOT NULL DEFAULT '[]'::JSONB,
     updated_at_unix BIGINT NOT NULL,
     updated_by TEXT NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0),
     CONSTRAINT fk_guardrail_policy_active_revision
         FOREIGN KEY (policy_id, active_revision)
         REFERENCES guardrail_policy_revisions(policy_id, revision)
@@ -1528,6 +1529,25 @@ BEGIN
 END
 $$;
 
+-- Issue #220: Guardrail binding writers coordinate with one indexed optimistic
+-- generation predicate. The database never owns retry, backoff, or wait loops.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (32, '032_guardrail_policy_binding_generation')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE guardrail_policy_bindings
+            ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE guardrail_policy_bindings
+            DROP CONSTRAINT IF EXISTS guardrail_policy_bindings_generation_check;
+        ALTER TABLE guardrail_policy_bindings
+            ADD CONSTRAINT guardrail_policy_bindings_generation_check
+            CHECK (generation >= 0);
+    END IF;
+END
+$$;
+
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (1, '001_init_postgres')
 ON CONFLICT (version) DO UPDATE
@@ -1679,4 +1699,8 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (31, '031_mcp_pending_flow_lookup_index')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (32, '032_guardrail_policy_binding_generation')
 ON CONFLICT (version) DO NOTHING;

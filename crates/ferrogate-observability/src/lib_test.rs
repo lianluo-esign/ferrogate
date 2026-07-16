@@ -132,6 +132,7 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         guardrail_evaluation_error_total: 1,
         guardrail_evaluation_shadow_total: 2,
         guardrail_evidence_persistence_failure_total: 1,
+        guardrail_policy_cas_conflict_total: 2,
         billing_event_total: 1,
         billing_report_enqueue_failure_total: 1,
         tool_call_total: 2,
@@ -176,6 +177,7 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_guardrail_evaluations_total{verdict=\"pass\"} 2"));
     assert!(text.contains("ferrogate_guardrail_shadow_evaluations_total 2"));
     assert!(text.contains("ferrogate_guardrail_evidence_persistence_failures_total 1"));
+    assert!(text.contains("ferrogate_guardrail_policy_cas_conflicts_total 2"));
     assert!(text.contains("ferrogate_network_access_denied_total 3"));
     assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
     assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
@@ -204,6 +206,7 @@ fn builds_otlp_http_json_requests_for_metrics_traces_and_logs() {
     let snapshot = GatewayMetricsSnapshot {
         service_name: "ferrogate".into(),
         billing_event_total: 1,
+        guardrail_policy_cas_conflict_total: 2,
         token_totals: TokenMetricTotals {
             prompt_tokens: 3,
             completion_tokens: 5,
@@ -227,6 +230,13 @@ fn builds_otlp_http_json_requests_for_metrics_traces_and_logs() {
             .unwrap()
             .iter()
             .any(|metric| metric["name"] == "ferrogate.tokens")
+    );
+    assert!(
+        metrics_body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|metric| metric["name"] == "ferrogate.guardrail.policy_cas_conflicts")
     );
 
     let traces = build_otlp_traces_request(

@@ -45,10 +45,14 @@ fn authoritative_reread_transport_caps_connect_and_tcp_user_timeouts() {
 }
 
 #[test]
-fn schema_contract_includes_pending_mcp_flow_lookup_index_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 31);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "031_mcp_pending_flow_lookup_index");
+fn schema_contract_includes_latest_guardrail_generation_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 32);
+    assert_eq!(
+        POSTGRES_SCHEMA_NAME,
+        "032_guardrail_policy_binding_generation"
+    );
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));

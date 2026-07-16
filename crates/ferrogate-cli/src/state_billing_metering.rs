@@ -569,6 +569,7 @@ impl AppState {
                 guardrail_evaluation_error_total: 0,
                 guardrail_evaluation_shadow_total: 0,
                 guardrail_evidence_persistence_failure_total: 0,
+                guardrail_policy_cas_conflict_total: 0,
                 billing_event_total: 0,
                 billing_report_enqueue_failure_total: 0,
                 tool_call_total: 0,

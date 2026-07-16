@@ -1158,6 +1158,18 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         }
     }
 
+    let guardrail_generation = postgres_scalar(&format!(
+        "SELECT data_type || ':' || is_nullable FROM information_schema.columns \
+         WHERE table_schema = '{}' AND table_name = 'guardrail_policy_bindings' \
+           AND column_name = 'generation'",
+        sql_literal(schema)
+    ))?;
+    if guardrail_generation.trim() != "bigint:NO" {
+        bail!(
+            "expected {schema}.guardrail_policy_bindings.generation to be bigint NOT NULL, got {guardrail_generation}"
+        );
+    }
+
     let bigint_columns = [(
         "self_hosted_worker_registrations",
         "identity_expires_at_unix",
@@ -1245,10 +1257,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 31",
+         FROM {}.storage_schema_migrations WHERE version = 32",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "31:031_mcp_pending_flow_lookup_index" {
+    if migration_version.trim() != "32:032_guardrail_policy_binding_generation" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1879,10 +1891,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 31);
+                assert_eq!(body["storage"]["schema"]["version"], 32);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "031_mcp_pending_flow_lookup_index"
+                    "032_guardrail_policy_binding_generation"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]

@@ -354,6 +354,7 @@ pub struct GatewayMetricsSnapshot {
     pub guardrail_evaluation_error_total: u64,
     pub guardrail_evaluation_shadow_total: u64,
     pub guardrail_evidence_persistence_failure_total: u64,
+    pub guardrail_policy_cas_conflict_total: u64,
     pub billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151) — distinguishable from successful
@@ -711,6 +712,16 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_guardrail_evidence_persistence_failures_total {}\n",
         snapshot.guardrail_evidence_persistence_failure_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_policy_cas_conflicts_total",
+        "Guardrail policy binding writes rejected by optimistic generation comparison.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_policy_cas_conflicts_total {}\n",
+        snapshot.guardrail_policy_cas_conflict_total
     ));
 
     push_help(
@@ -1096,6 +1107,12 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.guardrail.evidence_persistence_failures",
             "Failures persisting Guardrail evaluation evidence.",
             snapshot.guardrail_evidence_persistence_failure_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.policy_cas_conflicts",
+            "Guardrail policy binding writes rejected by optimistic generation comparison.",
+            snapshot.guardrail_policy_cas_conflict_total as f64,
             vec![],
         ),
         sum_metric_json(

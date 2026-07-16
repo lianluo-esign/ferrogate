@@ -494,7 +494,22 @@ impl FerroGateway {
                 )
                 .await
             }
-            Err(error) => write_guardrail_error(session, ctx, error).await,
+            Err(error) => {
+                record_guardrail_policy_cas_conflict(
+                    &state,
+                    ctx,
+                    &auth,
+                    if rollback {
+                        "guardrail.policy_rollback"
+                    } else {
+                        "guardrail.policy_activate"
+                    },
+                    policy_id,
+                    revision,
+                    &error,
+                );
+                write_guardrail_error(session, ctx, error).await
+            }
         }
     }
 
@@ -557,7 +572,18 @@ impl FerroGateway {
                 )
                 .await
             }
-            Err(error) => write_guardrail_error(session, ctx, error).await,
+            Err(error) => {
+                record_guardrail_policy_cas_conflict(
+                    &state,
+                    ctx,
+                    &auth,
+                    "guardrail.policy_archive",
+                    policy_id,
+                    revision,
+                    &error,
+                );
+                write_guardrail_error(session, ctx, error).await
+            }
         }
     }
 
@@ -900,6 +926,35 @@ async fn write_guardrail_error(
         None => (StatusCode::BAD_REQUEST, "invalid_guardrail_policy"),
     };
     write_json_error(session, status, code, message, &ctx.request_id).await
+}
+
+fn record_guardrail_policy_cas_conflict(
+    state: &AppState,
+    ctx: &ProxyContext,
+    auth: &AuthContext,
+    action: &'static str,
+    policy_id: &str,
+    revision: u32,
+    error: &anyhow::Error,
+) {
+    let conflict = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ferrogate_storage::StorageError>()
+            .is_some_and(ferrogate_storage::is_guardrail_policy_binding_cas_conflict)
+    });
+    if !conflict {
+        return;
+    }
+
+    state.record_guardrail_policy_cas_conflict();
+    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+        ctx,
+        auth,
+        action,
+        format!("{policy_id}@{revision}"),
+        "conflict",
+        "guardrail policy binding generation changed concurrently",
+    ));
 }
 
 async fn guardrail_not_found(session: &mut Session, ctx: &ProxyContext) -> PingoraResult<()> {

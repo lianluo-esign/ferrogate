@@ -2966,7 +2966,7 @@ impl SupabaseEvidence {
             .client
             .query_opt(
                 &format!(
-                    "SELECT active_revision, archived_revisions_json::text FROM \"{}\".guardrail_policy_bindings WHERE policy_id = 'dynamic-supabase-policy'",
+                    "SELECT active_revision, archived_revisions_json::text, generation FROM \"{}\".guardrail_policy_bindings WHERE policy_id = 'dynamic-supabase-policy'",
                     self.schema
                 ),
                 &[],
@@ -2974,10 +2974,11 @@ impl SupabaseEvidence {
             .context("Guardrail policy binding was not persisted")?;
         let active_revision: Option<i64> = binding.get(0);
         let archived_json: String = binding.get(1);
+        let generation: i64 = binding.get(2);
         let archived: Vec<u32> = serde_json::from_str(&archived_json)?;
-        if active_revision != Some(1) || archived != vec![2] {
+        if active_revision != Some(1) || archived != vec![2] || generation <= 0 {
             bail!(
-                "Guardrail rollback binding was incorrect: active={active_revision:?}, archived={archived:?}"
+                "Guardrail rollback binding was incorrect: active={active_revision:?}, archived={archived:?}, generation={generation}"
             );
         }
 

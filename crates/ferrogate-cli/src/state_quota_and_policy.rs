@@ -556,6 +556,12 @@ impl AppState {
         }
     }
 
+    pub(crate) fn record_guardrail_policy_cas_conflict(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_guardrail_policy_cas_conflict();
+        }
+    }
+
     pub(crate) async fn record_guardrail_stream_capture_overflow(
         &self,
         context: GuardrailEvaluationContext<'_>,

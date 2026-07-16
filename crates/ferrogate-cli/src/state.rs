@@ -339,9 +339,11 @@ impl SharedAppState {
         )?;
         let result = self.reload_process_local((*active.config).clone());
         if !result.committed {
-            active
-                .repositories
-                .restore_guardrail_policy_binding(policy_id, transition.previous)?;
+            active.repositories.restore_guardrail_policy_binding(
+                policy_id,
+                Some(transition.current.generation),
+                transition.previous,
+            )?;
             anyhow::bail!(
                 "guardrail policy binding was restored after runtime reload failed: {}",
                 result
@@ -361,10 +363,7 @@ impl SharedAppState {
         updated_at_unix: u64,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
-        let previous = active
-            .repositories
-            .get_guardrail_policy_binding(policy_id)?;
-        active.repositories.archive_guardrail_policy_revision(
+        let transition = active.repositories.archive_guardrail_policy_revision(
             policy_id,
             revision,
             actor,
@@ -372,9 +371,11 @@ impl SharedAppState {
         )?;
         let result = self.reload_process_local((*active.config).clone());
         if !result.committed {
-            active
-                .repositories
-                .restore_guardrail_policy_binding(policy_id, previous)?;
+            active.repositories.restore_guardrail_policy_binding(
+                policy_id,
+                Some(transition.current.generation),
+                transition.previous,
+            )?;
             anyhow::bail!(
                 "guardrail policy binding was restored after runtime reload failed: {}",
                 result
@@ -2483,6 +2484,7 @@ struct GatewayMetricsAccumulator {
     guardrail_evaluation_error_total: u64,
     guardrail_evaluation_shadow_total: u64,
     guardrail_evidence_persistence_failure_total: u64,
+    guardrail_policy_cas_conflict_total: u64,
     billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151).
@@ -2816,6 +2818,11 @@ impl GatewayMetricsAccumulator {
             .saturating_add(1);
     }
 
+    fn record_guardrail_policy_cas_conflict(&mut self) {
+        self.guardrail_policy_cas_conflict_total =
+            self.guardrail_policy_cas_conflict_total.saturating_add(1);
+    }
+
     fn record_tool_call(&mut self, _tool_name: &str, latency_ms: u64) {
         self.tool_call_total = self.tool_call_total.saturating_add(1);
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
@@ -2903,6 +2910,7 @@ impl GatewayMetricsAccumulator {
             guardrail_evaluation_shadow_total: self.guardrail_evaluation_shadow_total,
             guardrail_evidence_persistence_failure_total: self
                 .guardrail_evidence_persistence_failure_total,
+            guardrail_policy_cas_conflict_total: self.guardrail_policy_cas_conflict_total,
             billing_event_total: self.billing_event_total,
             billing_report_enqueue_failure_total: self.billing_report_enqueue_failure_total,
             tool_call_total: self.tool_call_total,
