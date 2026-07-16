@@ -4,58 +4,223 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
+// Pingora's inherited-listener transfer is implemented only on Linux.
+#![cfg(target_os = "linux")]
+
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
+    os::unix::fs::FileTypeExt,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Barrier,
+    },
     thread,
     time::{Duration, Instant},
 };
+
+use pingora::server::Fds;
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const OPENSSL_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn ferrogate() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ferrogate"))
 }
 
-fn free_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().to_string()
+struct ListenerReservation {
+    listener: TcpListener,
+    addr: String,
 }
 
-fn start_gateway(config: &std::path::Path) -> Child {
-    ferrogate()
-        .args(["run", "--config", config.to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
-}
-
-fn wait_for_gateway(addr: &str) {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
-        if let Ok(mut stream) = TcpStream::connect(addr) {
-            stream
-                .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .unwrap();
-            let mut buffer = [0_u8; 512];
-            if stream.read(&mut buffer).unwrap_or(0) > 0 {
-                return;
-            }
-        }
-        thread::sleep(Duration::from_millis(25));
+impl ListenerReservation {
+    fn reserve() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        Self { listener, addr }
     }
-    panic!("gateway did not become ready at {addr}");
+
+    fn addr(&self) -> &str {
+        &self.addr
+    }
 }
 
-fn wait_for_tcp_listener(addr: &str) {
+struct GatewayProcess {
+    child: Child,
+    output: tempfile::NamedTempFile,
+}
+
+impl GatewayProcess {
+    fn output_snapshot(&self) -> String {
+        std::fs::read_to_string(self.output.path()).unwrap_or_default()
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for GatewayProcess {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn start_gateway(config: &Path, reservation: ListenerReservation) -> GatewayProcess {
+    let upgrade_sock = configure_listener_transfer(config);
+    let output = tempfile::NamedTempFile::new().unwrap();
+    let output_writer = output.reopen().unwrap();
+    let child = ferrogate()
+        .args(["run", "--config", config.to_str().unwrap(), "--upgrade"])
+        .stdout(Stdio::from(output_writer.try_clone().unwrap()))
+        .stderr(Stdio::from(output_writer))
+        .spawn()
+        .unwrap();
+    let mut gateway = GatewayProcess { child, output };
+    wait_for_upgrade_socket(&mut gateway, &upgrade_sock);
+
+    let mut inherited = Fds::new();
+    inherited.add(
+        reservation.addr().to_string(),
+        reservation.listener.as_raw_fd(),
+    );
+    inherited
+        .send_to_sock(upgrade_sock.to_str().unwrap())
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to transfer reserved listener {} to gateway: {error}\n{}",
+                reservation.addr(),
+                gateway.output_snapshot()
+            )
+        });
+
+    drop(reservation.listener);
+    gateway
+}
+
+fn wait_for_upgrade_socket(gateway: &mut GatewayProcess, upgrade_sock: &Path) {
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
-        if TcpStream::connect(addr).is_ok() {
+    loop {
+        if std::fs::metadata(upgrade_sock).is_ok_and(|metadata| metadata.file_type().is_socket()) {
             return;
         }
+        if let Some(status) = gateway.child.try_wait().unwrap() {
+            panic!(
+                "gateway exited before opening listener transfer socket {}: {status}\n{}",
+                upgrade_sock.display(),
+                gateway.output_snapshot()
+            );
+        }
+        if started.elapsed() >= STARTUP_TIMEOUT {
+            panic!(
+                "gateway did not open listener transfer socket {}\n{}",
+                upgrade_sock.display(),
+                gateway.output_snapshot()
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn configure_listener_transfer(config: &Path) -> PathBuf {
+    let upgrade_sock = config.with_file_name("proxy-runtime-upgrade.sock");
+    let source = std::fs::read_to_string(config).unwrap();
+    let mut document = source.parse::<toml::Value>().unwrap();
+    let root = document.as_table_mut().unwrap();
+    let reliability = root
+        .entry("reliability")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .unwrap();
+    reliability.insert(
+        "graceful_upgrade_sock".to_string(),
+        toml::Value::String(upgrade_sock.to_string_lossy().into_owned()),
+    );
+    std::fs::write(config, toml::to_string(&document).unwrap()).unwrap();
+    upgrade_sock
+}
+
+fn wait_for_gateway(gateway: &mut GatewayProcess, addr: &str) {
+    let started = Instant::now();
+    let mut last_response = None;
+    while started.elapsed() < STARTUP_TIMEOUT {
+        if let Some(status) = gateway.child.try_wait().unwrap() {
+            panic!(
+                "gateway exited before becoming ready at {addr}: {status}\n{}",
+                gateway.output_snapshot()
+            );
+        }
+        if let Ok(response) = gateway_health(addr) {
+            if is_healthy_response(&response) {
+                return;
+            }
+            last_response = Some(response);
+        }
         thread::sleep(Duration::from_millis(25));
     }
-    panic!("gateway did not open TCP listener at {addr}");
+    panic!(
+        "gateway did not become ready at {addr}; last response: {:?}\n{}",
+        last_response,
+        gateway.output_snapshot()
+    );
+}
+
+fn gateway_health(addr: &str) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn is_healthy_response(response: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let mut status = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    if status.next() != Some("HTTP/1.1") || status.next() != Some("200") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|document| {
+            document.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+        })
+}
+
+fn wait_for_tls_gateway(gateway: &mut GatewayProcess, addr: &str, host: &str) -> String {
+    let started = Instant::now();
+    let mut last_response = None;
+    while started.elapsed() < STARTUP_TIMEOUT {
+        if let Some(status) = gateway.child.try_wait().unwrap() {
+            panic!(
+                "TLS gateway exited before becoming ready at {addr}: {status}\n{}",
+                gateway.output_snapshot()
+            );
+        }
+        if let Some(response) = https_get_with_openssl(addr, "/healthz", host) {
+            if is_healthy_response(&response) {
+                return response;
+            }
+            last_response = Some(response);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "TLS gateway did not become ready at {addr}; last response: {:?}\n{}",
+        last_response,
+        gateway.output_snapshot()
+    );
 }
 
 fn http_get(addr: &str, path: &str, host: &str) -> String {
@@ -101,17 +266,44 @@ fn https_get_with_openssl(addr: &str, path: &str, host: &str) -> Option<String> 
         .spawn()
         .ok()?;
 
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        write!(
-            stdin,
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
+    if !write_https_probe(&mut child, path, host) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
     }
 
-    let output = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().ok()?;
+                return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+            }
+            Ok(None) if started.elapsed() < OPENSSL_REQUEST_TIMEOUT => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn write_https_probe(child: &mut Child, path: &str, host: &str) -> bool {
+    let Some(mut stdin) = child.stdin.take() else {
+        return false;
+    };
+    write_https_probe_request(&mut stdin, path, host)
+}
+
+fn write_https_probe_request(output: &mut impl Write, path: &str, host: &str) -> bool {
+    write!(
+        output,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .is_ok()
 }
 
 fn spawn_echo_upstream() -> (String, thread::JoinHandle<String>) {
@@ -165,7 +357,8 @@ fn spawn_streaming_upstream() -> (String, thread::JoinHandle<()>) {
 
 #[test]
 fn healthz_and_reverse_proxy_vertical_slice_work() {
-    let gateway_addr = free_addr();
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
     let (upstream_addr, upstream_handle) = spawn_echo_upstream();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -203,8 +396,8 @@ value = "proxied"
     .unwrap();
     std::env::set_var("FERROGATE_PROXY_TEST_SECRET", "resolved-secret");
 
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
+    let mut gateway = start_gateway(&config, gateway_listener);
+    wait_for_gateway(&mut gateway, &gateway_addr);
 
     let health = http_get(&gateway_addr, "/healthz", "localhost");
     assert!(health.contains("200 OK"));
@@ -237,8 +430,7 @@ value = "proxied"
     assert!(normalized_response.contains("x-request-id"));
     assert!(normalized_response.contains("x-trace-id"));
 
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
+    gateway.shutdown();
     let upstream_request = upstream_handle.join().unwrap();
     assert!(upstream_request.contains("x-forwarded-host: example.test"));
     assert!(upstream_request
@@ -248,7 +440,8 @@ value = "proxied"
 
 #[test]
 fn reverse_proxy_accepts_traceparent_and_preserves_trace_headers() {
-    let gateway_addr = free_addr();
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
     let (upstream_addr, upstream_handle) = spawn_echo_upstream();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -272,8 +465,8 @@ path_prefixes = ["/proxy"]
     )
     .unwrap();
 
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
+    let mut gateway = start_gateway(&config, gateway_listener);
+    wait_for_gateway(&mut gateway, &gateway_addr);
 
     let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     let response = http_get_with_headers(
@@ -293,8 +486,7 @@ path_prefixes = ["/proxy"]
         "{response}"
     );
 
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
+    gateway.shutdown();
     let upstream_request = upstream_handle.join().unwrap().to_ascii_lowercase();
     assert!(upstream_request.contains(&format!("traceparent: {traceparent}")));
     assert!(upstream_request.contains("tracestate: token4ai=ingress"));
@@ -303,7 +495,8 @@ path_prefixes = ["/proxy"]
 
 #[test]
 fn proxied_response_body_is_not_fully_buffered_before_downstream_write() {
-    let gateway_addr = free_addr();
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
     let (upstream_addr, upstream_handle) = spawn_streaming_upstream();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -326,8 +519,8 @@ path_prefixes = ["/stream"]
     )
     .unwrap();
 
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
+    let mut gateway = start_gateway(&config, gateway_listener);
+    wait_for_gateway(&mut gateway, &gateway_addr);
 
     let mut stream = TcpStream::connect(&gateway_addr).unwrap();
     stream
@@ -358,14 +551,14 @@ path_prefixes = ["/stream"]
     assert!(response.contains("hello"));
     assert!(response.contains(" world"));
 
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
+    gateway.shutdown();
     upstream_handle.join().unwrap();
 }
 
 #[test]
 fn tls_listener_serves_healthz_when_certificate_is_configured() {
-    let gateway_addr = free_addr();
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
     let dir = tempfile::tempdir().unwrap();
     let cert = dir.path().join("cert.pem");
     let key = dir.path().join("key.pem");
@@ -391,16 +584,104 @@ key_path = "{}"
     )
     .unwrap();
 
-    let mut child = start_gateway(&config);
-    wait_for_tcp_listener(&gateway_addr);
-
-    let response = https_get_with_openssl(&gateway_addr, "/healthz", "localhost")
-        .expect("openssl should be available after certificate generation");
+    let mut child = start_gateway(&config, gateway_listener);
+    let response = wait_for_tls_gateway(&mut child, &gateway_addr, "localhost");
     assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains("ok"), "{response}");
 
-    child.kill().ok();
-    child.wait().ok();
+    child.shutdown();
+}
+
+#[test]
+fn inherited_listener_has_no_rebind_window() {
+    let gateway_listener = ListenerReservation::reserve();
+    let gateway_addr = gateway_listener.addr().to_string();
+    assert_eq!(
+        TcpListener::bind(&gateway_addr).unwrap_err().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    let contender_ready = Arc::new(Barrier::new(2));
+    let contender_stop = Arc::new(AtomicBool::new(false));
+    let contender_acquired = Arc::new(AtomicBool::new(false));
+    let contender_attempts = Arc::new(AtomicUsize::new(0));
+    let contender_addr = gateway_addr.clone();
+    let contender = {
+        let ready = Arc::clone(&contender_ready);
+        let stop = Arc::clone(&contender_stop);
+        let acquired = Arc::clone(&contender_acquired);
+        let attempts = Arc::clone(&contender_attempts);
+        thread::spawn(move || {
+            ready.wait();
+            while !stop.load(Ordering::Acquire) {
+                attempts.fetch_add(1, Ordering::Release);
+                match TcpListener::bind(&contender_addr) {
+                    Ok(listener) => {
+                        acquired.store(true, Ordering::Release);
+                        while !stop.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        drop(listener);
+                        return;
+                    }
+                    Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse),
+                }
+                thread::yield_now();
+            }
+        })
+    };
+    contender_ready.wait();
+    while contender_attempts.load(Ordering::Acquire) == 0 {
+        thread::yield_now();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, format!("listen = \"{gateway_addr}\"\n")).unwrap();
+
+    let mut gateway = start_gateway(&config, gateway_listener);
+    contender_stop.store(true, Ordering::Release);
+    contender.join().unwrap();
+    assert!(
+        !contender_acquired.load(Ordering::Acquire),
+        "a competing bind acquired the listener during descriptor transfer"
+    );
+    assert_eq!(
+        TcpListener::bind(&gateway_addr).unwrap_err().kind(),
+        std::io::ErrorKind::AddrInUse,
+        "the listener must remain owned after the parent transfers and closes its descriptor"
+    );
+    wait_for_gateway(&mut gateway, &gateway_addr);
+    let response = gateway_health(&gateway_addr).unwrap();
+    assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"status\":\"ok\""), "{response}");
+    gateway.shutdown();
+}
+
+#[test]
+fn readiness_requires_successful_health_json() {
+    assert!(is_healthy_response(
+        "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}"
+    ));
+    assert!(!is_healthy_response(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}"
+    ));
+    assert!(!is_healthy_response(
+        "HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"status\":\"error\"}"
+    ));
+    assert!(!is_healthy_response(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    ));
+}
+
+#[test]
+fn https_probe_treats_broken_pipe_as_not_ready() {
+    let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(reader);
+    assert!(!write_https_probe_request(
+        &mut writer,
+        "/healthz",
+        "localhost"
+    ));
 }
 
 fn write_self_signed_test_certificate(cert: &std::path::Path, key: &std::path::Path) -> bool {
