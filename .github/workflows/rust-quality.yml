@@ -44,7 +44,7 @@ jobs:
         run: |
           ./scripts/test-verify-image-supply-chain.sh
           ./scripts/test-perf-gateway-report.sh
-          python3 -m unittest scripts/test_audit_exceptions.py scripts/test_workflow_action_pins.py
+          python3 -m unittest scripts/test_audit_exceptions.py scripts/test_pingora_vendor.py scripts/test_protobuf_advisory.py scripts/test_workflow_action_pins.py
 
       - name: Run config validation tests
         run: |

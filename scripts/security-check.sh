@@ -21,6 +21,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 echo "==> cargo metadata --locked"
 cargo metadata --locked --format-version=1 >/dev/null
 
+echo "==> vendored Pingora integrity"
+python3 scripts/check-pingora-vendor.py
+
+echo "==> protobuf advisory floor"
+python3 scripts/check-protobuf-advisory.py
+
 scan_file="$(mktemp)"
 trap 'rm -f "$scan_file"' EXIT
 

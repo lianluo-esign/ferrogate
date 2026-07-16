@@ -12,6 +12,7 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY tools ./tools
+COPY vendor ./vendor
 COPY Ferrogate ./Ferrogate
 COPY config ./config
 COPY sql ./sql

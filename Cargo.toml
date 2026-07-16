@@ -64,7 +64,10 @@ jsonschema = { version = "0.47", default-features = false }
 instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 jsonwebtoken = "9"
 matchit = "0.8"
-pingora = { version = "0.8", features = ["proxy", "rustls"] }
+# Pingora 0.8.1 still ships prometheus 0.13/protobuf 2.x. Keep the runtime on
+# the audited 0.8.0 source while the path patch below applies the upstream
+# prometheus 0.14 dependency fix without pulling unreleased Pingora code.
+pingora = { version = "=0.8.0", features = ["proxy", "rustls"] }
 redis = "0.25"
 native-tls = "0.2"
 postgres = "0.19"
@@ -88,3 +91,8 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 proptest = "1"
+
+[patch.crates-io]
+# Remove after Pingora publishes a release whose pingora-core depends on
+# prometheus 0.14+ (https://github.com/cloudflare/pingora/issues/875).
+pingora-core = { path = "vendor/pingora-core-0.8.0" }

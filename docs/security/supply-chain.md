@@ -162,6 +162,19 @@ registry access to fetch the image manifest.
   local and release quality gates for missing, stale, duplicate, expired, or
   longer-than-90-day exceptions. Extension requires a new dated review; an
   expired exception blocks release.
+- **Pingora protobuf patch:** crates.io `pingora-core` 0.8.0 and 0.8.1 depend on
+  `prometheus` 0.13, which ships the vulnerable `protobuf` 2.x parser tracked by
+  RUSTSEC-2024-0437. FerroGate pins Pingora 0.8.0 and vendors that exact
+  `pingora-core` source with only its `prometheus` constraint raised to 0.14.
+  `scripts/check-protobuf-advisory.py` rejects any locked `protobuf` version
+  below 3.7.2, including a prerelease at the fixed-version boundary.
+  `scripts/check-pingora-vendor.py` verifies the pinned crates.io archive,
+  byte-identical runtime source, exact non-runtime fixture removals, and the two
+  allowed manifest edits before the secret scan and dependency audit run.
+  The vendored source and patch provenance are recorded in
+  `vendor/pingora-core-0.8.0/FERROGATE-PATCH.md`. Remove the path patch and pin
+  after Pingora publishes a release with `prometheus` 0.14 or newer; do not
+  replace it with an unpinned Git dependency.
 
 ## Local verifier evidence for #208
 
@@ -191,6 +204,12 @@ registry access to fetch the image manifest.
 - `scripts/test_audit_exceptions.py` proves valid, expired/ownerless, missing,
   and stale advisory exception cases. The release quality gate runs both test
   contracts and `scripts/security-check.sh` enforces the live exception file.
+- `scripts/test_protobuf_advisory.py` proves absent and fixed protobuf versions
+  pass while affected, fixed-version prerelease, and malformed versions fail
+  closed. `scripts/security-check.sh` enforces the live locked dependency graph.
+- `scripts/test_pingora_vendor.py` proves the vendor integrity policy rejects a
+  reintroduced private-key fixture, runtime-source edits, and manifest changes
+  beyond the documented Prometheus constraint update.
 - `scripts/test_workflow_action_pins.py` proves commit-pinned and local actions
   pass while a movable version tag fails. The same checker scans every release
   workflow and composite action in the quality gate.
