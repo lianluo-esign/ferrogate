@@ -297,12 +297,43 @@ fn managed_worker_capability_policy_for_tenant(
     let mut policy = managed_worker_capability_policy(config);
     let mut effective_grants = Vec::with_capacity(config.target_grants.len());
     for (configured, runtime) in config.target_grants.iter().zip(policy.target_grants) {
-        if state.tenant_has_permission_result(tenant_id, &configured.permission_key)? {
+        // The RBAC permission read is async (issue #221's rbac slice), but
+        // this authorizer runs on a plain std::thread::spawn worker with no
+        // tokio runtime (see start_external_action_authorizer_if_configured)
+        // -- bridge with the same block_on pattern used for agent tool
+        // dispatch (agent_runs.rs::block_on_agent_tool_dispatch) rather than
+        // restructuring the Unix-socket authorizer server into async.
+        if block_on_sync_bridge(
+            state.tenant_has_permission_result(tenant_id, &configured.permission_key),
+        )? {
             effective_grants.push(runtime);
         }
     }
     policy.target_grants = effective_grants;
     Ok(policy)
+}
+
+fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
+where
+    T: Send,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("sync-bridge runtime should build")
+                    .block_on(future)
+            })
+            .join()
+            .expect("sync-bridge runtime thread should not panic")
+    })
 }
 
 #[derive(Debug)]

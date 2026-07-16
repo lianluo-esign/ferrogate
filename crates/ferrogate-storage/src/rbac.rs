@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     deserialize_storage_document, serialize_storage_document, PostgresControlPlaneStore,
     PostgresRow, Repository, RuntimeControlPlaneBackend, RuntimeControlPlaneState,
-    RuntimeStorageRepositories, StorageError,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// A dynamically-definable, finest-grained capability unit (issue #182).
@@ -116,12 +116,21 @@ fn tenant_role_binding_from_row(row: &PostgresRow) -> StoredTenantRoleBinding {
 }
 
 impl PostgresControlPlaneStore {
-    pub(super) fn upsert_permission(
+    fn rbac_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    pub(super) async fn upsert_permission(
         &self,
         permission: &StoredPermission,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.rbac_operation("upsert permission");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO permissions (id, key, name, description, created_at_unix, updated_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6) \
                  ON CONFLICT (id) DO UPDATE SET \
@@ -135,47 +144,71 @@ impl PostgresControlPlaneStore {
                     &permission.created_at_unix,
                     &permission.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn get_permission(
+    pub(super) async fn get_permission(
         &self,
         id: &str,
     ) -> Result<Option<StoredPermission>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.rbac_operation("get permission");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, key, name, description, created_at_unix, updated_at_unix \
                  FROM permissions WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         Ok(row.as_ref().map(permission_from_row))
     }
 
-    pub(super) fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    pub(super) async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+        let operation = self.rbac_operation("list permissions");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, key, name, description, created_at_unix, updated_at_unix \
                  FROM permissions ORDER BY key ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         Ok(rows.iter().map(permission_from_row).collect())
     }
 
-    pub(super) fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute("DELETE FROM permissions WHERE id = $1", &[&id])
-        })?;
+    pub(super) async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.rbac_operation("delete permission");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute("DELETE FROM permissions WHERE id = $1", &[&id])
+            .await
+            .map_err(super::postgres_error)?;
         Ok(affected > 0)
     }
 
-    pub(super) fn upsert_role(&self, role: &StoredRole) -> Result<(), StorageError> {
+    pub(super) async fn upsert_role(&self, role: &StoredRole) -> Result<(), StorageError> {
         let permission_keys_json = serialize_storage_document(&role.permission_keys)?;
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.rbac_operation("upsert role");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO roles \
                  (id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) \
                  VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7) \
@@ -192,47 +225,72 @@ impl PostgresControlPlaneStore {
                     &role.created_at_unix,
                     &role.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    pub(super) async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+        let operation = self.rbac_operation("get role");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, name, slug, description, permission_keys_json::text, \
                  created_at_unix, updated_at_unix \
                  FROM roles WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         row.as_ref().map(role_from_row).transpose()
     }
 
-    pub(super) fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    pub(super) async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+        let operation = self.rbac_operation("list roles");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, name, slug, description, permission_keys_json::text, \
                  created_at_unix, updated_at_unix \
                  FROM roles ORDER BY slug ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         rows.iter().map(role_from_row).collect()
     }
 
-    pub(super) fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
-        let affected =
-            self.with_client(|client| client.execute("DELETE FROM roles WHERE id = $1", &[&id]))?;
+    pub(super) async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.rbac_operation("delete role");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute("DELETE FROM roles WHERE id = $1", &[&id])
+            .await
+            .map_err(super::postgres_error)?;
         Ok(affected > 0)
     }
 
-    pub(super) fn bind_tenant_role(
+    pub(super) async fn bind_tenant_role(
         &self,
         binding: &StoredTenantRoleBinding,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.rbac_operation("bind tenant role");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (id) DO NOTHING",
@@ -242,36 +300,49 @@ impl PostgresControlPlaneStore {
                     &binding.role_id,
                     &binding.created_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn list_tenant_role_bindings(
+    pub(super) async fn list_tenant_role_bindings(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.rbac_operation("list tenant role bindings");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, tenant_id, role_id, created_at_unix \
                  FROM tenant_role_bindings WHERE tenant_id = $1 ORDER BY role_id ASC",
                 &[&tenant_id],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         Ok(rows.iter().map(tenant_role_binding_from_row).collect())
     }
 
-    pub(super) fn unbind_tenant_role(
+    pub(super) async fn unbind_tenant_role(
         &self,
         tenant_id: &str,
         role_id: &str,
     ) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute(
+        let operation = self.rbac_operation("unbind tenant role");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute(
                 "DELETE FROM tenant_role_bindings WHERE id = $1",
                 &[&tenant_role_binding_id(tenant_id, role_id)],
             )
-        })?;
+            .await
+            .map_err(super::postgres_error)?;
         Ok(affected > 0)
     }
 }
@@ -332,7 +403,10 @@ impl RuntimeControlPlaneState {
 impl RuntimeStorageRepositories {
     /// Creates or replaces a permission (issue #182). Permissions are
     /// shared/global, like plans -- same trust model as `Self::upsert_plan`.
-    pub fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError> {
+    pub async fn upsert_permission(
+        &self,
+        permission: StoredPermission,
+    ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -341,46 +415,50 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_permission(&permission)
+                control_plane.upsert_permission(&permission).await
             }
         }
     }
 
-    pub fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+    pub async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_permission(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_permission(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_permission(id).await
+            }
         }
     }
 
-    pub fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+    pub async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_permissions())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_permissions(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_permissions().await
+            }
         }
     }
 
-    pub fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+    pub async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_permission(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_permission(id)
+                control_plane.delete_permission(id).await
             }
         }
     }
 
     /// Creates or replaces a role (issue #182): a named, horizontally
     /// extensible bundle of permission keys. Shared/global, like plans.
-    pub fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
+    pub async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -388,37 +466,41 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_role(&role),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_role(&role).await
+            }
         }
     }
 
-    pub fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+    pub async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_role(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_role(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_role(id).await,
         }
     }
 
-    pub fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+    pub async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_roles())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_roles(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_roles().await,
         }
     }
 
-    pub fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+    pub async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_role(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_role(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_role(id).await
+            }
         }
     }
 
@@ -426,7 +508,10 @@ impl RuntimeStorageRepositories {
     /// permission set becomes the union of every bound role's
     /// `permission_keys`. Idempotent: binding the same role twice is a
     /// no-op (deterministic id, `ON CONFLICT DO NOTHING` on Postgres).
-    pub fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError> {
+    pub async fn bind_tenant_role(
+        &self,
+        binding: StoredTenantRoleBinding,
+    ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -435,12 +520,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.bind_tenant_role(&binding)
+                control_plane.bind_tenant_role(&binding).await
             }
         }
     }
 
-    pub fn list_tenant_role_bindings(
+    pub async fn list_tenant_role_bindings(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
@@ -450,19 +535,23 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_tenant_role_bindings(tenant_id))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_tenant_role_bindings(tenant_id)
+                control_plane.list_tenant_role_bindings(tenant_id).await
             }
         }
     }
 
-    pub fn unbind_tenant_role(&self, tenant_id: &str, role_id: &str) -> Result<bool, StorageError> {
+    pub async fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.unbind_tenant_role(tenant_id, role_id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.unbind_tenant_role(tenant_id, role_id)
+                control_plane.unbind_tenant_role(tenant_id, role_id).await
             }
         }
     }

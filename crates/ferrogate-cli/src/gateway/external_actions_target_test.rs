@@ -77,41 +77,38 @@ fn unix_authorizer_max_requests_counts_completed_sequential_requests_cumulativel
 fn tenant_rbac_role_binding_controls_target_grant_without_fixed_role_names() {
     let shared = shared_state_with_mcp_grant("policy-1");
     let state = shared.current();
-    state
-        .upsert_permission(StoredPermission {
-            id: "permission-any-name".into(),
-            key: PERMISSION_KEY.into(),
-            name: "CRM lookup action".into(),
-            description: String::new(),
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .upsert_role(StoredRole {
-            id: "role-42".into(),
-            name: "Customer-defined operator role".into(),
-            slug: "not-a-hard-coded-role".into(),
-            description: String::new(),
-            permission_keys: vec![PERMISSION_KEY.into()],
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .bind_tenant_role(StoredTenantRoleBinding {
-            id: tenant_role_binding_id("tenant-1", "role-42"),
-            tenant_id: "tenant-1".into(),
-            role_id: "role-42".into(),
-            created_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_permission(StoredPermission {
+        id: "permission-any-name".into(),
+        key: PERMISSION_KEY.into(),
+        name: "CRM lookup action".into(),
+        description: String::new(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.upsert_role(StoredRole {
+        id: "role-42".into(),
+        name: "Customer-defined operator role".into(),
+        slug: "not-a-hard-coded-role".into(),
+        description: String::new(),
+        permission_keys: vec![PERMISSION_KEY.into()],
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.bind_tenant_role(StoredTenantRoleBinding {
+        id: tenant_role_binding_id("tenant-1", "role-42"),
+        tenant_id: "tenant-1".into(),
+        role_id: "role-42".into(),
+        created_at_unix: 1,
+    }))
+    .unwrap();
 
     let service = GatewayExternalActionAuthorizerService::new(shared.clone());
     let allowed = service.authorize_transport_request(mcp_request("42"));
     assert!(allowed.response.accepted, "{allowed:?}");
 
-    state.unbind_tenant_role("tenant-1", "role-42").unwrap();
+    block_on(state.unbind_tenant_role("tenant-1", "role-42")).unwrap();
     let denied = service.authorize_transport_request(mcp_request("42"));
     assert!(!denied.response.accepted, "{denied:?}");
     assert_eq!(
@@ -361,36 +358,41 @@ fn shared_state_with_mcp_grant(revision: &str) -> SharedAppState {
     SharedAppState::with_source_path(config, None)
 }
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn grant_permission(state: &crate::state::AppState) {
-    state
-        .upsert_permission(StoredPermission {
-            id: "permission-1".into(),
-            key: PERMISSION_KEY.into(),
-            name: "CRM lookup action".into(),
-            description: String::new(),
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .upsert_role(StoredRole {
-            id: "arbitrary-role-id".into(),
-            name: "Arbitrary role".into(),
-            slug: "arbitrary-role".into(),
-            description: String::new(),
-            permission_keys: vec![PERMISSION_KEY.into()],
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
-    state
-        .bind_tenant_role(StoredTenantRoleBinding {
-            id: tenant_role_binding_id("tenant-1", "arbitrary-role-id"),
-            tenant_id: "tenant-1".into(),
-            role_id: "arbitrary-role-id".into(),
-            created_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_permission(StoredPermission {
+        id: "permission-1".into(),
+        key: PERMISSION_KEY.into(),
+        name: "CRM lookup action".into(),
+        description: String::new(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.upsert_role(StoredRole {
+        id: "arbitrary-role-id".into(),
+        name: "Arbitrary role".into(),
+        slug: "arbitrary-role".into(),
+        description: String::new(),
+        permission_keys: vec![PERMISSION_KEY.into()],
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+    block_on(state.bind_tenant_role(StoredTenantRoleBinding {
+        id: tenant_role_binding_id("tenant-1", "arbitrary-role-id"),
+        tenant_id: "tenant-1".into(),
+        role_id: "arbitrary-role-id".into(),
+        created_at_unix: 1,
+    }))
+    .unwrap();
 }
 
 fn mcp_request(id: &str) -> GatewayExternalActionTransportRequest {

@@ -194,7 +194,10 @@ async fn require_guardrail_evidence_auth(
         }
     };
     if let Some(tenant_id) = auth.organization_id.as_deref() {
-        match state.tenant_has_permission_result(tenant_id, "guardrails.evidence.read") {
+        match state
+            .tenant_has_permission_result(tenant_id, "guardrails.evidence.read")
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 write_json_error(
@@ -5424,8 +5427,9 @@ impl FerroGateway {
                     .ok()
                     .flatten()
                     .is_some_and(|plan| plan.self_hosted_workers_enabled);
-                let role_grants_access =
-                    state.tenant_has_permission(&self_hosted_tenant_id, "workers.self_hosted");
+                let role_grants_access = state
+                    .tenant_has_permission(&self_hosted_tenant_id, "workers.self_hosted")
+                    .await;
                 if tenant_account_exists && !plan_grants_access && !role_grants_access {
                     state.record_admin_audit_event(admin_audit_event_draft_for_target(
                         ctx,

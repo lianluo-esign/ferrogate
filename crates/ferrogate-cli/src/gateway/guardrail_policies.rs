@@ -827,7 +827,10 @@ async fn require_guardrail_auth(
         }
     };
     if let Some(tenant_id) = auth.organization_id.as_deref() {
-        match state.tenant_has_permission_result(tenant_id, permission.key()) {
+        match state
+            .tenant_has_permission_result(tenant_id, permission.key())
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 write_json_error(

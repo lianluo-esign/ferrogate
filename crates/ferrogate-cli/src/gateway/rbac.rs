@@ -42,7 +42,7 @@ impl FerroGateway {
         if path == "/admin/v1/permissions" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_permissions() {
+                    Ok(_) => match state.list_permissions().await {
                         Ok(permissions) => {
                             let body =
                                 AdminList::new(permissions.iter().map(admin_permission).collect());
@@ -111,7 +111,7 @@ impl FerroGateway {
 
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_permission(id) {
+                Ok(_) => match state.get_permission(id).await {
                     Ok(Some(permission)) => {
                         let body = AdminPermissionMutationResponse {
                             object: "permission",
@@ -175,7 +175,7 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                match state.delete_permission(id) {
+                match state.delete_permission(id).await {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -287,7 +287,7 @@ impl FerroGateway {
             .id
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| next_rbac_id("permission"));
-        let existing = state.get_permission(&id).ok().flatten();
+        let existing = state.get_permission(&id).await.ok().flatten();
         let created_at_unix = existing
             .as_ref()
             .map_or(now, |existing| existing.created_at_unix);
@@ -299,7 +299,7 @@ impl FerroGateway {
             created_at_unix,
             updated_at_unix: now,
         };
-        match state.upsert_permission(permission.clone()) {
+        match state.upsert_permission(permission.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -341,7 +341,7 @@ impl FerroGateway {
         if path == "/admin/v1/roles" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_roles() {
+                    Ok(_) => match state.list_roles().await {
                         Ok(roles) => {
                             let body = AdminList::new(roles.iter().map(admin_role).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
@@ -406,7 +406,7 @@ impl FerroGateway {
 
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_role(id) {
+                Ok(_) => match state.get_role(id).await {
                     Ok(Some(role)) => {
                         let body = AdminRoleMutationResponse {
                             object: "role",
@@ -470,7 +470,7 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                match state.delete_role(id) {
+                match state.delete_role(id).await {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -581,7 +581,7 @@ impl FerroGateway {
             .id
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| next_rbac_id("role"));
-        let existing = state.get_role(&id).ok().flatten();
+        let existing = state.get_role(&id).await.ok().flatten();
         let created_at_unix = existing
             .as_ref()
             .map_or(now, |existing| existing.created_at_unix);
@@ -594,7 +594,7 @@ impl FerroGateway {
             created_at_unix,
             updated_at_unix: now,
         };
-        match state.upsert_role(role.clone()) {
+        match state.upsert_role(role.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -669,7 +669,7 @@ impl FerroGateway {
                             )
                             .await;
                         }
-                        match state.list_tenant_role_bindings(tenant_id) {
+                        match state.list_tenant_role_bindings(tenant_id).await {
                             Ok(bindings) => {
                                 let body = AdminList::new(
                                     bindings.iter().map(admin_tenant_role_binding).collect(),
@@ -742,7 +742,13 @@ impl FerroGateway {
                         Ok(payload) => payload,
                         Err(()) => return Ok(()),
                     };
-                if state.get_role(&payload.role_id).ok().flatten().is_none() {
+                if state
+                    .get_role(&payload.role_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
                     return write_json_error(
                         session,
                         StatusCode::BAD_REQUEST,
@@ -758,7 +764,7 @@ impl FerroGateway {
                     role_id: payload.role_id.clone(),
                     created_at_unix: now_unix_seconds(),
                 };
-                match state.bind_tenant_role(binding.clone()) {
+                match state.bind_tenant_role(binding.clone()).await {
                     Ok(()) => {
                         let target = format!("{tenant_id}/{}", payload.role_id);
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -818,7 +824,7 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                match state.unbind_tenant_role(tenant_id, role_id) {
+                match state.unbind_tenant_role(tenant_id, role_id).await {
                     Ok(true) => {
                         let target = format!("{tenant_id}/{role_id}");
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
