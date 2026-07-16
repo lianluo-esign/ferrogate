@@ -15,7 +15,7 @@
 
 use super::{
     postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// A tenant's prepaid-credit balance (issue #169). Balances are integer
@@ -129,77 +129,93 @@ fn wallet_settlement_from_row(row: &PostgresRow) -> StoredWalletSettlement {
 }
 
 impl PostgresControlPlaneStore {
-    pub(super) fn settle_wallet_balance(
+    fn wallet_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    pub(super) async fn settle_wallet_balance(
         &self,
         settlement_id: &str,
         tenant_id: &str,
         delta_credits: i64,
         now_unix: i64,
     ) -> Result<WalletSettlementOutcome, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
-            let inserted = transaction
-                .execute(
-                    "INSERT INTO wallet_settlements \
-                     (id, tenant_id, delta_credits, balance_after_credits, created_at_unix) \
-                     VALUES ($1, $2, $3, NULL, $4) ON CONFLICT (id) DO NOTHING",
-                    &[&settlement_id, &tenant_id, &delta_credits, &now_unix],
-                )
-                .map_err(postgres_error)?;
+        let operation = self.wallet_operation("settle wallet balance");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO wallet_settlements \
+                 (id, tenant_id, delta_credits, balance_after_credits, created_at_unix) \
+                 VALUES ($1, $2, $3, NULL, $4) ON CONFLICT (id) DO NOTHING",
+                &[&settlement_id, &tenant_id, &delta_credits, &now_unix],
+            )
+            .await
+            .map_err(postgres_error)?;
 
-            if inserted == 0 {
-                let row = transaction
-                    .query_one(
-                        "SELECT id, tenant_id, delta_credits, balance_after_credits, \
-                         created_at_unix FROM wallet_settlements WHERE id = $1",
-                        &[&settlement_id],
-                    )
-                    .map_err(postgres_error)?;
-                let settlement = wallet_settlement_from_row(&row);
-                if settlement.tenant_id != tenant_id || settlement.delta_credits != delta_credits {
-                    return Err(StorageError::Conflict(format!(
-                        "wallet settlement {settlement_id} replay changed tenant or amount"
-                    )));
-                }
-                transaction.commit().map_err(postgres_error)?;
-                return Ok(WalletSettlementOutcome {
-                    settlement,
-                    newly_applied: false,
-                });
+        if inserted == 0 {
+            let row = transaction
+                .query_one(
+                    "SELECT id, tenant_id, delta_credits, balance_after_credits, \
+                     created_at_unix FROM wallet_settlements WHERE id = $1",
+                    &[&settlement_id],
+                )
+                .await
+                .map_err(postgres_error)?;
+            let settlement = wallet_settlement_from_row(&row);
+            if settlement.tenant_id != tenant_id || settlement.delta_credits != delta_credits {
+                return Err(StorageError::Conflict(format!(
+                    "wallet settlement {settlement_id} replay changed tenant or amount"
+                )));
             }
-
-            let balance_after_credits = transaction
-                .query_opt(
-                    "UPDATE wallets SET balance_credits = balance_credits + $1, \
-                     updated_at_unix = $2 WHERE tenant_id = $3 RETURNING balance_credits",
-                    &[&delta_credits, &now_unix, &tenant_id],
-                )
-                .map_err(postgres_error)?
-                .map(|row| row.get(0));
-            transaction
-                .execute(
-                    "UPDATE wallet_settlements SET balance_after_credits = $2 WHERE id = $1",
-                    &[&settlement_id, &balance_after_credits],
-                )
-                .map_err(postgres_error)?;
-            let settlement = StoredWalletSettlement {
-                id: settlement_id.to_string(),
-                tenant_id: tenant_id.to_string(),
-                delta_credits,
-                balance_after_credits,
-                created_at_unix: now_unix,
-            };
-            transaction.commit().map_err(postgres_error)?;
-            Ok(WalletSettlementOutcome {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(WalletSettlementOutcome {
                 settlement,
-                newly_applied: true,
-            })
+                newly_applied: false,
+            });
+        }
+
+        let balance_after_credits = transaction
+            .query_opt(
+                "UPDATE wallets SET balance_credits = balance_credits + $1, \
+                 updated_at_unix = $2 WHERE tenant_id = $3 RETURNING balance_credits",
+                &[&delta_credits, &now_unix, &tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .map(|row| row.get(0));
+        transaction
+            .execute(
+                "UPDATE wallet_settlements SET balance_after_credits = $2 WHERE id = $1",
+                &[&settlement_id, &balance_after_credits],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let settlement = StoredWalletSettlement {
+            id: settlement_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            delta_credits,
+            balance_after_credits,
+            created_at_unix: now_unix,
+        };
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(WalletSettlementOutcome {
+            settlement,
+            newly_applied: true,
         })
     }
 
-    pub(super) fn upsert_wallet(&self, wallet: &StoredWallet) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+    pub(super) async fn upsert_wallet(&self, wallet: &StoredWallet) -> Result<(), StorageError> {
+        let operation = self.wallet_operation("upsert wallet");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO wallets \
                  (id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                   auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix) \
@@ -220,32 +236,48 @@ impl PostgresControlPlaneStore {
                     &wallet.created_at_unix,
                     &wallet.updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    pub(super) async fn get_wallet(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        let operation = self.wallet_operation("get wallet");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                  auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix \
                  FROM wallets WHERE tenant_id = $1",
                 &[&tenant_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(wallet_from_row))
     }
 
-    pub(super) fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    pub(super) async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        let operation = self.wallet_operation("list wallets");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                  auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix \
                  FROM wallets ORDER BY tenant_id ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(rows.iter().map(wallet_from_row).collect())
     }
 
@@ -256,45 +288,62 @@ impl PostgresControlPlaneStore {
     /// concurrent settlements against the same tenant can't race each
     /// other's balance update. Returns `Ok(None)` when the tenant has no
     /// wallet row (not an error: wallets are opt-in).
-    pub(super) fn adjust_wallet_balance(
+    pub(super) async fn adjust_wallet_balance(
         &self,
         tenant_id: &str,
         delta_credits: i64,
         now_unix: i64,
     ) -> Result<Option<StoredWallet>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.wallet_operation("adjust wallet balance");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "UPDATE wallets SET balance_credits = balance_credits + $1, \
                  updated_at_unix = $2 WHERE tenant_id = $3 \
                  RETURNING id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                  auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix",
                 &[&delta_credits, &now_unix, &tenant_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(wallet_from_row))
     }
 
-    pub(super) fn set_wallet_dunning(
+    pub(super) async fn set_wallet_dunning(
         &self,
         tenant_id: &str,
         dunning: bool,
         now_unix: i64,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.wallet_operation("set wallet dunning");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "UPDATE wallets SET dunning = $1, updated_at_unix = $2 WHERE tenant_id = $3",
                 &[&dunning, &now_unix, &tenant_id],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn upsert_payment_method(
+    pub(super) async fn upsert_payment_method(
         &self,
         payment_method: &StoredPaymentMethod,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.wallet_operation("upsert payment method");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO payment_methods \
                  (id, tenant_id, provider, provider_customer_id, provider_payment_method_id, \
                   is_default, created_at_unix) \
@@ -309,23 +358,30 @@ impl PostgresControlPlaneStore {
                     &payment_method.is_default,
                     &payment_method.created_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn list_payment_methods(
+    pub(super) async fn list_payment_methods(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.wallet_operation("list payment methods");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, tenant_id, provider, provider_customer_id, \
                  provider_payment_method_id, is_default, created_at_unix \
                  FROM payment_methods WHERE tenant_id = $1 ORDER BY created_at_unix ASC",
                 &[&tenant_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(rows.iter().map(payment_method_from_row).collect())
     }
 
@@ -333,25 +389,37 @@ impl PostgresControlPlaneStore {
     /// payment-method id (e.g. a DELETE request) need this to discover
     /// which tenant owns it *before* authorizing the request, since
     /// `list_payment_methods` requires already knowing the tenant.
-    pub(super) fn get_payment_method(
+    pub(super) async fn get_payment_method(
         &self,
         id: &str,
     ) -> Result<Option<StoredPaymentMethod>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.wallet_operation("get payment method");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, tenant_id, provider, provider_customer_id, \
                  provider_payment_method_id, is_default, created_at_unix \
                  FROM payment_methods WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(payment_method_from_row))
     }
 
-    pub(super) fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute("DELETE FROM payment_methods WHERE id = $1", &[&id])
-        })?;
+    pub(super) async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.wallet_operation("delete payment method");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute("DELETE FROM payment_methods WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
         Ok(affected > 0)
     }
 }
@@ -452,7 +520,7 @@ impl RuntimeControlPlaneState {
 impl RuntimeStorageRepositories {
     /// Applies `delta_credits` at most once for `settlement_id`, returning the
     /// first transaction's durable outcome on every replay.
-    pub fn settle_wallet_balance(
+    pub async fn settle_wallet_balance(
         &self,
         settlement_id: &str,
         tenant_id: &str,
@@ -464,8 +532,11 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
                 .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
+                    .await
+            }
         }
     }
 
@@ -473,7 +544,7 @@ impl RuntimeStorageRepositories {
     /// [`Self::adjust_wallet_balance`] for balance changes instead of
     /// read-modify-write through this method -- it's the atomic,
     /// race-safe path.
-    pub fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
+    pub async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -482,30 +553,32 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_wallet(&wallet)
+                control_plane.upsert_wallet(&wallet).await
             }
         }
     }
 
-    pub fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+    pub async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_wallet(tenant_id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_wallet(tenant_id)
+                control_plane.get_wallet(tenant_id).await
             }
         }
     }
 
-    pub fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+    pub async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_wallets())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_wallets(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_wallets().await
+            }
         }
     }
 
@@ -513,7 +586,7 @@ impl RuntimeStorageRepositories {
     /// to debit a settled request, positive to credit a top-up).
     /// `Ok(None)` means the tenant has no wallet row -- not an error,
     /// wallets are opt-in (issue #169).
-    pub fn adjust_wallet_balance(
+    pub async fn adjust_wallet_balance(
         &self,
         tenant_id: &str,
         delta_credits: i64,
@@ -527,12 +600,14 @@ impl RuntimeStorageRepositories {
                 })
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+                control_plane
+                    .adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+                    .await
             }
         }
     }
 
-    pub fn set_wallet_dunning(
+    pub async fn set_wallet_dunning(
         &self,
         tenant_id: &str,
         dunning: bool,
@@ -546,12 +621,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.set_wallet_dunning(tenant_id, dunning, now_unix)
+                control_plane
+                    .set_wallet_dunning(tenant_id, dunning, now_unix)
+                    .await
             }
         }
     }
 
-    pub fn upsert_payment_method(
+    pub async fn upsert_payment_method(
         &self,
         payment_method: StoredPaymentMethod,
     ) -> Result<(), StorageError> {
@@ -563,12 +640,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_payment_method(&payment_method)
+                control_plane.upsert_payment_method(&payment_method).await
             }
         }
     }
 
-    pub fn list_payment_methods(
+    pub async fn list_payment_methods(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
@@ -578,12 +655,12 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_payment_methods(tenant_id))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_payment_methods(tenant_id)
+                control_plane.list_payment_methods(tenant_id).await
             }
         }
     }
 
-    pub fn get_payment_method(
+    pub async fn get_payment_method(
         &self,
         id: &str,
     ) -> Result<Option<StoredPaymentMethod>, StorageError> {
@@ -593,19 +670,19 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_payment_method(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_payment_method(id)
+                control_plane.get_payment_method(id).await
             }
         }
     }
 
-    pub fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
+    pub async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_payment_method(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_payment_method(id)
+                control_plane.delete_payment_method(id).await
             }
         }
     }

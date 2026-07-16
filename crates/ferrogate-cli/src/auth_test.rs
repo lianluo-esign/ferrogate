@@ -8,6 +8,14 @@ use super::*;
 use crate::config::Config;
 use ferrogate_storage::{StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace};
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn decoy_yaml_key() -> ApiKey {
     ApiKey {
         region_allowlist: Vec::new(),
@@ -500,24 +508,23 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
             api_key_id: Some("vk-quota-budget".into()),
         },
     };
-    state
-        .record_billing_event(
-            crate::state::BillingEventDraft {
-                request: &request,
-                logical_model: "fast-chat",
-                provider: "openai",
-                provider_model: "gpt-4o-mini",
-                status_code: 200,
-                latency_ms: Some(10),
-                metadata: None,
-            },
-            &ProviderUsage {
-                prompt_tokens: Some(1000),
-                completion_tokens: Some(1000),
-                total_tokens: Some(2000),
-            },
-        )
-        .unwrap();
+    block_on(state.record_billing_event(
+        crate::state::BillingEventDraft {
+            request: &request,
+            logical_model: "fast-chat",
+            provider: "openai",
+            provider_model: "gpt-4o-mini",
+            status_code: 200,
+            latency_ms: Some(10),
+            metadata: None,
+        },
+        &ProviderUsage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(1000),
+            total_tokens: Some(2000),
+        },
+    ))
+    .unwrap();
 
     let error =
         authenticate(&state, &bearer_headers(secret), "chat.completions", "req-2").unwrap_err();

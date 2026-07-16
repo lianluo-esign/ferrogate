@@ -18,19 +18,19 @@ pub(crate) struct WalletDebitOutcome {
 }
 
 impl AppState {
-    pub(crate) fn list_wallets(&self) -> anyhow::Result<Vec<StoredWallet>> {
-        Ok(self.repositories.list_wallets()?)
+    pub(crate) async fn list_wallets(&self) -> anyhow::Result<Vec<StoredWallet>> {
+        Ok(self.repositories.list_wallets().await?)
     }
 
-    pub(crate) fn get_wallet(&self, tenant_id: &str) -> anyhow::Result<Option<StoredWallet>> {
-        Ok(self.repositories.get_wallet(tenant_id)?)
+    pub(crate) async fn get_wallet(&self, tenant_id: &str) -> anyhow::Result<Option<StoredWallet>> {
+        Ok(self.repositories.get_wallet(tenant_id).await?)
     }
 
-    pub(crate) fn upsert_wallet(&self, wallet: StoredWallet) -> anyhow::Result<()> {
-        Ok(self.repositories.upsert_wallet(wallet)?)
+    pub(crate) async fn upsert_wallet(&self, wallet: StoredWallet) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_wallet(wallet).await?)
     }
 
-    pub(crate) fn adjust_wallet_balance(
+    pub(crate) async fn adjust_wallet_balance(
         &self,
         tenant_id: &str,
         delta_credits: i64,
@@ -38,39 +38,48 @@ impl AppState {
         let now = now_unix_seconds().unwrap_or_default() as i64;
         Ok(self
             .repositories
-            .adjust_wallet_balance(tenant_id, delta_credits, now)?)
+            .adjust_wallet_balance(tenant_id, delta_credits, now)
+            .await?)
     }
 
-    pub(crate) fn set_wallet_dunning(&self, tenant_id: &str, dunning: bool) -> anyhow::Result<()> {
+    pub(crate) async fn set_wallet_dunning(
+        &self,
+        tenant_id: &str,
+        dunning: bool,
+    ) -> anyhow::Result<()> {
         let now = now_unix_seconds().unwrap_or_default() as i64;
         Ok(self
             .repositories
-            .set_wallet_dunning(tenant_id, dunning, now)?)
+            .set_wallet_dunning(tenant_id, dunning, now)
+            .await?)
     }
 
-    pub(crate) fn list_payment_methods(
+    pub(crate) async fn list_payment_methods(
         &self,
         tenant_id: &str,
     ) -> anyhow::Result<Vec<StoredPaymentMethod>> {
-        Ok(self.repositories.list_payment_methods(tenant_id)?)
+        Ok(self.repositories.list_payment_methods(tenant_id).await?)
     }
 
-    pub(crate) fn get_payment_method(
+    pub(crate) async fn get_payment_method(
         &self,
         id: &str,
     ) -> anyhow::Result<Option<StoredPaymentMethod>> {
-        Ok(self.repositories.get_payment_method(id)?)
+        Ok(self.repositories.get_payment_method(id).await?)
     }
 
-    pub(crate) fn upsert_payment_method(
+    pub(crate) async fn upsert_payment_method(
         &self,
         payment_method: StoredPaymentMethod,
     ) -> anyhow::Result<()> {
-        Ok(self.repositories.upsert_payment_method(payment_method)?)
+        Ok(self
+            .repositories
+            .upsert_payment_method(payment_method)
+            .await?)
     }
 
-    pub(crate) fn delete_payment_method(&self, id: &str) -> anyhow::Result<bool> {
-        Ok(self.repositories.delete_payment_method(id)?)
+    pub(crate) async fn delete_payment_method(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_payment_method(id).await?)
     }
     /// The current UTC calendar month in `YYYY-MM` form, for monthly-budget
     /// checks and default report windows.
@@ -126,6 +135,13 @@ impl AppState {
     /// tenant attribution and when the tenant has no wallet row at all,
     /// so this is purely additive for every tenant that hasn't adopted
     /// prepaid billing.
+    /// Stays sync (unlike the rest of this file's storage-backed methods)
+    /// because its only caller, `auth::finalize_auth`, is itself sync and
+    /// shared by ~150 call sites plus a batch of sync `#[test]` fns --
+    /// converting the whole `authenticate` chain to async is out of scope
+    /// for issue #221's storage migration. Bridges via the same
+    /// `block_on_sync_bridge` helper already used for the RBAC permission
+    /// check in `gateway/mod.rs` rather than duplicating that pattern.
     pub(crate) fn wallet_balance_exhausted(
         &self,
         tenant: &ferrogate_core::TenantContext,
@@ -133,7 +149,9 @@ impl AppState {
         let Some(tenant_id) = tenant.organization_id.as_deref() else {
             return Ok(false);
         };
-        let Some(wallet) = self.repositories.get_wallet(tenant_id)? else {
+        let Some(wallet) =
+            crate::gateway::block_on_sync_bridge(self.repositories.get_wallet(tenant_id))?
+        else {
             return Ok(false);
         };
         Ok(wallet.balance_credits <= 0)
@@ -157,7 +175,7 @@ impl AppState {
     /// `None` covers every "nothing happened" case (no cost, no tenant
     /// attribution, no wallet row, or a storage error), matching the
     /// pre-existing best-effort/no-op-by-default semantics exactly.
-    pub(crate) fn debit_wallet_for_settled_cost(
+    pub(crate) async fn debit_wallet_for_settled_cost(
         &self,
         tenant: &ferrogate_core::TenantContext,
         cost_usd: f64,
@@ -176,6 +194,7 @@ impl AppState {
         match self
             .repositories
             .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now)
+            .await
         {
             Ok(outcome) => {
                 let balance_after_credits = outcome.settlement.balance_after_credits?;
@@ -189,7 +208,7 @@ impl AppState {
                             -delta_credits, balance_after_credits
                         ),
                     );
-                    match self.repositories.get_wallet(tenant_id) {
+                    match self.repositories.get_wallet(tenant_id).await {
                         Ok(Some(wallet)) => self.maybe_trigger_auto_recharge(wallet),
                         Ok(None) => {}
                         Err(error) => warn!(
@@ -328,11 +347,12 @@ impl AppState {
                 "auto-recharge threshold crossed but FERROGATE_STRIPE_SECRET_KEY is not set; \
                  marking wallet dunning rather than silently skipping"
             );
-            let _ = self.set_wallet_dunning(tenant_id, true);
+            let _ = self.set_wallet_dunning(tenant_id, true).await;
             return;
         };
         let Some(payment_method) = self
             .list_payment_methods(tenant_id)
+            .await
             .ok()
             .and_then(|methods| methods.into_iter().find(|method| method.is_default))
         else {
@@ -340,7 +360,7 @@ impl AppState {
                 tenant_id = %tenant_id,
                 "auto-recharge threshold crossed but the tenant has no default payment method"
             );
-            let _ = self.set_wallet_dunning(tenant_id, true);
+            let _ = self.set_wallet_dunning(tenant_id, true).await;
             return;
         };
         let amount_usd_cents = ((amount_credits as f64)
@@ -361,8 +381,8 @@ impl AppState {
             .await;
         match outcome {
             Ok(outcome) if outcome.succeeded => {
-                let _ = self.set_wallet_dunning(tenant_id, false);
-                if let Err(error) = self.adjust_wallet_balance(tenant_id, amount_credits) {
+                let _ = self.set_wallet_dunning(tenant_id, false).await;
+                if let Err(error) = self.adjust_wallet_balance(tenant_id, amount_credits).await {
                     warn!(
                         tenant_id = %tenant_id,
                         error = %error,
@@ -386,7 +406,7 @@ impl AppState {
                     decline_reason = ?outcome.decline_reason,
                     "auto-recharge charge was declined"
                 );
-                let _ = self.set_wallet_dunning(tenant_id, true);
+                let _ = self.set_wallet_dunning(tenant_id, true).await;
                 self.record_wallet_ledger_event(
                     tenant_id,
                     "wallet.auto_recharge",
@@ -406,7 +426,7 @@ impl AppState {
                     error = %error,
                     "auto-recharge charge request failed"
                 );
-                let _ = self.set_wallet_dunning(tenant_id, true);
+                let _ = self.set_wallet_dunning(tenant_id, true).await;
                 self.record_wallet_ledger_event(
                     tenant_id,
                     "wallet.auto_recharge",
@@ -430,7 +450,10 @@ impl AppState {
     /// failure here (storage error, unreachable webhook) is logged and
     /// swallowed rather than propagated, so it can never affect whether the
     /// triggering request succeeded.
-    pub(crate) fn dispatch_budget_threshold_alerts(&self, tenant: &ferrogate_core::TenantContext) {
+    pub(crate) async fn dispatch_budget_threshold_alerts(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+    ) {
         let Some(webhook_url) = self.config.billing_alerts.webhook_url.clone() else {
             return;
         };
@@ -450,11 +473,12 @@ impl AppState {
                 &period_month,
                 &webhook_url,
                 timeout,
-            );
+            )
+            .await;
         }
     }
 
-    fn dispatch_budget_threshold_alerts_for_scope(
+    async fn dispatch_budget_threshold_alerts_for_scope(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
@@ -507,6 +531,7 @@ impl AppState {
             match self
                 .repositories
                 .budget_alert_already_notified(&notification_id)
+                .await
             {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -547,16 +572,17 @@ impl AppState {
             // for the rest of the billing period would be worse than a
             // single missed notification, and this matches the "fire
             // (attempt) exactly once per tier" contract in issue #170.
-            if let Err(error) =
-                self.repositories
-                    .record_budget_alert_notification(StoredBudgetAlertNotification {
-                        id: notification_id,
-                        scope_type,
-                        scope_id: scope_id.to_string(),
-                        period_month: period_month.to_string(),
-                        threshold_pct,
-                        notified_at_unix: fired_at_unix,
-                    })
+            if let Err(error) = self
+                .repositories
+                .record_budget_alert_notification(StoredBudgetAlertNotification {
+                    id: notification_id,
+                    scope_type,
+                    scope_id: scope_id.to_string(),
+                    period_month: period_month.to_string(),
+                    threshold_pct,
+                    notified_at_unix: fired_at_unix,
+                })
+                .await
             {
                 warn!(
                     scope_type = %scope_type.as_str(),
@@ -577,6 +603,14 @@ mod settlement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
 
     fn test_provider() -> Provider {
         Provider {
@@ -696,24 +730,23 @@ mod tests {
     /// [`budget_alert_test_request`].
     fn settle_budget_alert_spend(state: &AppState, request_id: &str, prompt_tokens: u64) {
         let request = budget_alert_test_request(request_id);
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-test",
-                    status_code: 200,
-                    latency_ms: Some(10),
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(prompt_tokens),
-                    completion_tokens: Some(0),
-                    total_tokens: Some(prompt_tokens),
-                },
-            )
-            .unwrap();
+        block_on(state.record_billing_event(
+            BillingEventDraft {
+                request: &request,
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-test",
+                status_code: 200,
+                latency_ms: Some(10),
+                metadata: None,
+            },
+            &ProviderUsage {
+                prompt_tokens: Some(prompt_tokens),
+                completion_tokens: Some(0),
+                total_tokens: Some(prompt_tokens),
+            },
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -791,24 +824,24 @@ mod tests {
             );
         }
 
-        assert!(state
-            .repositories
-            .budget_alert_already_notified(&budget_alert_notification_id(
+        assert!(block_on(state.repositories.budget_alert_already_notified(
+            &budget_alert_notification_id(
                 QuotaScopeKind::Tenant,
                 "tenant-budget-alerts",
                 &state.current_period_month(),
                 50,
-            ))
-            .unwrap());
-        assert!(state
-            .repositories
-            .budget_alert_already_notified(&budget_alert_notification_id(
+            )
+        ))
+        .unwrap());
+        assert!(block_on(state.repositories.budget_alert_already_notified(
+            &budget_alert_notification_id(
                 QuotaScopeKind::Tenant,
                 "tenant-budget-alerts",
                 &state.current_period_month(),
                 90,
-            ))
-            .unwrap());
+            )
+        ))
+        .unwrap());
     }
 
     #[test]

@@ -32,6 +32,14 @@ use ferrogate_storage::{
 
 const IMAGE: &str = "postgres:16-alpine";
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 struct PgContainer {
     id: String,
     port: u16,
@@ -611,32 +619,31 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
         api_key_id: Some("key-cost-rt".into()),
     };
 
-    let recorded = storage
-        .append_billing_event(BillingEvent {
-            request_id: "req-cost-rt-1".into(),
-            trace_id: None,
-            provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-cost-rt-1", 0),
-            agent_run_id: None,
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
-            cluster_id: None,
-            node_id: None,
-            tenant: tenant.clone(),
-            logical_model: "fast-chat".into(),
-            provider: "openai".into(),
-            provider_model: "gpt-4o-mini".into(),
-            usage: TokenUsage::new(100, 50, 150),
-            usage_source: BillingUsageSource::ProviderUsage,
-            status_code: 200,
-            occurred_at_unix: Some(1_783_036_800), // 2026-07
-            cost_usd: Some(0.015),
-            latency_ms: Some(240),
-            metadata: std::collections::BTreeMap::new(),
-            wallet_delta_credits: None,
-            wallet_balance_after_credits: None,
-        })
-        .expect("append_billing_event must succeed");
+    let recorded = block_on(storage.append_billing_event(BillingEvent {
+        request_id: "req-cost-rt-1".into(),
+        trace_id: None,
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-cost-rt-1", 0),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: tenant.clone(),
+        logical_model: "fast-chat".into(),
+        provider: "openai".into(),
+        provider_model: "gpt-4o-mini".into(),
+        usage: TokenUsage::new(100, 50, 150),
+        usage_source: BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_783_036_800), // 2026-07
+        cost_usd: Some(0.015),
+        latency_ms: Some(240),
+        metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
+    }))
+    .expect("append_billing_event must succeed");
     assert!(
         recorded,
         "first insert of a new request_id must be recorded"
@@ -886,29 +893,27 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
         .expect("re-enqueue must be a no-op");
 
     // Not due before its time; due at/after 100.
-    assert!(storage.list_due_billing_reports(50, 10).unwrap().is_empty());
-    let due = storage.list_due_billing_reports(100, 10).unwrap();
+    assert!(block_on(storage.list_due_billing_reports(50, 10))
+        .unwrap()
+        .is_empty());
+    let due = block_on(storage.list_due_billing_reports(100, 10)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].event.provider_model, "gpt-5.5");
     assert_eq!(due[0].attempts, 0);
 
     // A failed delivery reschedules with a bumped attempt count.
-    storage
-        .reschedule_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", 5_000)
+    block_on(storage.reschedule_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", 5_000))
         .expect("reschedule must succeed");
-    assert!(storage
-        .list_due_billing_reports(100, 10)
+    assert!(block_on(storage.list_due_billing_reports(100, 10))
         .unwrap()
         .is_empty());
-    let rescheduled = storage.list_due_billing_reports(5_000, 10).unwrap();
+    let rescheduled = block_on(storage.list_due_billing_reports(5_000, 10)).unwrap();
     assert_eq!(rescheduled[0].attempts, 1);
 
     // A delivered report is deleted and no longer appears.
-    storage
-        .delete_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt")
+    block_on(storage.delete_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt"))
         .expect("delete must succeed");
-    assert!(storage
-        .list_due_billing_reports(1_000_000, 10)
+    assert!(block_on(storage.list_due_billing_reports(1_000_000, 10))
         .unwrap()
         .is_empty());
 }
@@ -957,11 +962,8 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
         .expect("enqueue must succeed");
 
     // Dead-lettering removes the entry from the due queue...
-    storage
-        .dead_letter_billing_report(id, 200)
-        .expect("dead-letter must succeed");
-    assert!(storage
-        .list_due_billing_reports(1_000_000, 10)
+    block_on(storage.dead_letter_billing_report(id, 200)).expect("dead-letter must succeed");
+    assert!(block_on(storage.list_due_billing_reports(1_000_000, 10))
         .unwrap()
         .is_empty());
 
@@ -969,7 +971,7 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
     let reopened =
         RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
             .expect("re-open against existing schema must succeed");
-    let dead_lettered = reopened.list_dead_lettered_billing_reports(10).unwrap();
+    let dead_lettered = block_on(reopened.list_dead_lettered_billing_reports(10)).unwrap();
     assert_eq!(dead_lettered.len(), 1);
     assert_eq!(dead_lettered[0].id, id);
     assert_eq!(dead_lettered[0].event.provider_model, "mystery-model");
@@ -1017,25 +1019,29 @@ fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
     };
     let outbox_id = "ferrogate:trace-combined-rt:req-combined-rt";
 
-    let outcome = storage
-        .append_billing_event_with_outbox_enqueue(event.clone(), outbox_id, 100)
-        .expect("combined append must succeed");
+    let outcome =
+        block_on(storage.append_billing_event_with_outbox_enqueue(event.clone(), outbox_id, 100))
+            .expect("combined append must succeed");
     assert!(outcome.recorded);
     assert!(outcome.enqueue_error.is_none());
 
     // Both the metering event and the outbox row exist from one call.
     assert_eq!(storage.billing_events().len(), 1);
-    let due = storage.list_due_billing_reports(100, 10).unwrap();
+    let due = block_on(storage.list_due_billing_reports(100, 10)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, outbox_id);
     assert_eq!(due[0].event.request_id, "req-combined-rt");
 
     // A retry (same request_id) is idempotent: no duplicate metering event or
     // outbox row, and `recorded` reports the no-op.
-    let retry = storage
-        .append_billing_event_with_outbox_enqueue(event, outbox_id, 100)
+    let retry = block_on(storage.append_billing_event_with_outbox_enqueue(event, outbox_id, 100))
         .expect("idempotent retry must succeed");
     assert!(!retry.recorded);
     assert_eq!(storage.billing_events().len(), 1);
-    assert_eq!(storage.list_due_billing_reports(100, 10).unwrap().len(), 1);
+    assert_eq!(
+        block_on(storage.list_due_billing_reports(100, 10))
+            .unwrap()
+            .len(),
+        1
+    );
 }

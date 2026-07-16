@@ -6,6 +6,14 @@
 
 use super::*;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 #[test]
 fn prometheus_metrics_snapshot_aggregates_request_logs_and_distinct_attempts() {
     let config = Config {
@@ -116,19 +124,18 @@ fn record_attempt(
     attempt_index: u32,
     usage: ProviderUsage,
 ) {
-    state
-        .record_provider_attempt_billing_event(
-            BillingEventDraft {
-                request,
-                logical_model: "fast-chat",
-                provider: "openai",
-                provider_model: "gpt-4o-mini",
-                status_code: 200,
-                latency_ms: None,
-                metadata: None,
-            },
-            &ProviderAttempt::for_request(&request.request_id, attempt_index),
-            &usage,
-        )
-        .unwrap();
+    block_on(state.record_provider_attempt_billing_event(
+        BillingEventDraft {
+            request,
+            logical_model: "fast-chat",
+            provider: "openai",
+            provider_model: "gpt-4o-mini",
+            status_code: 200,
+            latency_ms: None,
+            metadata: None,
+        },
+        &ProviderAttempt::for_request(&request.request_id, attempt_index),
+        &usage,
+    ))
+    .unwrap();
 }

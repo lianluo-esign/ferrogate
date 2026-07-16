@@ -1,38 +1,50 @@
 use super::*;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 #[test]
 fn gateway_wallet_replay_debits_and_audits_once() {
     let state = AppState::new(Config::default());
-    state
-        .upsert_wallet(StoredWallet {
-            id: "tenant-wallet-replay".into(),
-            tenant_id: "tenant-wallet-replay".into(),
-            balance_credits: 1_000,
-            auto_recharge_threshold_credits: None,
-            auto_recharge_amount_credits: None,
-            dunning: false,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_wallet(StoredWallet {
+        id: "tenant-wallet-replay".into(),
+        tenant_id: "tenant-wallet-replay".into(),
+        balance_credits: 1_000,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
     let tenant = ferrogate_core::TenantContext {
         organization_id: Some("tenant-wallet-replay".into()),
         ..ferrogate_core::TenantContext::default()
     };
 
-    let first = state
-        .debit_wallet_for_settled_cost(&tenant, 0.000_125, "provider-attempt-replay")
-        .unwrap();
-    let replay = state
-        .debit_wallet_for_settled_cost(&tenant, 0.000_125, "provider-attempt-replay")
-        .unwrap();
+    let first = block_on(state.debit_wallet_for_settled_cost(
+        &tenant,
+        0.000_125,
+        "provider-attempt-replay",
+    ))
+    .unwrap();
+    let replay = block_on(state.debit_wallet_for_settled_cost(
+        &tenant,
+        0.000_125,
+        "provider-attempt-replay",
+    ))
+    .unwrap();
 
     assert_eq!(first, replay);
     assert_eq!(first.delta_credits, -125);
     assert_eq!(first.balance_after_credits, 875);
     assert_eq!(
-        state
-            .get_wallet("tenant-wallet-replay")
+        block_on(state.get_wallet("tenant-wallet-replay"))
             .unwrap()
             .unwrap()
             .balance_credits,
@@ -82,18 +94,17 @@ fn gateway_provider_attempt_collision_fails_closed_without_double_debiting_walle
         }],
         ..Config::default()
     });
-    state
-        .upsert_wallet(StoredWallet {
-            id: "tenant-provider-replay".into(),
-            tenant_id: "tenant-provider-replay".into(),
-            balance_credits: 1_000_000,
-            auto_recharge_threshold_credits: None,
-            auto_recharge_amount_credits: None,
-            dunning: false,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(state.upsert_wallet(StoredWallet {
+        id: "tenant-provider-replay".into(),
+        tenant_id: "tenant-provider-replay".into(),
+        balance_credits: 1_000_000,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
     let tenant = ferrogate_core::TenantContext {
         organization_id: Some("tenant-provider-replay".into()),
         ..ferrogate_core::TenantContext::default()
@@ -125,7 +136,7 @@ fn gateway_provider_attempt_collision_fails_closed_without_double_debiting_walle
     };
 
     let record = |request: &RequestContext| {
-        state.record_provider_attempt_billing_event(
+        block_on(state.record_provider_attempt_billing_event(
             BillingEventDraft {
                 request,
                 logical_model: "fast-chat",
@@ -137,7 +148,7 @@ fn gateway_provider_attempt_collision_fails_closed_without_double_debiting_walle
             },
             &attempt,
             &usage,
-        )
+        ))
     };
     record(&original).unwrap();
     let collision = record(&replay).unwrap_err();
@@ -157,8 +168,7 @@ fn gateway_provider_attempt_collision_fails_closed_without_double_debiting_walle
     assert_eq!(rollup.request_count, 1);
     assert_eq!(rollup.total_tokens, 500_000);
     assert_eq!(
-        state
-            .get_wallet("tenant-provider-replay")
+        block_on(state.get_wallet("tenant-provider-replay"))
             .unwrap()
             .unwrap()
             .balance_credits,

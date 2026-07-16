@@ -9,16 +9,17 @@ use super::*;
 
 impl AppState {
     #[cfg(test)]
-    pub(crate) fn record_billing_event(
+    pub(crate) async fn record_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
         usage: &ProviderUsage,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let provider_attempt = ProviderAttempt::for_request(&draft.request.request_id, 0);
         self.record_provider_attempt_billing_event(draft, &provider_attempt, usage)
+            .await
     }
 
-    pub(crate) fn record_provider_attempt_billing_event(
+    pub(crate) async fn record_provider_attempt_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
         provider_attempt: &ProviderAttempt,
@@ -44,19 +45,21 @@ impl AppState {
             },
             provider_attempt,
         )
+        .await
     }
 
     #[cfg(test)]
-    pub(crate) fn record_estimated_billing_event(
+    pub(crate) async fn record_estimated_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
         usage: &BillingTokenUsage,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let provider_attempt = ProviderAttempt::for_request(&draft.request.request_id, 0);
         self.record_estimated_provider_attempt_billing_event(draft, &provider_attempt, usage)
+            .await
     }
 
-    pub(crate) fn record_estimated_provider_attempt_billing_event(
+    pub(crate) async fn record_estimated_provider_attempt_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
         provider_attempt: &ProviderAttempt,
@@ -76,9 +79,10 @@ impl AppState {
             },
             provider_attempt,
         )
+        .await
     }
 
-    fn record_billing_token_usage(
+    async fn record_billing_token_usage(
         &self,
         draft: BillingTokenUsageDraft<'_>,
         provider_attempt: &ProviderAttempt,
@@ -139,9 +143,13 @@ impl AppState {
             wallet_balance_after_credits: None,
         };
         let settlement_id = ferrogate_billing::ledger::ledger_entry_id(&event);
-        let wallet_debit = cost_usd.and_then(|cost_usd| {
-            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd, &settlement_id)
-        });
+        let wallet_debit = match cost_usd {
+            Some(cost_usd) => {
+                self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd, &settlement_id)
+                    .await
+            }
+            None => None,
+        };
         event.wallet_delta_credits = wallet_debit.as_ref().map(|outcome| outcome.delta_credits);
         event.wallet_balance_after_credits = wallet_debit
             .as_ref()
@@ -161,6 +169,7 @@ impl AppState {
             let outcome = self
                 .repositories
                 .append_billing_event_with_outbox_enqueue(event.clone(), &entry_id, now)
+                .await
                 .map_err(|error| {
                     ferrogate_billing::BillingError::new(
                         "billing_persistence_failed",
@@ -186,6 +195,7 @@ impl AppState {
         } else {
             self.repositories
                 .append_billing_event(event.clone())
+                .await
                 .map_err(|error| {
                     ferrogate_billing::BillingError::new(
                         "billing_persistence_failed",
@@ -218,7 +228,8 @@ impl AppState {
         // (both `append_billing_event` paths increment
         // `usage_monthly_rollups` synchronously), so spend read here
         // reflects this request (issue #170).
-        self.dispatch_budget_threshold_alerts(&draft.request.tenant);
+        self.dispatch_budget_threshold_alerts(&draft.request.tenant)
+            .await;
         Ok(())
     }
 
@@ -230,7 +241,7 @@ impl AppState {
     /// batch capacity but is kept for operator inspection. Idempotent on the
     /// billing side, so replay never double-bills. A no-op when billing
     /// reporting is disabled.
-    pub(crate) fn sweep_billing_outbox_once(&self) {
+    pub(crate) async fn sweep_billing_outbox_once(&self) {
         let Some(reporter) = self.billing_reporter.clone() else {
             return;
         };
@@ -238,6 +249,7 @@ impl AppState {
         let due = match self
             .repositories
             .list_due_billing_reports(now, BILLING_OUTBOX_BATCH)
+            .await
         {
             Ok(entries) => entries,
             Err(error) => {
@@ -248,15 +260,17 @@ impl AppState {
         for entry in due {
             match reporter.deliver_once(&entry.event) {
                 Ok(()) => {
-                    if let Err(error) = self.repositories.delete_billing_report(&entry.id) {
+                    if let Err(error) = self.repositories.delete_billing_report(&entry.id).await {
                         warn!(id = %entry.id, error = %error, "failed to delete delivered billing report");
                     }
                 }
                 Err(error) => {
                     let attempts_after = entry.attempts.saturating_add(1);
                     if attempts_after >= MAX_BILLING_OUTBOX_ATTEMPTS {
-                        if let Err(dead_letter_error) =
-                            self.repositories.dead_letter_billing_report(&entry.id, now)
+                        if let Err(dead_letter_error) = self
+                            .repositories
+                            .dead_letter_billing_report(&entry.id, now)
+                            .await
                         {
                             warn!(id = %entry.id, error = %dead_letter_error, "failed to dead-letter billing report");
                         }
@@ -269,8 +283,10 @@ impl AppState {
                         continue;
                     }
                     let next = now.saturating_add(billing_outbox_backoff_secs(entry.attempts));
-                    if let Err(reschedule_error) =
-                        self.repositories.reschedule_billing_report(&entry.id, next)
+                    if let Err(reschedule_error) = self
+                        .repositories
+                        .reschedule_billing_report(&entry.id, next)
+                        .await
                     {
                         warn!(id = %entry.id, error = %reschedule_error, "failed to reschedule billing report");
                     }
@@ -287,10 +303,12 @@ impl AppState {
 
     /// List dead-lettered billing outbox entries for operator inspection
     /// (issue #143).
-    pub(crate) fn billing_outbox_dead_letters(
+    pub(crate) async fn billing_outbox_dead_letters(
         &self,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        self.repositories.list_dead_lettered_billing_reports(500)
+        self.repositories
+            .list_dead_lettered_billing_reports(500)
+            .await
     }
 
     #[cfg(test)]
@@ -607,6 +625,14 @@ mod metrics_tests;
 mod tests {
     use super::*;
 
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
     #[test]
     fn records_token_metering_event_with_settled_gateway_cost() {
         let config = Config {
@@ -663,24 +689,23 @@ mod tests {
             },
         };
 
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: Some(120),
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(3),
-                    completion_tokens: Some(5),
-                    total_tokens: Some(8),
-                },
-            )
-            .unwrap();
+        block_on(state.record_billing_event(
+            BillingEventDraft {
+                request: &request,
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: Some(120),
+                metadata: None,
+            },
+            &ProviderUsage {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(5),
+                total_tokens: Some(8),
+            },
+        ))
+        .unwrap();
 
         let events = state.billing_events();
         assert_eq!(events.len(), 1);
@@ -758,18 +783,17 @@ mod tests {
             ..Config::default()
         };
         let state = AppState::new(config);
-        state
-            .upsert_wallet(ferrogate_storage::StoredWallet {
-                id: "org".into(),
-                tenant_id: "org".into(),
-                balance_credits: 1_000_000,
-                auto_recharge_threshold_credits: None,
-                auto_recharge_amount_credits: None,
-                dunning: false,
-                created_at_unix: 0,
-                updated_at_unix: 0,
-            })
-            .unwrap();
+        block_on(state.upsert_wallet(ferrogate_storage::StoredWallet {
+            id: "org".into(),
+            tenant_id: "org".into(),
+            balance_credits: 1_000_000,
+            auto_recharge_threshold_credits: None,
+            auto_recharge_amount_credits: None,
+            dunning: false,
+            created_at_unix: 0,
+            updated_at_unix: 0,
+        }))
+        .unwrap();
         let request = RequestContext {
             request_id: "fg-wallet-test".into(),
             trace_id: Some("trace-wallet-test".into()),
@@ -789,24 +813,23 @@ mod tests {
             },
         };
 
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(500_000),
-                    completion_tokens: Some(0),
-                    total_tokens: Some(500_000),
-                },
-            )
-            .unwrap();
+        block_on(state.record_billing_event(
+            BillingEventDraft {
+                request: &request,
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: None,
+                metadata: None,
+            },
+            &ProviderUsage {
+                prompt_tokens: Some(500_000),
+                completion_tokens: Some(0),
+                total_tokens: Some(500_000),
+            },
+        ))
+        .unwrap();
 
         let events = state.billing_events();
         assert_eq!(events.len(), 1);
@@ -821,7 +844,7 @@ mod tests {
             "1_000_000 starting balance - 500_000 debited = 500_000 remaining"
         );
 
-        let wallet = state.get_wallet("org").unwrap().unwrap();
+        let wallet = block_on(state.get_wallet("org")).unwrap().unwrap();
         assert_eq!(
             wallet.balance_credits, 500_000,
             "the event's reported balance must match the real, persisted wallet balance"
@@ -843,24 +866,23 @@ mod tests {
             tenant: ferrogate_core::TenantContext::default(),
         };
 
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "unknown-model",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(3),
-                    completion_tokens: Some(5),
-                    total_tokens: Some(8),
-                },
-            )
-            .unwrap();
+        block_on(state.record_billing_event(
+            BillingEventDraft {
+                request: &request,
+                logical_model: "unknown-model",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: None,
+                metadata: None,
+            },
+            &ProviderUsage {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(5),
+                total_tokens: Some(8),
+            },
+        ))
+        .unwrap();
 
         let events = state.billing_events();
         assert_eq!(events.len(), 1);
@@ -892,20 +914,19 @@ mod tests {
             },
         };
 
-        state
-            .record_estimated_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: Some(95),
-                    metadata: None,
-                },
-                &BillingTokenUsage::new(2, 6, 8),
-            )
-            .unwrap();
+        block_on(state.record_estimated_billing_event(
+            BillingEventDraft {
+                request: &request,
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: Some(95),
+                metadata: None,
+            },
+            &BillingTokenUsage::new(2, 6, 8),
+        ))
+        .unwrap();
 
         let events = state.billing_events();
         assert_eq!(events.len(), 1);
@@ -1133,30 +1154,29 @@ mod tests {
                 outcome: "accepted".into(),
                 message: format!("audit {index}"),
             });
-            state
-                .record_estimated_billing_event(
-                    BillingEventDraft {
-                        request: &RequestContext {
-                            request_id: format!("fg-{index}"),
-                            trace_id: None,
-                            agent_run_id: None,
-                            workflow_id: None,
-                            workflow_version: None,
-                            workflow_node_id: None,
-                            route: None,
-                            upstream: None,
-                            tenant: ferrogate_core::TenantContext::default(),
-                        },
-                        logical_model: "fast-chat",
-                        provider: "openai",
-                        provider_model: "gpt-4o-mini",
-                        status_code,
-                        latency_ms: None,
-                        metadata: None,
+            block_on(state.record_estimated_billing_event(
+                BillingEventDraft {
+                    request: &RequestContext {
+                        request_id: format!("fg-{index}"),
+                        trace_id: None,
+                        agent_run_id: None,
+                        workflow_id: None,
+                        workflow_version: None,
+                        workflow_node_id: None,
+                        route: None,
+                        upstream: None,
+                        tenant: ferrogate_core::TenantContext::default(),
                     },
-                    &BillingTokenUsage::new(index, index, index * 2),
-                )
-                .unwrap();
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code,
+                    latency_ms: None,
+                    metadata: None,
+                },
+                &BillingTokenUsage::new(index, index, index * 2),
+            ))
+            .unwrap();
         }
 
         let first_page = state.request_logs_page(state.admin_pagination(None), None);

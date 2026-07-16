@@ -9,8 +9,9 @@
 // "one business entity per file" convention.
 
 use super::{
-    PostgresControlPlaneStore, PostgresRow, QuotaScopeKind, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, QuotaScopeKind, Repository,
+    RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    StorageOperation,
 };
 
 /// One "tenant X was notified it crossed tier Y of its budget for period Z"
@@ -64,13 +65,22 @@ fn budget_alert_notification_from_row(
 }
 
 impl PostgresControlPlaneStore {
-    pub(super) fn record_budget_alert_notification(
+    fn budget_alert_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    pub(super) async fn record_budget_alert_notification(
         &self,
         notification: &StoredBudgetAlertNotification,
     ) -> Result<(), StorageError> {
         let threshold_pct = i16::from(notification.threshold_pct);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.budget_alert_operation("record budget alert notification");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO budget_alert_notifications \
                  (id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6) \
@@ -83,37 +93,53 @@ impl PostgresControlPlaneStore {
                     &threshold_pct,
                     &notification.notified_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    pub(super) fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    pub(super) async fn budget_alert_already_notified(
+        &self,
+        id: &str,
+    ) -> Result<bool, StorageError> {
+        let operation = self.budget_alert_operation("budget alert already notified");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix \
                  FROM budget_alert_notifications WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.is_some())
     }
 
-    pub(super) fn list_budget_alert_notifications(
+    pub(super) async fn list_budget_alert_notifications(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
         period_month: &str,
     ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.budget_alert_operation("list budget alert notifications");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix \
                  FROM budget_alert_notifications \
                  WHERE scope_type = $1 AND scope_id = $2 AND period_month = $3 \
                  ORDER BY threshold_pct ASC",
                 &[&scope_type.as_str(), &scope_id, &period_month],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter()
             .map(budget_alert_notification_from_row)
             .collect()
@@ -160,7 +186,7 @@ impl RuntimeStorageRepositories {
     /// check [`Self::budget_alert_already_notified`] first and only fire
     /// the webhook (and call this) when it returns `false` -- `ON CONFLICT
     /// (id) DO NOTHING` makes a redundant call harmless either way.
-    pub fn record_budget_alert_notification(
+    pub async fn record_budget_alert_notification(
         &self,
         notification: StoredBudgetAlertNotification,
     ) -> Result<(), StorageError> {
@@ -172,24 +198,26 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.record_budget_alert_notification(&notification)
+                control_plane
+                    .record_budget_alert_notification(&notification)
+                    .await
             }
         }
     }
 
-    pub fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
+    pub async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.budget_alert_already_notified(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.budget_alert_already_notified(id)
+                control_plane.budget_alert_already_notified(id).await
             }
         }
     }
 
-    pub fn list_budget_alert_notifications(
+    pub async fn list_budget_alert_notifications(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
@@ -207,7 +235,9 @@ impl RuntimeStorageRepositories {
                 })
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_budget_alert_notifications(scope_type, scope_id, period_month)
+                control_plane
+                    .list_budget_alert_notifications(scope_type, scope_id, period_month)
+                    .await
             }
         }
     }

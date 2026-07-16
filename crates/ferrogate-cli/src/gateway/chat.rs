@@ -840,21 +840,24 @@ impl FerroGateway {
                                 if let Ok(Some(usage)) =
                                     state.extract_provider_usage(&provider.kind, &body)
                                 {
-                                    if let Err(error) = state.record_provider_attempt_billing_event(
-                                        BillingEventDraft {
-                                            request: &policy_request,
-                                            logical_model: &request.model,
-                                            provider: &provider.name,
-                                            provider_model: &model_route.provider_model,
-                                            status_code: response.status.as_u16(),
-                                            latency_ms: Some(
-                                                attempt_started_at.elapsed().as_millis() as u64,
-                                            ),
-                                            metadata: request.metadata.as_ref(),
-                                        },
-                                        &provider_attempt,
-                                        &usage,
-                                    ) {
+                                    if let Err(error) = state
+                                        .record_provider_attempt_billing_event(
+                                            BillingEventDraft {
+                                                request: &policy_request,
+                                                logical_model: &request.model,
+                                                provider: &provider.name,
+                                                provider_model: &model_route.provider_model,
+                                                status_code: response.status.as_u16(),
+                                                latency_ms: Some(
+                                                    attempt_started_at.elapsed().as_millis() as u64,
+                                                ),
+                                                metadata: request.metadata.as_ref(),
+                                            },
+                                            &provider_attempt,
+                                            &usage,
+                                        )
+                                        .await
+                                    {
                                         write_json_error(
                                             session,
                                             StatusCode::BAD_GATEWAY,
@@ -943,7 +946,7 @@ impl FerroGateway {
                             }
                             let record_bodies =
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
-                            let record_stream_usage = |stream_body: Option<&[u8]>| {
+                            let record_stream_usage = async |stream_body: Option<&[u8]>| {
                                 let reported_usage = stream_body.and_then(|body| {
                                     extract_last_provider_stream_usage(body, |payload| {
                                         state
@@ -953,37 +956,41 @@ impl FerroGateway {
                                     })
                                 });
                                 let result = if let Some(usage) = reported_usage {
-                                    state.record_provider_attempt_billing_event(
-                                        BillingEventDraft {
-                                            request: &policy_request,
-                                            logical_model: &request.model,
-                                            provider: &provider.name,
-                                            provider_model: &model_route.provider_model,
-                                            status_code: response.status.as_u16(),
-                                            latency_ms: Some(
-                                                attempt_started_at.elapsed().as_millis() as u64,
-                                            ),
-                                            metadata: request.metadata.as_ref(),
-                                        },
-                                        &provider_attempt,
-                                        &usage,
-                                    )
+                                    state
+                                        .record_provider_attempt_billing_event(
+                                            BillingEventDraft {
+                                                request: &policy_request,
+                                                logical_model: &request.model,
+                                                provider: &provider.name,
+                                                provider_model: &model_route.provider_model,
+                                                status_code: response.status.as_u16(),
+                                                latency_ms: Some(
+                                                    attempt_started_at.elapsed().as_millis() as u64,
+                                                ),
+                                                metadata: request.metadata.as_ref(),
+                                            },
+                                            &provider_attempt,
+                                            &usage,
+                                        )
+                                        .await
                                 } else {
-                                    state.record_estimated_provider_attempt_billing_event(
-                                        BillingEventDraft {
-                                            request: &policy_request,
-                                            logical_model: &request.model,
-                                            provider: &provider.name,
-                                            provider_model: &model_route.provider_model,
-                                            status_code: response.status.as_u16(),
-                                            latency_ms: Some(
-                                                attempt_started_at.elapsed().as_millis() as u64,
-                                            ),
-                                            metadata: request.metadata.as_ref(),
-                                        },
-                                        &provider_attempt,
-                                        &estimated_usage,
-                                    )
+                                    state
+                                        .record_estimated_provider_attempt_billing_event(
+                                            BillingEventDraft {
+                                                request: &policy_request,
+                                                logical_model: &request.model,
+                                                provider: &provider.name,
+                                                provider_model: &model_route.provider_model,
+                                                status_code: response.status.as_u16(),
+                                                latency_ms: Some(
+                                                    attempt_started_at.elapsed().as_millis() as u64,
+                                                ),
+                                                metadata: request.metadata.as_ref(),
+                                            },
+                                            &provider_attempt,
+                                            &estimated_usage,
+                                        )
+                                        .await
                                 };
                                 if let Err(error) = result {
                                     warn!(
@@ -1053,7 +1060,7 @@ impl FerroGateway {
                                 {
                                     Ok(body) => body,
                                     Err(error) => {
-                                        record_stream_usage(None);
+                                        record_stream_usage(None).await;
                                         let (status, code) = error.status_and_code();
                                         let empty_envelope = normalize_guardrail_response(
                                             endpoint.guardrail_protocol(),
@@ -1116,7 +1123,7 @@ impl FerroGateway {
                                         return Ok(());
                                     }
                                 };
-                                record_stream_usage(Some(&final_body));
+                                record_stream_usage(Some(&final_body)).await;
                                 let mut final_status = response_status;
                                 let mut final_content_type = client_content_type;
                                 let mut final_error_code = None;
@@ -1261,39 +1268,40 @@ impl FerroGateway {
                                 )
                                 .await;
                             }
-                            let record_pass_through_completion = |stream_body: Option<&[u8]>| {
-                                record_stream_usage(stream_body);
-                                state.record_request_log(StoredRequestLog {
-                                    request_id: ctx.request_id.clone(),
-                                    trace_id: ctx.trace_id.clone(),
-                                    agent_run_id: Some(agent_run_id.clone()),
-                                    workflow_id: workflow_id.clone(),
-                                    workflow_version,
-                                    workflow_node_id: workflow_node_id.clone(),
-                                    cluster_id: None,
-                                    node_id: None,
-                                    tenant: policy_request.tenant.clone(),
-                                    route: policy_request.route.clone(),
-                                    provider: Some(provider.name.clone()),
-                                    logical_model: Some(request.model.clone()),
-                                    provider_model: Some(model_route.provider_model.clone()),
-                                    gateway_config_id: gateway_config
-                                        .as_ref()
-                                        .map(|profile| profile.id.clone()),
-                                    gateway_config_revision: gateway_config
-                                        .as_ref()
-                                        .map(|profile| profile.revision),
-                                    status_code: response.status.as_u16(),
-                                    error_code: None,
-                                    prompt_recorded: record_bodies,
-                                    response_recorded: false,
-                                    prompt_body: record_bodies.then(|| body_json.to_string()),
-                                    response_body: None,
-                                    cache_status: None,
-                                    started_at_unix: Some(request_started_at_unix),
-                                    completed_at_unix: Some(now_unix_seconds()),
-                                });
-                            };
+                            let record_pass_through_completion =
+                                async |stream_body: Option<&[u8]>| {
+                                    record_stream_usage(stream_body).await;
+                                    state.record_request_log(StoredRequestLog {
+                                        request_id: ctx.request_id.clone(),
+                                        trace_id: ctx.trace_id.clone(),
+                                        agent_run_id: Some(agent_run_id.clone()),
+                                        workflow_id: workflow_id.clone(),
+                                        workflow_version,
+                                        workflow_node_id: workflow_node_id.clone(),
+                                        cluster_id: None,
+                                        node_id: None,
+                                        tenant: policy_request.tenant.clone(),
+                                        route: policy_request.route.clone(),
+                                        provider: Some(provider.name.clone()),
+                                        logical_model: Some(request.model.clone()),
+                                        provider_model: Some(model_route.provider_model.clone()),
+                                        gateway_config_id: gateway_config
+                                            .as_ref()
+                                            .map(|profile| profile.id.clone()),
+                                        gateway_config_revision: gateway_config
+                                            .as_ref()
+                                            .map(|profile| profile.revision),
+                                        status_code: response.status.as_u16(),
+                                        error_code: None,
+                                        prompt_recorded: record_bodies,
+                                        response_recorded: false,
+                                        prompt_body: record_bodies.then(|| body_json.to_string()),
+                                        response_body: None,
+                                        cache_status: None,
+                                        started_at_unix: Some(request_started_at_unix),
+                                        completed_at_unix: Some(now_unix_seconds()),
+                                    });
+                                };
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::ShadowAfterComplete
                             {
@@ -1359,7 +1367,7 @@ impl FerroGateway {
                                         body: Vec::new(),
                                         truncated: true,
                                     });
-                                record_pass_through_completion(Some(&usage_body));
+                                record_pass_through_completion(Some(&usage_body)).await;
                                 if stream_result.is_ok() {
                                     let guardrail_envelope = normalize_guardrail_response(
                                         endpoint.guardrail_protocol(),
@@ -1445,7 +1453,7 @@ impl FerroGateway {
                                 .lock()
                                 .map(|capture| capture.body())
                                 .unwrap_or_default();
-                            record_pass_through_completion(Some(&captured));
+                            record_pass_through_completion(Some(&captured)).await;
                             return stream_result;
                         }
                         Err(error) => {
@@ -1516,21 +1524,24 @@ impl FerroGateway {
                             if let Ok(Some(usage)) =
                                 state.extract_provider_usage(&provider.kind, &response.body)
                             {
-                                if let Err(error) = state.record_provider_attempt_billing_event(
-                                    BillingEventDraft {
-                                        request: &policy_request,
-                                        logical_model: &request.model,
-                                        provider: &provider.name,
-                                        provider_model: &model_route.provider_model,
-                                        status_code: response.status.as_u16(),
-                                        latency_ms: Some(
-                                            attempt_started_at.elapsed().as_millis() as u64
-                                        ),
-                                        metadata: request.metadata.as_ref(),
-                                    },
-                                    &provider_attempt,
-                                    &usage,
-                                ) {
+                                if let Err(error) = state
+                                    .record_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &provider_attempt,
+                                        &usage,
+                                    )
+                                    .await
+                                {
                                     write_json_error(
                                         session,
                                         StatusCode::BAD_GATEWAY,
@@ -1627,21 +1638,24 @@ impl FerroGateway {
                                 total_tokens = ?usage.total_tokens,
                                 "provider usage extracted"
                             );
-                            if let Err(error) = state.record_provider_attempt_billing_event(
-                                BillingEventDraft {
-                                    request: &policy_request,
-                                    logical_model: &request.model,
-                                    provider: &provider.name,
-                                    provider_model: &model_route.provider_model,
-                                    status_code: response.status.as_u16(),
-                                    latency_ms: Some(
-                                        attempt_started_at.elapsed().as_millis() as u64
-                                    ),
-                                    metadata: request.metadata.as_ref(),
-                                },
-                                &provider_attempt,
-                                &usage,
-                            ) {
+                            if let Err(error) = state
+                                .record_provider_attempt_billing_event(
+                                    BillingEventDraft {
+                                        request: &policy_request,
+                                        logical_model: &request.model,
+                                        provider: &provider.name,
+                                        provider_model: &model_route.provider_model,
+                                        status_code: response.status.as_u16(),
+                                        latency_ms: Some(
+                                            attempt_started_at.elapsed().as_millis() as u64
+                                        ),
+                                        metadata: request.metadata.as_ref(),
+                                    },
+                                    &provider_attempt,
+                                    &usage,
+                                )
+                                .await
+                            {
                                 warn!(
                                     request_id = %ctx.request_id,
                                     logical_model = %request.model,
@@ -1676,6 +1690,7 @@ impl FerroGateway {
                                 &provider_attempt,
                                 &estimated_usage,
                             )
+                            .await
                         {
                             warn!(
                                 request_id = %ctx.request_id,

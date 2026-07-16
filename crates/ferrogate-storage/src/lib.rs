@@ -2522,80 +2522,114 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn list_due_billing_reports(
+    fn billing_outbox_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn list_due_billing_reports(
         &self,
         now_unix: i64,
         limit: i64,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.billing_outbox_operation("list due billing reports");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, event_json::text, attempts, next_attempt_unix, dead_lettered_at_unix \
                  FROM billing_report_outbox \
                  WHERE next_attempt_unix <= $1 AND dead_lettered_at_unix IS NULL \
                  ORDER BY next_attempt_unix ASC LIMIT $2",
                 &[&now_unix, &limit],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(billing_report_outbox_from_row).collect()
     }
 
-    fn reschedule_billing_report(
+    async fn reschedule_billing_report(
         &self,
         id: &str,
         next_attempt_unix: i64,
     ) -> Result<(), StorageError> {
         let updated_at_unix = saturating_i64(now_unix_seconds());
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.billing_outbox_operation("reschedule billing report");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "UPDATE billing_report_outbox \
                  SET attempts = attempts + 1, next_attempt_unix = $2, updated_at_unix = $3 \
                  WHERE id = $1",
                 &[&id, &next_attempt_unix, &updated_at_unix],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
     /// Mark a permanently-failing report dead-lettered (issue #143) instead of
     /// rescheduling it forever. The row is kept for operator inspection and
     /// excluded from `list_due_billing_reports`.
-    fn dead_letter_billing_report(&self, id: &str) -> Result<(), StorageError> {
+    async fn dead_letter_billing_report(&self, id: &str) -> Result<(), StorageError> {
         let now = saturating_i64(now_unix_seconds());
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.billing_outbox_operation("dead letter billing report");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "UPDATE billing_report_outbox \
                  SET dead_lettered_at_unix = $2, updated_at_unix = $2 \
                  WHERE id = $1",
                 &[&id, &now],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn list_dead_lettered_billing_reports(
+    async fn list_dead_lettered_billing_reports(
         &self,
         limit: i64,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.billing_outbox_operation("list dead lettered billing reports");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, event_json::text, attempts, next_attempt_unix, dead_lettered_at_unix \
                  FROM billing_report_outbox WHERE dead_lettered_at_unix IS NOT NULL \
                  ORDER BY dead_lettered_at_unix DESC LIMIT $1",
                 &[&limit],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(billing_report_outbox_from_row).collect()
     }
 
-    fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute("DELETE FROM billing_report_outbox WHERE id = $1", &[&id])?;
-            Ok(())
-        })
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        let operation = self.billing_outbox_operation("delete billing report");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute("DELETE FROM billing_report_outbox WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
-        self.append_billing_event_impl(event, None)
+    async fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
+        self.append_billing_event_impl(event, None).await
     }
 
     /// Combines the metering write with the durable billing-report outbox
@@ -2609,16 +2643,17 @@ impl PostgresControlPlaneStore {
     /// acceptable because both writes target the same database, so a real
     /// outage fails both anyway; the common (all-success) case is what
     /// benefits from dropping the second round-trip.
-    fn append_billing_event_with_outbox_enqueue(
+    async fn append_billing_event_with_outbox_enqueue(
         &self,
         event: &BillingEvent,
         outbox_id: &str,
         outbox_next_attempt_unix: i64,
     ) -> Result<bool, StorageError> {
         self.append_billing_event_impl(event, Some((outbox_id, outbox_next_attempt_unix)))
+            .await
     }
 
-    fn append_billing_event_impl(
+    async fn append_billing_event_impl(
         &self,
         event: &BillingEvent,
         outbox_enqueue: Option<(&str, i64)>,
@@ -2641,10 +2676,15 @@ impl PostgresControlPlaneStore {
         let event_json = serialize_storage_document(event)?;
         let metadata_json = serialize_storage_document(&event.metadata)?;
         let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(event);
-        let inserted = self.with_client(|client| {
-            let mut transaction = client.transaction()?;
-            upsert_tenant_context(&mut transaction, &tenant_context_id, &event.tenant)?;
-            let inserted = transaction.execute(
+        let operation = self.billing_outbox_operation("append billing event");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        upsert_tenant_context_async(&transaction, &tenant_context_id, &event.tenant).await?;
+        let inserted = transaction
+            .execute(
                 "INSERT INTO metering_events \
                  (billing_event_id, request_id, provider_attempt_id, provider_attempt_index, \
                   tenant_context_id, trace_id, agent_run_id, workflow_id, workflow_version, \
@@ -2673,9 +2713,12 @@ impl PostgresControlPlaneStore {
                     &metadata_json,
                     &event_json,
                 ],
-            )?;
-            if inserted == 1 {
-                transaction.execute(
+            )
+            .await
+            .map_err(postgres_error)?;
+        if inserted == 1 {
+            transaction
+                .execute(
                     "INSERT INTO metering_event_routes \
                      (billing_event_id, request_id, logical_model, provider, provider_model) \
                      VALUES ($1, $2, $3, $4, $5)",
@@ -2686,8 +2729,11 @@ impl PostgresControlPlaneStore {
                         &event.provider,
                         &event.provider_model,
                     ],
-                )?;
-                transaction.execute(
+                )
+                .await
+                .map_err(postgres_error)?;
+            transaction
+                .execute(
                     "INSERT INTO metering_event_usage \
                      (billing_event_id, request_id, prompt_tokens, completion_tokens, total_tokens, \
                       usage_source) \
@@ -2700,62 +2746,70 @@ impl PostgresControlPlaneStore {
                         &total_tokens,
                         &usage_source,
                     ],
-                )?;
-                let rollup = UsageRollupUpsert {
-                    id: &usage_aggregate_id(&event.tenant, &event.logical_model, &event.provider),
-                    tenant_context_id: &tenant_context_id,
-                    logical_model: &event.logical_model,
-                    provider: &event.provider,
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                };
-                upsert_usage_rollup_delta(&mut transaction, &rollup)?;
-                let usage_delta = UsageMonthlyDelta {
-                    prompt_tokens: event.usage.prompt_tokens,
-                    completion_tokens: event.usage.completion_tokens,
-                    total_tokens: event.usage.total_tokens,
-                    cost_usd: event.cost_usd.unwrap_or(0.0),
-                    is_error,
-                };
-                increment_usage_monthly_rollups(
-                    &mut transaction,
-                    &event.tenant,
-                    &period_month,
-                    &usage_delta,
-                )?;
-                increment_usage_metadata_rollups(
-                    &mut transaction,
-                    &event.metadata,
-                    &period_month,
-                    &usage_delta,
-                )?;
-                if let (Some((outbox_id, next_attempt_unix)), Some(event_json)) =
-                    (outbox_enqueue, outbox_event_json.as_ref())
-                {
-                    let created_at_unix = saturating_i64(now_unix_seconds());
-                    transaction.execute(
+                )
+                .await
+                .map_err(postgres_error)?;
+            let rollup = UsageRollupUpsert {
+                id: &usage_aggregate_id(&event.tenant, &event.logical_model, &event.provider),
+                tenant_context_id: &tenant_context_id,
+                logical_model: &event.logical_model,
+                provider: &event.provider,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            };
+            upsert_usage_rollup_delta(&transaction, &rollup).await?;
+            let usage_delta = UsageMonthlyDelta {
+                prompt_tokens: event.usage.prompt_tokens,
+                completion_tokens: event.usage.completion_tokens,
+                total_tokens: event.usage.total_tokens,
+                cost_usd: event.cost_usd.unwrap_or(0.0),
+                is_error,
+            };
+            increment_usage_monthly_rollups(
+                &transaction,
+                &event.tenant,
+                &period_month,
+                &usage_delta,
+            )
+            .await?;
+            increment_usage_metadata_rollups(
+                &transaction,
+                &event.metadata,
+                &period_month,
+                &usage_delta,
+            )
+            .await?;
+            if let (Some((outbox_id, next_attempt_unix)), Some(event_json)) =
+                (outbox_enqueue, outbox_event_json.as_ref())
+            {
+                let created_at_unix = saturating_i64(now_unix_seconds());
+                transaction
+                    .execute(
                         "INSERT INTO billing_report_outbox \
                          (id, event_json, attempts, next_attempt_unix, created_at_unix, updated_at_unix) \
                          VALUES ($1, $2::text::jsonb, 0, $3, $4, $4) \
                          ON CONFLICT (id) DO NOTHING",
                         &[&outbox_id, event_json, &next_attempt_unix, &created_at_unix],
-                    )?;
-                }
+                    )
+                    .await
+                    .map_err(postgres_error)?;
             }
-            if inserted == 1 {
-                transaction.commit()?;
-            } else {
-                // A conflicting attempt may carry a different tenant payload. Do not
-                // commit its tenant-context upsert before exact replay is established.
-                transaction.rollback()?;
-            }
-            Ok(inserted == 1)
-        })?;
-        if inserted {
+        }
+        if inserted == 1 {
+            transaction.commit().await.map_err(postgres_error)?;
+        } else {
+            // A conflicting attempt may carry a different tenant payload. Do not
+            // commit its tenant-context upsert before exact replay is established.
+            transaction.rollback().await.map_err(postgres_error)?;
+        }
+        if inserted == 1 {
             return Ok(true);
         }
-        if self.billing_event_settlement_matches(&billing_event_id, event)? {
+        if self
+            .billing_event_settlement_matches(&billing_event_id, event)
+            .await?
+        {
             Ok(false)
         } else {
             Err(StorageError::Conflict(format!(
@@ -2764,17 +2818,23 @@ impl PostgresControlPlaneStore {
         }
     }
 
-    fn billing_event_settlement_matches(
+    async fn billing_event_settlement_matches(
         &self,
         billing_event_id: &str,
         event: &BillingEvent,
     ) -> Result<bool, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.billing_outbox_operation("billing event settlement matches");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT event_json::text FROM metering_events WHERE billing_event_id = $1",
                 &[&billing_event_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         let Some(row) = row else {
             return Err(StorageError::Runtime(format!(
                 "billing event id {billing_event_id} conflicted but could not be reloaded"
@@ -5112,23 +5172,35 @@ fn usage_aggregate_id(tenant: &TenantContext, logical_model: &str, provider: &st
     )
 }
 
-fn upsert_tenant_context(
-    transaction: &mut PostgresTransaction<'_>,
+/// Async-local twin of the sync tenant-context upsert used by
+/// `upsert_usage_aggregate`'s (CLI-unreachable) sync path, used only by
+/// `append_billing_event_impl`'s async transaction. Kept separate rather than
+/// converting the shared sync helper, so the untouched sync callers of
+/// `upsert_tenant_context_parts` are never put at risk by this migration.
+async fn upsert_tenant_context_async(
+    transaction: &deadpool_postgres::Transaction<'_>,
     id: &str,
     tenant: &TenantContext,
-) -> Result<(), postgres::Error> {
-    upsert_tenant_context_parts(
-        transaction,
-        id,
-        &TenantContextParts {
-            organization_id: tenant.organization_id.as_deref(),
-            team_id: tenant.team_id.as_deref(),
-            project_id: tenant.project_id.as_deref(),
-            workspace_id: tenant.workspace_id.as_deref(),
-            user_id: tenant.user_id.as_deref(),
-            api_key_id: tenant.api_key_id.as_deref(),
-        },
-    )
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO tenant_contexts \
+             (id, organization_id, team_id, project_id, workspace_id, user_id, api_key_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (id) DO NOTHING",
+            &[
+                &id,
+                &tenant.organization_id.as_deref(),
+                &tenant.team_id.as_deref(),
+                &tenant.project_id.as_deref(),
+                &tenant.workspace_id.as_deref(),
+                &tenant.user_id.as_deref(),
+                &tenant.api_key_id.as_deref(),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
+    Ok(())
 }
 
 struct TenantContextParts<'a> {
@@ -5163,12 +5235,13 @@ fn upsert_tenant_context_parts(
     Ok(())
 }
 
-fn upsert_usage_rollup_delta(
-    transaction: &mut PostgresTransaction<'_>,
+async fn upsert_usage_rollup_delta(
+    transaction: &deadpool_postgres::Transaction<'_>,
     rollup: &UsageRollupUpsert<'_>,
-) -> Result<(), postgres::Error> {
-    transaction.execute(
-        "INSERT INTO usage_aggregate_rollups \
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO usage_aggregate_rollups \
          (id, tenant_context_id, logical_model, provider, prompt_tokens, completion_tokens, \
           total_tokens, updated_at_unix) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, EXTRACT(EPOCH FROM NOW())::BIGINT) \
@@ -5177,16 +5250,18 @@ fn upsert_usage_rollup_delta(
          completion_tokens = usage_aggregate_rollups.completion_tokens + EXCLUDED.completion_tokens, \
          total_tokens = usage_aggregate_rollups.total_tokens + EXCLUDED.total_tokens, \
          updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
-        &[
-            &rollup.id,
-            &rollup.tenant_context_id,
-            &rollup.logical_model,
-            &rollup.provider,
-            &rollup.prompt_tokens,
-            &rollup.completion_tokens,
-            &rollup.total_tokens,
-        ],
-    )?;
+            &[
+                &rollup.id,
+                &rollup.tenant_context_id,
+                &rollup.logical_model,
+                &rollup.provider,
+                &rollup.prompt_tokens,
+                &rollup.completion_tokens,
+                &rollup.total_tokens,
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
     Ok(())
 }
 
@@ -5247,12 +5322,12 @@ struct UsageMonthlyDelta {
     is_error: bool,
 }
 
-fn increment_usage_monthly_rollups(
-    transaction: &mut PostgresTransaction<'_>,
+async fn increment_usage_monthly_rollups(
+    transaction: &deadpool_postgres::Transaction<'_>,
     tenant: &TenantContext,
     period_month: &str,
     delta: &UsageMonthlyDelta,
-) -> Result<(), postgres::Error> {
+) -> Result<(), StorageError> {
     let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
         (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
         (QuotaScopeKind::Project, tenant.project_id.as_deref()),
@@ -5263,18 +5338,19 @@ fn increment_usage_monthly_rollups(
         let Some(scope_id) = scope_id else {
             continue;
         };
-        upsert_usage_monthly_rollup_delta(transaction, period_month, scope_type, scope_id, delta)?;
+        upsert_usage_monthly_rollup_delta(transaction, period_month, scope_type, scope_id, delta)
+            .await?;
     }
     Ok(())
 }
 
-fn upsert_usage_monthly_rollup_delta(
-    transaction: &mut PostgresTransaction<'_>,
+async fn upsert_usage_monthly_rollup_delta(
+    transaction: &deadpool_postgres::Transaction<'_>,
     period_month: &str,
     scope_type: QuotaScopeKind,
     scope_id: &str,
     delta: &UsageMonthlyDelta,
-) -> Result<(), postgres::Error> {
+) -> Result<(), StorageError> {
     let id = usage_monthly_rollup_id(period_month, scope_type, scope_id);
     let scope_type_str = scope_type.as_str();
     let prompt_tokens = saturating_i64(delta.prompt_tokens);
@@ -5282,8 +5358,9 @@ fn upsert_usage_monthly_rollup_delta(
     let total_tokens = saturating_i64(delta.total_tokens);
     let cost_usd = delta.cost_usd;
     let error_increment: i64 = i64::from(delta.is_error);
-    transaction.execute(
-        "INSERT INTO usage_monthly_rollups \
+    transaction
+        .execute(
+            "INSERT INTO usage_monthly_rollups \
          (id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens, \
           total_tokens, cost_usd, request_count, error_count, updated_at_unix) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, EXTRACT(EPOCH FROM NOW())::BIGINT) \
@@ -5296,18 +5373,20 @@ fn upsert_usage_monthly_rollup_delta(
          request_count = usage_monthly_rollups.request_count + 1, \
          error_count = usage_monthly_rollups.error_count + EXCLUDED.error_count, \
          updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
-        &[
-            &id,
-            &period_month,
-            &scope_type_str,
-            &scope_id,
-            &prompt_tokens,
-            &completion_tokens,
-            &total_tokens,
-            &cost_usd,
-            &error_increment,
-        ],
-    )?;
+            &[
+                &id,
+                &period_month,
+                &scope_type_str,
+                &scope_id,
+                &prompt_tokens,
+                &completion_tokens,
+                &total_tokens,
+                &cost_usd,
+                &error_increment,
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
     Ok(())
 }
 
@@ -7689,6 +7768,19 @@ impl RuntimeStorageRepositories {
         &self,
         snapshot: StorageMigrationSnapshot,
     ) -> Result<(), StorageError> {
+        // One-shot CLI migration tool (`ferrogate storage migrate-to-supabase`),
+        // called from a plain sync `main()` with no tokio runtime anywhere in
+        // its call chain -- a dedicated current-thread runtime bridges the one
+        // now-async call (`append_billing_event`) rather than making this
+        // whole batch-import function (and its sync CLI caller) async.
+        let bridge_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                StorageError::Runtime(format!(
+                    "failed to build migration-import async bridge runtime: {error}"
+                ))
+            })?;
         self.replace_control_plane(snapshot.control_plane)?;
         for revision in snapshot.guardrail_policy_revisions {
             match self.insert_guardrail_policy_revision(revision) {
@@ -7710,7 +7802,7 @@ impl RuntimeStorageRepositories {
             self.upsert_control_plane_tool_approval(id, document_json)?;
         }
         for event in snapshot.billing_events {
-            self.append_billing_event(event)?;
+            bridge_runtime.block_on(self.append_billing_event(event))?;
         }
         for aggregate in snapshot.usage_aggregates {
             self.replace_usage_aggregate(aggregate)?;
@@ -8398,7 +8490,7 @@ impl RuntimeStorageRepositories {
     }
 
     /// List billing report outbox entries whose `next_attempt_unix <= now`.
-    pub fn list_due_billing_reports(
+    pub async fn list_due_billing_reports(
         &self,
         now_unix: i64,
         limit: usize,
@@ -8409,13 +8501,15 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_due_billing_reports(now_unix, limit))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_due_billing_reports(now_unix, saturating_i64(limit as u64))
+                control_plane
+                    .list_due_billing_reports(now_unix, saturating_i64(limit as u64))
+                    .await
             }
         }
     }
 
     /// Bump the attempt count and next-attempt time of a pending report.
-    pub fn reschedule_billing_report(
+    pub async fn reschedule_billing_report(
         &self,
         id: &str,
         next_attempt_unix: i64,
@@ -8428,7 +8522,9 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.reschedule_billing_report(id, next_attempt_unix)
+                control_plane
+                    .reschedule_billing_report(id, next_attempt_unix)
+                    .await
             }
         }
     }
@@ -8437,7 +8533,7 @@ impl RuntimeStorageRepositories {
     /// rescheduling it forever. The row is kept for operator inspection via
     /// [`list_dead_lettered_billing_reports`](Self::list_dead_lettered_billing_reports)
     /// and excluded from [`list_due_billing_reports`](Self::list_due_billing_reports).
-    pub fn dead_letter_billing_report(
+    pub async fn dead_letter_billing_report(
         &self,
         id: &str,
         dead_lettered_at_unix: i64,
@@ -8450,13 +8546,13 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.dead_letter_billing_report(id)
+                control_plane.dead_letter_billing_report(id).await
             }
         }
     }
 
     /// List dead-lettered billing reports, most recently given-up-on first.
-    pub fn list_dead_lettered_billing_reports(
+    pub async fn list_dead_lettered_billing_reports(
         &self,
         limit: usize,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
@@ -8466,13 +8562,15 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_dead_lettered_billing_reports(limit))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_dead_lettered_billing_reports(saturating_i64(limit as u64))
+                control_plane
+                    .list_dead_lettered_billing_reports(saturating_i64(limit as u64))
+                    .await
             }
         }
     }
 
     /// Delete a delivered report from the outbox.
-    pub fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+    pub async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8481,7 +8579,7 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_billing_report(id)
+                control_plane.delete_billing_report(id).await
             }
         }
     }
@@ -8793,10 +8891,10 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
+    pub async fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_billing_event(&event)
+                control_plane.append_billing_event(&event).await
             }
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(&event);
@@ -8849,7 +8947,7 @@ impl RuntimeStorageRepositories {
     /// [`enqueue_billing_report`](Self::enqueue_billing_report), preserving
     /// their prior non-fatal enqueue-failure semantics via
     /// [`BillingEventAppendOutcome::enqueue_error`].
-    pub fn append_billing_event_with_outbox_enqueue(
+    pub async fn append_billing_event_with_outbox_enqueue(
         &self,
         event: BillingEvent,
         outbox_id: &str,
@@ -8857,18 +8955,20 @@ impl RuntimeStorageRepositories {
     ) -> Result<BillingEventAppendOutcome, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                let recorded = control_plane.append_billing_event_with_outbox_enqueue(
-                    &event,
-                    outbox_id,
-                    outbox_next_attempt_unix,
-                )?;
+                let recorded = control_plane
+                    .append_billing_event_with_outbox_enqueue(
+                        &event,
+                        outbox_id,
+                        outbox_next_attempt_unix,
+                    )
+                    .await?;
                 Ok(BillingEventAppendOutcome {
                     recorded,
                     enqueue_error: None,
                 })
             }
             RuntimeControlPlaneBackend::Memory(_) => {
-                let recorded = self.append_billing_event(event.clone())?;
+                let recorded = self.append_billing_event(event.clone()).await?;
                 let enqueue_error = if recorded {
                     self.enqueue_billing_report(outbox_id, &event, outbox_next_attempt_unix)
                         .err()
@@ -9811,6 +9911,14 @@ mod guardrail_policy_test;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
 
     fn postgres_empty(
         provider_order: Vec<StorageProviderKind>,
@@ -11187,58 +11295,56 @@ mod tests {
             api_key_id: Some("key-a".into()),
         };
 
-        repositories
-            .append_billing_event(BillingEvent {
-                request_id: "req-1".into(),
-                trace_id: None,
-                provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-1", 0),
-                agent_run_id: None,
-                workflow_id: None,
-                workflow_version: None,
-                workflow_node_id: None,
-                cluster_id: None,
-                node_id: None,
-                tenant: tenant.clone(),
-                logical_model: "fast-chat".into(),
-                provider: "openai".into(),
-                provider_model: "gpt-4o-mini".into(),
-                usage: TokenUsage::new(100, 50, 150),
-                usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
-                status_code: 200,
-                occurred_at_unix: Some(1_783_036_800),
-                cost_usd: Some(0.01),
-                latency_ms: Some(120),
-                metadata: std::collections::BTreeMap::new(),
-                wallet_delta_credits: None,
-                wallet_balance_after_credits: None,
-            })
-            .unwrap();
-        repositories
-            .append_billing_event(BillingEvent {
-                request_id: "req-2".into(),
-                trace_id: None,
-                provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-2", 0),
-                agent_run_id: None,
-                workflow_id: None,
-                workflow_version: None,
-                workflow_node_id: None,
-                cluster_id: None,
-                node_id: None,
-                tenant: tenant.clone(),
-                logical_model: "fast-chat".into(),
-                provider: "openai".into(),
-                provider_model: "gpt-4o-mini".into(),
-                usage: TokenUsage::new(10, 5, 15),
-                usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
-                status_code: 500,
-                occurred_at_unix: Some(1_783_036_800),
-                cost_usd: Some(0.002),
-                latency_ms: Some(80),
-                metadata: std::collections::BTreeMap::new(),
-                wallet_delta_credits: None,
-                wallet_balance_after_credits: None,
-            })
-            .unwrap();
+        block_on(repositories.append_billing_event(BillingEvent {
+            request_id: "req-1".into(),
+            trace_id: None,
+            provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-1", 0),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: tenant.clone(),
+            logical_model: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            usage: TokenUsage::new(100, 50, 150),
+            usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+            status_code: 200,
+            occurred_at_unix: Some(1_783_036_800),
+            cost_usd: Some(0.01),
+            latency_ms: Some(120),
+            metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
+        }))
+        .unwrap();
+        block_on(repositories.append_billing_event(BillingEvent {
+            request_id: "req-2".into(),
+            trace_id: None,
+            provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-2", 0),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: tenant.clone(),
+            logical_model: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            usage: TokenUsage::new(10, 5, 15),
+            usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+            status_code: 500,
+            occurred_at_unix: Some(1_783_036_800),
+            cost_usd: Some(0.002),
+            latency_ms: Some(80),
+            metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
+        }))
+        .unwrap();
 
         for (scope_type, scope_id) in [
             (QuotaScopeKind::Tenant, "tenant-a"),
@@ -11308,18 +11414,14 @@ mod tests {
                 wallet_balance_after_credits: None,
             };
 
-        repositories
-            .append_billing_event(event("req-meta-1", "acme", 100, 0.01))
+        block_on(repositories.append_billing_event(event("req-meta-1", "acme", 100, 0.01)))
             .unwrap();
-        repositories
-            .append_billing_event(event("req-meta-2", "acme", 50, 0.005))
+        block_on(repositories.append_billing_event(event("req-meta-2", "acme", 50, 0.005)))
             .unwrap();
-        repositories
-            .append_billing_event(event("req-meta-3", "globex", 10, 0.001))
+        block_on(repositories.append_billing_event(event("req-meta-3", "globex", 10, 0.001)))
             .unwrap();
 
-        let acme = repositories
-            .list_usage_metadata_rollups("customer_id")
+        let acme = block_on(repositories.list_usage_metadata_rollups("customer_id"))
             .unwrap()
             .into_iter()
             .find(|rollup| rollup.metadata_value == "acme")
@@ -11328,8 +11430,7 @@ mod tests {
         assert_eq!(acme.total_tokens, 150);
         assert!((acme.cost_usd - 0.015).abs() < 1e-9, "{}", acme.cost_usd);
 
-        let globex = repositories
-            .list_usage_metadata_rollups("customer_id")
+        let globex = block_on(repositories.list_usage_metadata_rollups("customer_id"))
             .unwrap()
             .into_iter()
             .find(|rollup| rollup.metadata_value == "globex")
@@ -11340,10 +11441,11 @@ mod tests {
         // A key nothing was tagged with returns no rows -- proves rollups
         // are scoped per requested key, not a flattened union of every key
         // ever seen.
-        assert!(repositories
-            .list_usage_metadata_rollups("no_such_key")
-            .unwrap()
-            .is_empty());
+        assert!(
+            block_on(repositories.list_usage_metadata_rollups("no_such_key"))
+                .unwrap()
+                .is_empty()
+        );
 
         // The same 3 events also drove the existing tenant-scope rollup
         // (issue #171 adds a new dimension, it doesn't disturb the old one).
@@ -11361,63 +11463,57 @@ mod tests {
 
         // No wallet row yet: adjusting a nonexistent wallet is a no-op,
         // not an error -- wallets are opt-in (issue #169).
-        assert!(repositories
-            .adjust_wallet_balance("tenant-wallet", -100, 1)
+        assert!(
+            block_on(repositories.adjust_wallet_balance("tenant-wallet", -100, 1))
+                .unwrap()
+                .is_none()
+        );
+        assert!(block_on(repositories.get_wallet("tenant-wallet"))
             .unwrap()
             .is_none());
-        assert!(repositories.get_wallet("tenant-wallet").unwrap().is_none());
 
-        repositories
-            .upsert_wallet(StoredWallet {
-                id: "tenant-wallet".into(),
-                tenant_id: "tenant-wallet".into(),
-                balance_credits: 1_000,
-                auto_recharge_threshold_credits: Some(200),
-                auto_recharge_amount_credits: Some(500),
-                dunning: false,
-                created_at_unix: 1,
-                updated_at_unix: 1,
-            })
-            .unwrap();
+        block_on(repositories.upsert_wallet(StoredWallet {
+            id: "tenant-wallet".into(),
+            tenant_id: "tenant-wallet".into(),
+            balance_credits: 1_000,
+            auto_recharge_threshold_credits: Some(200),
+            auto_recharge_amount_credits: Some(500),
+            dunning: false,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
 
         // Debit: a settled request costs 300 credits.
-        let after_debit = repositories
-            .adjust_wallet_balance("tenant-wallet", -300, 2)
+        let after_debit = block_on(repositories.adjust_wallet_balance("tenant-wallet", -300, 2))
             .unwrap()
             .expect("wallet exists, must return the updated row");
         assert_eq!(after_debit.balance_credits, 700);
         assert_eq!(after_debit.updated_at_unix, 2);
 
         // Top-up (positive delta): a manual or auto-recharge credit.
-        let after_topup = repositories
-            .adjust_wallet_balance("tenant-wallet", 500, 3)
+        let after_topup = block_on(repositories.adjust_wallet_balance("tenant-wallet", 500, 3))
             .unwrap()
             .unwrap();
         assert_eq!(after_topup.balance_credits, 1_200);
 
         // Dunning state: set, then cleared by a later successful charge.
-        repositories
-            .set_wallet_dunning("tenant-wallet", true, 4)
-            .unwrap();
+        block_on(repositories.set_wallet_dunning("tenant-wallet", true, 4)).unwrap();
         assert!(
-            repositories
-                .get_wallet("tenant-wallet")
+            block_on(repositories.get_wallet("tenant-wallet"))
                 .unwrap()
                 .unwrap()
                 .dunning
         );
-        repositories
-            .set_wallet_dunning("tenant-wallet", false, 5)
-            .unwrap();
+        block_on(repositories.set_wallet_dunning("tenant-wallet", false, 5)).unwrap();
         assert!(
-            !repositories
-                .get_wallet("tenant-wallet")
+            !block_on(repositories.get_wallet("tenant-wallet"))
                 .unwrap()
                 .unwrap()
                 .dunning
         );
 
-        assert_eq!(repositories.list_wallets().unwrap().len(), 1);
+        assert_eq!(block_on(repositories.list_wallets()).unwrap().len(), 1);
     }
 
     #[test]
@@ -11433,25 +11529,30 @@ mod tests {
             is_default: true,
             created_at_unix: 1,
         };
-        repositories.upsert_payment_method(method.clone()).unwrap();
+        block_on(repositories.upsert_payment_method(method.clone())).unwrap();
         // Re-attaching the same provider-side payment method is idempotent
         // (deterministic id), not a duplicate row.
-        repositories.upsert_payment_method(method).unwrap();
+        block_on(repositories.upsert_payment_method(method)).unwrap();
 
-        let listed = repositories.list_payment_methods("tenant-pm").unwrap();
+        let listed = block_on(repositories.list_payment_methods("tenant-pm")).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].provider_payment_method_id, "pm_123");
 
-        assert!(repositories
-            .list_payment_methods("no-such-tenant")
-            .unwrap()
-            .is_empty());
+        assert!(
+            block_on(repositories.list_payment_methods("no-such-tenant"))
+                .unwrap()
+                .is_empty()
+        );
 
-        assert!(repositories
-            .delete_payment_method(&payment_method_id("tenant-pm", "stripe", "pm_123"))
-            .unwrap());
-        assert!(repositories
-            .list_payment_methods("tenant-pm")
+        assert!(
+            block_on(repositories.delete_payment_method(&payment_method_id(
+                "tenant-pm",
+                "stripe",
+                "pm_123"
+            )))
+            .unwrap()
+        );
+        assert!(block_on(repositories.list_payment_methods("tenant-pm"))
             .unwrap()
             .is_empty());
     }

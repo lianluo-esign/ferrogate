@@ -6,6 +6,14 @@
 
 use super::*;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn match_guardrail_for_test<'a>(
     state: &AppState,
     stage: crate::config::GuardrailStage,
@@ -1570,70 +1578,65 @@ fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
     };
 
     for api_key_id in ["key-a", "key-b"] {
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request_for(api_key_id),
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: Some(10),
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(1000),
-                    completion_tokens: Some(1000),
-                    total_tokens: Some(2000),
-                },
-            )
-            .unwrap();
+        block_on(state.record_billing_event(
+            BillingEventDraft {
+                request: &request_for(api_key_id),
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: Some(10),
+                metadata: None,
+            },
+            &ProviderUsage {
+                prompt_tokens: Some(1000),
+                completion_tokens: Some(1000),
+                total_tokens: Some(2000),
+            },
+        ))
+        .unwrap();
     }
 
     // Scoped to a single key: exactly one row, matching that key's own spend.
-    let key_a_rows = state
-        .usage_report(&UsageReportFilter {
-            scope_type: Some(QuotaScopeKind::Key),
-            scope_id: Some("key-a".into()),
-            ..UsageReportFilter::default()
-        })
-        .unwrap();
+    let key_a_rows = block_on(state.usage_report(&UsageReportFilter {
+        scope_type: Some(QuotaScopeKind::Key),
+        scope_id: Some("key-a".into()),
+        ..UsageReportFilter::default()
+    }))
+    .unwrap();
     assert_eq!(key_a_rows.len(), 1);
     assert_eq!(key_a_rows[0].scope_id.as_deref(), Some("key-a"));
     assert!((key_a_rows[0].cost_usd - 0.003).abs() < 1e-9);
     assert_eq!(key_a_rows[0].request_count, 1);
 
     // Both keys roll up into a single tenant-scope row.
-    let tenant_rows = state
-        .usage_report(&UsageReportFilter {
-            scope_type: Some(QuotaScopeKind::Tenant),
-            scope_id: Some("org-shared".into()),
-            ..UsageReportFilter::default()
-        })
-        .unwrap();
+    let tenant_rows = block_on(state.usage_report(&UsageReportFilter {
+        scope_type: Some(QuotaScopeKind::Tenant),
+        scope_id: Some("org-shared".into()),
+        ..UsageReportFilter::default()
+    }))
+    .unwrap();
     assert_eq!(tenant_rows.len(), 1);
     assert!((tenant_rows[0].cost_usd - 0.006).abs() < 1e-9);
     assert_eq!(tenant_rows[0].request_count, 2);
 
     // A future-only window excludes every real (current-month) row.
-    let out_of_range = state
-        .usage_report(&UsageReportFilter {
-            scope_type: Some(QuotaScopeKind::Key),
-            from_month: Some("9999-12".into()),
-            ..UsageReportFilter::default()
-        })
-        .unwrap();
+    let out_of_range = block_on(state.usage_report(&UsageReportFilter {
+        scope_type: Some(QuotaScopeKind::Key),
+        from_month: Some("9999-12".into()),
+        ..UsageReportFilter::default()
+    }))
+    .unwrap();
     assert!(out_of_range.is_empty());
 
     // group_by=period_month sums both key-scope rows (same real month)
     // into a single row, dropping the per-scope identity.
-    let grouped = state
-        .usage_report(&UsageReportFilter {
-            scope_type: Some(QuotaScopeKind::Key),
-            group_by: Some(UsageReportGroupBy::PeriodMonth),
-            ..UsageReportFilter::default()
-        })
-        .unwrap();
+    let grouped = block_on(state.usage_report(&UsageReportFilter {
+        scope_type: Some(QuotaScopeKind::Key),
+        group_by: Some(UsageReportGroupBy::PeriodMonth),
+        ..UsageReportFilter::default()
+    }))
+    .unwrap();
     assert_eq!(grouped.len(), 1);
     assert_eq!(grouped[0].scope_type, None);
     assert_eq!(grouped[0].scope_id, None);

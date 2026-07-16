@@ -497,21 +497,24 @@ impl FerroGateway {
                             if let Ok(Some(usage)) =
                                 state.extract_provider_usage(&provider.kind, &response.body)
                             {
-                                if let Err(error) = state.record_provider_attempt_billing_event(
-                                    BillingEventDraft {
-                                        request: &policy_request,
-                                        logical_model: &request.model,
-                                        provider: &provider.name,
-                                        provider_model: &model_route.provider_model,
-                                        status_code: response.status.as_u16(),
-                                        latency_ms: Some(
-                                            attempt_started_at.elapsed().as_millis() as u64
-                                        ),
-                                        metadata: request.metadata.as_ref(),
-                                    },
-                                    &provider_attempt,
-                                    &usage,
-                                ) {
+                                if let Err(error) = state
+                                    .record_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &provider_attempt,
+                                        &usage,
+                                    )
+                                    .await
+                                {
                                     write_json_error(
                                         session,
                                         StatusCode::BAD_GATEWAY,
@@ -605,21 +608,24 @@ impl FerroGateway {
                                 total_tokens = ?usage.total_tokens,
                                 "embeddings provider usage extracted"
                             );
-                            if let Err(error) = state.record_provider_attempt_billing_event(
-                                BillingEventDraft {
-                                    request: &policy_request,
-                                    logical_model: &request.model,
-                                    provider: &provider.name,
-                                    provider_model: &model_route.provider_model,
-                                    status_code: response.status.as_u16(),
-                                    latency_ms: Some(
-                                        attempt_started_at.elapsed().as_millis() as u64
-                                    ),
-                                    metadata: request.metadata.as_ref(),
-                                },
-                                &provider_attempt,
-                                &usage,
-                            ) {
+                            if let Err(error) = state
+                                .record_provider_attempt_billing_event(
+                                    BillingEventDraft {
+                                        request: &policy_request,
+                                        logical_model: &request.model,
+                                        provider: &provider.name,
+                                        provider_model: &model_route.provider_model,
+                                        status_code: response.status.as_u16(),
+                                        latency_ms: Some(
+                                            attempt_started_at.elapsed().as_millis() as u64
+                                        ),
+                                        metadata: request.metadata.as_ref(),
+                                    },
+                                    &provider_attempt,
+                                    &usage,
+                                )
+                                .await
+                            {
                                 write_json_error(
                                     session,
                                     StatusCode::BAD_GATEWAY,
@@ -646,6 +652,7 @@ impl FerroGateway {
                                 &provider_attempt,
                                 &estimated_usage,
                             )
+                            .await
                         {
                             write_json_error(
                                 session,

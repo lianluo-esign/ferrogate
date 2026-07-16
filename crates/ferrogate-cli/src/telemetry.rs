@@ -1477,6 +1477,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
     #[test]
     fn stable_trace_id_preserves_w3c_trace_ids() {
         let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -1605,31 +1613,30 @@ mod tests {
             outcome: "error".into(),
             message: "policy denied request".into(),
         });
-        state
-            .record_estimated_billing_event(
-                BillingEventDraft {
-                    request: &ferrogate_core::RequestContext {
-                        request_id: "fg-1".into(),
-                        trace_id: Some("fg-1".into()),
-                        agent_run_id: Some("agent-run-1".into()),
-                        tenant: TenantContext {
-                            organization_id: Some("org".into()),
-                            project_id: Some("project".into()),
-                            api_key_id: Some("key".into()),
-                            ..TenantContext::default()
-                        },
-                        ..ferrogate_core::RequestContext::default()
+        block_on(state.record_estimated_billing_event(
+            BillingEventDraft {
+                request: &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    agent_run_id: Some("agent-run-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
                     },
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
+                    ..ferrogate_core::RequestContext::default()
                 },
-                &ferrogate_billing::TokenUsage::new(1, 2, 3),
-            )
-            .unwrap();
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: None,
+                metadata: None,
+            },
+            &ferrogate_billing::TokenUsage::new(1, 2, 3),
+        ))
+        .unwrap();
 
         export_otlp_once(&state, &endpoint).unwrap();
         server.join().unwrap();
@@ -1736,30 +1743,29 @@ mod tests {
             outcome: "error".into(),
             message: "policy denied request".into(),
         });
-        state
-            .record_estimated_billing_event(
-                BillingEventDraft {
-                    request: &ferrogate_core::RequestContext {
-                        request_id: "fg-1".into(),
-                        trace_id: Some("fg-1".into()),
-                        tenant: TenantContext {
-                            organization_id: Some("org".into()),
-                            project_id: Some("project".into()),
-                            api_key_id: Some("key".into()),
-                            ..TenantContext::default()
-                        },
-                        ..ferrogate_core::RequestContext::default()
+        block_on(state.record_estimated_billing_event(
+            BillingEventDraft {
+                request: &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
                     },
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
+                    ..ferrogate_core::RequestContext::default()
                 },
-                &ferrogate_billing::TokenUsage::new(1, 2, 3),
-            )
-            .unwrap();
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: None,
+                metadata: None,
+            },
+            &ferrogate_billing::TokenUsage::new(1, 2, 3),
+        ))
+        .unwrap();
 
         let mut exported_request_logs = 0;
         let mut exported_audit_events = 0;
@@ -1947,30 +1953,29 @@ mod tests {
             outcome: "error".into(),
             message: "policy denied request".into(),
         });
-        state
-            .record_estimated_billing_event(
-                BillingEventDraft {
-                    request: &ferrogate_core::RequestContext {
-                        request_id: "fg-1".into(),
-                        trace_id: Some("fg-1".into()),
-                        tenant: TenantContext {
-                            organization_id: Some("org".into()),
-                            project_id: Some("project".into()),
-                            api_key_id: Some("key".into()),
-                            ..TenantContext::default()
-                        },
-                        ..ferrogate_core::RequestContext::default()
+        block_on(state.record_estimated_billing_event(
+            BillingEventDraft {
+                request: &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
                     },
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
+                    ..ferrogate_core::RequestContext::default()
                 },
-                &ferrogate_billing::TokenUsage::new(1, 2, 3),
-            )
-            .unwrap();
+                logical_model: "fast-chat",
+                provider: "openai",
+                provider_model: "gpt-4o-mini",
+                status_code: 200,
+                latency_ms: None,
+                metadata: None,
+            },
+            &ferrogate_billing::TokenUsage::new(1, 2, 3),
+        ))
+        .unwrap();
         state
     }
 }

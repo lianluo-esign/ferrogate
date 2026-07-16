@@ -10,6 +10,14 @@ fn repositories() -> RuntimeStorageRepositories {
     RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 10, 10)
 }
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn billing_event() -> BillingEvent {
     BillingEvent {
         request_id: "request-original".into(),
@@ -47,8 +55,8 @@ fn billing_event() -> BillingEvent {
 fn memory_billing_replay_does_not_increment_aggregates_or_rollups() {
     let repositories = repositories();
     let event = billing_event();
-    assert!(repositories.append_billing_event(event.clone()).unwrap());
-    assert!(!repositories.append_billing_event(event).unwrap());
+    assert!(block_on(repositories.append_billing_event(event.clone())).unwrap());
+    assert!(!block_on(repositories.append_billing_event(event)).unwrap());
 
     let aggregate = repositories.usage_aggregates().pop().unwrap();
     assert_eq!(aggregate.usage.total_tokens, 8);
@@ -65,7 +73,7 @@ fn memory_billing_replay_does_not_increment_aggregates_or_rollups() {
 fn memory_billing_attempt_key_collision_fails_closed_without_rollup_changes() {
     let repositories = repositories();
     let original = billing_event();
-    assert!(repositories.append_billing_event(original.clone()).unwrap());
+    assert!(block_on(repositories.append_billing_event(original.clone())).unwrap());
 
     let mut mutations = Vec::new();
     let mut tenant = original.clone();
@@ -98,7 +106,7 @@ fn memory_billing_attempt_key_collision_fails_closed_without_rollup_changes() {
 
     for collision in mutations {
         assert!(matches!(
-            repositories.append_billing_event(collision),
+            block_on(repositories.append_billing_event(collision)),
             Err(StorageError::Conflict(_))
         ));
     }
@@ -115,33 +123,39 @@ fn memory_billing_attempt_key_collision_fails_closed_without_rollup_changes() {
 #[test]
 fn memory_wallet_settlement_replay_returns_first_outcome_and_debits_once() {
     let repositories = repositories();
-    repositories
-        .upsert_wallet(StoredWallet {
-            id: "tenant-idempotency".into(),
-            tenant_id: "tenant-idempotency".into(),
-            balance_credits: 1_000,
-            auto_recharge_threshold_credits: None,
-            auto_recharge_amount_credits: None,
-            dunning: false,
-            created_at_unix: 1,
-            updated_at_unix: 1,
-        })
-        .unwrap();
+    block_on(repositories.upsert_wallet(StoredWallet {
+        id: "tenant-idempotency".into(),
+        tenant_id: "tenant-idempotency".into(),
+        balance_credits: 1_000,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
 
-    let first = repositories
-        .settle_wallet_balance("attempt-stable", "tenant-idempotency", -125, 2)
-        .unwrap();
-    let replay = repositories
-        .settle_wallet_balance("attempt-stable", "tenant-idempotency", -125, 99)
-        .unwrap();
+    let first = block_on(repositories.settle_wallet_balance(
+        "attempt-stable",
+        "tenant-idempotency",
+        -125,
+        2,
+    ))
+    .unwrap();
+    let replay = block_on(repositories.settle_wallet_balance(
+        "attempt-stable",
+        "tenant-idempotency",
+        -125,
+        99,
+    ))
+    .unwrap();
 
     assert!(first.newly_applied);
     assert!(!replay.newly_applied);
     assert_eq!(first.settlement, replay.settlement);
     assert_eq!(first.settlement.balance_after_credits, Some(875));
     assert_eq!(
-        repositories
-            .get_wallet("tenant-idempotency")
+        block_on(repositories.get_wallet("tenant-idempotency"))
             .unwrap()
             .unwrap()
             .balance_credits,
@@ -149,7 +163,12 @@ fn memory_wallet_settlement_replay_returns_first_outcome_and_debits_once() {
     );
 
     assert!(matches!(
-        repositories.settle_wallet_balance("attempt-stable", "tenant-idempotency", -126, 3),
+        block_on(repositories.settle_wallet_balance(
+            "attempt-stable",
+            "tenant-idempotency",
+            -126,
+            3
+        )),
         Err(StorageError::Conflict(_))
     ));
 }
@@ -157,32 +176,38 @@ fn memory_wallet_settlement_replay_returns_first_outcome_and_debits_once() {
 #[test]
 fn no_wallet_settlement_is_still_remembered_across_wallet_creation() {
     let repositories = repositories();
-    let first = repositories
-        .settle_wallet_balance("attempt-before-wallet", "tenant-later", -50, 1)
-        .unwrap();
+    let first = block_on(repositories.settle_wallet_balance(
+        "attempt-before-wallet",
+        "tenant-later",
+        -50,
+        1,
+    ))
+    .unwrap();
     assert!(first.newly_applied);
     assert_eq!(first.settlement.balance_after_credits, None);
 
-    repositories
-        .upsert_wallet(StoredWallet {
-            id: "tenant-later".into(),
-            tenant_id: "tenant-later".into(),
-            balance_credits: 500,
-            auto_recharge_threshold_credits: None,
-            auto_recharge_amount_credits: None,
-            dunning: false,
-            created_at_unix: 2,
-            updated_at_unix: 2,
-        })
-        .unwrap();
-    let replay = repositories
-        .settle_wallet_balance("attempt-before-wallet", "tenant-later", -50, 3)
-        .unwrap();
+    block_on(repositories.upsert_wallet(StoredWallet {
+        id: "tenant-later".into(),
+        tenant_id: "tenant-later".into(),
+        balance_credits: 500,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 2,
+        updated_at_unix: 2,
+    }))
+    .unwrap();
+    let replay = block_on(repositories.settle_wallet_balance(
+        "attempt-before-wallet",
+        "tenant-later",
+        -50,
+        3,
+    ))
+    .unwrap();
     assert!(!replay.newly_applied);
     assert_eq!(replay.settlement.balance_after_credits, None);
     assert_eq!(
-        repositories
-            .get_wallet("tenant-later")
+        block_on(repositories.get_wallet("tenant-later"))
             .unwrap()
             .unwrap()
             .balance_credits,

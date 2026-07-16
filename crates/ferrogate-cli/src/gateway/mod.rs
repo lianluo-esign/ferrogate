@@ -313,7 +313,7 @@ fn managed_worker_capability_policy_for_tenant(
     Ok(policy)
 }
 
-fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
+pub(crate) fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
 where
     T: Send,
 {
@@ -417,7 +417,7 @@ fn start_billing_outbox_sweeper(state: &SharedAppState) -> BillingOutboxSweeperH
             if thread_stop.load(Ordering::Relaxed) {
                 break;
             }
-            state.current().sweep_billing_outbox_once();
+            block_on_sync_bridge(state.current().sweep_billing_outbox_once());
         }
     });
     BillingOutboxSweeperHandle {

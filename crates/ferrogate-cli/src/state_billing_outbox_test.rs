@@ -10,6 +10,14 @@
 
 use super::*;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn unreachable_billing_config() -> Config {
     Config {
         billing_service: crate::config::BillingServiceConfig {
@@ -71,31 +79,30 @@ fn sweep_dead_letters_after_max_attempts_and_stops_retrying() {
     // rescheduling directly (bypassing real backoff wait times), keeping it
     // due (next_attempt_unix = 0) so the final sweep picks it up immediately.
     for _ in 0..(MAX_BILLING_OUTBOX_ATTEMPTS - 1) {
-        state
-            .repositories
-            .reschedule_billing_report(&id, 0)
+        block_on(state.repositories.reschedule_billing_report(&id, 0))
             .expect("reschedule must succeed");
     }
-    let due = state.repositories.list_due_billing_reports(0, 10).unwrap();
+    let due = block_on(state.repositories.list_due_billing_reports(0, 10)).unwrap();
     assert_eq!(due[0].attempts, MAX_BILLING_OUTBOX_ATTEMPTS - 1);
 
     // One more failed delivery attempt crosses the threshold and dead-letters.
-    state.sweep_billing_outbox_once();
+    block_on(state.sweep_billing_outbox_once());
 
-    assert!(state
-        .repositories
-        .list_due_billing_reports(0, 10)
+    assert!(block_on(state.repositories.list_due_billing_reports(0, 10))
         .unwrap()
         .is_empty());
-    let dead_letters = state.billing_outbox_dead_letters().unwrap();
+    let dead_letters = block_on(state.billing_outbox_dead_letters()).unwrap();
     assert_eq!(dead_letters.len(), 1);
     assert_eq!(dead_letters[0].id, id);
 
     // A dead-lettered entry is never picked up again, no matter how many more
     // times the sweeper runs.
-    state.sweep_billing_outbox_once();
-    state.sweep_billing_outbox_once();
-    assert_eq!(state.billing_outbox_dead_letters().unwrap().len(), 1);
+    block_on(state.sweep_billing_outbox_once());
+    block_on(state.sweep_billing_outbox_once());
+    assert_eq!(
+        block_on(state.billing_outbox_dead_letters()).unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -108,21 +115,18 @@ fn sweep_reschedules_with_backoff_before_the_attempt_threshold() {
         .enqueue_billing_report(&id, &event, 0)
         .expect("enqueue must succeed");
 
-    state.sweep_billing_outbox_once();
+    block_on(state.sweep_billing_outbox_once());
 
     // Not dead-lettered yet: rescheduled into the future instead. The sweeper
     // schedules `next_attempt_unix` from the real wall clock, so query with a
     // far-future cutoff rather than assuming a specific timestamp.
-    assert!(state.billing_outbox_dead_letters().unwrap().is_empty());
-    assert!(state
-        .repositories
-        .list_due_billing_reports(0, 10)
+    assert!(block_on(state.billing_outbox_dead_letters())
         .unwrap()
         .is_empty());
-    let rescheduled = state
-        .repositories
-        .list_due_billing_reports(i64::MAX, 10)
-        .unwrap();
+    assert!(block_on(state.repositories.list_due_billing_reports(0, 10))
+        .unwrap()
+        .is_empty());
+    let rescheduled = block_on(state.repositories.list_due_billing_reports(i64::MAX, 10)).unwrap();
     assert_eq!(rescheduled.len(), 1);
     assert_eq!(rescheduled[0].attempts, 1);
 }

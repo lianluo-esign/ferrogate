@@ -835,22 +835,38 @@ fn run_live_repository_replay(args: &SupabaseLiveRestartArgs, schema: &str) -> R
         wallet_balance_after_credits: Some(875),
     };
     let settlement_id = ferrogate_billing::ledger::ledger_entry_id(&original);
-    let first_wallet =
-        repositories.settle_wallet_balance(&settlement_id, "org_replay", -125, 1_783_641_600)?;
+    // This CLI tool has no tokio runtime anywhere in its call chain (a plain
+    // sync `main`), so bridge the now-async storage calls with a dedicated
+    // current-thread runtime rather than threading async through the whole
+    // compliance-check call graph.
+    let bridge_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build live-repository-replay async bridge runtime")?;
+    let first_wallet = bridge_runtime.block_on(repositories.settle_wallet_balance(
+        &settlement_id,
+        "org_replay",
+        -125,
+        1_783_641_600,
+    ))?;
     if !first_wallet.newly_applied || first_wallet.settlement.balance_after_credits != Some(875) {
         bail!("live repository first wallet settlement did not apply exactly once");
     }
-    if !repositories.append_billing_event(original.clone())? {
+    if !bridge_runtime.block_on(repositories.append_billing_event(original.clone()))? {
         bail!("live repository first provider attempt was not recorded");
     }
 
     let replay = original.clone();
-    let replay_wallet =
-        repositories.settle_wallet_balance(&settlement_id, "org_replay", -125, 1_783_641_999)?;
+    let replay_wallet = bridge_runtime.block_on(repositories.settle_wallet_balance(
+        &settlement_id,
+        "org_replay",
+        -125,
+        1_783_641_999,
+    ))?;
     if replay_wallet.newly_applied || replay_wallet.settlement != first_wallet.settlement {
         bail!("live repository provider-attempt replay changed wallet settlement outcome");
     }
-    if repositories.append_billing_event(replay)? {
+    if bridge_runtime.block_on(repositories.append_billing_event(replay))? {
         bail!("live repository provider-attempt replay created a second metering event");
     }
     let mut collision = original;
@@ -858,7 +874,7 @@ fn run_live_repository_replay(args: &SupabaseLiveRestartArgs, schema: &str) -> R
     collision.trace_id = None;
     collision.tenant.organization_id = Some("org_replay_collision".into());
     if !matches!(
-        repositories.append_billing_event(collision),
+        bridge_runtime.block_on(repositories.append_billing_event(collision)),
         Err(ferrogate_storage::StorageError::Conflict(_))
     ) {
         bail!("live repository accepted a changed provider-attempt payload as replay");

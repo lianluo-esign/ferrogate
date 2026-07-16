@@ -55,7 +55,7 @@ impl FerroGateway {
                         }
                     }
                 }
-                match state.usage_report(&filter) {
+                match state.usage_report(&filter).await {
                     Ok(rows) => {
                         let body = AdminList::new(rows);
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await

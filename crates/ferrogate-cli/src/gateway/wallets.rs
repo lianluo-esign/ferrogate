@@ -43,7 +43,7 @@ impl FerroGateway {
         if path == "/admin/v1/wallets" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(auth) => match state.list_wallets() {
+                    Ok(auth) => match state.list_wallets().await {
                         Ok(wallets) => {
                             let wallets =
                                 crate::auth::filter_by_tenant_scope(&auth, wallets, |wallet| {
@@ -169,7 +169,7 @@ impl FerroGateway {
                         )
                         .await;
                     }
-                    match state.get_wallet(tenant_id) {
+                    match state.get_wallet(tenant_id).await {
                         Ok(Some(wallet)) => {
                             let body = AdminWalletMutationResponse {
                                 object: "wallet",
@@ -291,7 +291,7 @@ impl FerroGateway {
             )
             .await;
         }
-        if state.get_wallet(&tenant_id).ok().flatten().is_some() {
+        if state.get_wallet(&tenant_id).await.ok().flatten().is_some() {
             return write_json_error(
                 session,
                 StatusCode::CONFLICT,
@@ -363,7 +363,7 @@ impl FerroGateway {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
-        let Some(existing) = state.get_wallet(tenant_id).ok().flatten() else {
+        let Some(existing) = state.get_wallet(tenant_id).await.ok().flatten() else {
             return write_json_error(
                 session,
                 StatusCode::NOT_FOUND,
@@ -454,7 +454,10 @@ impl FerroGateway {
             )
             .await;
         }
-        match state.adjust_wallet_balance(tenant_id, payload.delta_credits) {
+        match state
+            .adjust_wallet_balance(tenant_id, payload.delta_credits)
+            .await
+        {
             Ok(Some(wallet)) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -565,7 +568,7 @@ impl FerroGateway {
             )
             .await;
         };
-        if state.get_wallet(tenant_id).ok().flatten().is_none() {
+        if state.get_wallet(tenant_id).await.ok().flatten().is_none() {
             return write_json_error(
                 session,
                 StatusCode::NOT_FOUND,
@@ -578,10 +581,12 @@ impl FerroGateway {
         let payment_method = match payload.payment_method_id {
             Some(id) => state
                 .list_payment_methods(tenant_id)
+                .await
                 .ok()
                 .and_then(|methods| methods.into_iter().find(|method| method.id == id)),
             None => state
                 .list_payment_methods(tenant_id)
+                .await
                 .ok()
                 .and_then(|methods| methods.into_iter().find(|method| method.is_default)),
         };
@@ -635,8 +640,8 @@ impl FerroGateway {
             let credited = (amount_usd_cents as f64
                 * (ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD / 100.0))
                 .round() as i64;
-            let _ = state.set_wallet_dunning(tenant_id, false);
-            match state.adjust_wallet_balance(tenant_id, credited) {
+            let _ = state.set_wallet_dunning(tenant_id, false).await;
+            match state.adjust_wallet_balance(tenant_id, credited).await {
                 Ok(Some(wallet)) => {
                     state.record_admin_audit_event(admin_audit_event_draft_for_target(
                         ctx,
@@ -682,7 +687,7 @@ impl FerroGateway {
             // A declined charge leaves the tenant in a visible dunning
             // state rather than either silently blocking all traffic or
             // silently granting unlimited credit.
-            let _ = state.set_wallet_dunning(tenant_id, true);
+            let _ = state.set_wallet_dunning(tenant_id, true).await;
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,
@@ -696,6 +701,7 @@ impl FerroGateway {
             ));
             let wallet = state
                 .get_wallet(tenant_id)
+                .await
                 .ok()
                 .flatten()
                 .map(|wallet| admin_wallet(&wallet));
@@ -789,7 +795,7 @@ impl FerroGateway {
         success_status: StatusCode,
     ) -> PingoraResult<()> {
         let tenant_id = wallet.tenant_id.clone();
-        match state.upsert_wallet(wallet.clone()) {
+        match state.upsert_wallet(wallet.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -860,7 +866,7 @@ impl FerroGateway {
                             )
                             .await;
                         }
-                        match state.list_payment_methods(tenant_id) {
+                        match state.list_payment_methods(tenant_id).await {
                             Ok(payment_methods) => {
                                 let body = AdminList::new(
                                     payment_methods.iter().map(admin_payment_method).collect(),
@@ -942,7 +948,7 @@ impl FerroGateway {
                 // tenant-ownership check can run -- unlike every other
                 // handler here, where the tenant_id is already known from
                 // the path/query/body.
-                match state.get_payment_method(id) {
+                match state.get_payment_method(id).await {
                     Ok(Some(existing)) => {
                         if let Err(error) =
                             crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
@@ -978,7 +984,7 @@ impl FerroGateway {
                         .await;
                     }
                 }
-                match state.delete_payment_method(id) {
+                match state.delete_payment_method(id).await {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
@@ -1193,7 +1199,7 @@ impl FerroGateway {
             created_at_unix: now_unix_seconds(),
         };
         let id = payment_method.id.clone();
-        match state.upsert_payment_method(payment_method.clone()) {
+        match state.upsert_payment_method(payment_method.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

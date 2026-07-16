@@ -13,12 +13,10 @@
 
 use std::collections::BTreeMap;
 
-use postgres::Transaction as PostgresTransaction;
-
 use super::{
-    nonnegative_u64, saturating_i64, PostgresControlPlaneStore, PostgresRow, Repository,
-    RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
-    UsageMonthlyDelta,
+    nonnegative_u64, postgres_error, saturating_i64, PostgresControlPlaneStore, PostgresRow,
+    Repository, RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories,
+    StorageError, StorageOperation, UsageMonthlyDelta,
 };
 
 /// One calendar month's aggregated usage/cost for every settled request
@@ -75,12 +73,12 @@ fn usage_metadata_rollup_from_row(row: &PostgresRow) -> StoredUsageMetadataRollu
 /// request's usage/cost lands in every applicable rollup atomically or not
 /// at all. A no-op when the event carries no metadata (the common case,
 /// fully backward compatible).
-pub(super) fn increment_usage_metadata_rollups(
-    transaction: &mut PostgresTransaction<'_>,
+pub(super) async fn increment_usage_metadata_rollups(
+    transaction: &deadpool_postgres::Transaction<'_>,
     metadata: &BTreeMap<String, String>,
     period_month: &str,
     delta: &UsageMonthlyDelta,
-) -> Result<(), postgres::Error> {
+) -> Result<(), StorageError> {
     for (metadata_key, metadata_value) in metadata {
         upsert_usage_metadata_rollup_delta(
             transaction,
@@ -88,60 +86,72 @@ pub(super) fn increment_usage_metadata_rollups(
             metadata_key,
             metadata_value,
             delta,
-        )?;
+        )
+        .await?;
     }
     Ok(())
 }
 
-fn upsert_usage_metadata_rollup_delta(
-    transaction: &mut PostgresTransaction<'_>,
+async fn upsert_usage_metadata_rollup_delta(
+    transaction: &deadpool_postgres::Transaction<'_>,
     period_month: &str,
     metadata_key: &str,
     metadata_value: &str,
     delta: &UsageMonthlyDelta,
-) -> Result<(), postgres::Error> {
+) -> Result<(), StorageError> {
     let id = usage_metadata_rollup_id(period_month, metadata_key, metadata_value);
     let prompt_tokens = saturating_i64(delta.prompt_tokens);
     let completion_tokens = saturating_i64(delta.completion_tokens);
     let total_tokens = saturating_i64(delta.total_tokens);
     let cost_usd = delta.cost_usd;
     let error_increment: i64 = i64::from(delta.is_error);
-    transaction.execute(
-        "INSERT INTO usage_metadata_rollups \
-         (id, period_month, metadata_key, metadata_value, prompt_tokens, completion_tokens, \
-          total_tokens, cost_usd, request_count, error_count, updated_at_unix) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, EXTRACT(EPOCH FROM NOW())::BIGINT) \
-         ON CONFLICT (period_month, metadata_key, metadata_value) DO UPDATE SET \
-         prompt_tokens = usage_metadata_rollups.prompt_tokens + EXCLUDED.prompt_tokens, \
-         completion_tokens = \
-             usage_metadata_rollups.completion_tokens + EXCLUDED.completion_tokens, \
-         total_tokens = usage_metadata_rollups.total_tokens + EXCLUDED.total_tokens, \
-         cost_usd = usage_metadata_rollups.cost_usd + EXCLUDED.cost_usd, \
-         request_count = usage_metadata_rollups.request_count + 1, \
-         error_count = usage_metadata_rollups.error_count + EXCLUDED.error_count, \
-         updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
-        &[
-            &id,
-            &period_month,
-            &metadata_key,
-            &metadata_value,
-            &prompt_tokens,
-            &completion_tokens,
-            &total_tokens,
-            &cost_usd,
-            &error_increment,
-        ],
-    )?;
+    transaction
+        .execute(
+            "INSERT INTO usage_metadata_rollups \
+             (id, period_month, metadata_key, metadata_value, prompt_tokens, completion_tokens, \
+              total_tokens, cost_usd, request_count, error_count, updated_at_unix) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+             ON CONFLICT (period_month, metadata_key, metadata_value) DO UPDATE SET \
+             prompt_tokens = usage_metadata_rollups.prompt_tokens + EXCLUDED.prompt_tokens, \
+             completion_tokens = \
+                 usage_metadata_rollups.completion_tokens + EXCLUDED.completion_tokens, \
+             total_tokens = usage_metadata_rollups.total_tokens + EXCLUDED.total_tokens, \
+             cost_usd = usage_metadata_rollups.cost_usd + EXCLUDED.cost_usd, \
+             request_count = usage_metadata_rollups.request_count + 1, \
+             error_count = usage_metadata_rollups.error_count + EXCLUDED.error_count, \
+             updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
+            &[
+                &id,
+                &period_month,
+                &metadata_key,
+                &metadata_value,
+                &prompt_tokens,
+                &completion_tokens,
+                &total_tokens,
+                &cost_usd,
+                &error_increment,
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
     Ok(())
 }
 
 impl PostgresControlPlaneStore {
-    pub(super) fn list_usage_metadata_rollups(
+    pub(super) async fn list_usage_metadata_rollups(
         &self,
         metadata_key: &str,
     ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = StorageOperation::new(
+            "list usage metadata rollups",
+            self.async_pool.statement_timeout(),
+        );
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, period_month, metadata_key, metadata_value, prompt_tokens, \
                  completion_tokens, total_tokens, cost_usd, request_count, error_count, \
                  updated_at_unix \
@@ -149,7 +159,8 @@ impl PostgresControlPlaneStore {
                  ORDER BY period_month ASC, metadata_value ASC",
                 &[&metadata_key],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(rows.iter().map(usage_metadata_rollup_from_row).collect())
     }
 }
@@ -214,7 +225,7 @@ impl RuntimeControlPlaneState {
 impl RuntimeStorageRepositories {
     /// Per-`metadata_key` usage/cost breakdown for the P1-4 usage-report
     /// surface's `group_by=metadata.<key>` option (issue #171).
-    pub fn list_usage_metadata_rollups(
+    pub async fn list_usage_metadata_rollups(
         &self,
         metadata_key: &str,
     ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
@@ -224,7 +235,9 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_usage_metadata_rollups(metadata_key))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_usage_metadata_rollups(metadata_key)
+                control_plane
+                    .list_usage_metadata_rollups(metadata_key)
+                    .await
             }
         }
     }
