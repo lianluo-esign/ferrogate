@@ -1627,7 +1627,17 @@ fn approval_mcp_config(gateway_addr: &str, mcp_addr: &str) -> String {
 listen = "{gateway_addr}"
 
 [reliability]
-tool_approval_timeout_secs = 1
+# `tool_approvals_bind_fingerprint_and_fail_closed` has two competing timing
+# needs. Its mismatch/approve/deny cases require the pending approval to stay
+# alive until the admin decision request lands -- under full-workspace scheduler
+# contention a 1s TTL let the approval auto-expire first, so `decision()`
+# returned `tool_approval_terminal` (Expired) instead of the fingerprint/decision
+# outcome (the intermittent failure this file used to flake on). Its final case
+# deliberately leaves an execute request to *fail closed by TTL auto-expiry*, so
+# the TTL must still elapse within the client read timeout. Both hold once the
+# TTL comfortably exceeds worst-case decision latency and stays under the (now
+# 30s) client read deadline in `support::http_request`.
+tool_approval_timeout_secs = 8
 
 [[api_keys]]
 id = "admin"

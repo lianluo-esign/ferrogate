@@ -46,8 +46,14 @@ pub fn wait_for_gateway(addr: &str) {
 
 pub fn http_request(addr: &str, method: &str, path: &str, headers: &[&str], body: &str) -> String {
     let mut stream = TcpStream::connect(addr).unwrap();
+    // Generous read timeout: some endpoints (e.g. `/v1/tools/execute` gated on a
+    // tool approval that is left to fail closed by its TTL) intentionally hold
+    // the response until a server-side deadline elapses. The timeout only bounds
+    // how long a genuinely hung request waits before failing; it never changes a
+    // response, so keeping it well above any test's server-side wait avoids
+    // coupling approval-TTL choices to the client read deadline.
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     write!(
         stream,
