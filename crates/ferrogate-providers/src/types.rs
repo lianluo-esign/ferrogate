@@ -102,6 +102,13 @@ pub struct ResponsesPlan {
     pub body: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingsPlan {
+    pub logical_model: String,
+    pub provider_model: String,
+    pub body: Value,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
 
@@ -323,6 +330,16 @@ pub trait ProviderAdapter: Send + Sync {
         &self,
         _provider: ProviderConfig,
         _request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        Err(AdapterError::UnsupportedProviderKind {
+            kind: self.kind().to_string(),
+        })
+    }
+
+    fn prepare_embeddings(
+        &self,
+        _provider: ProviderConfig,
+        _request: EmbeddingsPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
         Err(AdapterError::UnsupportedProviderKind {
             kind: self.kind().to_string(),

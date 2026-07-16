@@ -13,6 +13,7 @@ mod billing_outbox;
 mod body;
 mod chat;
 mod dispatch;
+mod embeddings;
 mod external_actions;
 mod function_egress;
 mod guardrail_policies;

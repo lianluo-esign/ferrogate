@@ -65,6 +65,23 @@ impl AppState {
         )
     }
 
+    pub(crate) fn prepare_embeddings(
+        &self,
+        provider: &Provider,
+        model_route: &ModelRoute,
+        logical_model: String,
+        body: serde_json::Value,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.provider_adapters.prepare_embeddings(
+            self.provider_config(provider),
+            EmbeddingsPlan {
+                logical_model,
+                provider_model: model_route.provider_model.clone(),
+                body,
+            },
+        )
+    }
+
     pub(crate) fn provider_config(&self, provider: &Provider) -> ProviderConfig {
         let api_key = self
             .resolved_provider_secrets

@@ -5924,6 +5924,55 @@
         }
       }
     },
+    "/v1/embeddings": {
+      "post": {
+        "operationId": "createEmbedding",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Create OpenAI-compatible embeddings for one or more inputs.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "embeddings.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Create OpenAI-compatible embeddings for one or more inputs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddingsRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tools": {
       "get": {
         "operationId": "listTools",
@@ -18814,6 +18863,47 @@
         "additionalProperties": false,
         "required": [
           "model"
+        ]
+      },
+      "EmbeddingsRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "input": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "encoding_format": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "integer"
+          },
+          "user": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "model",
+          "input"
         ]
       },
       "MachineTransportRequest": {

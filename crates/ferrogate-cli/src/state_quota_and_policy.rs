@@ -1081,6 +1081,7 @@ fn guardrail_protocol_name(protocol: ferrogate_guardrails::GuardrailProtocol) ->
     match protocol {
         ferrogate_guardrails::GuardrailProtocol::ChatCompletions => "chat_completions",
         ferrogate_guardrails::GuardrailProtocol::Responses => "responses",
+        ferrogate_guardrails::GuardrailProtocol::Embeddings => "embeddings",
     }
 }
 

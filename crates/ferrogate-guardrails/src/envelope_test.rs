@@ -78,6 +78,61 @@ fn responses_request_extracts_instructions_input_and_tool_items() {
 }
 
 #[test]
+fn embeddings_request_extracts_string_input_and_metadata() {
+    let envelope = normalize_request(
+        GuardrailProtocol::Embeddings,
+        &json!({
+            "model": "text-embedding-3-small",
+            "input": "embed this",
+            "metadata": {"case": "42"}
+        }),
+    );
+    assert_eq!(envelope.segments.len(), 2);
+    assert_eq!(envelope.segments[0].source, ContentSource::User);
+    assert_eq!(envelope.segments[0].text, "embed this");
+    assert!(envelope
+        .segments
+        .iter()
+        .any(|segment| segment.source == ContentSource::Metadata));
+}
+
+#[test]
+fn embeddings_request_extracts_each_batch_item_as_its_own_segment() {
+    let envelope = normalize_request(
+        GuardrailProtocol::Embeddings,
+        &json!({
+            "model": "text-embedding-3-small",
+            "input": ["first", "second", "third"]
+        }),
+    );
+    let texts = envelope
+        .segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, vec!["first", "second", "third"]);
+    assert!(envelope
+        .segments
+        .iter()
+        .all(|segment| segment.source == ContentSource::User));
+}
+
+#[test]
+fn embeddings_response_is_never_normalized_into_content_segments() {
+    // Embeddings have no model-generated text; normalize_response's raw-body
+    // fallback would otherwise mistake the numeric embedding vector for
+    // assistant text (issue #207) -- callers must never invoke this for
+    // GuardrailProtocol::Embeddings, but the match itself stays a no-op for
+    // safety if one ever did.
+    let envelope = normalize_response(
+        GuardrailProtocol::Embeddings,
+        br#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#,
+        false,
+    );
+    assert!(envelope.segments.is_empty());
+}
+
+#[test]
 fn sse_deltas_are_assembled_before_fingerprinting() {
     let body = br#"data: {"choices":[{"delta":{"content":"split-sec"}}]}
 

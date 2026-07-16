@@ -51,6 +51,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/embeddings",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/tools",
       "group": "tool"
     },
@@ -1844,6 +1848,17 @@
       "auth": {
         "kind": "bearer",
         "scope": "responses.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/embeddings",
+      "method": "post",
+      "operation_id": "createEmbedding",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "embeddings.create"
       },
       "rbac_action": null
     },

@@ -9,10 +9,10 @@ use serde_json::Value;
 
 use crate::{
     canonical_provider_adapter_family, AdapterError, AnthropicAdapter, AzureOpenAiAdapter,
-    BedrockAdapter, ChatCompletionPlan, GeminiAdapter, GrokAdapter, OpenAiCompatibleAdapter,
-    OpenRouterAdapter, ProviderAdapter, ProviderAdapterFamily, ProviderCatalogModel,
-    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
-    ProviderUsage, ResponsesPlan, VertexAiAdapter,
+    BedrockAdapter, ChatCompletionPlan, EmbeddingsPlan, GeminiAdapter, GrokAdapter,
+    OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderAdapterFamily,
+    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -60,6 +60,15 @@ impl ProviderAdapterRegistry {
     ) -> Result<ProviderHttpRequest, AdapterError> {
         self.adapter_for(&provider.kind)?
             .prepare_responses(provider, request)
+    }
+
+    pub fn prepare_embeddings(
+        &self,
+        provider: ProviderConfig,
+        request: EmbeddingsPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.adapter_for(&provider.kind)?
+            .prepare_embeddings(provider, request)
     }
 
     pub fn prepare_model_catalog(

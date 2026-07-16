@@ -16,6 +16,10 @@ use crate::{ContentPatch, DetectorError, DetectorErrorKind, DetectorStage};
 pub enum GuardrailProtocol {
     ChatCompletions,
     Responses,
+    /// Request-only: embeddings have no model-generated text output, so no
+    /// `normalize_response`/`GuardrailStage::Response` call is ever made for
+    /// this protocol (issue #207).
+    Embeddings,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -139,22 +143,34 @@ pub fn normalize_request(protocol: GuardrailProtocol, body: &Value) -> Guardrail
     match protocol {
         GuardrailProtocol::ChatCompletions => extract_chat_request(body, &mut builder),
         GuardrailProtocol::Responses => extract_responses_request(body, &mut builder),
+        GuardrailProtocol::Embeddings => extract_embeddings_request(body, &mut builder),
     }
     builder.finish()
 }
 
+/// Never called for `GuardrailProtocol::Embeddings` -- embeddings have no
+/// model-generated text output, so callers never evaluate
+/// `GuardrailStage::Response` for that protocol (issue #207). The match stays
+/// exhaustive so a future protocol addition cannot silently skip this stage.
 pub fn normalize_response(
     protocol: GuardrailProtocol,
     body: &[u8],
     streaming: bool,
 ) -> GuardrailEnvelope {
     let mut builder = EnvelopeBuilder::new(protocol, DetectorStage::Response);
+    if matches!(protocol, GuardrailProtocol::Embeddings) {
+        // No model-generated text to inspect; skip both extraction and the
+        // raw-body fallback below so a caller can never mistake a numeric
+        // embedding vector for assistant text.
+        return builder.finish();
+    }
     if streaming {
         extract_sse(protocol, body, &mut builder);
     } else if let Ok(value) = serde_json::from_slice::<Value>(body) {
         match protocol {
             GuardrailProtocol::ChatCompletions => extract_chat_response(&value, &mut builder),
             GuardrailProtocol::Responses => extract_responses_response(&value, &mut builder),
+            GuardrailProtocol::Embeddings => unreachable!("returned above"),
         }
     }
     if builder.is_empty() && !body.is_empty() {
@@ -264,6 +280,28 @@ fn extract_responses_request(body: &Value, builder: &mut EnvelopeBuilder) {
         _ => {}
     }
     extract_tools(body.get("tools"), "tools", builder);
+    extract_metadata(body.get("metadata"), builder);
+}
+
+fn extract_embeddings_request(body: &Value, builder: &mut EnvelopeBuilder) {
+    match body.get("input") {
+        Some(Value::String(text)) => {
+            builder.push(ContentSource::User, "input", SegmentContentType::Text, text)
+        }
+        Some(Value::Array(items)) => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(text) = item.as_str() {
+                    builder.push(
+                        ContentSource::User,
+                        format!("input[{index}]"),
+                        SegmentContentType::Text,
+                        text,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
     extract_metadata(body.get("metadata"), builder);
 }
 
@@ -489,6 +527,7 @@ fn extract_sse(protocol: GuardrailProtocol, body: &[u8], builder: &mut EnvelopeB
             GuardrailProtocol::Responses => {
                 accumulate_responses_sse(event, &value, &mut accumulated)
             }
+            GuardrailProtocol::Embeddings => {}
         }
     }
     for ((source, location), text) in accumulated {
@@ -601,6 +640,7 @@ fn protocol_name(protocol: GuardrailProtocol) -> &'static str {
     match protocol {
         GuardrailProtocol::ChatCompletions => "chat",
         GuardrailProtocol::Responses => "responses",
+        GuardrailProtocol::Embeddings => "embeddings",
     }
 }
 
