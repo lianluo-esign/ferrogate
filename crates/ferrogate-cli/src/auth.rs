@@ -20,6 +20,12 @@ use crate::{config::ApiKey, state::AppState};
 use ferrogate_auth::ApiKeyAuthenticator;
 use ferrogate_core::TenantContext;
 
+/// Explicit "all scopes" marker. An operator-authored static config key (or
+/// auth-disabled mode) that wants unrestricted access carries this instead of
+/// relying on an empty scope list -- which, for durable/API-created keys, now
+/// means "data-plane only, no admin".
+pub(crate) const WILDCARD_SCOPE: &str = "*";
+
 #[derive(Debug, Clone)]
 pub(crate) struct AuthContext {
     #[allow(dead_code)]
@@ -54,10 +60,11 @@ pub(crate) struct AuthContext {
 }
 
 impl AuthContext {
-    /// A privileged scope must always be granted explicitly -- it is NOT
-    /// conferred by the "empty set means all data-plane scopes" convenience
-    /// default. Today that is the `admin.*` family (admin.read/admin.write),
-    /// the only non-data-plane scopes gated by `authenticate`.
+    /// A privileged scope must always be granted explicitly (or via the `*`
+    /// wildcard) -- it is NOT conferred by the "empty set means all data-plane
+    /// scopes" convenience default. Today that is the `admin.*` family
+    /// (admin.read/admin.write), the only non-data-plane scopes gated by
+    /// `authenticate`.
     pub(crate) fn is_privileged_scope(scope: &str) -> bool {
         scope.starts_with("admin.")
     }
@@ -66,12 +73,19 @@ impl AuthContext {
         if self.scopes.contains(scope) {
             return true;
         }
-        // An empty scope set is the data-plane convenience default ("all
-        // ordinary scopes"), relied on by keys minted without an explicit
-        // scope list. It must NEVER confer a privileged `admin.*` scope --
-        // otherwise a virtual/data-plane key created with no scopes would
-        // silently become a full tenant admin (round-7 finding). Admin scopes
-        // require explicit membership.
+        // An explicit `*` wildcard grants every scope, including `admin.*`. It
+        // is set for operator-authored *static config* keys (and auth-disabled
+        // mode) that historically used an EMPTY scope list to mean "all
+        // access" -- that intent is preserved, just made explicit.
+        if self.scopes.contains(WILDCARD_SCOPE) {
+            return true;
+        }
+        // A residual empty scope set means a durable/API-created (virtual) key
+        // minted without explicit scopes: it grants ordinary data-plane scopes
+        // (the convenience default relied on by such keys) but NEVER a
+        // privileged `admin.*` scope -- otherwise a tenant admin creating a
+        // virtual key with no scopes would silently mint a full tenant-admin
+        // credential (round-7 finding).
         self.scopes.is_empty() && !Self::is_privileged_scope(scope)
     }
 
@@ -347,7 +361,9 @@ pub(crate) fn authenticate(
         return Ok(AuthContext {
             region_allowlist: HashSet::new(),
             api_key_id: None,
-            scopes: HashSet::new(),
+            // Auth disabled (zero-config): unrestricted access, carried as an
+            // explicit wildcard so it survives the empty-set-is-not-admin rule.
+            scopes: HashSet::from([WILDCARD_SCOPE.to_string()]),
             allowed_models: HashSet::new(),
             denied_models: HashSet::new(),
             allowed_providers: HashSet::new(),
@@ -415,7 +431,16 @@ pub(crate) fn authenticate(
             let auth = AuthContext {
                 region_allowlist: configured_key.region_allowlist.iter().cloned().collect(),
                 api_key_id: Some(configured_key.id.clone()),
-                scopes: configured_key.scopes.iter().cloned().collect(),
+                // A STATIC config key is operator-authored: an empty scope list
+                // has always meant "all access" (including admin), so preserve
+                // that intent as an explicit wildcard. Durable/virtual keys
+                // (authenticate_durable) keep an empty set, which now grants
+                // data-plane scopes only -- never admin.
+                scopes: if configured_key.scopes.is_empty() {
+                    HashSet::from([WILDCARD_SCOPE.to_string()])
+                } else {
+                    configured_key.scopes.iter().cloned().collect()
+                },
                 allowed_models: configured_key.allowed_models.iter().cloned().collect(),
                 denied_models: configured_key.denied_models.iter().cloned().collect(),
                 allowed_providers: configured_key.allowed_providers.iter().cloned().collect(),

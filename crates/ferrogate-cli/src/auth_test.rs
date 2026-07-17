@@ -878,6 +878,13 @@ fn empty_scope_set_grants_data_plane_scopes_but_never_admin_scopes() {
     // An explicit admin key does not implicitly gain data-plane scopes.
     assert!(!admin.has_scope("chat.completions"));
 
+    // The explicit "*" wildcard (operator-authored static config keys /
+    // auth-disabled mode) grants EVERY scope, including admin.*.
+    let wildcard = auth_with_scopes(&["*"]);
+    assert!(wildcard.has_scope("chat.completions"));
+    assert!(wildcard.has_scope("admin.read"));
+    assert!(wildcard.has_scope("admin.write"));
+
     assert!(AuthContext::is_privileged_scope("admin.read"));
     assert!(!AuthContext::is_privileged_scope("chat.completions"));
 }

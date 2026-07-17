@@ -1013,9 +1013,21 @@ impl FerroGateway {
                             }
 
                             state.record_provider_success(&provider.name);
-                            if let Some(reservation) = token_reservation.take() {
-                                reservation.settle();
-                            }
+                            // Do NOT settle the token reservation here. Settling
+                            // at stream-header arrival released the reserved
+                            // budget while the stream was still generating (and
+                            // billing real tokens), and the stream's actual usage
+                            // is only recorded at completion (record_stream_usage
+                            // below) -- so between header arrival and stream end
+                            // the request counted as neither reserved nor used,
+                            // letting concurrent streams overrun the monthly
+                            // budget. The reservation is RAII (Drop releases the
+                            // reserved counter on every exit path, including
+                            // mid-stream error/disconnect), so keeping it in
+                            // `token_reservation` holds the budget for the stream
+                            // and releases it when the handler returns -- after
+                            // the usage has been recorded. Non-streaming settles
+                            // similarly (record billing, then settle).
                             let record_bodies =
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
                             let record_stream_usage = async |stream_body: Option<&[u8]>| {
