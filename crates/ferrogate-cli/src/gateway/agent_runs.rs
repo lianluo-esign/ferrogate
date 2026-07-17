@@ -82,6 +82,10 @@ struct AgentWorkflowUse {
     id: String,
     version: u32,
     node_id: String,
+    /// The tool this workflow node is restricted to, if any (`node.tool`).
+    /// Enforced fail-closed against the tool that is ACTUALLY dispatched, not
+    /// just the caller-declared `tool_calls`.
+    node_tool: Option<String>,
 }
 
 impl FerroGateway {
@@ -604,7 +608,36 @@ fn agent_workflow_use(
         id: workflow.id.clone(),
         version: workflow.version,
         node_id: node_id.to_string(),
+        // Capture the node's declared tool restriction unconditionally (even
+        // when `request.tool_calls` is empty) so the dispatcher can enforce it
+        // against the tool that is actually dispatched at runtime.
+        node_tool: node.tool.clone(),
     }))
+}
+
+/// Fail-closed enforcement of a workflow node's declared tool allowlist against
+/// the tool that is ACTUALLY dispatched, rather than the caller-declared
+/// `tool_calls` metadata.
+///
+/// Returns `Some(denial_message)` when the dispatch is bound to a workflow node
+/// (`workflow_use` present) that restricts execution to a specific tool
+/// (`node_tool` is `Some`) and the dispatched tool name differs. Non-workflow
+/// dispatches (`workflow_use` absent) and nodes without a declared tool
+/// restriction (`node_tool` is `None`) are always allowed, preserving existing
+/// behaviour.
+fn workflow_node_tool_denial(
+    workflow_use: Option<&AgentWorkflowUse>,
+    dispatched_tool: &str,
+) -> Option<String> {
+    let workflow_use = workflow_use?;
+    let node_tool = workflow_use.node_tool.as_deref()?;
+    if dispatched_tool == node_tool {
+        return None;
+    }
+    Some(format!(
+        "scope_denied: workflow node {} is restricted to tool {node_tool}; dispatch of tool {dispatched_tool} is not allowed",
+        workflow_use.node_id
+    ))
 }
 
 fn can_use_workflow(auth: &AuthContext, workflow: &AgentWorkflowPolicy) -> bool {
@@ -800,6 +833,16 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
             return Err(AgentRuntimeError::ToolDispatch(
                 "scope_denied: API key does not have required scope tools.execute".to_string(),
             ));
+        }
+        // Fail closed: a workflow node restricted to a specific tool must never
+        // dispatch a different tool, regardless of what the caller declared in
+        // `tool_calls` (which may be empty or mismatched vs. the model's actual
+        // tool call). This is the authoritative allowlist gate.
+        if let Some(message) =
+            workflow_node_tool_denial(self.workflow_use.as_ref(), &request.tool_call.name)
+        {
+            self.record_capability_event(&request, "denied", message.clone());
+            return Err(AgentRuntimeError::ToolDispatch(message));
         }
         let scripted = self
             .scripted_tool_calls
@@ -1313,5 +1356,55 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("not allowed by capability policy"));
+    }
+
+    fn workflow_use_with_tool(node_tool: Option<&str>) -> AgentWorkflowUse {
+        AgentWorkflowUse {
+            id: "wf-tool-guard".to_string(),
+            version: 1,
+            node_id: "node-tool".to_string(),
+            node_tool: node_tool.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn workflow_node_tool_allowlist_is_enforced_against_the_dispatched_tool() {
+        let restricted = workflow_use_with_tool(Some("allowed_tool"));
+
+        // The declared allowlist tool is permitted.
+        assert!(
+            workflow_node_tool_denial(Some(&restricted), "allowed_tool").is_none(),
+            "the tool the node is restricted to must be allowed to dispatch"
+        );
+
+        // A DIFFERENT tool than the node's declared allowlist must fail closed,
+        // even though the caller-declared tool_calls check may have passed (or
+        // been empty). This is the authorization-bypass fix.
+        let denial = workflow_node_tool_denial(Some(&restricted), "other_tool")
+            .expect("dispatching a tool other than the node's restricted tool must be denied");
+        assert!(
+            denial.starts_with("scope_denied:"),
+            "denial must be a fail-closed scope_denied message, got: {denial}"
+        );
+        assert!(
+            denial.contains("allowed_tool") && denial.contains("other_tool"),
+            "denial must name both the restricted tool and the rejected tool, got: {denial}"
+        );
+    }
+
+    #[test]
+    fn workflow_node_tool_denial_ignores_non_workflow_and_unrestricted_nodes() {
+        // Non-workflow dispatch (no workflow_use) is unaffected.
+        assert!(
+            workflow_node_tool_denial(None, "any_tool").is_none(),
+            "non-workflow dispatches must not be gated by node.tool"
+        );
+
+        // A workflow node without a declared tool restriction is unaffected.
+        let unrestricted = workflow_use_with_tool(None);
+        assert!(
+            workflow_node_tool_denial(Some(&unrestricted), "any_tool").is_none(),
+            "nodes without a declared tool restriction must allow any dispatched tool"
+        );
     }
 }
