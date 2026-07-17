@@ -171,3 +171,52 @@ data: {"type":"response.function_call_arguments.delta","index":0,"delta":"1}"}
         .iter()
         .any(|segment| segment.text == "{\"a\":1}"));
 }
+
+#[test]
+fn managed_action_input_envelope_is_tool_arguments() {
+    // #200: an action's input arguments become a ToolArguments segment under
+    // the ManagedAction protocol at the Request stage.
+    let envelope = GuardrailEnvelope::managed_action(
+        DetectorStage::Request,
+        "mcp:github/create_issue/arguments",
+        r#"{"title":"leak","body":"sk-secret"}"#,
+    );
+    assert_eq!(envelope.protocol, GuardrailProtocol::ManagedAction);
+    assert_eq!(envelope.stage, DetectorStage::Request);
+    assert_eq!(envelope.segments.len(), 1);
+    let segment = &envelope.segments[0];
+    assert_eq!(segment.source, ContentSource::ToolArguments);
+    assert_eq!(
+        segment.protocol_location,
+        "mcp:github/create_issue/arguments"
+    );
+    assert!(envelope.flattened_text().contains("sk-secret"));
+}
+
+#[test]
+fn managed_action_output_envelope_is_tool_result() {
+    // #200: an action's result becomes a ToolResult segment at the Response
+    // stage (output guardrail — quarantine/redact before it reaches the model).
+    let envelope = GuardrailEnvelope::managed_action(
+        DetectorStage::Response,
+        "cli:bash/result",
+        "total 4\n-rw------- 1 root root /etc/shadow",
+    );
+    assert_eq!(envelope.protocol, GuardrailProtocol::ManagedAction);
+    assert_eq!(envelope.stage, DetectorStage::Response);
+    assert_eq!(envelope.segments[0].source, ContentSource::ToolResult);
+    assert!(envelope.flattened_text().contains("/etc/shadow"));
+}
+
+#[test]
+fn managed_action_envelope_is_never_produced_by_http_extractors() {
+    // Managed actions are built directly; the HTTP normalizers yield an empty
+    // envelope for the ManagedAction protocol (they are never called for it).
+    let req = normalize_request(
+        GuardrailProtocol::ManagedAction,
+        &serde_json::json!({"a":1}),
+    );
+    assert!(req.segments.is_empty());
+    let resp = normalize_response(GuardrailProtocol::ManagedAction, b"{\"a\":1}", false);
+    assert!(resp.segments.is_empty());
+}

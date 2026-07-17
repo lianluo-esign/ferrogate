@@ -1098,6 +1098,7 @@ fn guardrail_protocol_name(protocol: ferrogate_guardrails::GuardrailProtocol) ->
         ferrogate_guardrails::GuardrailProtocol::ChatCompletions => "chat_completions",
         ferrogate_guardrails::GuardrailProtocol::Responses => "responses",
         ferrogate_guardrails::GuardrailProtocol::Embeddings => "embeddings",
+        ferrogate_guardrails::GuardrailProtocol::ManagedAction => "managed_action",
     }
 }
 

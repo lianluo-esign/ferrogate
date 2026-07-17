@@ -20,6 +20,13 @@ pub enum GuardrailProtocol {
     /// `normalize_response`/`GuardrailStage::Response` call is ever made for
     /// this protocol (issue #207).
     Embeddings,
+    /// A managed MCP/Tool/CLI/filesystem/network/secret/REST action (issue
+    /// #200). Its envelope is built directly from the action's arguments
+    /// (input, `Request` stage) or result (output, `Response` stage) via
+    /// [`GuardrailEnvelope::managed_action`], not from an HTTP body, so the
+    /// HTTP `normalize_request`/`normalize_response` extractors are never
+    /// invoked for it.
+    ManagedAction,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,6 +132,29 @@ impl GuardrailEnvelope {
         }
     }
 
+    /// Builds a single-segment envelope for a managed action (issue #200):
+    /// the action's input arguments (`DetectorStage::Request`) or output result
+    /// (`DetectorStage::Response`), tagged so detectors and evidence see it as
+    /// tool arguments / tool result. `protocol_location` identifies the action
+    /// (e.g. `"mcp:github/create_issue/arguments"`).
+    pub fn managed_action(
+        stage: DetectorStage,
+        protocol_location: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let source = match stage {
+            DetectorStage::Request => ContentSource::ToolArguments,
+            DetectorStage::Response => ContentSource::ToolResult,
+        };
+        Self::from_text(
+            GuardrailProtocol::ManagedAction,
+            stage,
+            source,
+            protocol_location,
+            text,
+        )
+    }
+
     pub fn flattened_text(&self) -> String {
         self.segments
             .iter()
@@ -144,6 +174,9 @@ pub fn normalize_request(protocol: GuardrailProtocol, body: &Value) -> Guardrail
         GuardrailProtocol::ChatCompletions => extract_chat_request(body, &mut builder),
         GuardrailProtocol::Responses => extract_responses_request(body, &mut builder),
         GuardrailProtocol::Embeddings => extract_embeddings_request(body, &mut builder),
+        // #200: managed actions never reach the HTTP-body extractor — their
+        // envelope is built directly via `GuardrailEnvelope::managed_action`.
+        GuardrailProtocol::ManagedAction => {}
     }
     builder.finish()
 }
@@ -158,10 +191,14 @@ pub fn normalize_response(
     streaming: bool,
 ) -> GuardrailEnvelope {
     let mut builder = EnvelopeBuilder::new(protocol, DetectorStage::Response);
-    if matches!(protocol, GuardrailProtocol::Embeddings) {
-        // No model-generated text to inspect; skip both extraction and the
-        // raw-body fallback below so a caller can never mistake a numeric
-        // embedding vector for assistant text.
+    if matches!(
+        protocol,
+        GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction
+    ) {
+        // Embeddings have no model-generated text; managed-action outputs
+        // (#200) are evaluated via `GuardrailEnvelope::managed_action`, never
+        // this HTTP normalizer. Skip extraction and the raw-body fallback so a
+        // caller can never mistake either for assistant text.
         return builder.finish();
     }
     if streaming {
@@ -170,7 +207,9 @@ pub fn normalize_response(
         match protocol {
             GuardrailProtocol::ChatCompletions => extract_chat_response(&value, &mut builder),
             GuardrailProtocol::Responses => extract_responses_response(&value, &mut builder),
-            GuardrailProtocol::Embeddings => unreachable!("returned above"),
+            GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction => {
+                unreachable!("returned above")
+            }
         }
     }
     if builder.is_empty() && !body.is_empty() {
@@ -527,7 +566,8 @@ fn extract_sse(protocol: GuardrailProtocol, body: &[u8], builder: &mut EnvelopeB
             GuardrailProtocol::Responses => {
                 accumulate_responses_sse(event, &value, &mut accumulated)
             }
-            GuardrailProtocol::Embeddings => {}
+            // #200: managed actions do not stream via SSE.
+            GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction => {}
         }
     }
     for ((source, location), text) in accumulated {
@@ -641,6 +681,7 @@ fn protocol_name(protocol: GuardrailProtocol) -> &'static str {
         GuardrailProtocol::ChatCompletions => "chat",
         GuardrailProtocol::Responses => "responses",
         GuardrailProtocol::Embeddings => "embeddings",
+        GuardrailProtocol::ManagedAction => "managed_action",
     }
 }
 
