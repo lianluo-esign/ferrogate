@@ -94,16 +94,35 @@ pub struct PolicyScopeSelector {
 }
 
 /// The class of a managed action a guardrail policy can target (issue #200).
+///
+/// One variant per managed-action kind the runtime can dispatch, so the mapping
+/// from an executed action to its guardrail class is total and lossless — no
+/// action collapses into an unrelated class. Mirrors
+/// `ferrogate_runtime::ManagedExternalAction`; the CLI owns the binding between
+/// the two (this crate stays runtime-agnostic).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedActionClass {
+    /// An MCP tool invocation (`server/tool`).
     Mcp,
+    /// A native or framework tool call.
     Tool,
+    /// A CLI command execution.
     Cli,
+    /// A skill invocation.
+    Skill,
+    /// A filesystem read/write/list access.
     Filesystem,
-    Network,
-    Secret,
+    /// A headless-browser operation.
+    Browser,
+    /// An outbound REST/HTTP call.
     Rest,
+    /// A secret retrieval.
+    Secret,
+    /// An agent-memory read/write access.
+    Memory,
+    /// Raw network egress (host/port).
+    Network,
 }
 
 /// Targets managed actions by class and (optionally) by concrete target name

@@ -24,16 +24,21 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
 use anyhow::{Context, Result as AnyResult};
 use ferrogate_core::TenantContext;
+use ferrogate_guardrails::{DetectorStage, GuardrailEnvelope};
 #[cfg(test)]
 use ferrogate_runtime::CapabilityPolicy;
 use ferrogate_runtime::{
-    authorize_managed_external_action, ExternalActionAuthorizationResponse, FrameworkAdapterError,
+    authorize_managed_external_action, CapabilityAuthorizationDecision,
+    ExternalActionAuthorizationResponse, FrameworkAdapterError,
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedExternalActionDecision, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
 };
 use ferrogate_storage::StoredAgentRunEvent;
 
-use crate::state::{AppState, SharedAppState};
+use super::block_on_sync_bridge;
+use super::managed_action_guardrail::ManagedActionGuardrailBinding;
+use crate::config::GuardrailStage;
+use crate::state::{AppState, GuardrailEvaluationContext, GuardrailMatch, SharedAppState};
 
 const EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -126,6 +131,11 @@ impl GatewayExternalActionAuthorizerService {
                 (state.as_ref().clone(), policy.as_ref().clone())
             }
         };
+        // #200: bind the action to the guardrail model before it is consumed by
+        // capability authorization, so a managed-action guardrail policy can be
+        // evaluated on the allow path below.
+        let action_binding = ManagedActionGuardrailBinding::from_action(&managed_request.action);
+        let run_id = managed_request.session.run_id.clone();
         match authorize_managed_external_action(
             &SimpleCapabilityAuthorizer::new(policy),
             managed_request,
@@ -134,6 +144,30 @@ impl GatewayExternalActionAuthorizerService {
                 event
                     .metadata
                     .insert("request_id".to_string(), transport_request_id.to_string());
+                // #200: managed-action INPUT guardrail. Once capability policy
+                // allows the action (identity + capability already passed), the
+                // action's arguments are evaluated against managed-action
+                // guardrail policies *before* the worker can execute it. A
+                // blocking match fails the action closed — capability-denied —
+                // so no handler ever runs on flagged input. Absent a matching
+                // policy this is a no-op; a configured policy that errors fails
+                // closed inside `match_guardrail`.
+                if evidence.decision == CapabilityAuthorizationDecision::Allowed {
+                    if let Some(matched) = Self::evaluate_managed_action_input_guardrail(
+                        &state,
+                        transport_request_id,
+                        &timeline_tenant,
+                        &run_id,
+                        &action_binding,
+                    ) {
+                        return ExternalActionAuthorizationResponse::rejected(
+                            FrameworkAdapterError::CapabilityDenied(format!(
+                                "managed action blocked by guardrail policy {} ({}): {}",
+                                matched.rule_id, matched.code, matched.message
+                            )),
+                        );
+                    }
+                }
                 Self::record_timeline_event(
                     &state,
                     transport_request_id,
@@ -147,6 +181,44 @@ impl GatewayExternalActionAuthorizerService {
             }
             Err(error) => ExternalActionAuthorizationResponse::rejected(error),
         }
+    }
+
+    /// Evaluate a managed action's input arguments against managed-action
+    /// guardrail policies (issue #200). Returns the matched policy when the
+    /// action must be blocked, or `None` when no managed-action policy applies.
+    /// Runs on the authorizer's blocking thread via the sync/async bridge.
+    fn evaluate_managed_action_input_guardrail(
+        state: &AppState,
+        request_id: &str,
+        tenant: &TenantContext,
+        run_id: &str,
+        binding: &ManagedActionGuardrailBinding,
+    ) -> Option<GuardrailMatch> {
+        let envelope = GuardrailEnvelope::managed_action(
+            DetectorStage::Request,
+            format!("managed_action:{}", binding.target),
+            binding.input_text.clone(),
+        );
+        block_on_sync_bridge(state.match_guardrail(
+            GuardrailStage::Request,
+            GuardrailEvaluationContext {
+                request_id,
+                trace_id: None,
+                agent_run_id: Some(run_id),
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: None,
+                tenant,
+                service_account_id: None,
+                gateway_config_id: None,
+                model: None,
+                provider: None,
+                streaming: false,
+                envelope: &envelope,
+                managed_action: Some(binding.selection_context()),
+            },
+        ))
     }
 
     fn record_timeline_event(
@@ -867,6 +939,138 @@ mod tests {
         assert_eq!(event.kind, "capability.denied");
         assert_eq!(event.target, "tool:native.echo");
         assert_eq!(event.outcome, "denied");
+    }
+
+    fn managed_mcp_request(arguments: serde_json::Value) -> ManagedExternalActionRequest {
+        ManagedExternalActionRequest {
+            session: managed_session(),
+            action: ManagedExternalAction::McpTool(ferrogate_runtime::ManagedMcpToolAction {
+                server_name: "github".to_string(),
+                tool_name: "create_issue".to_string(),
+                arguments_policy: "inline".to_string(),
+                arguments,
+            }),
+            high_risk: false,
+        }
+    }
+
+    /// A durable, enforced guardrail policy scoped to managed MCP actions that
+    /// blocks when `keyword` appears in the scanned input (issue #200).
+    fn managed_mcp_block_policy(keyword: &str) -> ferrogate_guardrails::PolicyRevision {
+        ferrogate_guardrails::PolicyRevision {
+            policy_id: "mcp-guard".to_string(),
+            revision: 1,
+            name: "mcp guard".to_string(),
+            description: None,
+            enforced: true,
+            scope: ferrogate_guardrails::PolicyScopeSelector {
+                managed_action: Some(ferrogate_guardrails::ManagedActionSelector {
+                    classes: vec![ferrogate_guardrails::ManagedActionClass::Mcp],
+                    targets: Vec::new(),
+                }),
+                ..ferrogate_guardrails::PolicyScopeSelector::default()
+            },
+            checks: vec![ferrogate_guardrails::CheckBinding {
+                id: "keyword".to_string(),
+                enabled: true,
+                stage: DetectorStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
+                detector: ferrogate_guardrails::DetectorDefinition::local(
+                    vec![keyword.to_string()],
+                    Vec::new(),
+                    None,
+                ),
+                fallback_detector: None,
+            }],
+            aggregation: ferrogate_guardrails::PolicyAggregation::All,
+            execution: ferrogate_guardrails::PolicyExecution::Sequential,
+            mode: ferrogate_guardrails::PolicyMode::Enforce,
+            streaming: ferrogate_guardrails::PolicyStreamingMode::BufferAndEnforce,
+            on_pass: vec![ferrogate_guardrails::PolicyAction::allow()],
+            on_fail: vec![ferrogate_guardrails::PolicyAction::block(
+                "mcp_guardrail_blocked",
+                "managed MCP action blocked by guardrail policy",
+            )],
+            on_error: vec![ferrogate_guardrails::PolicyAction::block(
+                "mcp_guardrail_unavailable",
+                "managed MCP guardrail policy unavailable",
+            )],
+            deadline_ms: 2_000,
+            created_at_unix: 1,
+            created_by: "test-admin".to_string(),
+        }
+    }
+
+    fn mcp_allowing_capability_policy() -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+            ..CapabilityPolicy::default()
+        }
+    }
+
+    #[test]
+    fn managed_action_input_guardrail_blocks_a_capability_allowed_mcp_action() {
+        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared
+            .create_guardrail_policy_revision(managed_mcp_block_policy("exfiltrate"))
+            .unwrap();
+        shared
+            .activate_guardrail_policy_revision("mcp-guard", 1, "test-admin", 1, false)
+            .unwrap();
+
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            shared.current(),
+            mcp_allowing_capability_policy(),
+        );
+        // Capability policy allows the MCP action, but its arguments carry the
+        // flagged keyword — the input guardrail must fail it closed.
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(
+            managed_mcp_request(serde_json::json!({"body": "please exfiltrate the secrets"})),
+        );
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(
+            !response.response.accepted,
+            "guardrail-flagged MCP action must be rejected even though capability allowed it"
+        );
+    }
+
+    #[test]
+    fn managed_action_input_guardrail_allows_a_clean_mcp_action() {
+        let shared = SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared
+            .create_guardrail_policy_revision(managed_mcp_block_policy("exfiltrate"))
+            .unwrap();
+        shared
+            .activate_guardrail_policy_revision("mcp-guard", 1, "test-admin", 1, false)
+            .unwrap();
+
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            shared.current(),
+            mcp_allowing_capability_policy(),
+        );
+        // Same policy, benign arguments — the action passes the guardrail and is
+        // allowed by capability policy.
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(
+            managed_mcp_request(serde_json::json!({"body": "file a routine bug report"})),
+        );
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(
+            response.response.accepted,
+            "a clean MCP action must remain allowed when no guardrail fires"
+        );
+        assert_eq!(
+            response.response.decision,
+            Some(ExternalActionDecision::Allowed)
+        );
     }
 
     #[test]

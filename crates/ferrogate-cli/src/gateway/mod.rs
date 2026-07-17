@@ -19,6 +19,7 @@ mod function_egress;
 mod guardrail_policies;
 mod handlers;
 mod local;
+mod managed_action_guardrail;
 mod mcp_identity;
 mod mcp_rpc;
 pub(crate) mod payments;

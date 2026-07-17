@@ -314,6 +314,31 @@ fn managed_action_selector_matches_by_class_and_target() {
 }
 
 #[test]
+fn managed_action_class_serializes_every_variant_in_snake_case() {
+    // #200: ManagedActionClass is a persisted guardrail-policy contract mirroring
+    // the runtime action taxonomy — every variant must round-trip in snake_case,
+    // including skill/browser/memory added alongside the enforcement seams.
+    let cases = [
+        (ManagedActionClass::Mcp, "\"mcp\""),
+        (ManagedActionClass::Tool, "\"tool\""),
+        (ManagedActionClass::Cli, "\"cli\""),
+        (ManagedActionClass::Skill, "\"skill\""),
+        (ManagedActionClass::Filesystem, "\"filesystem\""),
+        (ManagedActionClass::Browser, "\"browser\""),
+        (ManagedActionClass::Rest, "\"rest\""),
+        (ManagedActionClass::Secret, "\"secret\""),
+        (ManagedActionClass::Memory, "\"memory\""),
+        (ManagedActionClass::Network, "\"network\""),
+    ];
+    for (class, expected) in cases {
+        let json = serde_json::to_string(&class).unwrap();
+        assert_eq!(json, expected, "class {class:?} serialized unexpectedly");
+        let back: ManagedActionClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, class, "class {class:?} failed to round-trip");
+    }
+}
+
+#[test]
 fn managed_action_and_model_content_policies_are_mutually_exclusive_targets() {
     let action_scope = PolicyScopeSelector {
         managed_action: Some(ManagedActionSelector {
