@@ -125,6 +125,17 @@ struct SharedFileControlPlane {
 struct SharedFileSnapshot {
     version: u32,
     revision: String,
+    /// Monotonic control-plane generation counter (cross-node guardrail
+    /// propagation). Bumped by every `publish_from_config`, it forces the
+    /// cross-node `revision` to change on ANY committed repositories mutation
+    /// -- including guardrail policy bindings that live in durable storage
+    /// rather than in `api_keys`/`policies`. Peers re-read those bindings from
+    /// shared durable storage on reload (see `try_new_with_repositories`), so
+    /// the snapshot only needs to SIGNAL the change here, not ship the
+    /// bindings. `#[serde(default)]` keeps snapshots written before this field
+    /// existed loadable -- they read back as generation 0.
+    #[serde(default)]
+    generation: u64,
     api_keys: Vec<ApiKey>,
     policies: Vec<ConfigPolicyRule>,
 }
@@ -166,10 +177,23 @@ impl SharedFileControlPlane {
     }
 
     fn publish_from_config(&self, config: &Config) -> anyhow::Result<String> {
-        let revision = shared_control_plane_revision(&config.api_keys, &config.policies);
+        // Bump the monotonic generation off the last published snapshot so the
+        // cross-node revision changes on every committed mutation, even ones
+        // (guardrail policy bindings) that leave `api_keys`/`policies`
+        // untouched. `fs::rename` publishes atomically, so `load` never sees a
+        // torn file; a failed read here surfaces as an error to the caller,
+        // matching the existing publish failure surface.
+        let generation = self
+            .load()?
+            .map(|snapshot| snapshot.generation)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let revision =
+            shared_control_plane_revision(&config.api_keys, &config.policies, generation);
         let snapshot = SharedFileSnapshot {
             version: 1,
             revision: revision.clone(),
+            generation,
             api_keys: config.api_keys.clone(),
             policies: config.policies.clone(),
         };
@@ -188,15 +212,28 @@ impl SharedFileControlPlane {
     }
 }
 
-fn shared_control_plane_revision(api_keys: &[ApiKey], policies: &[ConfigPolicyRule]) -> String {
+fn shared_control_plane_revision(
+    api_keys: &[ApiKey],
+    policies: &[ConfigPolicyRule],
+    generation: u64,
+) -> String {
     #[derive(Serialize)]
     struct RevisionInput<'a> {
         api_keys: &'a [ApiKey],
         policies: &'a [ConfigPolicyRule],
+        // Folding the generation into the hash makes the revision change for
+        // guardrail (and any future durable-binding) mutations that do not
+        // touch `api_keys`/`policies`; peers then leave the
+        // `sync_shared_control_plane` early-return and reload.
+        generation: u64,
     }
 
-    let bytes = serde_json::to_vec(&RevisionInput { api_keys, policies })
-        .expect("shared control plane serialization should not fail");
+    let bytes = serde_json::to_vec(&RevisionInput {
+        api_keys,
+        policies,
+        generation,
+    })
+    .expect("shared control plane serialization should not fail");
     format!("{:016x}", fnv1a64(&bytes))
 }
 
@@ -352,6 +389,7 @@ impl SharedAppState {
                     .unwrap_or("runtime rejected the policy revision")
             );
         }
+        self.signal_binding_change_to_peers();
         Ok(result)
     }
 
@@ -384,7 +422,28 @@ impl SharedAppState {
                     .unwrap_or("runtime rejected the archived revision")
             );
         }
+        self.signal_binding_change_to_peers();
         Ok(result)
+    }
+
+    /// Signal peer nodes that a durable control-plane binding changed even
+    /// though `api_keys`/`policies` did not. Guardrail policy bindings live in
+    /// durable storage (`repositories`), which every node re-reads on reload
+    /// (see `try_new_with_repositories`), so we only need to bump the shared
+    /// cross-node revision; peers then leave the `sync_shared_control_plane`
+    /// early-return and reload the binding. The binding is already durably
+    /// committed and the local runtime reloaded, so a best-effort failure to
+    /// publish must NOT unwind it -- the admin endpoint's `committed=true`
+    /// stays truthful. On failure cross-node convergence simply falls back to
+    /// the next mutation (the pre-fix worst case), so we log and continue.
+    /// No-op on the 'local' backend, where there is no shared file.
+    fn signal_binding_change_to_peers(&self) {
+        if self.shared_file_control_plane.is_none() {
+            return;
+        }
+        if let Err(error) = self.publish_shared_control_plane(&self.current().config) {
+            warn!("failed to publish guardrail binding change to peer nodes: {error}");
+        }
     }
 
     pub(crate) fn upsert_plugin_registration(

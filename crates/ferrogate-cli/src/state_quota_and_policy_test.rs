@@ -1853,3 +1853,104 @@ fn managed_action_context_selects_managed_action_scoped_policy() {
         "managed-action policy must not apply to a different action class"
     );
 }
+
+/// Regression: activating a durable guardrail policy revision must bump the
+/// shared control-plane revision so peer nodes in a `file`-backend cluster
+/// leave the `sync_shared_control_plane` early-return and reload.
+///
+/// Before the fix, `activate_guardrail_policy_revision` only called
+/// `reload_process_local` (this node) and never touched the shared file. The
+/// cross-node `revision` is an FNV hash over `api_keys`+`policies` only, and a
+/// guardrail activation changes neither, so peers kept the stale binding until
+/// an unrelated api-key/policy edit forced a reload. We now fold a monotonic
+/// `generation` into the revision and publish it on activation. Peers re-read
+/// the binding from shared durable storage (`repositories`) on reload, so the
+/// signal alone is sufficient -- we do not ship the binding in the snapshot.
+///
+/// A true two-node assertion is infeasible here (each `SharedAppState` owns an
+/// independent in-memory `repositories`), so this proves the crux: the shared
+/// revision changes on activation -- the exact condition
+/// `snapshot.revision == active.cluster_sync.active_revision` that gates the
+/// peer early-return. This assertion fails before the fix (the file is never
+/// republished, so the revision is unchanged).
+#[test]
+fn activating_guardrail_policy_bumps_shared_control_plane_revision_for_peers() {
+    fn read_shared_revision(path: &std::path::Path) -> (String, u64) {
+        let raw = std::fs::read_to_string(path).expect("shared control-plane file must exist");
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("shared control-plane file must be valid JSON");
+        (
+            value["revision"]
+                .as_str()
+                .expect("revision field")
+                .to_string(),
+            value["generation"].as_u64().expect("generation field"),
+        )
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("cluster-state.json");
+
+    let mut config = Config::default();
+    config.cluster.enabled = true;
+    config.cluster.state_backend = "file".to_string();
+    config.cluster.file_state_path = Some(state_path.to_string_lossy().into_owned());
+
+    let shared = SharedAppState::with_source_path(config, None);
+
+    // Bootstrap the shared file (no snapshot yet -> publish from config).
+    shared
+        .sync_shared_control_plane()
+        .expect("bootstrap shared control-plane");
+    let (revision_before, generation_before) = read_shared_revision(&state_path);
+
+    // Drafting a revision does not reload/publish, so the file is untouched.
+    shared
+        .create_guardrail_policy_revision(durable_guardrail_revision(
+            "peer-propagation-policy",
+            1,
+            "cross-node-secret",
+            PolicyScopeSelector::default(),
+        ))
+        .expect("create guardrail revision");
+    assert_eq!(
+        read_shared_revision(&state_path),
+        (revision_before.clone(), generation_before),
+        "drafting a revision must not touch the shared control-plane file",
+    );
+
+    // Activation must publish a new cross-node revision.
+    let reload = shared
+        .activate_guardrail_policy_revision("peer-propagation-policy", 1, "test-admin", 10, false)
+        .expect("activate guardrail revision");
+    assert!(
+        reload.committed,
+        "local activation must commit (committed=true stays truthful)",
+    );
+
+    let (revision_after, generation_after) = read_shared_revision(&state_path);
+    assert_ne!(
+        revision_after, revision_before,
+        "activation must change the shared revision so a peer at the old revision reloads \
+         instead of early-returning in sync_shared_control_plane",
+    );
+    assert_eq!(
+        generation_after,
+        generation_before + 1,
+        "the monotonic generation must advance by exactly one publish",
+    );
+
+    // The binding is durably stored (this is what a reloading peer re-reads),
+    // confirming Option B: we only signal, we do not ship the binding.
+    let bindings = shared
+        .current()
+        .repositories
+        .list_guardrail_policy_bindings()
+        .expect("list guardrail bindings");
+    assert!(
+        bindings.iter().any(|binding| {
+            binding.policy_id == "peer-propagation-policy" && binding.active_revision == Some(1)
+        }),
+        "the active binding must live in durable storage for peers to re-read on reload",
+    );
+}
