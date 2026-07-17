@@ -24,7 +24,6 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
 use anyhow::{Context, Result as AnyResult};
 use ferrogate_core::TenantContext;
-use ferrogate_guardrails::{DetectorStage, GuardrailEnvelope};
 #[cfg(test)]
 use ferrogate_runtime::CapabilityPolicy;
 use ferrogate_runtime::{
@@ -35,10 +34,11 @@ use ferrogate_runtime::{
 };
 use ferrogate_storage::StoredAgentRunEvent;
 
-use super::block_on_sync_bridge;
-use super::managed_action_guardrail::ManagedActionGuardrailBinding;
+use super::managed_action_guardrail::{
+    evaluate_managed_action_guardrail, ManagedActionGuardrailBinding, ManagedActionGuardrailRequest,
+};
 use crate::config::GuardrailStage;
-use crate::state::{AppState, GuardrailEvaluationContext, GuardrailMatch, SharedAppState};
+use crate::state::{AppState, GuardrailMatch, SharedAppState};
 
 const EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -186,7 +186,7 @@ impl GatewayExternalActionAuthorizerService {
     /// Evaluate a managed action's input arguments against managed-action
     /// guardrail policies (issue #200). Returns the matched policy when the
     /// action must be blocked, or `None` when no managed-action policy applies.
-    /// Runs on the authorizer's blocking thread via the sync/async bridge.
+    /// Delegates to the shared fail-closed evaluator used by every seam.
     fn evaluate_managed_action_input_guardrail(
         state: &AppState,
         request_id: &str,
@@ -194,31 +194,19 @@ impl GatewayExternalActionAuthorizerService {
         run_id: &str,
         binding: &ManagedActionGuardrailBinding,
     ) -> Option<GuardrailMatch> {
-        let envelope = GuardrailEnvelope::managed_action(
-            DetectorStage::Request,
-            format!("managed_action:{}", binding.target),
-            binding.input_text.clone(),
-        );
-        block_on_sync_bridge(state.match_guardrail(
+        evaluate_managed_action_guardrail(
+            state,
             GuardrailStage::Request,
-            GuardrailEvaluationContext {
+            &ManagedActionGuardrailRequest {
                 request_id,
                 trace_id: None,
                 agent_run_id: Some(run_id),
-                workflow_id: None,
-                workflow_version: None,
-                workflow_node_id: None,
-                actor_api_key_id: None,
                 tenant,
-                service_account_id: None,
-                gateway_config_id: None,
-                model: None,
-                provider: None,
-                streaming: false,
-                envelope: &envelope,
-                managed_action: Some(binding.selection_context()),
+                class: binding.class,
+                target: &binding.target,
             },
-        ))
+            binding.input_text.clone(),
+        )
     }
 
     fn record_timeline_event(
@@ -862,6 +850,7 @@ mod tests {
         time::Duration,
     };
 
+    use ferrogate_guardrails::DetectorStage;
     use ferrogate_runtime::{
         CapabilityAction, ExternalActionAuthorizationRequest, ExternalActionDecision,
         ExternalActionMode, FrameworkAdapterMode, GatewayExternalActionTransportRequest,

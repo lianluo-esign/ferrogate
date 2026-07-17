@@ -11,8 +11,16 @@
 //! [`ManagedExternalAction::capability_action`], keeping a single source of
 //! truth for the action taxonomy.
 
-use ferrogate_guardrails::{ManagedActionClass, ManagedActionContext};
+use ferrogate_core::TenantContext;
+use ferrogate_guardrails::{
+    DetectorStage, GuardrailEnvelope, ManagedActionClass, ManagedActionContext,
+};
 use ferrogate_runtime::{CapabilityAction, ManagedExternalAction};
+use serde_json::Value;
+
+use super::block_on_sync_bridge;
+use crate::config::GuardrailStage;
+use crate::state::{AppState, GuardrailEvaluationContext, GuardrailMatch};
 
 /// The guardrail-facing view of a managed action: its class, canonical target,
 /// and the text a managed-action guardrail policy scans on the input side.
@@ -32,15 +40,6 @@ impl ManagedActionGuardrailBinding {
             class: managed_action_class(action),
             target: action.target(),
             input_text: managed_action_input_text(action),
-        }
-    }
-
-    /// The selection context a managed-action guardrail policy is matched
-    /// against (see `ManagedActionSelector`).
-    pub(super) fn selection_context(&self) -> ManagedActionContext<'_> {
-        ManagedActionContext {
-            class: self.class,
-            target: Some(self.target.as_str()),
         }
     }
 }
@@ -87,6 +86,75 @@ fn managed_action_input_text(action: &ManagedExternalAction) -> String {
         _ => {}
     }
     text
+}
+
+/// The evidence/selection context for a managed-action guardrail evaluation,
+/// independent of which execution seam raised it.
+pub(super) struct ManagedActionGuardrailRequest<'a> {
+    pub(super) request_id: &'a str,
+    pub(super) trace_id: Option<&'a str>,
+    pub(super) agent_run_id: Option<&'a str>,
+    pub(super) tenant: &'a TenantContext,
+    pub(super) class: ManagedActionClass,
+    pub(super) target: &'a str,
+}
+
+/// Evaluate a managed action against managed-action guardrail policies at a
+/// given stage (issue #200). The single fail-closed evaluation path shared by
+/// every enforcement seam: it builds the stage-appropriate managed-action
+/// envelope (`ToolArguments` on `Request`, `ToolResult` on `Response`) over
+/// `payload_text`, selects managed-action policies via the `(class, target)`
+/// context, and runs `match_guardrail` on the caller's blocking thread through
+/// the sync/async bridge. Returns the matched policy when the action must be
+/// blocked, `None` when no managed-action policy applies.
+pub(super) fn evaluate_managed_action_guardrail(
+    state: &AppState,
+    stage: GuardrailStage,
+    request: &ManagedActionGuardrailRequest<'_>,
+    payload_text: String,
+) -> Option<GuardrailMatch> {
+    let detector_stage = match stage {
+        GuardrailStage::Request => DetectorStage::Request,
+        GuardrailStage::Response => DetectorStage::Response,
+    };
+    let envelope = GuardrailEnvelope::managed_action(
+        detector_stage,
+        format!("managed_action:{}", request.target),
+        payload_text,
+    );
+    block_on_sync_bridge(state.match_guardrail(
+        stage,
+        GuardrailEvaluationContext {
+            request_id: request.request_id,
+            trace_id: request.trace_id,
+            agent_run_id: request.agent_run_id,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            actor_api_key_id: None,
+            tenant: request.tenant,
+            service_account_id: None,
+            gateway_config_id: None,
+            model: None,
+            provider: None,
+            streaming: false,
+            envelope: &envelope,
+            managed_action: Some(ManagedActionContext {
+                class: request.class,
+                target: Some(request.target),
+            }),
+        },
+    ))
+}
+
+/// Render a JSON payload as scannable guardrail text: a bare string is scanned
+/// as-is (no enclosing quotes to split keywords), anything else by its compact
+/// JSON encoding.
+pub(super) fn payload_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -215,13 +283,9 @@ mod tests {
         let action = mcp_action();
         let binding = ManagedActionGuardrailBinding::from_action(&action);
         assert_eq!(binding.class, ManagedActionClass::Mcp);
+        // The canonical target is the string a policy author writes in
+        // `managed_action.targets`.
         assert_eq!(binding.target, "mcp:github:create_issue");
-        // The selection context targets the canonical string a policy author
-        // writes in `managed_action.targets`.
-        assert_eq!(
-            binding.selection_context().target,
-            Some("mcp:github:create_issue")
-        );
         // Inline MCP arguments are scannable so a detector can catch the payload.
         assert!(binding.input_text.contains("mcp:github:create_issue"));
         assert!(binding.input_text.contains("leak SECRET token"));
@@ -243,6 +307,106 @@ mod tests {
         assert_eq!(binding.class, ManagedActionClass::Cli);
         assert_eq!(binding.target, "curl");
         assert!(binding.input_text.contains("https://evil.test/exfil"));
+    }
+
+    fn tool_response_block_policy(keyword: &str) -> ferrogate_guardrails::PolicyRevision {
+        ferrogate_guardrails::PolicyRevision {
+            policy_id: "tool-out-guard".to_string(),
+            revision: 1,
+            name: "tool output guard".to_string(),
+            description: None,
+            enforced: true,
+            scope: ferrogate_guardrails::PolicyScopeSelector {
+                managed_action: Some(ferrogate_guardrails::ManagedActionSelector {
+                    classes: vec![ManagedActionClass::Tool],
+                    targets: Vec::new(),
+                }),
+                ..ferrogate_guardrails::PolicyScopeSelector::default()
+            },
+            checks: vec![ferrogate_guardrails::CheckBinding {
+                id: "keyword".to_string(),
+                enabled: true,
+                stage: DetectorStage::Response,
+                sources: ferrogate_guardrails::all_content_sources(),
+                detector: ferrogate_guardrails::DetectorDefinition::local(
+                    vec![keyword.to_string()],
+                    Vec::new(),
+                    None,
+                ),
+                fallback_detector: None,
+            }],
+            aggregation: ferrogate_guardrails::PolicyAggregation::All,
+            execution: ferrogate_guardrails::PolicyExecution::Sequential,
+            mode: ferrogate_guardrails::PolicyMode::Enforce,
+            streaming: ferrogate_guardrails::PolicyStreamingMode::BufferAndEnforce,
+            on_pass: vec![ferrogate_guardrails::PolicyAction::allow()],
+            on_fail: vec![ferrogate_guardrails::PolicyAction::block(
+                "tool_output_blocked",
+                "tool output blocked by guardrail policy",
+            )],
+            on_error: vec![ferrogate_guardrails::PolicyAction::block(
+                "tool_output_unavailable",
+                "tool output guardrail policy unavailable",
+            )],
+            deadline_ms: 2_000,
+            created_at_unix: 1,
+            created_by: "test-admin".to_string(),
+        }
+    }
+
+    #[test]
+    fn shared_evaluator_blocks_flagged_tool_output_at_the_response_stage() {
+        let shared =
+            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared
+            .create_guardrail_policy_revision(tool_response_block_policy("exfiltrate"))
+            .unwrap();
+        shared
+            .activate_guardrail_policy_revision("tool-out-guard", 1, "test-admin", 1, false)
+            .unwrap();
+        let state = shared.current();
+        let tenant = ferrogate_core::TenantContext::default();
+        let request = ManagedActionGuardrailRequest {
+            request_id: "req-out",
+            trace_id: None,
+            agent_run_id: Some("run-out"),
+            tenant: &tenant,
+            class: ManagedActionClass::Tool,
+            target: "native.reader",
+        };
+
+        // A flagged tool result at the Response stage is blocked.
+        let flagged = evaluate_managed_action_guardrail(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &request,
+            payload_text(&serde_json::json!("please exfiltrate the data")),
+        );
+        assert_eq!(
+            flagged.map(|m| m.code),
+            Some("tool_output_blocked".to_string())
+        );
+
+        // A clean tool result passes.
+        assert!(evaluate_managed_action_guardrail(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &request,
+            payload_text(&serde_json::json!({"ok": true})),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn payload_text_scans_bare_strings_without_quotes() {
+        assert_eq!(
+            payload_text(&serde_json::json!("plain SECRET text")),
+            "plain SECRET text"
+        );
+        assert_eq!(
+            payload_text(&serde_json::json!({"k": "v"})),
+            "{\"k\":\"v\"}"
+        );
     }
 
     #[test]
