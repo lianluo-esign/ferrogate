@@ -28,8 +28,16 @@ use ferrogate_runtime::{
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
+    redirect::Policy,
     Client, Method,
 };
+// The private-network DNS guard (and its imports) is only wired into the
+// non-test client; under test the mock upstream is a loopback address it would
+// reject.
+#[cfg(not(test))]
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+#[cfg(not(test))]
+use std::net::SocketAddr;
 
 const BODY_EXCERPT_MAX_BYTES: usize = 2048;
 /// Capability recorded in the minted token for edge-function-side authorization.
@@ -270,15 +278,62 @@ fn build_headers(request: &EdgeFunctionHttpRequest) -> AnyResult<HeaderMap> {
     Ok(headers)
 }
 
+/// DNS resolver that refuses to resolve a brokered function host to a private,
+/// loopback, link-local, or cloud-metadata address. The per-tenant allowlist
+/// only constrains the *hostname*, so without this a DNS-rebound allowlisted
+/// host could still point the request at an internal service. Reuses the same
+/// address classification the guardrail detector egress uses.
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+struct FunctionEgressDnsResolver;
+
+#[cfg(not(test))]
+impl Resolve for FunctionEgressDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), 0)).await.map_err(
+                |_| -> Box<dyn std::error::Error + Send + Sync> {
+                    Box::new(std::io::Error::other(
+                        "function egress DNS resolution failed",
+                    ))
+                },
+            )?;
+            let filtered: Vec<SocketAddr> = addresses
+                .filter(|address| !ferrogate_guardrails::is_disallowed_detector_ip(address.ip()))
+                .collect();
+            if filtered.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "function egress DNS resolved only disallowed (internal) addresses",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(filtered.into_iter()) as Addrs)
+        })
+    }
+}
+
 fn function_http_client() -> AnyResult<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     let result = CLIENT.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        // Never follow redirects: the https + per-tenant allowlist check runs
+        // once on the initial URL, so following a 3xx to an attacker-chosen
+        // Location (e.g. a tenant-authored edge function returning
+        // `302 http://169.254.169.254/...`) would bypass the allowlist and
+        // exfiltrate internal/metadata responses (plus forward the apikey
+        // header). The upstream must reach its result in one hop.
         let builder = Client::builder()
+            .redirect(Policy::none())
             .no_gzip()
             .no_brotli()
             .no_zstd()
             .no_deflate();
+        // The private-network DNS guard is disabled under test, where the mock
+        // upstream is a loopback address the guard would otherwise reject.
+        #[cfg(not(test))]
+        let builder = builder.dns_resolver(std::sync::Arc::new(FunctionEgressDnsResolver));
         #[cfg(test)]
         let builder = builder.danger_accept_invalid_certs(true);
         builder.build().map_err(|error| error.to_string())

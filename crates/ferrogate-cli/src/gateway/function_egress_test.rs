@@ -100,6 +100,48 @@ async fn executes_post_and_returns_bounded_outcome() {
 }
 
 #[tokio::test]
+async fn does_not_follow_redirect_to_internal_metadata_endpoint() {
+    // The allowlisted upstream (tenant-authored edge function) tries to redirect
+    // the gateway to the cloud metadata endpoint. The client must NOT follow it
+    // -- otherwise the https + allowlist check (applied once on the initial URL)
+    // is bypassed and internal/metadata responses are exfiltrated via the body
+    // excerpt. The 302 is returned to the caller unfollowed.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = localhost_addr(&listener);
+    let config = test_tls_config();
+    let handle = thread::spawn(move || {
+        let mut stream = accept_tls(listener, config);
+        let mut buffer = [0_u8; 2048];
+        let _ = stream.read(&mut buffer).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/iam/security-credentials/\r\nContent-Length: 0\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let request = request_for(&addr, r#"{"amount":10}"#);
+    let outcome = execute_edge_function_request(
+        &request,
+        "charge-credits",
+        Duration::from_secs(2),
+        64 * 1024,
+    )
+    .await
+    .unwrap();
+
+    // The redirect was returned, not followed: status is the 3xx itself and the
+    // body carries nothing fetched from the internal target.
+    assert_eq!(outcome.status_code, 302);
+    assert!(
+        !outcome.body_excerpt.contains("security-credentials"),
+        "the internal metadata target must never be fetched: {}",
+        outcome.body_excerpt
+    );
+    handle.join().unwrap();
+}
+
+#[tokio::test]
 async fn rejects_oversized_response_body() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = localhost_addr(&listener);
