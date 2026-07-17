@@ -18,6 +18,46 @@ pub struct QuotaScopeChain<'a> {
     pub key_id: Option<&'a str>,
 }
 
+/// Identifies the single scope in a chain whose configured limit is the
+/// binding (tightest) one for a given dimension (rpm / tpm / monthly budget).
+///
+/// Rate-limit and monthly-budget windows are keyed on this scope so a
+/// tenant/project/workspace-level cap is enforced as ONE aggregate counter
+/// shared by every API key under it, instead of being counted independently
+/// per key (which lets a tenant with N keys do N times the intended cap).
+/// When the binding scope is the `Key` itself, the counter stays byte-for-
+/// byte per-key -- see [`QuotaScopeSelector::counter_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaScopeSelector {
+    pub kind: QuotaScopeKind,
+    pub id: String,
+}
+
+impl QuotaScopeSelector {
+    fn new(kind: QuotaScopeKind, id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+        }
+    }
+
+    /// The rate-limit / budget counter-window key for this binding scope.
+    ///
+    /// A `Key`-scoped winner returns the raw `api_key_id` unchanged, so the
+    /// common case (a per-key limit binds) stays byte-for-byte identical to
+    /// the pre-fix per-key counter -- no counter reset, no merged keys. Every
+    /// broader scope returns a `"{kind}:{id}"` key that all keys under that
+    /// scope derive identically, so they share one window.
+    pub fn counter_key(&self, api_key_id: &str) -> String {
+        match self.kind {
+            QuotaScopeKind::Key => api_key_id.to_string(),
+            QuotaScopeKind::Tenant | QuotaScopeKind::Project | QuotaScopeKind::Workspace => {
+                format!("{}:{}", self.kind.as_str(), self.id)
+            }
+        }
+    }
+}
+
 /// The result of merging every defined policy across a scope chain.
 ///
 /// - `model_allowlist = None` means no scope in the chain restricts models
@@ -29,6 +69,14 @@ pub struct QuotaScopeChain<'a> {
 ///   ancestor's cap" -- because `min` is commutative/associative, the two
 ///   framings always produce the same number, and `min`-across-the-chain is
 ///   simpler to implement and to verify.
+/// - `rpm_limit_scope` / `tpm_limit_scope` / `monthly_budget_scope` each
+///   record WHICH scope's value won that dimension's `min` (they can differ:
+///   rpm may bind at the workspace while tpm binds at the tenant). Ties go to
+///   the most specific scope (Key > Workspace > Project > Tenant), so a
+///   per-key limit equal to a broader cap keeps per-key counting. Callers key
+///   the corresponding rate-limit/budget window on this scope's
+///   [`QuotaScopeSelector::counter_key`] so the cap holds across every key
+///   under the winning scope.
 /// - `denied_by = Some(scope)` means some scope in the chain has
 ///   `enabled = false`; the caller must fail closed regardless of the other
 ///   fields (they are left at their defaults when this is set).
@@ -36,8 +84,11 @@ pub struct QuotaScopeChain<'a> {
 pub struct EffectiveQuota {
     pub model_allowlist: Option<Vec<String>>,
     pub rpm_limit: Option<u64>,
+    pub rpm_limit_scope: Option<QuotaScopeSelector>,
     pub tpm_limit: Option<u64>,
+    pub tpm_limit_scope: Option<QuotaScopeSelector>,
     pub monthly_budget_usd: Option<f64>,
+    pub monthly_budget_scope: Option<QuotaScopeSelector>,
     pub asset_storage_quota_bytes: Option<u64>,
     pub denied_by: Option<QuotaScopeKind>,
 }
@@ -100,23 +151,66 @@ pub fn resolve_effective_quota(
                 None => policy.model_allowlist.clone(),
             });
         }
-        effective.rpm_limit = min_opt_u64(effective.rpm_limit, policy.rpm_limit);
-        effective.tpm_limit = min_opt_u64(effective.tpm_limit, policy.tpm_limit);
-        effective.monthly_budget_usd =
-            min_opt_f64(effective.monthly_budget_usd, policy.monthly_budget_usd);
+        // Values stay `min`-across-the-chain (unchanged); `_scope` records the
+        // scope whose value is that min, ties going to the most specific scope
+        // because `policies` is ordered Tenant->Project->Workspace->Key and
+        // `update_min_*` overrides on `<=` (a later, more specific scope wins a
+        // tie). This never alters the numeric limit -- only which scope's
+        // counter the caller keys the window on.
+        update_min_u64_scope(
+            &mut effective.rpm_limit,
+            &mut effective.rpm_limit_scope,
+            policy.rpm_limit,
+            policy.scope_type,
+            &policy.scope_id,
+        );
+        update_min_u64_scope(
+            &mut effective.tpm_limit,
+            &mut effective.tpm_limit_scope,
+            policy.tpm_limit,
+            policy.scope_type,
+            &policy.scope_id,
+        );
+        update_min_f64_scope(
+            &mut effective.monthly_budget_usd,
+            &mut effective.monthly_budget_scope,
+            policy.monthly_budget_usd,
+            policy.scope_type,
+            &policy.scope_id,
+        );
         if policy.scope_type == QuotaScopeKind::Tenant {
             effective.asset_storage_quota_bytes = policy.asset_storage_quota_bytes;
         }
     }
     if let Some(plan) = plan {
+        // A plan is a tenant-level default bundle (issue #168), so a limit it
+        // supplies as a floor is a tenant-wide default: key its window on the
+        // Tenant scope (aggregated across the tenant's keys) when a tenant id
+        // is present, mirroring how an explicit tenant policy would be keyed.
+        let plan_scope = chain
+            .tenant_id
+            .map(|id| QuotaScopeSelector::new(QuotaScopeKind::Tenant, id));
         if effective.model_allowlist.is_none() && !plan.default_model_allowlist.is_empty() {
             effective.model_allowlist = Some(plan.default_model_allowlist.clone());
         }
-        effective.rpm_limit = effective.rpm_limit.or(plan.default_rpm_limit);
-        effective.tpm_limit = effective.tpm_limit.or(plan.default_tpm_limit);
-        effective.monthly_budget_usd = effective
-            .monthly_budget_usd
-            .or(plan.default_monthly_budget_usd);
+        if effective.rpm_limit.is_none() {
+            if let Some(rpm) = plan.default_rpm_limit {
+                effective.rpm_limit = Some(rpm);
+                effective.rpm_limit_scope = plan_scope.clone();
+            }
+        }
+        if effective.tpm_limit.is_none() {
+            if let Some(tpm) = plan.default_tpm_limit {
+                effective.tpm_limit = Some(tpm);
+                effective.tpm_limit_scope = plan_scope.clone();
+            }
+        }
+        if effective.monthly_budget_usd.is_none() {
+            if let Some(budget) = plan.default_monthly_budget_usd {
+                effective.monthly_budget_usd = Some(budget);
+                effective.monthly_budget_scope = plan_scope.clone();
+            }
+        }
         effective.asset_storage_quota_bytes = effective
             .asset_storage_quota_bytes
             .or(plan.default_asset_storage_quota_bytes);
@@ -124,21 +218,41 @@ pub fn resolve_effective_quota(
     effective
 }
 
-fn min_opt_u64(existing: Option<u64>, next: Option<u64>) -> Option<u64> {
-    match (existing, next) {
-        (Some(existing), Some(next)) => Some(existing.min(next)),
-        (Some(existing), None) => Some(existing),
-        (None, Some(next)) => Some(next),
-        (None, None) => None,
+/// Fold one policy's `u64` limit into the running `min`, recording the scope
+/// whose value now holds that min. Overrides the recorded scope on `<=` so
+/// that, given the Tenant->Project->Workspace->Key iteration order, a tie is
+/// awarded to the most specific (nearest-to-the-key) scope. The numeric value
+/// is exactly `min_opt_u64(*value, candidate)`.
+fn update_min_u64_scope(
+    value: &mut Option<u64>,
+    scope: &mut Option<QuotaScopeSelector>,
+    candidate: Option<u64>,
+    scope_type: QuotaScopeKind,
+    scope_id: &str,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if value.is_none_or(|current| candidate <= current) {
+        *value = Some(candidate);
+        *scope = Some(QuotaScopeSelector::new(scope_type, scope_id));
     }
 }
 
-fn min_opt_f64(existing: Option<f64>, next: Option<f64>) -> Option<f64> {
-    match (existing, next) {
-        (Some(existing), Some(next)) => Some(existing.min(next)),
-        (Some(existing), None) => Some(existing),
-        (None, Some(next)) => Some(next),
-        (None, None) => None,
+/// `f64` analogue of [`update_min_u64_scope`] for the monthly-budget cap.
+fn update_min_f64_scope(
+    value: &mut Option<f64>,
+    scope: &mut Option<QuotaScopeSelector>,
+    candidate: Option<f64>,
+    scope_type: QuotaScopeKind,
+    scope_id: &str,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if value.is_none_or(|current| candidate <= current) {
+        *value = Some(candidate);
+        *scope = Some(QuotaScopeSelector::new(scope_type, scope_id));
     }
 }
 
@@ -417,6 +531,143 @@ mod tests {
         );
         assert_eq!(quota.tpm_limit, Some(50_000));
         assert_eq!(quota.monthly_budget_usd, Some(500.0));
+    }
+
+    #[test]
+    fn winning_scope_is_recorded_per_dimension_and_rpm_tpm_can_differ() {
+        // rpm binds at the workspace (200 < tenant 1000); tpm binds at the
+        // tenant (1M < key 50k? no -- tenant 1M vs key 50k, key is tighter).
+        // Construct so rpm winner != tpm winner to prove they're tracked
+        // independently.
+        let policies = vec![
+            policy(
+                QuotaScopeKind::Tenant,
+                "t1",
+                vec![],
+                Some(1_000),
+                Some(10_000),
+                None,
+                true,
+            ),
+            policy(
+                QuotaScopeKind::Workspace,
+                "w1",
+                vec![],
+                Some(200), // rpm winner
+                Some(50_000),
+                None,
+                true,
+            ),
+            policy(
+                QuotaScopeKind::Key,
+                "k1",
+                vec![],
+                Some(500),
+                Some(5_000), // tpm winner
+                None,
+                true,
+            ),
+        ];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: Some("w1"),
+                key_id: Some("k1"),
+            },
+            lookup_from(policies),
+            None,
+        );
+        assert_eq!(quota.rpm_limit, Some(200));
+        assert_eq!(
+            quota.rpm_limit_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Workspace, "w1"))
+        );
+        assert_eq!(quota.tpm_limit, Some(5_000));
+        assert_eq!(
+            quota.tpm_limit_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Key, "k1"))
+        );
+    }
+
+    #[test]
+    fn a_tie_between_a_broader_scope_and_the_key_is_awarded_to_the_key() {
+        // Tenant and key both cap rpm at 100. The key (most specific) must win
+        // the tie so per-key counting is preserved; the monthly budget ties
+        // between tenant and key too and likewise resolves to the key.
+        let policies = vec![
+            policy(
+                QuotaScopeKind::Tenant,
+                "t1",
+                vec![],
+                Some(100),
+                None,
+                Some(10.0),
+                true,
+            ),
+            policy(
+                QuotaScopeKind::Key,
+                "k1",
+                vec![],
+                Some(100),
+                None,
+                Some(10.0),
+                true,
+            ),
+        ];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: Some("k1"),
+            },
+            lookup_from(policies),
+            None,
+        );
+        assert_eq!(quota.rpm_limit, Some(100));
+        assert_eq!(
+            quota.rpm_limit_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Key, "k1"))
+        );
+        assert_eq!(
+            quota.monthly_budget_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Key, "k1"))
+        );
+    }
+
+    #[test]
+    fn counter_key_is_raw_for_the_key_scope_and_prefixed_for_broader_scopes() {
+        let key = QuotaScopeSelector::new(QuotaScopeKind::Key, "k1");
+        // Byte-for-byte per-key: the raw api key id, no prefix.
+        assert_eq!(key.counter_key("vk-abc"), "vk-abc");
+        let workspace = QuotaScopeSelector::new(QuotaScopeKind::Workspace, "w1");
+        assert_eq!(workspace.counter_key("vk-abc"), "workspace:w1");
+        let tenant = QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1");
+        assert_eq!(tenant.counter_key("vk-abc"), "tenant:t1");
+        let project = QuotaScopeSelector::new(QuotaScopeKind::Project, "p1");
+        assert_eq!(project.counter_key("vk-abc"), "project:p1");
+    }
+
+    #[test]
+    fn plan_supplied_limits_are_keyed_on_the_tenant_scope() {
+        let plan = sample_plan();
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: Some("k1"),
+            },
+            lookup_from(vec![]),
+            Some(&plan),
+        );
+        // The plan is a tenant-wide default bundle, so its rpm/tpm/budget
+        // floors aggregate at the tenant, not per key.
+        let tenant_scope = Some(QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1"));
+        assert_eq!(quota.rpm_limit_scope, tenant_scope);
+        assert_eq!(quota.tpm_limit_scope, tenant_scope);
+        assert_eq!(quota.monthly_budget_scope, tenant_scope);
     }
 
     #[test]

@@ -394,11 +394,9 @@ impl FerroGateway {
 
             if !tpm_checked {
                 tpm_checked = true;
-                if let (Some(api_key_id), Some(limit)) =
-                    (auth.api_key_id.as_deref(), auth.effective_quota.tpm_limit)
-                {
+                if let Some((counter_key, limit)) = auth.tpm_window() {
                     match state.try_consume_api_key_tokens_per_minute(
-                        api_key_id,
+                        &counter_key,
                         limit,
                         estimated_usage.total_tokens,
                     ) {

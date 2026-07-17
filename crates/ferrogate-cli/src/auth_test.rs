@@ -380,6 +380,182 @@ fn quota_policy_rpm_composes_with_the_keys_own_limit_as_a_single_counter() {
 }
 
 #[test]
+fn workspace_scoped_rpm_limit_is_shared_across_two_keys_under_the_workspace() {
+    use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+    // Two distinct durable virtual keys, both bound to workspace-1 (the fixed
+    // tenant/project/workspace chain `seed_durable_virtual_key` seeds). The
+    // ONLY rate cap is a workspace-scoped rpm_limit of 1 -- neither key has
+    // its own request_limit_per_minute, and there is no tenant/project cap.
+    let secret_a = "fg_live_ws_rpm_a_0123456789ab";
+    let secret_b = "fg_live_ws_rpm_b_0123456789ab";
+    let state = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    });
+    seed_durable_virtual_key(&state, "vk-ws-rpm-a", secret_a, |_| {});
+    seed_durable_virtual_key(&state, "vk-ws-rpm-b", secret_b, |_| {});
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "workspace:workspace-1".into(),
+        scope_type: QuotaScopeKind::Workspace,
+        scope_id: "workspace-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: Some(1),
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+
+    // Key A's first request consumes the single shared workspace slot.
+    assert!(
+        authenticate(
+            &state,
+            &bearer_headers(secret_a),
+            "chat.completions",
+            "req-a1"
+        )
+        .is_ok(),
+        "first request under the workspace must be admitted"
+    );
+    // Key B is a DIFFERENT key, but the workspace rpm cap is the binding one,
+    // so its request must count against the SAME window and be throttled.
+    // Before the scope-keying fix this passed (per-key counter), bypassing the
+    // aggregate workspace cap.
+    let error = authenticate(
+        &state,
+        &bearer_headers(secret_b),
+        "chat.completions",
+        "req-b1",
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.code, "rate_limit_exceeded",
+        "a workspace-scoped rpm cap must aggregate across every key under the workspace"
+    );
+}
+
+#[test]
+fn key_level_rpm_limit_still_throttles_each_key_independently() {
+    // Regression guard for the common case: when the binding cap is the key's
+    // own request_limit_per_minute (no broader scope cap), the two keys must
+    // remain fully independent -- exhausting key A must not throttle key B.
+    let secret_a = "fg_live_key_rpm_a_0123456789ab";
+    let secret_b = "fg_live_key_rpm_b_0123456789ab";
+    let state = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    });
+    seed_durable_virtual_key(&state, "vk-key-rpm-a", secret_a, |key| {
+        key.request_limit_per_minute = Some(1);
+    });
+    seed_durable_virtual_key(&state, "vk-key-rpm-b", secret_b, |key| {
+        key.request_limit_per_minute = Some(1);
+    });
+
+    // Key A: first ok, second throttled (its own per-key limit of 1).
+    assert!(authenticate(
+        &state,
+        &bearer_headers(secret_a),
+        "chat.completions",
+        "req-a1"
+    )
+    .is_ok());
+    let error = authenticate(
+        &state,
+        &bearer_headers(secret_a),
+        "chat.completions",
+        "req-a2",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "rate_limit_exceeded");
+    // Key B is untouched by key A's exhausted window: its own first request
+    // must still be admitted.
+    assert!(
+        authenticate(
+            &state,
+            &bearer_headers(secret_b),
+            "chat.completions",
+            "req-b1"
+        )
+        .is_ok(),
+        "a key-level rpm cap must stay byte-for-byte per-key, never shared"
+    );
+}
+
+#[test]
+fn workspace_scoped_tpm_window_is_one_shared_counter_across_two_keys() {
+    use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+    // TPM is enforced at dispatch (chat/embeddings) via `AuthContext::tpm_window`.
+    // Two keys under workspace-1 with only a workspace-scoped tpm_limit must
+    // resolve to the SAME counter key, so their token consumption shares one
+    // window -- exercising exactly the derivation the dispatch path uses.
+    let secret_a = "fg_live_ws_tpm_a_0123456789ab";
+    let secret_b = "fg_live_ws_tpm_b_0123456789ab";
+    let state = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    });
+    seed_durable_virtual_key(&state, "vk-ws-tpm-a", secret_a, |_| {});
+    seed_durable_virtual_key(&state, "vk-ws-tpm-b", secret_b, |_| {});
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "workspace:workspace-1".into(),
+        scope_type: QuotaScopeKind::Workspace,
+        scope_id: "workspace-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: None,
+        tpm_limit: Some(100),
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+
+    let auth_a = authenticate(
+        &state,
+        &bearer_headers(secret_a),
+        "chat.completions",
+        "req-a",
+    )
+    .expect("key A authenticates");
+    let auth_b = authenticate(
+        &state,
+        &bearer_headers(secret_b),
+        "chat.completions",
+        "req-b",
+    )
+    .expect("key B authenticates");
+    let (key_a, limit_a) = auth_a.tpm_window().expect("key A has a tpm window");
+    let (key_b, limit_b) = auth_b.tpm_window().expect("key B has a tpm window");
+    // Two different api keys, but the binding scope is the workspace, so both
+    // derive one shared counter key.
+    assert_eq!(key_a, "workspace:workspace-1");
+    assert_eq!(key_b, "workspace:workspace-1");
+    assert_eq!(limit_a, 100);
+    assert_eq!(limit_b, 100);
+
+    // Key A's request consumes the whole 100-token workspace window; key B's
+    // next request (against the SAME derived key) must then be throttled.
+    assert!(state
+        .try_consume_api_key_tokens_per_minute(&key_a, limit_a, 100)
+        .unwrap());
+    assert!(
+        !state
+            .try_consume_api_key_tokens_per_minute(&key_b, limit_b, 1)
+            .unwrap(),
+        "a workspace-scoped tpm cap must aggregate token usage across every key under it"
+    );
+}
+
+#[test]
 fn quota_policy_model_allowlist_intersects_with_the_keys_own_allowlist() {
     use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
 
@@ -524,6 +700,125 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
     let error =
         authenticate(&state, &bearer_headers(secret), "chat.completions", "req-2").unwrap_err();
     assert_eq!(error.code, "monthly_budget_exceeded");
+}
+
+#[test]
+fn tenant_scoped_monthly_budget_is_shared_across_two_keys_under_the_tenant() {
+    use crate::config::{Model, Provider};
+    use ferrogate_core::RequestContext;
+    use ferrogate_providers::{ProviderUsage, RoutingStrategy};
+    use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+    let secret_a = "fg_live_tbudget_a_0123456789ab";
+    let secret_b = "fg_live_tbudget_b_0123456789ab";
+    let state = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        providers: vec![Provider {
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key_env: None,
+            aws_session_token_env: None,
+            gcp_project_id: None,
+            gcp_access_token_env: None,
+            name: "openai".into(),
+            kind: "openai".into(),
+            base_url: "http://127.0.0.1:10001/v1".into(),
+            api_key_env: None,
+            secret_ref: None,
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
+            enabled: true,
+        }],
+        models: vec![Model {
+            name: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            routing_strategy: RoutingStrategy::Priority,
+            fallbacks: vec![],
+            visible_organization_ids: vec![],
+            visible_project_ids: vec![],
+            capabilities: vec![],
+            context_window: None,
+            input_price_per_1m: Some(1.0),
+            output_price_per_1m: Some(2.0),
+            enabled: true,
+            cache_enabled: None,
+        }],
+        ..Config::default()
+    });
+    // Two keys under the same tenant-1 chain; a TENANT-scoped monthly budget.
+    seed_durable_virtual_key(&state, "vk-tbudget-a", secret_a, |_| {});
+    seed_durable_virtual_key(&state, "vk-tbudget-b", secret_b, |_| {});
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "tenant:tenant-1".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "tenant-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd: Some(0.001),
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+
+    // Spend all the tenant's budget through KEY A only ($0.003 > $0.001). This
+    // increments the tenant-1 rollup as well as key A's own rollup.
+    let request_a = RequestContext {
+        request_id: "fg-tbudget-spend-a".into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        route: Some("openai.chat.completions".into()),
+        upstream: Some("openai".into()),
+        tenant: TenantContext {
+            organization_id: Some("tenant-1".into()),
+            team_id: None,
+            project_id: Some("project-1".into()),
+            workspace_id: Some("workspace-1".into()),
+            user_id: None,
+            api_key_id: Some("vk-tbudget-a".into()),
+        },
+    };
+    block_on(state.record_billing_event(
+        crate::state::BillingEventDraft {
+            request: &request_a,
+            logical_model: "fast-chat",
+            provider: "openai",
+            provider_model: "gpt-4o-mini",
+            status_code: 200,
+            latency_ms: Some(10),
+            metadata: None,
+        },
+        &ProviderUsage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(1000),
+            total_tokens: Some(2000),
+        },
+    ))
+    .unwrap();
+
+    // Key B has spent nothing itself, but the tenant-scoped budget is the
+    // binding cap, so its aggregate (tenant) spend is already exhausted. Before
+    // the scope-keying fix, monthly_budget_exceeded checked key B's OWN spend
+    // ($0) and admitted the request, letting a second key bypass the tenant
+    // budget.
+    let error = authenticate(
+        &state,
+        &bearer_headers(secret_b),
+        "chat.completions",
+        "req-b1",
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.code, "monthly_budget_exceeded",
+        "a tenant-scoped monthly budget must aggregate spend across every key under the tenant"
+    );
 }
 
 #[test]

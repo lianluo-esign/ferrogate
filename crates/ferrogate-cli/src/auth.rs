@@ -80,6 +80,50 @@ impl AuthContext {
         }
     }
 
+    /// The per-minute request (RPM) rate-limit window for this request:
+    /// `(counter_key, limit)`, or `None` when the request has no API key or
+    /// no RPM cap applies.
+    ///
+    /// The limit is the tighter of the key's own `request_limit_per_minute`
+    /// (TOK-12) and the resolved quota `rpm_limit` -- unchanged. The counter
+    /// key is derived from the *winning* scope: a broader scope's cap
+    /// (tenant/project/workspace) is keyed on that scope so it aggregates
+    /// across every key under it, but the key's own limit stays byte-for-byte
+    /// per-key. The quota scope only binds when its rpm is *strictly* tighter
+    /// than the key's own limit (or the key sets none); on a tie the key's own
+    /// per-key limit is (co-)binding, so per-key counting is preserved.
+    pub(crate) fn request_window(&self) -> Option<(String, u64)> {
+        let api_key_id = self.api_key_id.as_deref()?;
+        let key_limit = self.request_limit_per_minute;
+        let quota_limit = self.effective_quota.rpm_limit;
+        let limit = min_opt_u64(key_limit, quota_limit)?;
+        let quota_binds_strictly =
+            quota_limit.is_some_and(|quota| key_limit.is_none_or(|key| quota < key));
+        let counter_key = match &self.effective_quota.rpm_limit_scope {
+            Some(scope) if quota_binds_strictly => scope.counter_key(api_key_id),
+            _ => api_key_id.to_string(),
+        };
+        Some((counter_key, limit))
+    }
+
+    /// The tokens-per-minute (TPM) rate-limit window for this request:
+    /// `(counter_key, limit)`, or `None` when there is no API key or no TPM
+    /// cap applies. TPM only comes from the quota chain (there is no per-key
+    /// TOK-12 TPM), so the counter is keyed on the scope whose `tpm_limit`
+    /// won the min -- aggregating a tenant/project/workspace cap across keys
+    /// while a key-scoped cap stays per-key.
+    pub(crate) fn tpm_window(&self) -> Option<(String, u64)> {
+        let api_key_id = self.api_key_id.as_deref()?;
+        let limit = self.effective_quota.tpm_limit?;
+        let counter_key = self
+            .effective_quota
+            .tpm_limit_scope
+            .as_ref()
+            .map(|scope| scope.counter_key(api_key_id))
+            .unwrap_or_else(|| api_key_id.to_string());
+        Some((counter_key, limit))
+    }
+
     pub(crate) fn can_record_bodies(&self, global_log_bodies: bool) -> bool {
         global_log_bodies && self.log_bodies
     }
@@ -455,7 +499,11 @@ fn finalize_auth(
             code: "quota_resolution_unavailable",
             message: format!("quota policy lookup failed: {error}"),
         })?;
-    if let Some(denied_by) = quota.denied_by {
+    // Assign the resolved quota now so the RPM/TPM/budget windows below can be
+    // keyed on the scope that won each dimension's `min` (recorded on the
+    // quota) rather than always on the api key.
+    auth.effective_quota = quota;
+    if let Some(denied_by) = auth.effective_quota.denied_by {
         return Err(AuthError {
             status: StatusCode::FORBIDDEN,
             code: "quota_scope_disabled",
@@ -465,8 +513,12 @@ fn finalize_auth(
             ),
         });
     }
-    if let Some(budget) = quota.monthly_budget_usd {
-        match state.monthly_budget_exceeded(&auth.tenant_context(), budget) {
+    if let Some(budget) = auth.effective_quota.monthly_budget_usd {
+        // Enforce the budget against the winning scope's aggregate spend (so a
+        // tenant/project/workspace budget holds across every key under it), not
+        // the nearest attributed scope.
+        let budget_scope = auth.effective_quota.monthly_budget_scope.clone();
+        match state.monthly_budget_exceeded(&auth.tenant_context(), budget_scope.as_ref(), budget) {
             Ok(true) => {
                 return Err(AuthError {
                     status: StatusCode::TOO_MANY_REQUESTS,
@@ -508,11 +560,9 @@ fn finalize_auth(
             });
         }
     }
-    let rpm_limit = min_opt_u64(auth.request_limit_per_minute, quota.rpm_limit);
-    if let Some(limit) = rpm_limit {
-        require_request_budget(state, &auth, limit, request_id)?;
+    if let Some((counter_key, limit)) = auth.request_window() {
+        require_request_budget(state, &counter_key, limit, request_id)?;
     }
-    auth.effective_quota = quota;
     Ok(auth)
 }
 
@@ -527,14 +577,11 @@ fn min_opt_u64(existing: Option<u64>, next: Option<u64>) -> Option<u64> {
 
 fn require_request_budget(
     state: &AppState,
-    auth: &AuthContext,
+    counter_key: &str,
     limit: u64,
     request_id: &str,
 ) -> std::result::Result<(), AuthError> {
-    let Some(api_key_id) = auth.api_key_id.as_deref() else {
-        return Ok(());
-    };
-    match state.try_consume_api_key_request(api_key_id, limit) {
+    match state.try_consume_api_key_request(counter_key, limit) {
         Ok(true) => Ok(()),
         Ok(false) => Err(AuthError {
             status: StatusCode::TOO_MANY_REQUESTS,

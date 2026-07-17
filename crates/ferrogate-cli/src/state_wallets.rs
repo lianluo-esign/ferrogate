@@ -92,28 +92,34 @@ impl AppState {
     /// against real accumulated spend for the current calendar month,
     /// closing the loop P1-3 deferred to P1-4.
     ///
-    /// Known simplification: the cap is a single merged number without
-    /// tracking which scope level contributed it, so this checks it against
-    /// the *most specific* scope present in `tenant` (key, else workspace,
-    /// else project, else tenant) rather than checking every scope that
-    /// defines a budget against its own independent spend. In the common
-    /// case (a budget set at the same scope as the tightest cap) this is
-    /// exact; in the mixed case (e.g. a looser tenant-level budget alongside
-    /// a tighter key-level one) it still fails closed on the cap that
-    /// actually governs, just measured against the nearest scope's spend.
+    /// `budget_scope` is the scope whose `monthly_budget_usd` won the chain's
+    /// `min` (recorded by `resolve_effective_quota`). Spend is measured
+    /// against THAT scope's aggregate monthly rollup, so a tenant/project/
+    /// workspace budget is enforced across every key under it, not counted
+    /// per key -- which would let N keys each spend the full cap. When the
+    /// winning scope is the key, this is exactly the key's own spend, so
+    /// per-key budgets are unchanged. `None` (a budget with no recorded
+    /// scope, e.g. a legacy caller) falls back to the pre-fix behavior of
+    /// checking the most specific attributed scope.
     pub(crate) fn monthly_budget_exceeded(
         &self,
         tenant: &ferrogate_core::TenantContext,
+        budget_scope: Option<&ferrogate_policy::QuotaScopeSelector>,
         budget_usd: f64,
     ) -> anyhow::Result<bool> {
-        let Some((scope_type, scope_id)) = [
-            (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
-            (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
-            (QuotaScopeKind::Project, tenant.project_id.as_deref()),
-            (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
-        ]
-        .into_iter()
-        .find_map(|(scope_type, scope_id)| scope_id.map(|scope_id| (scope_type, scope_id))) else {
+        let Some((scope_type, scope_id)) = budget_scope
+            .map(|scope| (scope.kind, scope.id.as_str()))
+            .or_else(|| {
+                [
+                    (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
+                    (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
+                    (QuotaScopeKind::Project, tenant.project_id.as_deref()),
+                    (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
+                ]
+                .into_iter()
+                .find_map(|(scope_type, scope_id)| scope_id.map(|scope_id| (scope_type, scope_id)))
+            })
+        else {
             // No attribution at all to check spend against; nothing to fail
             // closed on, so let quota model_allowlist/rpm/tpm/disabled checks
             // (which already ran) be the only governance for this request.
