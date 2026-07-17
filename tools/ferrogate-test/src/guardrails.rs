@@ -9,10 +9,11 @@ use crate::{
     compliance::{assert_component_contract, ComponentContract},
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
-    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
+    supabase_schema::{
+        connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
+    },
 };
 use anyhow::{bail, Context, Result};
-use postgres::Client;
 use serde_json::Value;
 use std::{
     cell::RefCell,
@@ -2361,7 +2362,7 @@ impl Drop for ProtectedPatchDetector {
 }
 
 struct SupabaseEvidence {
-    client: Client,
+    client: LiveSupabaseClient,
     schema: String,
 }
 

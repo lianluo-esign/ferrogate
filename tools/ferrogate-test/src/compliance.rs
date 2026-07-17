@@ -10,7 +10,9 @@ use crate::{
     http::http_request_addr,
     local::{BillingHarness, LocalHarness},
     mocks::spawn_local_provider_upstream_with_timeout,
-    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
+    supabase_schema::{
+        connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
+    },
 };
 use anyhow::{bail, Context, Result};
 use ferrogate_billing::{BillingEvent, BillingUsageSource, ProviderAttempt, TokenUsage};
@@ -19,7 +21,6 @@ use ferrogate_storage::{
     ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageProviderKind,
 };
-use postgres::Client;
 use serde_json::{json, Value};
 use std::{
     env,
@@ -1062,7 +1063,7 @@ impl Drop for GatewayGuard {
 }
 
 struct SupabaseEvidence {
-    client: Client,
+    client: LiveSupabaseClient,
     schema: String,
 }
 

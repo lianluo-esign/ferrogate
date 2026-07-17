@@ -8,7 +8,9 @@ use crate::{
     cli::SupabaseLiveRestartArgs,
     constants::{ADMIN_AUTH, JSON_CONTENT},
     http::{free_addr, http_request_addr},
-    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
+    supabase_schema::{
+        connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
+    },
 };
 use anyhow::{bail, Context, Result};
 use ferrogate_runtime::{
@@ -16,7 +18,6 @@ use ferrogate_runtime::{
     ExternalActionSession, ExternalActionSpec, GatewayExternalActionTransportRequest,
     GatewayExternalActionTransportResponse,
 };
-use postgres::Client;
 use serde_json::json;
 use std::{
     fs,
@@ -362,7 +363,7 @@ impl Drop for GatewayGuard {
 }
 
 struct SupabaseRbacEvidence {
-    client: Client,
+    client: LiveSupabaseClient,
     schema: String,
 }
 

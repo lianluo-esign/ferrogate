@@ -30,7 +30,6 @@ ferrogate-runtime = { path = "../../crates/ferrogate-runtime" }
 ferrogate-storage = { path = "../../crates/ferrogate-storage" }
 jsonwebtoken.workspace = true
 native-tls.workspace = true
-postgres.workspace = true
 postgres-native-tls.workspace = true
 rcgen.workspace = true
 serde.workspace = true
@@ -38,3 +37,4 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true

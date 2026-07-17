@@ -9,12 +9,13 @@ use crate::{
     cli::SupabaseLiveRestartArgs,
     http::{free_addr, http_request_addr, http_request_addr_after_write, HttpResponse},
     mocks::read_http_request,
-    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
+    supabase_schema::{
+        connect_live_supabase, LiveSupabaseClient, LiveSupabaseScenario, LiveSupabaseSchema,
+    },
 };
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use postgres::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1609,7 +1610,7 @@ struct RefreshLeaseTakeover {
 }
 
 struct SupabaseEvidence {
-    client: Client,
+    client: LiveSupabaseClient,
     schema: String,
 }
 

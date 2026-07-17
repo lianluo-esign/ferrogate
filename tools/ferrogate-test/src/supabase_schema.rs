@@ -7,13 +7,17 @@
 use crate::cli::SupabaseLiveRestartArgs;
 use anyhow::{bail, Context, Result};
 use native_tls::{Certificate, TlsConnector};
-use postgres::{config::SslMode, Client, Config as PostgresConfig};
 use postgres_native_tls::MakeTlsConnector;
 use std::{
     fs, process,
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::runtime::{Builder, Runtime};
+use tokio_postgres::{
+    config::SslMode, types::ToSql, Client, Config as PostgresConfig, Error, Row, ToStatement,
+    Transaction,
 };
 
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
@@ -159,7 +163,142 @@ impl LiveSupabaseSchema {
     }
 }
 
-pub(crate) fn connect_live_supabase(args: &SupabaseLiveRestartArgs) -> Result<Client> {
+/// A synchronous facade over an async `tokio_postgres` connection.
+///
+/// The FerroGate test harness runs on a plain synchronous `main` with no
+/// ambient Tokio runtime, so each live Supabase connection owns a dedicated
+/// current-thread runtime that drives both the connection task and every
+/// statement to completion via `block_on`. This mirrors the async-bridge
+/// precedent in `compliance.rs` while keeping every existing call site (which
+/// expects the synchronous `postgres` crate `Client` API surface) unchanged as
+/// the workspace standardizes on the async `tokio-postgres` driver.
+pub(crate) struct LiveSupabaseClient {
+    client: Client,
+    runtime: Runtime,
+}
+
+impl LiveSupabaseClient {
+    pub(crate) fn query<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime.block_on(self.client.query(statement, params))
+    }
+
+    pub(crate) fn query_one<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Row, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.client.query_one(statement, params))
+    }
+
+    pub(crate) fn query_opt<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Option<Row>, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.client.query_opt(statement, params))
+    }
+
+    pub(crate) fn execute<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.client.execute(statement, params))
+    }
+
+    pub(crate) fn batch_execute(&mut self, query: &str) -> Result<(), Error> {
+        self.runtime.block_on(self.client.batch_execute(query))
+    }
+
+    pub(crate) fn transaction(&mut self) -> Result<LiveTransaction<'_>, Error> {
+        let runtime = &self.runtime;
+        let transaction = runtime.block_on(self.client.transaction())?;
+        Ok(LiveTransaction {
+            transaction,
+            runtime,
+        })
+    }
+}
+
+/// A synchronous facade over an async `tokio_postgres` transaction, driven by
+/// the owning [`LiveSupabaseClient`]'s runtime.
+pub(crate) struct LiveTransaction<'a> {
+    transaction: Transaction<'a>,
+    runtime: &'a Runtime,
+}
+
+impl LiveTransaction<'_> {
+    pub(crate) fn query<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.transaction.query(statement, params))
+    }
+
+    pub(crate) fn query_one<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Row, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.transaction.query_one(statement, params))
+    }
+
+    pub(crate) fn execute<T>(
+        &mut self,
+        statement: &T,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, Error>
+    where
+        T: ?Sized + ToStatement,
+    {
+        self.runtime
+            .block_on(self.transaction.execute(statement, params))
+    }
+
+    pub(crate) fn batch_execute(&mut self, query: &str) -> Result<(), Error> {
+        self.runtime.block_on(self.transaction.batch_execute(query))
+    }
+
+    pub(crate) fn commit(self) -> Result<(), Error> {
+        let runtime = self.runtime;
+        runtime.block_on(self.transaction.commit())
+    }
+
+    pub(crate) fn rollback(self) -> Result<(), Error> {
+        let runtime = self.runtime;
+        runtime.block_on(self.transaction.rollback())
+    }
+}
+
+pub(crate) fn connect_live_supabase(args: &SupabaseLiveRestartArgs) -> Result<LiveSupabaseClient> {
     let dsn = args.supabase_dsn.trim();
     if dsn.is_empty() {
         bail!("--supabase-dsn must not be empty");
@@ -194,9 +333,17 @@ pub(crate) fn connect_live_supabase(args: &SupabaseLiveRestartArgs) -> Result<Cl
         tls.build()
             .context("failed to initialize Supabase TLS connector")?,
     );
-    config
-        .connect(connector)
-        .context("failed to connect to live Supabase PostgreSQL")
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build live Supabase async runtime")?;
+    let (client, connection) = runtime
+        .block_on(config.connect(connector))
+        .context("failed to connect to live Supabase PostgreSQL")?;
+    runtime.spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(LiveSupabaseClient { client, runtime })
 }
 
 fn unique_schema_name(scenario: LiveSupabaseScenario) -> Result<(String, String)> {
