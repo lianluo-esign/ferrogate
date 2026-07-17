@@ -2409,10 +2409,19 @@ impl PostgresControlPlaneStore {
         rows.iter().map(plan_from_row).collect()
     }
 
-    fn upsert_asset(&self, asset: &StoredAsset) -> Result<(), StorageError> {
+    fn asset_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn upsert_asset(&self, asset: &StoredAsset) -> Result<(), StorageError> {
         let size_bytes = saturating_i64(asset.size_bytes);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.asset_operation("upsert asset");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO stored_assets \
                  (id, tenant_id, project_id, asset_type, name, version, content_type, \
                   content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
@@ -2438,54 +2447,78 @@ impl PostgresControlPlaneStore {
                     &asset.updated_at_unix,
                     &asset.storage_uri,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        let operation = self.asset_operation("get asset");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                  content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
                  storage_uri \
                  FROM stored_assets WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(asset_from_row))
     }
 
-    fn list_assets(
+    async fn list_assets(
         &self,
         tenant_id: &str,
         asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
-        let rows = self.with_client(|client| match asset_type {
-            Some(asset_type) => client.query(
-                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
-                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                 storage_uri \
-                 FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
-                 ORDER BY name ASC, version ASC",
-                &[&tenant_id, &asset_type],
-            ),
-            None => client.query(
-                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
-                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                 storage_uri \
-                 FROM stored_assets WHERE tenant_id = $1 \
-                 ORDER BY asset_type ASC, name ASC, version ASC",
-                &[&tenant_id],
-            ),
-        })?;
+        let operation = self.asset_operation("list assets");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = match asset_type {
+            Some(asset_type) => client
+                .query(
+                    "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                         content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                         storage_uri \
+                         FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
+                         ORDER BY name ASC, version ASC",
+                    &[&tenant_id, &asset_type],
+                )
+                .await
+                .map_err(postgres_error)?,
+            None => client
+                .query(
+                    "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                         content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                         storage_uri \
+                         FROM stored_assets WHERE tenant_id = $1 \
+                         ORDER BY asset_type ASC, name ASC, version ASC",
+                    &[&tenant_id],
+                )
+                .await
+                .map_err(postgres_error)?,
+        };
         Ok(rows.iter().map(asset_from_row).collect())
     }
 
-    fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute("DELETE FROM stored_assets WHERE id = $1", &[&id])
-        })?;
+    async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.asset_operation("delete asset");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute("DELETE FROM stored_assets WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
         Ok(affected > 0)
     }
 
@@ -8733,7 +8766,7 @@ impl RuntimeStorageRepositories {
     /// Creates or replaces an asset (issue #176). Unlike plans/quota
     /// policies (shared/scope-keyed), assets are tenant-owned -- same trust
     /// model as tenant account CRUD.
-    pub fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
+    pub async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8742,22 +8775,24 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_asset(&asset)
+                control_plane.upsert_asset(&asset).await
             }
         }
     }
 
-    pub fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+    pub async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_asset(id))
                 .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_asset(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_asset(id).await
+            }
         }
     }
 
-    pub fn list_assets(
+    pub async fn list_assets(
         &self,
         tenant_id: &str,
         asset_type: Option<&str>,
@@ -8768,18 +8803,20 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_assets(tenant_id, asset_type))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_assets(tenant_id, asset_type)
+                control_plane.list_assets(tenant_id, asset_type).await
             }
         }
     }
 
-    pub fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+    pub async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_asset(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_asset(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_asset(id).await
+            }
         }
     }
 

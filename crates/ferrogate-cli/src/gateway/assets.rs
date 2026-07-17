@@ -151,7 +151,7 @@ impl FerroGateway {
             )
             .await;
         };
-        match state.list_assets(&tenant_id, asset_type) {
+        match state.list_assets(&tenant_id, asset_type).await {
             Ok(assets) => {
                 let body = AdminList::new(assets.iter().map(asset_summary).collect());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -276,21 +276,23 @@ impl FerroGateway {
         let effective_quota = auth.effective_quota.asset_storage_quota_bytes;
 
         if let Some(default_quota) = effective_quota {
-            let existing =
-                match state.get_asset(&stored_asset_id(&tenant_id, asset_type, name, version)) {
-                    Ok(existing) => existing,
-                    Err(error) => {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await;
-                    }
-                };
-            let used_by_others = match state.tenant_asset_storage_bytes_used(&tenant_id) {
+            let existing = match state
+                .get_asset(&stored_asset_id(&tenant_id, asset_type, name, version))
+                .await
+            {
+                Ok(existing) => existing,
+                Err(error) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "storage_unavailable",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+            let used_by_others = match state.tenant_asset_storage_bytes_used(&tenant_id).await {
                 Ok(used) => {
                     used.saturating_sub(existing.map(|asset| asset.size_bytes).unwrap_or(0))
                 }
@@ -323,6 +325,7 @@ impl FerroGateway {
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
         let created_at_unix = state
             .get_asset(&id)
+            .await
             .ok()
             .flatten()
             .map_or(now, |existing| existing.created_at_unix);
@@ -364,7 +367,7 @@ impl FerroGateway {
             created_at_unix,
             updated_at_unix: now,
         };
-        match state.upsert_asset(asset.clone()) {
+        match state.upsert_asset(asset.clone()).await {
             Ok(()) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
@@ -427,7 +430,7 @@ impl FerroGateway {
             .await;
         };
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
-        match state.get_asset(&id) {
+        match state.get_asset(&id).await {
             Ok(Some(asset)) => {
                 // Bucket-backed storage (issue #176): the real bytes live
                 // in the bucket, not `asset.content` (which is empty for
@@ -544,7 +547,7 @@ impl FerroGateway {
         // doesn't block the delete, since an orphaned bucket object is a
         // lesser problem than a `stored_assets` row the operator can never
         // remove because the bucket happens to be unreachable.
-        if let Ok(Some(existing)) = state.get_asset(&id) {
+        if let Ok(Some(existing)) = state.get_asset(&id).await {
             if let Some(storage_uri) = existing.storage_uri.as_deref() {
                 if let Some(bucket) = state.asset_bucket_client() {
                     if let Err(error) = bucket.delete_object(storage_uri).await {
@@ -557,7 +560,7 @@ impl FerroGateway {
                 }
             }
         }
-        match state.delete_asset(&id) {
+        match state.delete_asset(&id).await {
             Ok(true) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

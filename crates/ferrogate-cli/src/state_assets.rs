@@ -8,32 +8,36 @@
 use super::*;
 
 impl AppState {
-    pub(crate) fn upsert_asset(&self, asset: StoredAsset) -> anyhow::Result<()> {
-        Ok(self.repositories.upsert_asset(asset)?)
+    pub(crate) async fn upsert_asset(&self, asset: StoredAsset) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_asset(asset).await?)
     }
 
-    pub(crate) fn get_asset(&self, id: &str) -> anyhow::Result<Option<StoredAsset>> {
-        Ok(self.repositories.get_asset(id)?)
+    pub(crate) async fn get_asset(&self, id: &str) -> anyhow::Result<Option<StoredAsset>> {
+        Ok(self.repositories.get_asset(id).await?)
     }
 
-    pub(crate) fn list_assets(
+    pub(crate) async fn list_assets(
         &self,
         tenant_id: &str,
         asset_type: Option<&str>,
     ) -> anyhow::Result<Vec<StoredAsset>> {
-        Ok(self.repositories.list_assets(tenant_id, asset_type)?)
+        Ok(self.repositories.list_assets(tenant_id, asset_type).await?)
     }
 
-    pub(crate) fn delete_asset(&self, id: &str) -> anyhow::Result<bool> {
-        Ok(self.repositories.delete_asset(id)?)
+    pub(crate) async fn delete_asset(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_asset(id).await?)
     }
 
     /// Cumulative stored bytes for a tenant across all asset types, used to
     /// enforce `StoredPlan::default_asset_storage_quota_bytes` at push time.
-    pub(crate) fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> anyhow::Result<u64> {
+    pub(crate) async fn tenant_asset_storage_bytes_used(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<u64> {
         Ok(self
             .repositories
-            .list_assets(tenant_id, None)?
+            .list_assets(tenant_id, None)
+            .await?
             .iter()
             .map(|asset| asset.size_bytes)
             .sum())
