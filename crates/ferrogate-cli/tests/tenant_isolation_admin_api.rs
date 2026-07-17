@@ -219,6 +219,100 @@ fn cross_tenant_admin_key_cannot_read_or_mutate_another_tenants_wallet() {
     gateway.wait().unwrap();
 }
 
+/// A tenant-scoped admin key must not be able to credit its *own* wallet.
+/// `/adjust` mints prepaid balance with no charge or invoice obligation --
+/// the tenant-scope check alone (own tenant == target) is satisfied, so
+/// before the `require_platform_operator` gate a tenant-console key (the
+/// shape every admin-console login auto-provisions) could self-credit an
+/// unlimited balance and defeat `wallet_balance_exhausted`, yielding
+/// unlimited free inference and bypassing the paid Stripe top-up. Only a
+/// platform operator may mint balance.
+#[test]
+fn tenant_scoped_admin_key_cannot_self_credit_its_own_wallet() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+
+    // The operator provisions the tenant's wallet and seeds a *positive*
+    // balance (as if the tenant had paid $0.25 via Stripe). The positive
+    // balance matters: `authenticate()` runs the wallet-balance gate on the
+    // caller's own tenant, so a zero-balance tenant would be turned away with
+    // 429 `wallet_balance_exhausted` before reaching the handler -- the
+    // exploit this test guards is precisely the pay-once-then-self-inflate
+    // path, where the tenant already has a nonzero balance that clears the
+    // gate.
+    let created_wallet = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/wallets",
+        &ADMIN,
+        r#"{"tenant_id":"tenant-iso-a"}"#,
+    ));
+    assert_eq!(created_wallet["wallet"]["balance_credits"], 0);
+    let seeded = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/wallets/tenant-iso-a/adjust",
+        &ADMIN,
+        r#"{"delta_credits":250000}"#,
+    ));
+    assert_eq!(seeded["wallet"]["balance_credits"], 250000);
+
+    // Tenant A tries to self-inflate its OWN wallet -- own tenant == target,
+    // so the tenant-scope check passes and the positive balance clears the
+    // wallet gate; the operator gate must still deny it.
+    let self_credit = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/wallets/tenant-iso-a/adjust",
+        &TENANT_A,
+        r#"{"delta_credits":999999999}"#,
+    );
+    assert!(
+        status_line(&self_credit).contains("403"),
+        "tenant A must not be able to self-inflate its own wallet: {self_credit}"
+    );
+    assert!(
+        self_credit.contains("platform_operator_required"),
+        "self-credit denial must be the operator gate, not merely tenant scope: {self_credit}"
+    );
+
+    // The balance must be untouched by the denied self-credit.
+    let balance_after = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/wallets/tenant-iso-a",
+        &ADMIN,
+        "",
+    ));
+    assert_eq!(
+        balance_after["wallet"]["balance_credits"], 250000,
+        "the denied self-credit must not have changed the balance: {balance_after}"
+    );
+
+    // The platform operator retains the legitimate balance-correction path.
+    let operator_adjust = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/wallets/tenant-iso-a/adjust",
+        &ADMIN,
+        r#"{"delta_credits":250000}"#,
+    ));
+    assert_eq!(
+        operator_adjust["wallet"]["balance_credits"], 500000,
+        "the platform operator must retain the wallet-adjust primitive: {operator_adjust}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 /// The same class of gap, across the other admin surfaces fixed alongside
 /// wallets: tenant-accounts, projects, virtual-keys, and quota-policies.
 #[test]

@@ -430,6 +430,26 @@ impl FerroGateway {
                 .await;
             }
         };
+        // `/adjust` mints prepaid balance out of thin air (no charge, no
+        // invoice obligation -- see the `.._charge` sibling for the paid,
+        // tenant-safe top-up path). A tenant-scoped `admin.write` key --
+        // exactly what every admin-console login provisions for its own
+        // tenant -- would otherwise pass `authorize_tenant_scope` (own
+        // tenant == target) and self-credit an unlimited balance, defeating
+        // `wallet_balance_exhausted` and yielding unlimited free inference.
+        // Restrict the free-credit primitive to platform operators, matching
+        // the documented "operator-issued balance correction" intent and the
+        // sibling privileged mutations.
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
             return write_json_error(
                 session,
