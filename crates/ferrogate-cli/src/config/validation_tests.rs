@@ -3200,6 +3200,7 @@ fn accepts_valid_ip_and_cidr_allowlist_entries() {
                 "2001:db8::/32".into(),
             ],
             trust_forwarded_for: false,
+            trusted_proxy_hops: None,
             unauthenticated_rate_limit_per_minute: Some(600),
         },
         ..Config::default()
@@ -3214,6 +3215,7 @@ fn rejects_invalid_ip_allowlist_entry() {
         network_access: NetworkAccessConfig {
             ip_allowlist: vec!["not-an-ip".into()],
             trust_forwarded_for: false,
+            trusted_proxy_hops: None,
             unauthenticated_rate_limit_per_minute: None,
         },
         ..Config::default()
@@ -3229,6 +3231,7 @@ fn rejects_ip_allowlist_entry_with_invalid_prefix_length() {
         network_access: NetworkAccessConfig {
             ip_allowlist: vec!["10.0.0.0/33".into()],
             trust_forwarded_for: false,
+            trusted_proxy_hops: None,
             unauthenticated_rate_limit_per_minute: None,
         },
         ..Config::default()
@@ -3244,6 +3247,7 @@ fn rejects_zero_unauthenticated_rate_limit() {
         network_access: NetworkAccessConfig {
             ip_allowlist: vec![],
             trust_forwarded_for: false,
+            trusted_proxy_hops: None,
             unauthenticated_rate_limit_per_minute: Some(0),
         },
         ..Config::default()

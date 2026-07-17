@@ -82,26 +82,52 @@ fn masked_eq_u128(a: u128, b: u128, prefix_len: u8) -> bool {
 }
 
 /// Resolves the client IP used for allowlist/rate-limit decisions: either
-/// the raw TCP peer address, or (only when explicitly trusted via config)
-/// the leftmost `X-Forwarded-For` entry, falling back to `X-Real-IP`.
+/// the raw TCP peer address, or (only when explicitly trusted via config) the
+/// entry `trusted_proxy_hops` positions from the RIGHT of `X-Forwarded-For`,
+/// falling back to `X-Real-IP`.
 ///
 /// Trusting forwarded headers by default would let any client spoof its
 /// apparent source IP, so this only consults them when `trust_forwarded_for`
-/// is set (the operator has a trusted reverse proxy in front that overwrites
-/// these headers).
+/// is set (the operator has trusted reverse proxies in front and the gateway is
+/// only reachable through them).
+///
+/// Selection is from the right, not the left: the common load balancers
+/// (nginx `$proxy_add_x_forwarded_for`, AWS ALB, GCP LB, Cloudflare) *append*
+/// the peer they received from, so with `H` trusted proxies in front the
+/// rightmost `H` entries are proxy-authored and the `H`-th-from-right entry is
+/// the real client. Everything to its left is client-supplied and therefore
+/// spoofable — taking the leftmost entry (the pre-fix behavior) let a client
+/// behind an appending proxy forge its apparent source IP, bypassing the
+/// pre-auth allowlist and minting a fresh rate-limit window per fake IP.
+/// `trusted_proxy_hops` is clamped to at least 1 whenever forwarded headers are
+/// trusted.
 pub(crate) fn resolve_client_ip(
     headers: &HeaderMap,
     peer_addr: Option<IpAddr>,
     trust_forwarded_for: bool,
+    trusted_proxy_hops: u32,
 ) -> Option<IpAddr> {
     if trust_forwarded_for {
+        let hops = (trusted_proxy_hops.max(1)) as usize;
         if let Some(forwarded) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .and_then(|first| first.trim().parse::<IpAddr>().ok())
         {
-            return Some(forwarded);
+            let entries: Vec<&str> = forwarded
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            // The client is `hops` entries from the right. If the chain is
+            // shorter than the configured hop count (fewer proxies than
+            // expected — a misconfiguration or a direct connection that skipped
+            // the proxy fleet), do NOT fall back to a client-supplied entry;
+            // drop to X-Real-IP / peer_addr below, which fail closed.
+            if let Some(entry) = entries.len().checked_sub(hops).and_then(|i| entries.get(i)) {
+                if let Ok(ip) = entry.parse::<IpAddr>() {
+                    return Some(ip);
+                }
+            }
         }
         if let Some(real_ip) = headers
             .get("x-real-ip")
@@ -228,16 +254,68 @@ mod tests {
     fn ignores_forwarded_headers_when_not_trusted() {
         let headers = headers_with(&[("x-forwarded-for", "198.51.100.9")]);
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
-        assert_eq!(resolve_client_ip(&headers, Some(peer), false), Some(peer));
+        assert_eq!(
+            resolve_client_ip(&headers, Some(peer), false, 1),
+            Some(peer)
+        );
     }
 
     #[test]
-    fn uses_leftmost_forwarded_for_entry_when_trusted() {
-        let headers = headers_with(&[("x-forwarded-for", "198.51.100.9, 10.0.0.1")]);
+    fn uses_rightmost_untrusted_forwarded_for_entry_with_single_hop() {
+        // Behind one appending proxy the chain is `<spoofable client value>,
+        // <real client the proxy appended>`. With one trusted hop the real
+        // client is the rightmost entry.
+        let headers = headers_with(&[("x-forwarded-for", "203.0.113.7, 198.51.100.9")]);
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            resolve_client_ip(&headers, Some(peer), true),
+            resolve_client_ip(&headers, Some(peer), true, 1),
             Some("198.51.100.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn leftmost_forwarded_for_entry_cannot_spoof_an_allowlisted_source() {
+        // The exploit: an attacker sends `X-Forwarded-For: 10.0.0.1` (an
+        // allowlisted internal IP); the appending proxy yields
+        // `10.0.0.1, <attacker_ip>`. The old leftmost selection returned the
+        // spoofed 10.0.0.1; the fix returns the attacker's real appended IP.
+        let headers = headers_with(&[("x-forwarded-for", "10.0.0.1, 203.0.113.66")]);
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let resolved = resolve_client_ip(&headers, Some(peer), true, 1).unwrap();
+        assert_eq!(resolved, "203.0.113.66".parse::<IpAddr>().unwrap());
+        assert_ne!(resolved, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn selects_client_by_hop_count_through_a_proxy_chain() {
+        // Two trusted proxies: `<spoofable>, <client>, <proxy1>`. With two hops
+        // the client is two entries from the right.
+        let headers = headers_with(&[("x-forwarded-for", "203.0.113.7, 198.51.100.9, 192.0.2.10")]);
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(&headers, Some(peer), true, 2),
+            Some("198.51.100.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn falls_back_when_chain_is_shorter_than_the_hop_count() {
+        // Fewer entries than configured hops (a direct connection that skipped
+        // the proxy fleet): do NOT trust a client-supplied entry -- fall back to
+        // X-Real-IP / peer.
+        let headers = headers_with(&[
+            ("x-forwarded-for", "203.0.113.7"),
+            ("x-real-ip", "198.51.100.9"),
+        ]);
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(&headers, Some(peer), true, 2),
+            Some("198.51.100.9".parse().unwrap())
+        );
+        let peer_only = headers_with(&[("x-forwarded-for", "203.0.113.7")]);
+        assert_eq!(
+            resolve_client_ip(&peer_only, Some(peer), true, 2),
+            Some(peer)
         );
     }
 
@@ -246,7 +324,7 @@ mod tests {
         let headers = headers_with(&[("x-real-ip", "198.51.100.9")]);
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
-            resolve_client_ip(&headers, Some(peer), true),
+            resolve_client_ip(&headers, Some(peer), true, 1),
             Some("198.51.100.9".parse().unwrap())
         );
     }
@@ -255,7 +333,7 @@ mod tests {
     fn falls_back_to_peer_addr_when_no_forwarded_headers_present() {
         let headers = HeaderMap::new();
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
-        assert_eq!(resolve_client_ip(&headers, Some(peer), true), Some(peer));
+        assert_eq!(resolve_client_ip(&headers, Some(peer), true, 1), Some(peer));
     }
 
     #[test]

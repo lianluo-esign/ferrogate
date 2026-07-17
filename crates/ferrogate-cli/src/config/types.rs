@@ -122,12 +122,20 @@ pub(crate) struct NetworkAccessConfig {
     pub(crate) ip_allowlist: Vec<String>,
     /// Whether to trust `X-Forwarded-For`/`X-Real-IP` over the raw TCP peer
     /// address when resolving the client IP for allowlist/rate-limit
-    /// decisions. Only enable this when FerroGate sits behind a reverse
-    /// proxy that itself overwrites these headers — otherwise any client
-    /// can spoof its apparent source IP. Defaults to `false` (trust only
-    /// the raw peer address).
+    /// decisions. Only enable this when FerroGate sits behind trusted reverse
+    /// proxies and is reachable only through them — otherwise any client can
+    /// spoof its apparent source IP. Defaults to `false` (trust only the raw
+    /// peer address).
     #[serde(default)]
     pub(crate) trust_forwarded_for: bool,
+    /// Number of trusted reverse proxies in front of the gateway. When
+    /// `trust_forwarded_for` is set, the client IP is taken this many entries
+    /// from the RIGHT of `X-Forwarded-For` (each trusted proxy appends exactly
+    /// one entry), so client-supplied leftmost entries cannot spoof the source
+    /// IP. Defaults to `1` (a single fronting load balancer) when trusting
+    /// forwarded headers; set higher for a chain of N proxies.
+    #[serde(default)]
+    pub(crate) trusted_proxy_hops: Option<u32>,
     /// Maximum requests per source IP per minute before authentication is
     /// even attempted. `None` (the default) disables pre-auth throttling.
     #[serde(default)]

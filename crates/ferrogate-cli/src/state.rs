@@ -1101,6 +1101,7 @@ pub(crate) struct AppState {
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
     ip_allowlist: Arc<Vec<IpCidr>>,
     trust_forwarded_for: bool,
+    trusted_proxy_hops: u32,
     unauthenticated_rate_limit_per_minute: Option<u64>,
     unauth_rate_limiter: Arc<UnauthenticatedIpRateLimiter>,
     /// `Provider.secret_ref` values resolved once at config load/reload time
@@ -3968,6 +3969,7 @@ impl AppState {
             acme_renewal: None,
             ip_allowlist: Arc::new(ip_allowlist),
             trust_forwarded_for: config.network_access.trust_forwarded_for,
+            trusted_proxy_hops: config.network_access.trusted_proxy_hops.unwrap_or(1),
             unauthenticated_rate_limit_per_minute: config
                 .network_access
                 .unauthenticated_rate_limit_per_minute,
@@ -4068,7 +4070,12 @@ impl AppState {
         headers: &HeaderMap,
         peer_addr: Option<IpAddr>,
     ) -> NetworkAccessDecision {
-        let client_ip = resolve_client_ip(headers, peer_addr, self.trust_forwarded_for);
+        let client_ip = resolve_client_ip(
+            headers,
+            peer_addr,
+            self.trust_forwarded_for,
+            self.trusted_proxy_hops,
+        );
 
         if !self.ip_allowlist.is_empty() {
             let allowed =
