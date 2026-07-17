@@ -3245,7 +3245,93 @@ impl FerroGateway {
             });
         };
 
-        if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
+        // #200: managed-action guardrails at the shared tool-governance
+        // chokepoint — a single fail-closed path covering every in-process tool
+        // backend (Extension, MCP, HTTP). `class`/`target` follow the backend:
+        // an Extension tool is a Tool-class action, an MCP tool an Mcp-class one.
+        let guardrail_tenant = auth.tenant_context();
+        let (guardrail_class, guardrail_target) = match backend {
+            ToolExecuteBackend::Extension => {
+                (ManagedActionClass::Tool, format!("tool:{}", request.name))
+            }
+            ToolExecuteBackend::Mcp => (
+                ManagedActionClass::Mcp,
+                mcp_audit_details
+                    .as_ref()
+                    .map(|(server, tool)| format!("mcp:{server}:{tool}"))
+                    .unwrap_or_else(|| format!("mcp:{}", request.name)),
+            ),
+        };
+        let guardrail_request = ManagedActionGuardrailRequest {
+            request_id: &ctx.request_id,
+            trace_id: ctx.trace_id.as_deref(),
+            agent_run_id: execution.agent_run_id,
+            tenant: &guardrail_tenant,
+            class: guardrail_class,
+            target: &guardrail_target,
+        };
+        // INPUT guardrail — evaluated after capability, before approval and
+        // execution (matching the decision order in #200). A Block/Quarantine
+        // match fails the action closed; a RequireApproval match escalates to the
+        // approval gate below so the tool runs only once an approval bound to the
+        // action fingerprint is granted.
+        let mut guardrail_requires_approval = false;
+        if let Some(matched) = evaluate_managed_action_guardrail_async(
+            &state,
+            GuardrailStage::Request,
+            &guardrail_request,
+            payload_text(&request.arguments),
+        )
+        .await
+        {
+            match matched.action_kind {
+                GuardrailActionKind::RequireApproval => {
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                        ctx,
+                        auth,
+                        execution,
+                        "tool.guardrail",
+                        guardrail_target.clone(),
+                        "approval_required",
+                        format!(
+                            "managed action requires approval by guardrail policy {} ({}): {}",
+                            matched.rule_id, matched.code, matched.message
+                        ),
+                    ));
+                    guardrail_requires_approval = true;
+                }
+                kind => {
+                    let code = match kind {
+                        GuardrailActionKind::Quarantine => "guardrail_quarantined",
+                        _ => "guardrail_blocked",
+                    };
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                        ctx,
+                        auth,
+                        execution,
+                        "tool.guardrail",
+                        guardrail_target.clone(),
+                        "rejected",
+                        format!(
+                            "tool input {} by guardrail policy {} ({}): {}",
+                            code, matched.rule_id, matched.code, matched.message
+                        ),
+                    ));
+                    return Err(ToolExecutionHttpError {
+                        status: StatusCode::FORBIDDEN,
+                        code,
+                        message: format!(
+                            "tool input blocked by guardrail policy: {}",
+                            matched.message
+                        ),
+                    });
+                }
+            }
+        }
+
+        if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always
+            || guardrail_requires_approval
+        {
             let approval =
                 match state.create_tool_approval(crate::state::ToolApprovalCreateRequest {
                     tool: &request,
@@ -3342,66 +3428,6 @@ impl FerroGateway {
         // an Extension tool is a Tool-class action, an MCP tool an Mcp-class
         // action. The input stage runs after capability + approval and before
         // execution, so no tool ever runs on flagged arguments.
-        let guardrail_tenant = auth.tenant_context();
-        let (guardrail_class, guardrail_target) = match backend {
-            ToolExecuteBackend::Extension => {
-                (ManagedActionClass::Tool, format!("tool:{}", request.name))
-            }
-            ToolExecuteBackend::Mcp => (
-                ManagedActionClass::Mcp,
-                mcp_audit_details
-                    .as_ref()
-                    .map(|(server, tool)| format!("mcp:{server}:{tool}"))
-                    .unwrap_or_else(|| format!("mcp:{}", request.name)),
-            ),
-        };
-        let guardrail_request = ManagedActionGuardrailRequest {
-            request_id: &ctx.request_id,
-            trace_id: ctx.trace_id.as_deref(),
-            agent_run_id: execution.agent_run_id,
-            tenant: &guardrail_tenant,
-            class: guardrail_class,
-            target: &guardrail_target,
-        };
-        if let Some(matched) = evaluate_managed_action_guardrail_async(
-            &state,
-            GuardrailStage::Request,
-            &guardrail_request,
-            payload_text(&request.arguments),
-        )
-        .await
-        {
-            // The action kind distinguishes the fail-closed reason on input:
-            // require-approval signals the caller to seek approval, quarantine a
-            // quarantined action, everything else a plain block. All deny — no
-            // tool ever runs on flagged input.
-            let code = match matched.action_kind {
-                GuardrailActionKind::RequireApproval => "guardrail_approval_required",
-                GuardrailActionKind::Quarantine => "guardrail_quarantined",
-                _ => "guardrail_blocked",
-            };
-            state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                ctx,
-                auth,
-                execution,
-                "tool.guardrail",
-                guardrail_target.clone(),
-                "rejected",
-                format!(
-                    "tool input {} by guardrail policy {} ({}): {}",
-                    code, matched.rule_id, matched.code, matched.message
-                ),
-            ));
-            return Err(ToolExecutionHttpError {
-                status: StatusCode::FORBIDDEN,
-                code,
-                message: format!(
-                    "tool input blocked by guardrail policy: {}",
-                    matched.message
-                ),
-            });
-        }
-
         let result = match backend {
             ToolExecuteBackend::Extension => {
                 state
