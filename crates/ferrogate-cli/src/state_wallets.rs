@@ -155,7 +155,55 @@ impl AppState {
         else {
             return Ok(false);
         };
-        Ok(wallet.balance_credits <= 0)
+        // Account for credits already held by in-flight requests from this
+        // tenant (issue #169 concurrent-overdraft fix), not just the settled
+        // balance: once outstanding reservations have consumed the funded
+        // balance the wallet is effectively exhausted even though no debit
+        // has landed yet, so a fresh request must be rejected here rather
+        // than admitted to race the ones already dispatched.
+        let reserved = self.cluster_counters.reserved_wallet_credits(tenant_id);
+        Ok(wallet.balance_credits.saturating_sub(reserved) <= 0)
+    }
+
+    /// Atomically reserve the estimated credit cost of one request against the
+    /// tenant's prepaid wallet *before* dispatch (issue #169's
+    /// concurrent-overdraft fix). This is the wallet analogue of
+    /// [`AppState::try_reserve_api_key_tokens`]: it reads the tenant's funded
+    /// balance and asks the shared counter backend to hold `estimated_credits`
+    /// against `balance_credits - outstanding_reservations`, so N concurrent
+    /// requests can no longer all observe a positive balance and all dispatch.
+    ///
+    /// Opt-in and purely additive: returns
+    /// [`WalletReservationOutcome::NotApplicable`] (never blocks) when the
+    /// request has no tenant attribution, the tenant has no wallet row, or the
+    /// route is unpriced (a zero estimate that will produce no debit).
+    /// Returns [`WalletReservationOutcome::Insufficient`] when a real wallet
+    /// cannot cover the estimate, which the caller maps to the same
+    /// `wallet_balance_exhausted` denial the pre-request gate raises. The
+    /// returned guard releases its hold on drop, so a cancelled or errored
+    /// request never leaks a reservation.
+    pub(crate) async fn try_reserve_wallet_credits(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        estimated_credits: i64,
+    ) -> anyhow::Result<WalletReservationOutcome> {
+        if estimated_credits <= 0 {
+            return Ok(WalletReservationOutcome::NotApplicable);
+        }
+        let Some(tenant_id) = tenant.organization_id.as_deref() else {
+            return Ok(WalletReservationOutcome::NotApplicable);
+        };
+        let Some(wallet) = self.repositories.get_wallet(tenant_id).await? else {
+            return Ok(WalletReservationOutcome::NotApplicable);
+        };
+        match self.cluster_counters.try_reserve_wallet_credits(
+            tenant_id,
+            wallet.balance_credits,
+            estimated_credits,
+        )? {
+            Some(reservation) => Ok(WalletReservationOutcome::Reserved(reservation)),
+            None => Ok(WalletReservationOutcome::Insufficient),
+        }
     }
 
     /// Debits a settled request's cost from the tenant's wallet, if one

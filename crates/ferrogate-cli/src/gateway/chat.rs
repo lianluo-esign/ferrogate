@@ -296,6 +296,13 @@ impl FerroGateway {
         let max_dispatch_retries = state.provider_dispatch_max_retries();
         let provider_response_body_max_bytes = state.provider_response_body_max_bytes();
         let mut token_reservation = None;
+        // Prepaid-wallet credit hold for the whole request (issue #169
+        // concurrent-overdraft fix). Reserved once, just before the first
+        // dispatch, and held (across any fallback routes) until this handler
+        // returns -- its `Drop` releases the hold, so a cancelled or errored
+        // request never leaks credits, and the hold always outlives the
+        // settlement debit on the success path.
+        let mut wallet_reservation = None;
         let mut tpm_checked = false;
 
         let mut provider_attempt_sequence = ProviderAttemptSequence::default();
@@ -683,6 +690,71 @@ impl FerroGateway {
                             .await?;
                             return Ok(());
                         }
+                    }
+                }
+            }
+
+            // Prepaid-wallet credit reservation (issue #169
+            // concurrent-overdraft fix): the last gate before dispatch, so
+            // rate/budget rejections above never take a hold. Reserved once
+            // per request (against `balance - outstanding_reservations`) so
+            // concurrent requests from one tenant can't all pass a bare
+            // `balance > 0` read and settle afterward into a negative balance.
+            // A no-op for tenants without a wallet or an unpriced route.
+            if wallet_reservation.is_none() {
+                let estimated_credits =
+                    crate::state::estimated_request_credits(model_route, &estimated_usage);
+                match state
+                    .try_reserve_wallet_credits(&policy_request.tenant, estimated_credits)
+                    .await
+                {
+                    Ok(crate::state::WalletReservationOutcome::NotApplicable) => {}
+                    Ok(crate::state::WalletReservationOutcome::Reserved(reservation)) => {
+                        wallet_reservation = Some(reservation);
+                    }
+                    Ok(crate::state::WalletReservationOutcome::Insufficient) => {
+                        self.record_ai_error_log(
+                            endpoint,
+                            ctx,
+                            AiErrorLog {
+                                tenant: policy_request.tenant.clone(),
+                                logical_model: Some(&request.model),
+                                provider: Some(&provider.name),
+                                status: StatusCode::TOO_MANY_REQUESTS,
+                                error_code: "wallet_balance_exhausted",
+                            },
+                        );
+                        write_json_error(
+                            session,
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "wallet_balance_exhausted",
+                            "prepaid credit balance cannot cover the estimated request cost",
+                            &ctx.request_id,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        self.record_ai_error_log(
+                            endpoint,
+                            ctx,
+                            AiErrorLog {
+                                tenant: policy_request.tenant.clone(),
+                                logical_model: Some(&request.model),
+                                provider: Some(&provider.name),
+                                status: StatusCode::SERVICE_UNAVAILABLE,
+                                error_code: "wallet_reservation_unavailable",
+                            },
+                        );
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "wallet_reservation_unavailable",
+                            format!("wallet balance reservation failed: {error}"),
+                            &ctx.request_id,
+                        )
+                        .await?;
+                        return Ok(());
                     }
                 }
             }

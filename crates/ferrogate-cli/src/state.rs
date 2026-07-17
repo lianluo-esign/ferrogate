@@ -4269,6 +4269,26 @@ fn settled_cost_usd(
     )
 }
 
+/// Estimated pre-dispatch cost of one request in wallet credits for a
+/// concrete candidate `route`, used to size a [`WalletCreditReservation`].
+/// Deliberately mirrors [`settled_cost_usd`]'s "only ever from real
+/// configured pricing" rule: an unpriced route yields `0`, exactly as it
+/// yields no debit at settlement, so a wallet reservation is only ever
+/// taken for requests that will actually be charged. Rounds to whole credits
+/// via the same `DEFAULT_CREDITS_PER_USD` unit `debit_wallet_for_settled_cost`
+/// uses, so a reservation and its eventual debit are denominated identically.
+pub(crate) fn estimated_request_credits(route: &ModelRoute, usage: &BillingTokenUsage) -> i64 {
+    let (Some(input_price), Some(output_price)) =
+        (route.input_price_per_1m, route.output_price_per_1m)
+    else {
+        return 0;
+    };
+    let cost_usd = ModelPrice::usd(input_price, output_price)
+        .estimate(usage)
+        .total_cost;
+    (cost_usd * ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD).round() as i64
+}
+
 #[derive(Debug)]
 pub(crate) struct ApiKeyTokenReservation {
     api_key_id: String,
@@ -4299,6 +4319,72 @@ impl Drop for ApiKeyTokenReservation {
     fn drop(&mut self) {
         self.release_inner();
     }
+}
+
+/// An in-flight prepaid-wallet credit hold (the concurrent-overdraft fix
+/// for issue #169): the credit-denominated analogue of
+/// [`ApiKeyTokenReservation`]. The pre-request wallet gate
+/// (`wallet_balance_exhausted`) is only a `balance > 0` read that takes no
+/// hold, so N concurrent requests from one tenant could all read a positive
+/// balance, all dispatch upstream, and all settle afterward -- driving the
+/// wallet arbitrarily negative and billing the operator for tokens the
+/// attacker never funded. This guard reserves an estimated request cost (in
+/// credits) against `balance_credits - outstanding_reservations` *before*
+/// dispatch, exactly mirroring how `try_reserve_tokens` reserves estimated
+/// tokens against a monthly budget, so concurrent reservations serialize and
+/// the in-flight total can never exceed the funded balance.
+///
+/// Released on `Drop` (so a cancelled/errored request that never settles
+/// still frees its hold) or explicitly via [`Self::settle`]. Release is the
+/// only mutation the guard performs; the actual debit is applied separately
+/// at settlement by `debit_wallet_for_settled_cost`, so holding the
+/// reservation until the guard drops at end of request is strictly
+/// conservative (it never releases before the real balance is reduced).
+#[derive(Debug)]
+pub(crate) struct WalletCreditReservation {
+    tenant_id: String,
+    credits: i64,
+    counters: Arc<ClusterCounterBackend>,
+    released: bool,
+}
+
+impl WalletCreditReservation {
+    #[cfg(test)]
+    pub(crate) fn credits(&self) -> i64 {
+        self.credits
+    }
+
+    fn release_inner(&mut self) {
+        if self.released {
+            return;
+        }
+        self.counters
+            .release_wallet_credits(&self.tenant_id, self.credits);
+        self.released = true;
+    }
+}
+
+impl Drop for WalletCreditReservation {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
+/// Outcome of an atomic pre-dispatch wallet credit reservation
+/// ([`AppState::try_reserve_wallet_credits`]) -- the concurrent-overdraft fix
+/// for issue #169.
+pub(crate) enum WalletReservationOutcome {
+    /// No wallet governs this request (no tenant attribution, no wallet row,
+    /// or a zero-cost/unpriced estimate). Proceed with no hold, matching the
+    /// opt-in, purely-additive semantics of the wallet gate.
+    NotApplicable,
+    /// Reserved credits against the tenant's funded balance. Hold the guard
+    /// for the whole request so a cancel/error still releases it on drop.
+    Reserved(WalletCreditReservation),
+    /// A wallet exists but its available balance (net of other in-flight
+    /// holds) cannot cover the estimated request cost -- reject before
+    /// dispatch, the same denial the `wallet_balance_exhausted` gate uses.
+    Insufficient,
 }
 
 fn process_local_reload_rejection(active: &Config, candidate: &Config) -> Option<String> {
@@ -4528,6 +4614,11 @@ enum ClusterCounterBackend {
         request_windows: Arc<Mutex<HashMap<String, Arc<ApiKeyRequestWindow>>>>,
         token_rate_windows: Arc<Mutex<HashMap<String, Arc<ApiKeyTokenWindow>>>>,
         token_reservations: Arc<Mutex<HashMap<String, u64>>>,
+        // In-flight prepaid-wallet credit holds keyed by tenant id
+        // (`organization_id`), the credit analogue of `token_reservations`.
+        // Guards the concurrent-overdraft window on the wallet balance the
+        // same way `token_reservations` guards the monthly token budget.
+        wallet_reservations: Arc<Mutex<HashMap<String, i64>>>,
     },
     Redis(RedisCounterBackend),
 }
@@ -4559,6 +4650,7 @@ impl ClusterCounterBackend {
             request_windows: Arc::new(Mutex::new(HashMap::new())),
             token_rate_windows: Arc::new(Mutex::new(HashMap::new())),
             token_reservations: Arc::new(Mutex::new(HashMap::new())),
+            wallet_reservations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -4570,11 +4662,13 @@ impl ClusterCounterBackend {
                     request_windows,
                     token_rate_windows,
                     token_reservations,
+                    wallet_reservations,
                 },
             ) => Self::Local {
                 request_windows: Arc::clone(request_windows),
                 token_rate_windows: Arc::clone(token_rate_windows),
                 token_reservations: Arc::clone(token_reservations),
+                wallet_reservations: Arc::clone(wallet_reservations),
             },
             (next, _) => next,
         }
@@ -4727,6 +4821,101 @@ impl ClusterCounterBackend {
             }
         }
     }
+
+    /// Credits currently held by in-flight requests for `tenant_id` -- the
+    /// wallet analogue of `reserved_tokens`. Best-effort (a poisoned lock or
+    /// an unreachable Redis reads as `0`) since this only tightens the
+    /// early-reject wallet gate; the authoritative overdraft guard is the
+    /// atomic reserve in `try_reserve_wallet_credits`.
+    fn reserved_wallet_credits(&self, tenant_id: &str) -> i64 {
+        match self {
+            Self::Local {
+                wallet_reservations,
+                ..
+            } => wallet_reservations
+                .lock()
+                .ok()
+                .and_then(|reservations| reservations.get(tenant_id).copied())
+                .unwrap_or_default(),
+            Self::Redis(redis) => redis.reserved_wallet_credits(tenant_id).unwrap_or_default(),
+        }
+    }
+
+    /// Atomically reserve `estimated_credits` for `tenant_id` against
+    /// `balance_credits` (already net of settled debits), the credit analogue
+    /// of `try_reserve_tokens`. Returns `Ok(Some(guard))` when the hold plus
+    /// every other in-flight hold still fits inside the funded balance, or
+    /// `Ok(None)` when it would overdraw. Callers pass a caller-read
+    /// `balance_credits`; because settlements only *reduce* the balance and
+    /// each reduction is paired with releasing that request's hold, a slightly
+    /// stale (higher) balance can never let the summed in-flight holds exceed
+    /// the real balance -- the reservation map under the lock is the source of
+    /// truth for the in-flight portion, exactly as in `try_reserve_tokens`.
+    fn try_reserve_wallet_credits(
+        self: &Arc<Self>,
+        tenant_id: &str,
+        balance_credits: i64,
+        estimated_credits: i64,
+    ) -> anyhow::Result<Option<WalletCreditReservation>> {
+        match self.as_ref() {
+            Self::Local {
+                wallet_reservations,
+                ..
+            } => {
+                let Ok(mut reservations) = wallet_reservations.lock() else {
+                    return Ok(None);
+                };
+                let reserved = reservations.get(tenant_id).copied().unwrap_or_default();
+                if reserved.saturating_add(estimated_credits) > balance_credits {
+                    return Ok(None);
+                }
+                *reservations.entry(tenant_id.to_string()).or_default() += estimated_credits;
+                Ok(Some(WalletCreditReservation {
+                    tenant_id: tenant_id.to_string(),
+                    credits: estimated_credits,
+                    counters: Arc::clone(self),
+                    released: false,
+                }))
+            }
+            Self::Redis(redis) => {
+                if redis.try_reserve_wallet_credits(
+                    tenant_id,
+                    balance_credits,
+                    estimated_credits,
+                )? {
+                    Ok(Some(WalletCreditReservation {
+                        tenant_id: tenant_id.to_string(),
+                        credits: estimated_credits,
+                        counters: Arc::clone(self),
+                        released: false,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    fn release_wallet_credits(&self, tenant_id: &str, credits: i64) {
+        match self {
+            Self::Local {
+                wallet_reservations,
+                ..
+            } => {
+                if let Ok(mut reservations) = wallet_reservations.lock() {
+                    if let Some(reserved) = reservations.get_mut(tenant_id) {
+                        *reserved = reserved.saturating_sub(credits);
+                        if *reserved <= 0 {
+                            reservations.remove(tenant_id);
+                        }
+                    }
+                }
+            }
+            Self::Redis(redis) => {
+                let _ = redis.release_wallet_credits(tenant_id, credits);
+            }
+        }
+    }
 }
 
 impl RedisCounterBackend {
@@ -4872,6 +5061,69 @@ return 1
         );
         let mut connection = self.connection()?;
         let _: u8 = script.key(key).arg(tokens).invoke(&mut connection)?;
+        Ok(())
+    }
+
+    fn wallet_prefix(&self, tenant_id: &str) -> String {
+        let sanitized = sanitize_redis_key_part(tenant_id);
+        self.key(&format!("wallet:{sanitized}"))
+    }
+
+    fn reserved_wallet_credits(&self, tenant_id: &str) -> anyhow::Result<i64> {
+        let key = format!("{}:credits:reserved", self.wallet_prefix(tenant_id));
+        let mut connection = self.connection()?;
+        let reserved: Option<i64> = redis::cmd("GET").arg(key).query(&mut connection)?;
+        Ok(reserved.unwrap_or_default())
+    }
+
+    /// Cluster-wide analogue of the `Local` wallet reservation: the reserved
+    /// credit total lives in Redis (shared across nodes) while `balance` is
+    /// passed by the caller (read from the shared wallet store). Atomic under
+    /// the Lua script, exactly like `try_reserve_tokens`.
+    fn try_reserve_wallet_credits(
+        &self,
+        tenant_id: &str,
+        balance_credits: i64,
+        estimated_credits: i64,
+    ) -> anyhow::Result<bool> {
+        let reserved_key = format!("{}:credits:reserved", self.wallet_prefix(tenant_id));
+        let script = redis::Script::new(
+            r#"
+local reserved = tonumber(redis.call('GET', KEYS[1]) or '0')
+local balance = tonumber(ARGV[1])
+local estimate = tonumber(ARGV[2])
+if reserved + estimate > balance then
+  return 0
+end
+redis.call('INCRBY', KEYS[1], estimate)
+return 1
+"#,
+        );
+        let mut connection = self.connection()?;
+        let reserved: u8 = script
+            .key(reserved_key)
+            .arg(balance_credits)
+            .arg(estimated_credits)
+            .invoke(&mut connection)?;
+        Ok(reserved == 1)
+    }
+
+    fn release_wallet_credits(&self, tenant_id: &str, credits: i64) -> anyhow::Result<()> {
+        let key = format!("{}:credits:reserved", self.wallet_prefix(tenant_id));
+        let script = redis::Script::new(
+            r#"
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local next = current - tonumber(ARGV[1])
+if next <= 0 then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('SET', KEYS[1], next)
+end
+return 1
+"#,
+        );
+        let mut connection = self.connection()?;
+        let _: u8 = script.key(key).arg(credits).invoke(&mut connection)?;
         Ok(())
     }
 }
