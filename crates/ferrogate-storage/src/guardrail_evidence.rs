@@ -271,7 +271,7 @@ impl PostgresControlPlaneStore {
         let until_unix = query.until_unix.map(saturating_i64);
         let offset = saturating_i64(query.offset as u64);
         let limit = saturating_i64(query.limit as u64);
-        let parameters: [&(dyn postgres::types::ToSql + Sync); 16] = [
+        let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 16] = [
             &query.tenant_id,
             &query.request_id,
             &query.trace_id,

@@ -115,10 +115,20 @@ impl PgContainer {
         let deadline = Instant::now() + timeout;
         let dsn = self.dsn();
         while Instant::now() < deadline {
-            if let Ok(mut client) = postgres::Client::connect(&dsn, postgres::NoTls) {
-                if client.simple_query("SELECT 1").is_ok() {
-                    return true;
-                }
+            let ok = block_on(async {
+                let Ok((client, connection)) =
+                    tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await
+                else {
+                    return false;
+                };
+                let driver = tokio::spawn(connection);
+                let ready = client.simple_query("SELECT 1").await.is_ok();
+                drop(client);
+                let _ = driver.await;
+                ready
+            });
+            if ok {
+                return true;
             }
             thread::sleep(Duration::from_millis(400));
         }

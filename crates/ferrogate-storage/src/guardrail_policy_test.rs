@@ -42,22 +42,33 @@ struct LocalSchemaCleanup {
 
 impl LocalSchemaCleanup {
     fn drop_and_verify(&mut self) {
-        let mut client = postgres::Client::connect(&self.dsn, postgres::NoTls)
-            .expect("connect for exact local schema cleanup");
-        client
-            .batch_execute(&format!(
-                "DROP SCHEMA {} CASCADE",
-                crate::quote_postgres_identifier(&self.schema)
-            ))
-            .expect("drop exact local Guardrail CAS schema");
-        let remaining: i64 = client
-            .query_one(
-                "SELECT COUNT(*)::bigint FROM information_schema.schemata WHERE schema_name = $1",
-                &[&self.schema],
-            )
-            .unwrap()
-            .get(0);
-        assert_eq!(remaining, 0);
+        let dsn = self.dsn.clone();
+        let schema = self.schema.clone();
+        block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+                .await
+                .expect("connect for exact local schema cleanup");
+            let driver = tokio::spawn(connection);
+            client
+                .batch_execute(&format!(
+                    "DROP SCHEMA {} CASCADE",
+                    crate::quote_postgres_identifier(&schema)
+                ))
+                .await
+                .expect("drop exact local Guardrail CAS schema");
+            let remaining: i64 = client
+                .query_one(
+                    "SELECT COUNT(*)::bigint FROM information_schema.schemata \
+                     WHERE schema_name = $1",
+                    &[&schema],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(remaining, 0);
+            drop(client);
+            let _ = driver.await;
+        });
         self.completed = true;
     }
 }
@@ -67,12 +78,23 @@ impl Drop for LocalSchemaCleanup {
         if self.completed {
             return;
         }
-        if let Ok(mut client) = postgres::Client::connect(&self.dsn, postgres::NoTls) {
-            let _ = client.batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE",
-                crate::quote_postgres_identifier(&self.schema)
-            ));
-        }
+        let dsn = self.dsn.clone();
+        let schema = self.schema.clone();
+        block_on(async move {
+            if let Ok((client, connection)) =
+                tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await
+            {
+                let driver = tokio::spawn(connection);
+                let _ = client
+                    .batch_execute(&format!(
+                        "DROP SCHEMA IF EXISTS {} CASCADE",
+                        crate::quote_postgres_identifier(&schema)
+                    ))
+                    .await;
+                drop(client);
+                let _ = driver.await;
+            }
+        });
     }
 }
 

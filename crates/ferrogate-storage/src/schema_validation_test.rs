@@ -5,8 +5,8 @@
 // description: Focused schema-contract query regression coverage for issue #213.
 
 use super::{
-    postgres_transport_config, PostgresStorageConfig, PostgresTlsMode, POSTGRES_SCHEMA_NAME,
-    POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION, PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
+    POSTGRES_SCHEMA_NAME, POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION,
+    PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
 };
 
 #[test]
@@ -24,25 +24,10 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
         .contains("target_namespace.nspname = current_schema()"));
 }
 
-#[test]
-fn authoritative_reread_transport_caps_connect_and_tcp_user_timeouts() {
-    let config = PostgresStorageConfig {
-        dsn: "postgresql://example.invalid/db".into(),
-        pool_size: 1,
-        pool_acquire_timeout_millis: 1_000,
-        tls_mode: PostgresTlsMode::Require,
-        tls_ca_cert_path: None,
-        connect_timeout_secs: 10,
-        statement_timeout_millis: 30_000,
-        schema: Some("tenant".into()),
-        search_path: vec!["public".into()],
-    };
-    let timeout = std::time::Duration::from_secs(3);
-    let transport = postgres_transport_config(&config, timeout, Some(timeout)).unwrap();
-
-    assert_eq!(transport.get_connect_timeout(), Some(&timeout));
-    assert_eq!(transport.get_tcp_user_timeout(), Some(&timeout));
-}
+// (Removed `authoritative_reread_transport_caps_connect_and_tcp_user_timeouts`:
+// it exercised the sync `postgres_transport_config`, deleted in #221's final
+// slice. The same connect/tcp_user timeout capping now lives in
+// `AsyncPostgresPool::new` (`pg_config.connect_timeout` / `tcp_user_timeout`).)
 
 #[test]
 fn schema_contract_includes_latest_guardrail_generation_migration() {

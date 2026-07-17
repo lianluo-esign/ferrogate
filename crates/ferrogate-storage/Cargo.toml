@@ -21,7 +21,6 @@ deadpool-postgres.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }
 native-tls.workspace = true
-postgres.workspace = true
 postgres-native-tls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,7 +32,6 @@ tracing.workspace = true
 [dev-dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
 tempfile.workspace = true
-postgres.workspace = true
 
 [features]
 default = []

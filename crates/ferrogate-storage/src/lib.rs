@@ -12,10 +12,9 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    str::FromStr,
     sync::{
         atomic::{AtomicU8, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -23,11 +22,9 @@ use std::{
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::{TenantContext, WorkspaceScope};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
-use postgres::config::SslMode as PostgresSslMode;
-use postgres::row::Row as PostgresRow;
-use postgres::{Client as PostgresClient, NoTls};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
+use tokio_postgres::Row as PostgresRow;
 
 mod async_postgres;
 pub use async_postgres::PostgresPoolMetricsSnapshot;
@@ -500,7 +497,6 @@ const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.s
 const POSTGRES_SCHEMA_VERSION: u64 = 32;
 const POSTGRES_SCHEMA_NAME: &str = "032_guardrail_policy_binding_generation";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
-const POSTGRES_OPERATION_LOCK_TIMEOUT_MILLIS: u64 = 250;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
      (policy_id, active_revision, archived_revisions_json, updated_at_unix, updated_by, generation) \
@@ -1113,14 +1109,8 @@ pub struct RuntimeControlPlaneState {
 }
 
 struct PostgresControlPlaneStore {
-    pool: Arc<PostgresClientPool>,
     async_pool: Arc<async_postgres::AsyncPostgresPool>,
     schema: StorageSchemaEvidence,
-}
-
-struct PostgresClientPool {
-    clients: Mutex<Vec<PostgresClient>>,
-    available: Condvar,
 }
 
 impl std::fmt::Debug for PostgresControlPlaneStore {
@@ -1141,16 +1131,8 @@ impl PostgresControlPlaneStore {
         let schema_timeout_millis = config
             .statement_timeout_millis
             .max(POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS);
-        let mut clients = Vec::with_capacity(config.pool_size);
-        for _ in 0..config.pool_size {
-            clients.push(connect_postgres_client(&config)?);
-        }
         let async_pool = Arc::new(async_postgres::AsyncPostgresPool::new(&config)?);
         let store = Self {
-            pool: Arc::new(PostgresClientPool {
-                clients: Mutex::new(clients),
-                available: Condvar::new(),
-            }),
             async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
         };
@@ -1191,16 +1173,8 @@ impl PostgresControlPlaneStore {
         let schema_timeout_millis = config
             .statement_timeout_millis
             .max(POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS);
-        let mut clients = Vec::with_capacity(config.pool_size);
-        for _ in 0..config.pool_size {
-            clients.push(connect_postgres_client(&config)?);
-        }
         let async_pool = Arc::new(async_postgres::AsyncPostgresPool::new(&config)?);
         let store = Self {
-            pool: Arc::new(PostgresClientPool {
-                clients: Mutex::new(clients),
-                available: Condvar::new(),
-            }),
             async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
         };
@@ -4800,113 +4774,6 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
     }
-
-    fn with_client_storage<T: Send>(
-        &self,
-        action: impl FnOnce(&mut PostgresClient) -> Result<T, StorageError> + Send,
-    ) -> Result<T, StorageError> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let mut client = self.pool.acquire()?;
-                    let result = action(&mut client);
-                    self.pool.release(client);
-                    result
-                })
-                .join()
-                .map_err(|_| StorageError::Postgres("postgres storage thread panicked".into()))?
-        })
-    }
-}
-
-impl Drop for PostgresControlPlaneStore {
-    fn drop(&mut self) {
-        let Ok(mut clients) = self.pool.clients.lock() else {
-            return;
-        };
-        let clients = std::mem::take(&mut *clients);
-        if clients.is_empty() {
-            return;
-        }
-        let _ = std::thread::spawn(move || drop(clients)).join();
-    }
-}
-
-impl PostgresClientPool {
-    fn acquire(&self) -> Result<PostgresClient, StorageError> {
-        let mut clients = self.clients.lock().map_err(|_| {
-            StorageError::Postgres("postgres control-plane client pool mutex is poisoned".into())
-        })?;
-        loop {
-            if let Some(client) = clients.pop() {
-                return Ok(client);
-            }
-            clients = self.available.wait(clients).map_err(|_| {
-                StorageError::Postgres(
-                    "postgres control-plane client pool mutex is poisoned".into(),
-                )
-            })?;
-        }
-    }
-
-    fn release(&self, client: PostgresClient) {
-        if let Ok(mut clients) = self.clients.lock() {
-            clients.push(client);
-            self.available.notify_one();
-        }
-    }
-}
-
-fn connect_postgres_transport(
-    config: &PostgresStorageConfig,
-    connect_timeout: Duration,
-    tcp_user_timeout: Option<Duration>,
-) -> Result<PostgresClient, StorageError> {
-    let pg_config = postgres_transport_config(config, connect_timeout, tcp_user_timeout)?;
-    let client = match config.tls_mode {
-        PostgresTlsMode::Disable => pg_config
-            .connect(NoTls)
-            .map_err(postgres_connection_error)?,
-        PostgresTlsMode::Prefer
-        | PostgresTlsMode::Require
-        | PostgresTlsMode::VerifyCa
-        | PostgresTlsMode::VerifyFull => {
-            let connector = build_postgres_tls_connector(config)?;
-            pg_config
-                .connect(connector)
-                .map_err(postgres_connection_error)?
-        }
-    };
-    Ok(client)
-}
-
-fn postgres_transport_config(
-    config: &PostgresStorageConfig,
-    connect_timeout: Duration,
-    tcp_user_timeout: Option<Duration>,
-) -> Result<postgres::Config, StorageError> {
-    let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
-    pg_config.connect_timeout(connect_timeout);
-    if let Some(tcp_user_timeout) = tcp_user_timeout {
-        pg_config.tcp_user_timeout(tcp_user_timeout);
-    }
-    pg_config.ssl_mode(match config.tls_mode {
-        PostgresTlsMode::Disable => PostgresSslMode::Disable,
-        PostgresTlsMode::Prefer => PostgresSslMode::Prefer,
-        PostgresTlsMode::Require => PostgresSslMode::Require,
-        PostgresTlsMode::VerifyCa | PostgresTlsMode::VerifyFull => PostgresSslMode::Require,
-    });
-    Ok(pg_config)
-}
-
-fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
-    let mut client = connect_postgres_transport(
-        config,
-        Duration::from_secs(config.connect_timeout_secs),
-        None,
-    )?;
-    initialize_postgres_session(&mut client, config)?;
-    Ok(client)
 }
 
 fn build_postgres_tls_connector(
@@ -4944,36 +4811,6 @@ fn build_postgres_tls_connector(
         StorageError::Postgres(format!("postgres TLS connector error: {error}"))
     })?;
     Ok(MakeTlsConnector::new(connector))
-}
-
-fn initialize_postgres_session(
-    client: &mut PostgresClient,
-    config: &PostgresStorageConfig,
-) -> Result<(), StorageError> {
-    client
-        .batch_execute(&format!(
-            "SET statement_timeout = {}; SET lock_timeout = {};",
-            config.statement_timeout_millis, POSTGRES_OPERATION_LOCK_TIMEOUT_MILLIS
-        ))
-        .map_err(postgres_error)?;
-
-    if let Some(schema) = config.schema.as_deref() {
-        client
-            .batch_execute(&format!(
-                "CREATE SCHEMA IF NOT EXISTS {}; SET search_path TO {};",
-                quote_postgres_identifier(schema),
-                postgres_search_path_sql(config)
-            ))
-            .map_err(postgres_error)?;
-    } else if !config.search_path.is_empty() {
-        client
-            .batch_execute(&format!(
-                "SET search_path TO {};",
-                postgres_search_path_sql(config)
-            ))
-            .map_err(postgres_error)?;
-    }
-    Ok(())
 }
 
 fn postgres_search_path_sql(config: &PostgresStorageConfig) -> String {
@@ -10650,15 +10487,11 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
     }
 }
 
-fn postgres_error(error: postgres::Error) -> StorageError {
+fn postgres_error(error: tokio_postgres::Error) -> StorageError {
     StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
 }
 
-fn postgres_connection_error(error: postgres::Error) -> StorageError {
-    StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
-}
-
-fn postgres_error_message(error: &postgres::Error) -> String {
+fn postgres_error_message(error: &tokio_postgres::Error) -> String {
     error.as_db_error().map_or_else(
         || error.to_string(),
         |database_error| {

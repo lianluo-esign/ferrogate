@@ -6,13 +6,13 @@
 
 use std::{
     future::Future,
-    sync::{Arc, Barrier, Condvar, Mutex},
+    sync::{Arc, Barrier},
     time::{Duration, Instant},
 };
 
 use super::*;
 use crate::{
-    async_postgres::AsyncPostgresPool, PostgresClientPool, PostgresStorageConfig, PostgresTlsMode,
+    async_postgres::AsyncPostgresPool, PostgresStorageConfig, PostgresTlsMode,
     StorageOperationCancelOutcome, StorageProviderKind, StorageSchemaEvidence, StoredAuditEvent,
 };
 
@@ -104,10 +104,6 @@ fn exhausted_postgres_store() -> PostgresControlPlaneStore {
         search_path: Vec::new(),
     };
     PostgresControlPlaneStore {
-        pool: Arc::new(PostgresClientPool {
-            clients: Mutex::new(Vec::new()),
-            available: Condvar::new(),
-        }),
         async_pool: Arc::new(AsyncPostgresPool::new(&config).expect("async test pool")),
         schema: StorageSchemaEvidence::postgres_expected(),
     }
@@ -143,7 +139,6 @@ fn expired_operation_fences_async_mcp_identity_authorization_read() {
         }
     ));
     assert!(started.elapsed() < Duration::from_millis(100));
-    assert!(store.pool.clients.lock().unwrap().is_empty());
     assert_eq!(
         store.async_pool.metrics_snapshot(),
         crate::PostgresPoolMetricsSnapshot::default()
@@ -167,10 +162,10 @@ fn postgres_identity_authorization_is_one_short_nonlocking_read() {
     assert!(normalized.contains("CREDENTIAL.USER_ID=$3"));
     assert!(normalized.contains("CREDENTIAL.SERVER_NAME=$4"));
     assert!(is_mcp_authorization_statement_timeout_code(Some(
-        &postgres::error::SqlState::QUERY_CANCELED
+        &tokio_postgres::error::SqlState::QUERY_CANCELED
     )));
     assert!(!is_mcp_authorization_statement_timeout_code(Some(
-        &postgres::error::SqlState::LOCK_NOT_AVAILABLE
+        &tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE
     )));
     assert!(!is_mcp_authorization_statement_timeout_code(None));
 }
@@ -196,7 +191,6 @@ fn expired_operation_fences_async_mcp_identity_audit_without_late_write() {
         }
     ));
     assert!(started.elapsed() < Duration::from_millis(100));
-    assert!(store.pool.clients.lock().unwrap().is_empty());
     assert_eq!(
         store.async_pool.metrics_snapshot(),
         crate::PostgresPoolMetricsSnapshot::default()
@@ -717,10 +711,10 @@ fn postgres_refresh_claim_lock_conflict_is_a_short_conservative_busy() {
         }
     );
     assert!(is_mcp_refresh_lock_timeout_code(Some(
-        &postgres::error::SqlState::LOCK_NOT_AVAILABLE
+        &tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE
     )));
     assert!(!is_mcp_refresh_lock_timeout_code(Some(
-        &postgres::error::SqlState::QUERY_CANCELED
+        &tokio_postgres::error::SqlState::QUERY_CANCELED
     )));
     assert!(!is_mcp_refresh_lock_timeout_code(None));
 }

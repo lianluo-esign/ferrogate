@@ -691,12 +691,12 @@ fn mcp_refresh_mutation_lock_timeout_millis(
     Ok(timeout_millis.max(1))
 }
 
-fn is_mcp_refresh_lock_timeout(error: &postgres::Error) -> bool {
+fn is_mcp_refresh_lock_timeout(error: &tokio_postgres::Error) -> bool {
     is_mcp_refresh_lock_timeout_code(error.code())
 }
 
-fn is_mcp_refresh_lock_timeout_code(code: Option<&postgres::error::SqlState>) -> bool {
-    code == Some(&postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+fn is_mcp_refresh_lock_timeout_code(code: Option<&tokio_postgres::error::SqlState>) -> bool {
+    code == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
 enum McpRefreshClaimClassification {
@@ -939,8 +939,10 @@ async fn postgres_authorize_mcp_actor(
     Ok(McpIdentityAccessOutcome::Allowed(Box::new(credential)))
 }
 
-fn is_mcp_authorization_statement_timeout_code(code: Option<&postgres::error::SqlState>) -> bool {
-    code == Some(&postgres::error::SqlState::QUERY_CANCELED)
+fn is_mcp_authorization_statement_timeout_code(
+    code: Option<&tokio_postgres::error::SqlState>,
+) -> bool {
+    code == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
 }
 
 fn mcp_statement_timeout_for_operation(
@@ -978,7 +980,7 @@ async fn await_mcp_async_postgres_stage<T, F>(
     future: F,
 ) -> Result<T, StorageError>
 where
-    F: Future<Output = Result<T, postgres::Error>>,
+    F: Future<Output = Result<T, tokio_postgres::Error>>,
 {
     let remaining = operation.remaining(stage)?;
     match tokio::time::timeout(remaining, future).await {
@@ -986,7 +988,9 @@ where
             operation.check_active(stage)?;
             Ok(output)
         }
-        Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+        Ok(Err(error))
+            if error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) =>
+        {
             Err(mcp_async_operation_deadline(operation, stage))
         }
         Ok(Err(error)) => Err(super::postgres_error(error)),
@@ -1011,7 +1015,7 @@ async fn commit_mcp_async_storage_transaction(
         tracing::warn!(
             operation = operation.name(),
             storage_stage = "transaction commit",
-            sqlstate = error.code().map(postgres::error::SqlState::code),
+            sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
             outcome = "commit_outcome_unknown",
             "PostgreSQL returned an error after the async MCP storage commit fence"
         );
@@ -1566,7 +1570,9 @@ impl PostgresControlPlaneStore {
                 );
                 return Ok(busy);
             }
-            Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+            Ok(Err(error))
+                if error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) =>
+            {
                 return Err(mcp_async_operation_deadline(operation, "refresh claim CAS"));
             }
             Ok(Err(error)) => return Err(super::postgres_error(error)),
@@ -1680,7 +1686,9 @@ impl PostgresControlPlaneStore {
                 );
                 return Ok(McpRefreshRenewOutcome::OwnershipChanged);
             }
-            Ok(Err(error)) if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) => {
+            Ok(Err(error))
+                if error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) =>
+            {
                 return Err(mcp_async_operation_deadline(
                     operation,
                     "refresh renewal CAS",

@@ -1240,7 +1240,6 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-core",
  "native-tls",
- "postgres",
  "postgres-native-tls",
  "serde",
  "serde_json",
