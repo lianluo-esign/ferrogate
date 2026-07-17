@@ -3,9 +3,10 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-17
 // description: Socket-boundary proof for #200 managed-action guardrail enforcement:
-//   a managed-action guardrail policy blocks a capability-ALLOWED MCP action whose
-//   input arguments carry a flagged keyword, while a clean MCP action stays allowed,
-//   both driven through the real gateway's managed-worker external-action authorizer.
+//   managed-action guardrail policies block capability-ALLOWED MCP and CLI actions
+//   whose scanned input matches a flagged keyword, each recording auditable
+//   `guardrail.blocked` timeline evidence, while a clean MCP action stays allowed —
+//   all driven through the real gateway's managed-worker external-action authorizer.
 
 mod support;
 
@@ -64,43 +65,27 @@ fn managed_action_guardrail_blocks_capability_allowed_mcp_action_over_socket() {
     // Makes the `local-smoke`/`echo` MCP action capability-ALLOWED for tenant-1.
     provision_target_capability_rbac(&gateway_addr, &["tenant-1"]);
 
-    // Provision the managed-action guardrail policy through the ADMIN API: the
-    // POST body is a serialized `PolicyRevision`; the create handler assigns the
-    // revision number and returns it in the created view.
-    let policy = managed_mcp_guardrail_block_policy("managed-action-mcp-guard", "exfiltrate");
-    let created = response_json(http_request(
+    // Provision two managed-action guardrail policies through the admin API — one
+    // scoped to MCP actions, one to CLI actions — covering ≥ 2 managed-action
+    // families end-to-end (issue #200 acceptance).
+    provision_guardrail_policy(
         &gateway_addr,
-        "POST",
-        "/admin/v1/guardrail-policies",
-        &[
-            "Authorization: Bearer admin-secret",
-            "Content-Type: application/json",
-        ],
-        &serde_json::to_string(&policy).unwrap(),
-    ));
-    assert_eq!(created["object"], "guardrail_policy_revision", "{created}");
-    let revision = created["policy"]["revision"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("guardrail create response missing revision: {created}"));
-    assert_eq!(revision, 1, "{created}");
-
-    // Activate it: the activate body selects the revision to make live.
-    let activated = response_json(http_request(
-        &gateway_addr,
-        "POST",
-        "/admin/v1/guardrail-policies/managed-action-mcp-guard/activate",
-        &[
-            "Authorization: Bearer admin-secret",
-            "Content-Type: application/json",
-        ],
-        &json!({ "revision": revision }).to_string(),
-    ));
-    assert_eq!(
-        activated["object"], "guardrail_policy_binding",
-        "{activated}"
+        "managed-action-mcp-guard",
+        managed_action_guardrail_block_policy(
+            "managed-action-mcp-guard",
+            ManagedActionClass::Mcp,
+            "exfiltrate",
+        ),
     );
-    assert_eq!(activated["active_revision"], revision, "{activated}");
-    assert_eq!(activated["rollback"], false, "{activated}");
+    provision_guardrail_policy(
+        &gateway_addr,
+        "managed-action-cli-guard",
+        managed_action_guardrail_block_policy(
+            "managed-action-cli-guard",
+            ManagedActionClass::Cli,
+            "/usr/bin/env",
+        ),
+    );
 
     // (1) Capability-ALLOWED MCP action whose input arguments carry the flagged
     //     keyword must be blocked by the managed-action guardrail (issue #200).
@@ -141,7 +126,58 @@ fn managed_action_guardrail_blocks_capability_allowed_mcp_action_over_socket() {
         "guardrail block message must attribute the guardrail policy: {flagged}"
     );
 
-    // (2) The same capability-allowed action with clean arguments passes the
+    // (2) A second managed-action family: a capability-ALLOWED CLI action whose
+    //     command matches the CLI guardrail keyword must also be blocked.
+    let flagged_cli = authorize(
+        &authorizer_socket,
+        "cli",
+        json!({
+            "kind": "cli",
+            "command": "/usr/bin/env",
+            "args": [],
+            "working_dir": workspace.path().display().to_string(),
+            "env_policy": "empty",
+            "timeout_millis": 1000,
+            "stdout_limit_bytes": 1024,
+            "stderr_limit_bytes": 1024,
+            "artifact_capture": false
+        }),
+    );
+    assert_eq!(flagged_cli["response"]["accepted"], false, "{flagged_cli}");
+    assert!(
+        flagged_cli["response"]["decision"].is_null(),
+        "{flagged_cli}"
+    );
+    assert_eq!(
+        flagged_cli["response"]["error"]["code"], "capability_denied",
+        "{flagged_cli}"
+    );
+    assert!(
+        flagged_cli["response"]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("guardrail"),
+        "CLI guardrail block must attribute the guardrail policy: {flagged_cli}"
+    );
+
+    // (3) Audit/evaluation evidence: each guardrail block records a
+    //     `guardrail.blocked` timeline event on the run, readable via the admin
+    //     agent-runs API. Both the MCP and CLI blocks must be present.
+    let blocked_targets = guardrail_block_event_targets(&gateway_addr, "run-1");
+    assert!(
+        blocked_targets
+            .iter()
+            .any(|target| target == "mcp:local-smoke:echo"),
+        "missing MCP guardrail.blocked evidence: {blocked_targets:?}"
+    );
+    assert!(
+        blocked_targets
+            .iter()
+            .any(|target| target == "/usr/bin/env"),
+        "missing CLI guardrail.blocked evidence: {blocked_targets:?}"
+    );
+
+    // (4) The same capability-allowed MCP action with clean arguments passes the
     //     guardrail and stays allowed.
     let clean = authorize(
         &authorizer_socket,
@@ -165,19 +201,23 @@ fn managed_action_guardrail_blocks_capability_allowed_mcp_action_over_socket() {
     gateway.wait().unwrap();
 }
 
-/// A durable, enforced guardrail policy scoped to managed MCP actions that blocks
-/// when `keyword` appears in the scanned input (issue #200). Mirrors the
+/// A durable, enforced guardrail policy scoped to a managed-action class that
+/// blocks when `keyword` appears in the scanned input (issue #200). Mirrors the
 /// production-tested `managed_mcp_block_policy` shape.
-fn managed_mcp_guardrail_block_policy(policy_id: &str, keyword: &str) -> PolicyRevision {
+fn managed_action_guardrail_block_policy(
+    policy_id: &str,
+    class: ManagedActionClass,
+    keyword: &str,
+) -> PolicyRevision {
     PolicyRevision {
         policy_id: policy_id.to_string(),
         revision: 1,
-        name: "managed mcp guardrail".to_string(),
+        name: format!("managed {policy_id} guardrail"),
         description: None,
         enforced: true,
         scope: PolicyScopeSelector {
             managed_action: Some(ManagedActionSelector {
-                classes: vec![ManagedActionClass::Mcp],
+                classes: vec![class],
                 targets: Vec::new(),
             }),
             ..PolicyScopeSelector::default()
@@ -207,6 +247,64 @@ fn managed_mcp_guardrail_block_policy(policy_id: &str, keyword: &str) -> PolicyR
         created_at_unix: 1,
         created_by: "test-admin".to_string(),
     }
+}
+
+/// Create + activate a guardrail policy revision through the admin API. The
+/// create body is a serialized `PolicyRevision`; the activate body selects the
+/// revision to make live.
+fn provision_guardrail_policy(gateway_addr: &str, policy_id: &str, policy: PolicyRevision) {
+    let created = response_json(http_request(
+        gateway_addr,
+        "POST",
+        "/admin/v1/guardrail-policies",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::to_string(&policy).unwrap(),
+    ));
+    assert_eq!(created["object"], "guardrail_policy_revision", "{created}");
+    let revision = created["policy"]["revision"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("guardrail create response missing revision: {created}"));
+    let activated = response_json(http_request(
+        gateway_addr,
+        "POST",
+        &format!("/admin/v1/guardrail-policies/{policy_id}/activate"),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &json!({ "revision": revision }).to_string(),
+    ));
+    assert_eq!(
+        activated["object"], "guardrail_policy_binding",
+        "{activated}"
+    );
+    assert_eq!(activated["active_revision"], revision, "{activated}");
+}
+
+/// The `target`s of every `guardrail.blocked` timeline event recorded on a run,
+/// read via the admin agent-runs API — the audit evidence that a managed action
+/// was stopped by the guardrail seam (issue #200).
+fn guardrail_block_event_targets(gateway_addr: &str, run_id: &str) -> Vec<String> {
+    let timeline = response_json(http_request(
+        gateway_addr,
+        "GET",
+        &format!("/admin/v1/agent-runs/{run_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    timeline["agent_events"]
+        .as_array()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| event["kind"] == "guardrail.blocked")
+                .filter_map(|event| event["target"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn authorize(socket_path: &Path, kind: &str, action: Value) -> Value {

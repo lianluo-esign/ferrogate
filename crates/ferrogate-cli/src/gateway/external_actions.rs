@@ -160,6 +160,27 @@ impl GatewayExternalActionAuthorizerService {
                         &run_id,
                         &action_binding,
                     ) {
+                        // Record timeline evidence for the guardrail block so the
+                        // fail-closed decision is auditable (issue #200) — the
+                        // capability-allow event is intentionally not emitted, so
+                        // this is the only evidence the action was stopped here.
+                        state.record_agent_run_event(StoredAgentRunEvent {
+                            id: format!("managed-action-guardrail:{run_id}:{transport_request_id}"),
+                            run_id: run_id.clone(),
+                            request_id: transport_request_id.to_string(),
+                            trace_id: None,
+                            tenant: timeline_tenant.clone(),
+                            turn: 0,
+                            kind: "guardrail.blocked".to_string(),
+                            target: action_binding.target.clone(),
+                            outcome: "blocked".to_string(),
+                            tool_call_id: None,
+                            message: Some(format!(
+                                "managed action blocked by guardrail policy {} ({}): {}",
+                                matched.rule_id, matched.code, matched.message
+                            )),
+                            occurred_at_unix: Some(now_unix_seconds()),
+                        });
                         return ExternalActionAuthorizationResponse::rejected(
                             FrameworkAdapterError::CapabilityDenied(format!(
                                 "managed action blocked by guardrail policy {} ({}): {}",
