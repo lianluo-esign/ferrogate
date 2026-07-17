@@ -104,10 +104,9 @@ pub(super) struct ManagedActionGuardrailRequest<'a> {
 /// every enforcement seam: it builds the stage-appropriate managed-action
 /// envelope (`ToolArguments` on `Request`, `ToolResult` on `Response`) over
 /// `payload_text`, selects managed-action policies via the `(class, target)`
-/// context, and runs `match_guardrail` on the caller's blocking thread through
-/// the sync/async bridge. Returns the matched policy when the action must be
-/// blocked, `None` when no managed-action policy applies.
-pub(super) fn evaluate_managed_action_guardrail(
+/// context, and runs `match_guardrail`. Returns the matched policy when the
+/// action must be blocked, `None` when no managed-action policy applies.
+pub(super) async fn evaluate_managed_action_guardrail_async(
     state: &AppState,
     stage: GuardrailStage,
     request: &ManagedActionGuardrailRequest<'_>,
@@ -122,28 +121,47 @@ pub(super) fn evaluate_managed_action_guardrail(
         format!("managed_action:{}", request.target),
         payload_text,
     );
-    block_on_sync_bridge(state.match_guardrail(
+    state
+        .match_guardrail(
+            stage,
+            GuardrailEvaluationContext {
+                request_id: request.request_id,
+                trace_id: request.trace_id,
+                agent_run_id: request.agent_run_id,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: None,
+                tenant: request.tenant,
+                service_account_id: None,
+                gateway_config_id: None,
+                model: None,
+                provider: None,
+                streaming: false,
+                envelope: &envelope,
+                managed_action: Some(ManagedActionContext {
+                    class: request.class,
+                    target: Some(request.target),
+                }),
+            },
+        )
+        .await
+}
+
+/// Synchronous wrapper over [`evaluate_managed_action_guardrail_async`] for
+/// seams that run on a blocking thread (e.g. the managed-worker external-action
+/// authorizer). Async callers should await the async form directly.
+pub(super) fn evaluate_managed_action_guardrail(
+    state: &AppState,
+    stage: GuardrailStage,
+    request: &ManagedActionGuardrailRequest<'_>,
+    payload_text: String,
+) -> Option<GuardrailMatch> {
+    block_on_sync_bridge(evaluate_managed_action_guardrail_async(
+        state,
         stage,
-        GuardrailEvaluationContext {
-            request_id: request.request_id,
-            trace_id: request.trace_id,
-            agent_run_id: request.agent_run_id,
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
-            actor_api_key_id: None,
-            tenant: request.tenant,
-            service_account_id: None,
-            gateway_config_id: None,
-            model: None,
-            provider: None,
-            streaming: false,
-            envelope: &envelope,
-            managed_action: Some(ManagedActionContext {
-                class: request.class,
-                target: Some(request.target),
-            }),
-        },
+        request,
+        payload_text,
     ))
 }
 
@@ -393,6 +411,55 @@ mod tests {
             crate::config::GuardrailStage::Response,
             &request,
             payload_text(&serde_json::json!({"ok": true})),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn shared_evaluator_selects_mcp_class_by_canonical_target() {
+        // Locks the contract between the chokepoint's derived MCP target
+        // ("mcp:{server}:{tool}") and what a policy author writes in
+        // `managed_action.targets`.
+        let mut policy = tool_response_block_policy("exfiltrate");
+        policy.policy_id = "mcp-target-guard".to_string();
+        policy.scope.managed_action = Some(ferrogate_guardrails::ManagedActionSelector {
+            classes: vec![ManagedActionClass::Mcp],
+            targets: vec!["mcp:github:create_issue".to_string()],
+        });
+        let shared =
+            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared.create_guardrail_policy_revision(policy).unwrap();
+        shared
+            .activate_guardrail_policy_revision("mcp-target-guard", 1, "test-admin", 1, false)
+            .unwrap();
+        let state = shared.current();
+        let tenant = ferrogate_core::TenantContext::default();
+        let matching = ManagedActionGuardrailRequest {
+            request_id: "req",
+            trace_id: None,
+            agent_run_id: None,
+            tenant: &tenant,
+            class: ManagedActionClass::Mcp,
+            target: "mcp:github:create_issue",
+        };
+        assert!(evaluate_managed_action_guardrail(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &matching,
+            payload_text(&serde_json::json!("exfiltrate")),
+        )
+        .is_some());
+
+        // A different MCP tool (target mismatch) is not selected.
+        let other = ManagedActionGuardrailRequest {
+            target: "mcp:github:list_issues",
+            ..matching
+        };
+        assert!(evaluate_managed_action_guardrail(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &other,
+            payload_text(&serde_json::json!("exfiltrate")),
         )
         .is_none());
     }

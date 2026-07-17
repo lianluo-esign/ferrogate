@@ -21,8 +21,8 @@ use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
     config::{
-        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, PolicyRule, PromptTemplate,
-        PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
+        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, GuardrailStage, PolicyRule,
+        PromptTemplate, PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
         PromptTemplateVersionStatus, Provider, SkillPackage, SkillPackageCapabilityKind,
     },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
@@ -64,8 +64,13 @@ use crate::{
 use ferrogate_providers::provider_compatibility_kind;
 use ferrogate_providers::{ProviderHeader, SecretValue};
 
+use ferrogate_guardrails::ManagedActionClass;
+
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
+use super::managed_action_guardrail::{
+    evaluate_managed_action_guardrail_async, payload_text, ManagedActionGuardrailRequest,
+};
 use super::mcp_rpc;
 use super::{FerroGateway, ProxyContext};
 
@@ -3330,6 +3335,63 @@ impl FerroGateway {
             }
         }
 
+        // #200: managed-action guardrails at the shared tool-governance
+        // chokepoint — a single fail-closed path covering every in-process tool
+        // backend (Extension, MCP, HTTP). `class`/`target` follow the backend:
+        // an Extension tool is a Tool-class action, an MCP tool an Mcp-class
+        // action. The input stage runs after capability + approval and before
+        // execution, so no tool ever runs on flagged arguments.
+        let guardrail_tenant = auth.tenant_context();
+        let (guardrail_class, guardrail_target) = match backend {
+            ToolExecuteBackend::Extension => {
+                (ManagedActionClass::Tool, format!("tool:{}", request.name))
+            }
+            ToolExecuteBackend::Mcp => (
+                ManagedActionClass::Mcp,
+                mcp_audit_details
+                    .as_ref()
+                    .map(|(server, tool)| format!("mcp:{server}:{tool}"))
+                    .unwrap_or_else(|| format!("mcp:{}", request.name)),
+            ),
+        };
+        let guardrail_request = ManagedActionGuardrailRequest {
+            request_id: &ctx.request_id,
+            trace_id: ctx.trace_id.as_deref(),
+            agent_run_id: execution.agent_run_id,
+            tenant: &guardrail_tenant,
+            class: guardrail_class,
+            target: &guardrail_target,
+        };
+        if let Some(matched) = evaluate_managed_action_guardrail_async(
+            &state,
+            GuardrailStage::Request,
+            &guardrail_request,
+            payload_text(&request.arguments),
+        )
+        .await
+        {
+            state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                ctx,
+                auth,
+                execution,
+                "tool.guardrail",
+                guardrail_target.clone(),
+                "rejected",
+                format!(
+                    "tool input blocked by guardrail policy {} ({}): {}",
+                    matched.rule_id, matched.code, matched.message
+                ),
+            ));
+            return Err(ToolExecutionHttpError {
+                status: StatusCode::FORBIDDEN,
+                code: "guardrail_blocked",
+                message: format!(
+                    "tool input blocked by guardrail policy: {}",
+                    matched.message
+                ),
+            });
+        }
+
         let result = match backend {
             ToolExecuteBackend::Extension => {
                 state
@@ -3423,6 +3485,40 @@ impl FerroGateway {
                         Some(response.latency_ms),
                     ),
                 ));
+                // #200: OUTPUT guardrail. Evaluate the tool result before the
+                // caller consumes it; a blocking match withholds the flagged
+                // content (fail-closed) and returns an error result in its
+                // place, so raw flagged output never leaves the gateway.
+                if let Some(matched) = evaluate_managed_action_guardrail_async(
+                    &state,
+                    GuardrailStage::Response,
+                    &guardrail_request,
+                    payload_text(&response.content),
+                )
+                .await
+                {
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                        ctx,
+                        auth,
+                        execution,
+                        "tool.guardrail",
+                        guardrail_target.clone(),
+                        "rejected",
+                        format!(
+                            "tool output withheld by guardrail policy {} ({}): {}",
+                            matched.rule_id, matched.code, matched.message
+                        ),
+                    ));
+                    return Ok(ToolExecutionResponse {
+                        content: serde_json::json!({
+                            "error": "tool_output_blocked_by_guardrail",
+                            "code": matched.code,
+                            "message": matched.message,
+                        }),
+                        is_error: true,
+                        ..response
+                    });
+                }
                 Ok(response)
             }
             Err(error) => {

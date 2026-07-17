@@ -22,21 +22,17 @@ use crate::{
     auth::{authenticate, AuthContext},
     config::{
         AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider,
-        AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailStage,
+        AgentWorkflowNodeKind, AgentWorkflowPolicy,
     },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
-    state::{AdminAuditEventDraft, AppState, GuardrailMatch},
+    state::{AdminAuditEventDraft, AppState},
 };
-use ferrogate_guardrails::ManagedActionClass;
 use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
 
 use super::{
     body::read_request_body,
     local::{ToolExecuteBackend, ToolExecutionContext, ToolExecutionHttpError},
-    managed_action_guardrail::{
-        evaluate_managed_action_guardrail, payload_text, ManagedActionGuardrailRequest,
-    },
     FerroGateway, ProxyContext,
 };
 
@@ -788,32 +784,6 @@ impl GatewayAgentToolDispatcher {
             },
         ));
     }
-
-    /// Evaluate a gateway-mediated tool action against managed-action guardrail
-    /// policies at the given stage (issue #200). The action is a `Tool`-class
-    /// managed action targeting the tool name; input uses the arguments and
-    /// output the result content. Delegates to the shared fail-closed evaluator.
-    fn evaluate_tool_guardrail(
-        &self,
-        stage: GuardrailStage,
-        request: &AgentToolDispatchRequest<'_>,
-        payload: &Value,
-    ) -> Option<GuardrailMatch> {
-        let tenant = self.auth.tenant_context();
-        evaluate_managed_action_guardrail(
-            &self.state,
-            stage,
-            &ManagedActionGuardrailRequest {
-                request_id: &self.ctx.request_id,
-                trace_id: self.ctx.trace_id.as_deref(),
-                agent_run_id: Some(request.run_id),
-                tenant: &tenant,
-                class: ManagedActionClass::Tool,
-                target: &request.tool_call.name,
-            },
-            payload_text(payload),
-        )
-    }
 }
 
 impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
@@ -859,25 +829,6 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
                 ),
             );
         }
-        // #200: managed-action INPUT guardrail. Evaluate the tool arguments
-        // against managed-action guardrail policies before the tool executes; a
-        // blocking match fails the dispatch closed so the tool never runs.
-        if let Some(matched) =
-            self.evaluate_tool_guardrail(GuardrailStage::Request, &request, &tool_request.arguments)
-        {
-            self.record_capability_event(
-                &request,
-                "denied",
-                format!(
-                    "tool input blocked by guardrail policy {} ({}): {}",
-                    matched.rule_id, matched.code, matched.message
-                ),
-            );
-            return Err(AgentRuntimeError::ToolDispatch(format!(
-                "guardrail_blocked: {}: {}",
-                matched.code, matched.message
-            )));
-        }
         let response =
             match block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
                 &self.ctx,
@@ -899,31 +850,6 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
                     return Err(tool_dispatch_error(error));
                 }
             };
-        // #200: managed-action OUTPUT guardrail. Evaluate the tool result before
-        // the model can consume it; a blocking match withholds the flagged
-        // content (fail-closed) and returns an error result in its place, so the
-        // raw output never reaches the agent loop.
-        if let Some(matched) =
-            self.evaluate_tool_guardrail(GuardrailStage::Response, &request, &response.content)
-        {
-            self.record_capability_event(
-                &request,
-                "denied",
-                format!(
-                    "tool output withheld by guardrail policy {} ({}): {}",
-                    matched.rule_id, matched.code, matched.message
-                ),
-            );
-            return Ok(ToolResult {
-                tool_call_id: request.tool_call.id.clone(),
-                content: serde_json::json!({
-                    "error": "tool_output_blocked_by_guardrail",
-                    "code": matched.code,
-                    "message": matched.message,
-                }),
-                is_error: true,
-            });
-        }
         self.record_capability_event(
             &request,
             "allowed",
