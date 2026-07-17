@@ -1436,15 +1436,40 @@ fn guardrail_enforcement(
     selected
 }
 
+/// Restrictiveness rank for choosing which co-matching policy's enforcement
+/// wins. Higher wins. An *unconditional* deny (a `Block`, or a `Redact`/
+/// `Quarantine` that failed closed to `Deny`) must outrank an approval-gated
+/// deny (`RequireApproval`): the chokepoint branches on `action_kind`, and a
+/// `RequireApproval` still executes once a human approves, so treating it as
+/// equal to `Block` (both merely `effect == Deny`) let a hard `Block` be
+/// silently downgraded to an approvable action whenever a `RequireApproval`
+/// policy co-matched and sorted first.
+fn guardrail_enforcement_rank(candidate: &GuardrailMatch) -> u8 {
+    match candidate.effect {
+        GuardrailEffect::Deny => match candidate.action_kind {
+            // Approval-gated: weakest deny -- the action can still run after
+            // approval, so it must never displace an unconditional block.
+            GuardrailActionKind::RequireApproval => 2,
+            // Block, or a fail-closed redact/quarantine: the action never runs.
+            _ => 3,
+        },
+        GuardrailEffect::Redact => 1,
+    }
+}
+
 fn merge_guardrail_enforcement(
     enforcement: &mut Option<GuardrailMatch>,
     candidate: GuardrailMatch,
 ) {
-    let candidate_is_block = candidate.effect == GuardrailEffect::Deny;
-    let current_is_block = enforcement
-        .as_ref()
-        .is_some_and(|current| current.effect == GuardrailEffect::Deny);
-    if enforcement.is_none() || (candidate_is_block && !current_is_block) {
+    let replace = match enforcement.as_ref() {
+        None => true,
+        // Strictly-greater so equal-strength ties keep the first (stable)
+        // selection, preserving prior ordering behaviour among like matches.
+        Some(current) => {
+            guardrail_enforcement_rank(&candidate) > guardrail_enforcement_rank(current)
+        }
+    };
+    if replace {
         *enforcement = Some(candidate);
     }
 }

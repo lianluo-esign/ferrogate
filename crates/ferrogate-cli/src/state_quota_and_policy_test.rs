@@ -1954,3 +1954,90 @@ fn activating_guardrail_policy_bumps_shared_control_plane_revision_for_peers() {
         "the active binding must live in durable storage for peers to re-read on reload",
     );
 }
+
+fn guardrail_match_for_merge(
+    effect: GuardrailEffect,
+    action_kind: GuardrailActionKind,
+    rule_id: &str,
+) -> GuardrailMatch {
+    GuardrailMatch {
+        rule_id: rule_id.to_string(),
+        rule_name: rule_id.to_string(),
+        policy_revision: 1,
+        check_id: None,
+        effect,
+        action_kind,
+        segment_id: None,
+        byte_start: None,
+        byte_end: None,
+        content_patches: Vec::new(),
+        patch_envelope: None,
+        patch_sources: Vec::new(),
+        code: "code".to_string(),
+        message: "message".to_string(),
+    }
+}
+
+#[test]
+fn hard_block_wins_over_require_approval_regardless_of_merge_order() {
+    // A RequireApproval and a Block co-match. The unconditional Block must win
+    // both orderings; otherwise the chokepoint (which branches on action_kind)
+    // would run the approval flow and execute the action a hard Block forbids.
+    let block = || {
+        guardrail_match_for_merge(
+            GuardrailEffect::Deny,
+            GuardrailActionKind::Block,
+            "block-policy",
+        )
+    };
+    let approval = || {
+        guardrail_match_for_merge(
+            GuardrailEffect::Deny,
+            GuardrailActionKind::RequireApproval,
+            "approval-policy",
+        )
+    };
+
+    // Approval selected first, then Block arrives.
+    let mut enforcement = None;
+    merge_guardrail_enforcement(&mut enforcement, approval());
+    merge_guardrail_enforcement(&mut enforcement, block());
+    assert_eq!(
+        enforcement.as_ref().map(|m| m.action_kind),
+        Some(GuardrailActionKind::Block),
+        "a hard Block must displace an already-selected RequireApproval",
+    );
+
+    // Block selected first, then Approval arrives -- Block must stay.
+    let mut enforcement = None;
+    merge_guardrail_enforcement(&mut enforcement, block());
+    merge_guardrail_enforcement(&mut enforcement, approval());
+    assert_eq!(
+        enforcement.as_ref().map(|m| m.action_kind),
+        Some(GuardrailActionKind::Block),
+        "a RequireApproval must never downgrade an already-selected hard Block",
+    );
+}
+
+#[test]
+fn merge_precedence_orders_deny_above_approval_above_redact() {
+    let deny = guardrail_match_for_merge(GuardrailEffect::Deny, GuardrailActionKind::Block, "b");
+    let approval = guardrail_match_for_merge(
+        GuardrailEffect::Deny,
+        GuardrailActionKind::RequireApproval,
+        "a",
+    );
+    let redact =
+        guardrail_match_for_merge(GuardrailEffect::Redact, GuardrailActionKind::Redact, "r");
+    assert!(guardrail_enforcement_rank(&deny) > guardrail_enforcement_rank(&approval));
+    assert!(guardrail_enforcement_rank(&approval) > guardrail_enforcement_rank(&redact));
+
+    // A Redact must not displace a RequireApproval that was selected first.
+    let mut enforcement = None;
+    merge_guardrail_enforcement(&mut enforcement, approval);
+    merge_guardrail_enforcement(&mut enforcement, redact);
+    assert_eq!(
+        enforcement.as_ref().map(|m| m.action_kind),
+        Some(GuardrailActionKind::RequireApproval),
+    );
+}
