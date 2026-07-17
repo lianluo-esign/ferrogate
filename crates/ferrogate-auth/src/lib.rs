@@ -389,10 +389,15 @@ impl RbacAuthService {
 impl ApiKeyAuthenticator for RbacAuthService {
     fn authenticate(&self, presented_key: &str) -> Option<AuthDecision> {
         let data = self.read_data();
-        let api_key = data
-            .api_keys
-            .iter()
-            .find(|api_key| api_key.enabled && api_key.secret.as_deref() == Some(presented_key))?;
+        // Compare the presented secret in constant time (CWE-208): a plain `==`
+        // on the secret string leaks, via timing, how many leading bytes matched
+        // -- matching the constant_time_eq the hashed-key path already uses.
+        let api_key = data.api_keys.iter().find(|api_key| {
+            api_key.enabled
+                && api_key.secret.as_deref().is_some_and(|secret| {
+                    constant_time_eq(secret.as_bytes(), presented_key.as_bytes())
+                })
+        })?;
 
         Some(AuthDecision {
             tenant: api_key.tenant.clone(),
@@ -3201,6 +3206,11 @@ fn tenant_matches(expected: &TenantContext, actual: &TenantContext) -> bool {
     tenant_field_matches(&expected.organization_id, &actual.organization_id)
         && tenant_field_matches(&expected.team_id, &actual.team_id)
         && tenant_field_matches(&expected.project_id, &actual.project_id)
+        // workspace_id is the environment (dev/staging/prod) scoping dimension.
+        // Omitting it let a binding scoped to one workspace match a request from
+        // another (staging -> prod privilege leak); a binding with no
+        // workspace_id still matches any workspace, consistent with the others.
+        && tenant_field_matches(&expected.workspace_id, &actual.workspace_id)
         && tenant_field_matches(&expected.user_id, &actual.user_id)
         && tenant_field_matches(&expected.api_key_id, &actual.api_key_id)
 }
@@ -3337,6 +3347,44 @@ mod tests {
 
         assert!(decision.allowed);
         assert_eq!(decision.reason, "matched_rbac_binding");
+    }
+
+    #[test]
+    fn workspace_scoped_binding_does_not_match_a_request_from_another_workspace() {
+        // A binding scoped to the staging workspace must not authorize a request
+        // from prod (same org/project, different environment). Before the fix
+        // tenant_matches ignored workspace_id, silently leaking the grant.
+        let mut staging_scope = tenant();
+        staging_scope.workspace_id = Some("staging".into());
+        let service = RbacAuthService::new(AuthServiceData {
+            roles: vec![Role {
+                id: "role_chat".into(),
+                name: "Chat caller".into(),
+                permissions: vec![Permission {
+                    action: "chat.completions".into(),
+                    resource: "model:fast-chat".into(),
+                }],
+            }],
+            bindings: vec![PolicyBinding {
+                id: "binding_chat".into(),
+                role_id: "role_chat".into(),
+                tenant: staging_scope,
+                subject: PolicySubject::ApiKey {
+                    api_key_id: "key".into(),
+                },
+            }],
+            ..AuthServiceData::default()
+        });
+
+        // Request from prod: denied.
+        let mut prod_request = authorize_request();
+        prod_request.tenant.workspace_id = Some("prod".into());
+        assert!(!service.authorize(&prod_request).allowed);
+
+        // Request from the bound workspace (staging): allowed.
+        let mut staging_request = authorize_request();
+        staging_request.tenant.workspace_id = Some("staging".into());
+        assert!(service.authorize(&staging_request).allowed);
     }
 
     #[test]
