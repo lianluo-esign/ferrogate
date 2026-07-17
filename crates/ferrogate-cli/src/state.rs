@@ -3643,8 +3643,7 @@ fn persist_self_hosted_dispatch_records(
     records: Vec<StoredSelfHostedRunDispatch>,
 ) -> Result<(), SelfHostedWorkerError> {
     for record in records {
-        repositories
-            .upsert_self_hosted_run_dispatch(record)
+        crate::gateway::block_on_sync_bridge(repositories.upsert_self_hosted_run_dispatch(record))
             .map_err(|error| SelfHostedWorkerError::InvalidTransport(error.to_string()))?;
     }
     Ok(())
@@ -3823,8 +3822,11 @@ impl AppState {
         let cluster_counters = ClusterCounterBackend::from_config(&config);
         let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
         {
-            let registrations = repositories.self_hosted_worker_registrations();
-            let dispatches = repositories.self_hosted_run_dispatches();
+            let registrations = crate::gateway::block_on_sync_bridge(
+                repositories.self_hosted_worker_registrations(),
+            );
+            let dispatches =
+                crate::gateway::block_on_sync_bridge(repositories.self_hosted_run_dispatches());
             let records = match self_hosted_dispatch.lock() {
                 Ok(mut dispatch) => {
                     dispatch.rebuild_registries(registrations, dispatches)?;

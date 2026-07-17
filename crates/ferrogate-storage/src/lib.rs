@@ -3378,7 +3378,11 @@ impl PostgresControlPlaneStore {
         Ok(events)
     }
 
-    fn upsert_managed_worker_template(
+    fn worker_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn upsert_managed_worker_template(
         &self,
         template: &StoredManagedWorkerTemplate,
     ) -> Result<(), StorageError> {
@@ -3388,8 +3392,13 @@ impl PostgresControlPlaneStore {
             saturating_i64(template.created_at_unix.unwrap_or_else(now_unix_seconds));
         let updated_at_unix =
             saturating_i64(template.updated_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert managed worker template");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_templates \
                  (id, framework_adapter, isolation_backend_kind, enabled, max_tenant_sessions, \
                   max_workspace_sessions, created_at_unix, updated_at_unix) \
@@ -3411,39 +3420,51 @@ impl PostgresControlPlaneStore {
                     &created_at_unix,
                     &updated_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_templates(&self) -> Result<Vec<StoredManagedWorkerTemplate>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, framework_adapter, isolation_backend_kind, enabled, \
-                        max_tenant_sessions, max_workspace_sessions, created_at_unix, \
-                        updated_at_unix \
-                     FROM managed_worker_templates \
-                     ORDER BY id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_template_from_row)
-                .collect())
-        })
+    async fn managed_worker_templates(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerTemplate>, StorageError> {
+        let operation = self.worker_operation("list managed worker templates");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, framework_adapter, isolation_backend_kind, enabled, \
+                    max_tenant_sessions, max_workspace_sessions, created_at_unix, \
+                    updated_at_unix \
+                 FROM managed_worker_templates \
+                 ORDER BY id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_template_from_row)
+            .collect())
     }
 
-    fn upsert_agent_worker_instance(
+    async fn upsert_agent_worker_instance(
         &self,
         instance: &StoredAgentWorkerInstance,
     ) -> Result<(), StorageError> {
         let started_at_unix =
             saturating_i64(instance.started_at_unix.unwrap_or_else(now_unix_seconds));
         let last_seen_at_unix = instance.last_seen_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert agent worker instance");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO agent_worker_instances \
                  (id, process_name, host_id, worker_version, status, started_at_unix, \
                   last_seen_at_unix, process_json) \
@@ -3465,30 +3486,35 @@ impl PostgresControlPlaneStore {
                     &last_seen_at_unix,
                     &instance.process_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn agent_worker_instances(&self) -> Result<Vec<StoredAgentWorkerInstance>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, process_name, host_id, worker_version, status, started_at_unix, \
-                        last_seen_at_unix, process_json::text \
-                     FROM agent_worker_instances \
-                     ORDER BY started_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(agent_worker_instance_from_row)
-                .collect())
-        })
+    async fn agent_worker_instances(&self) -> Result<Vec<StoredAgentWorkerInstance>, StorageError> {
+        let operation = self.worker_operation("list agent worker instances");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, process_name, host_id, worker_version, status, started_at_unix, \
+                    last_seen_at_unix, process_json::text \
+                 FROM agent_worker_instances \
+                 ORDER BY started_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(agent_worker_instance_from_row)
+            .collect())
     }
 
-    fn upsert_managed_worker_session(
+    async fn upsert_managed_worker_session(
         &self,
         session: &StoredManagedWorkerSession,
     ) -> Result<(), StorageError> {
@@ -3498,8 +3524,13 @@ impl PostgresControlPlaneStore {
         let started_at_unix = session.started_at_unix.map(saturating_i64);
         let completed_at_unix = session.completed_at_unix.map(saturating_i64);
         let cleanup_completed_at_unix = session.cleanup_completed_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert managed worker session");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_sessions \
                  (id, run_id, tenant, workspace_id, worker_template_id, \
                   agent_worker_instance_id, status, isolation_backend_kind, microvm_id, \
@@ -3540,41 +3571,53 @@ impl PostgresControlPlaneStore {
                     &session.capability_envelope_json,
                     &session.resource_limits_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_sessions(&self) -> Result<Vec<StoredManagedWorkerSession>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, run_id, tenant, workspace_id, worker_template_id, \
-                        agent_worker_instance_id, status, isolation_backend_kind, microvm_id, \
-                        capability_envelope_id, requested_at_unix, started_at_unix, \
-                        completed_at_unix, cleanup_completed_at_unix, \
-                        capability_envelope_json::text, resource_limits_json::text \
-                     FROM managed_worker_sessions \
-                     ORDER BY requested_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_session_from_row)
-                .collect())
-        })
+    async fn managed_worker_sessions(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerSession>, StorageError> {
+        let operation = self.worker_operation("list managed worker sessions");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, run_id, tenant, workspace_id, worker_template_id, \
+                    agent_worker_instance_id, status, isolation_backend_kind, microvm_id, \
+                    capability_envelope_id, requested_at_unix, started_at_unix, \
+                    completed_at_unix, cleanup_completed_at_unix, \
+                    capability_envelope_json::text, resource_limits_json::text \
+                 FROM managed_worker_sessions \
+                 ORDER BY requested_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_session_from_row)
+            .collect())
     }
 
-    fn append_managed_worker_lifecycle_event(
+    async fn append_managed_worker_lifecycle_event(
         &self,
         event: &StoredManagedWorkerLifecycleEvent,
     ) -> Result<(), StorageError> {
         let tenant_context_id = tenant_storage_key(&event.tenant);
         let occurred_at_unix =
             saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("append managed worker lifecycle event");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_lifecycle_events \
                  (id, session_id, run_id, tenant, workspace_id, agent_worker_instance_id, status, \
                   action, outcome, occurred_at_unix, evidence_json) \
@@ -3593,41 +3636,51 @@ impl PostgresControlPlaneStore {
                     &occurred_at_unix,
                     &event.evidence_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_lifecycle_events(
+    async fn managed_worker_lifecycle_events(
         &self,
     ) -> Result<Vec<StoredManagedWorkerLifecycleEvent>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, session_id, run_id, tenant, workspace_id, \
-                        agent_worker_instance_id, status, action, outcome, occurred_at_unix, \
-                        evidence_json::text \
-                     FROM managed_worker_lifecycle_events \
-                     ORDER BY occurred_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_lifecycle_event_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list managed worker lifecycle events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, session_id, run_id, tenant, workspace_id, \
+                    agent_worker_instance_id, status, action, outcome, occurred_at_unix, \
+                    evidence_json::text \
+                 FROM managed_worker_lifecycle_events \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_lifecycle_event_from_row)
+            .collect())
     }
 
-    fn upsert_managed_worker_isolation_selection(
+    async fn upsert_managed_worker_isolation_selection(
         &self,
         selection: &StoredManagedWorkerIsolationSelection,
     ) -> Result<(), StorageError> {
         let tenant_context_id = tenant_storage_key(&selection.tenant);
         let selected_at_unix =
             saturating_i64(selection.selected_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert managed worker isolation selection");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_isolation_selections \
                  (session_id, run_id, tenant, workspace_id, agent_worker_instance_id, \
                   backend_name, backend_version, backend_kind, host_lifecycle_owner, \
@@ -3659,33 +3712,38 @@ impl PostgresControlPlaneStore {
                     &selection.capability_envelope_id,
                     &selected_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_isolation_selections(
+    async fn managed_worker_isolation_selections(
         &self,
     ) -> Result<Vec<StoredManagedWorkerIsolationSelection>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT session_id, run_id, tenant, workspace_id, agent_worker_instance_id, \
-                        backend_name, backend_version, backend_kind, host_lifecycle_owner, \
-                        gateway_controls_backend, capability_envelope_id, selected_at_unix \
-                     FROM managed_worker_isolation_selections \
-                     ORDER BY selected_at_unix ASC, session_id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_isolation_selection_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list managed worker isolation selections");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT session_id, run_id, tenant, workspace_id, agent_worker_instance_id, \
+                    backend_name, backend_version, backend_kind, host_lifecycle_owner, \
+                    gateway_controls_backend, capability_envelope_id, selected_at_unix \
+                 FROM managed_worker_isolation_selections \
+                 ORDER BY selected_at_unix ASC, session_id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_isolation_selection_from_row)
+            .collect())
     }
 
-    fn upsert_managed_worker_isolation_policy(
+    async fn upsert_managed_worker_isolation_policy(
         &self,
         policy: &StoredManagedWorkerIsolationPolicy,
     ) -> Result<(), StorageError> {
@@ -3693,8 +3751,13 @@ impl PostgresControlPlaneStore {
         let memory_mib = saturating_i32(u64::from(policy.memory_mib));
         let disk_mib = saturating_i32(u64::from(policy.disk_mib));
         let max_runtime_millis = policy.max_runtime_millis.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert managed worker isolation policy");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_isolation_policies \
                  (session_id, cpu_count, memory_mib, disk_mib, max_runtime_millis, \
                   direct_public_egress, gateway_control_channel, governed_egress, \
@@ -3724,41 +3787,51 @@ impl PostgresControlPlaneStore {
                     &policy.writable_workspace,
                     &policy.host_path_mounts,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_isolation_policies(
+    async fn managed_worker_isolation_policies(
         &self,
     ) -> Result<Vec<StoredManagedWorkerIsolationPolicy>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT session_id, cpu_count, memory_mib, disk_mib, max_runtime_millis, \
-                        direct_public_egress, gateway_control_channel, governed_egress, \
-                        read_only_rootfs, writable_workspace, host_path_mounts \
-                     FROM managed_worker_isolation_policies \
-                     ORDER BY session_id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_isolation_policy_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list managed worker isolation policies");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT session_id, cpu_count, memory_mib, disk_mib, max_runtime_millis, \
+                    direct_public_egress, gateway_control_channel, governed_egress, \
+                    read_only_rootfs, writable_workspace, host_path_mounts \
+                 FROM managed_worker_isolation_policies \
+                 ORDER BY session_id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_isolation_policy_from_row)
+            .collect())
     }
 
-    fn upsert_managed_worker_isolation_evidence(
+    async fn upsert_managed_worker_isolation_evidence(
         &self,
         evidence: &StoredManagedWorkerIsolationEvidence,
     ) -> Result<(), StorageError> {
         let tenant_context_id = tenant_storage_key(&evidence.tenant);
         let occurred_at_unix =
             saturating_i64(evidence.occurred_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert managed worker isolation evidence");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO managed_worker_isolation_evidence \
                  (id, session_id, lifecycle_event_id, run_id, tenant, workspace_id, \
                   agent_worker_instance_id, isolation_instance_id, action, outcome, \
@@ -3792,33 +3865,38 @@ impl PostgresControlPlaneStore {
                     &occurred_at_unix,
                     &evidence.evidence_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn managed_worker_isolation_evidence(
+    async fn managed_worker_isolation_evidence(
         &self,
     ) -> Result<Vec<StoredManagedWorkerIsolationEvidence>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, session_id, lifecycle_event_id, run_id, tenant, workspace_id, \
-                        agent_worker_instance_id, isolation_instance_id, action, outcome, \
-                        failure_reason, occurred_at_unix, evidence_json::text \
-                     FROM managed_worker_isolation_evidence \
-                     ORDER BY occurred_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(managed_worker_isolation_evidence_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list managed worker isolation evidence");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, session_id, lifecycle_event_id, run_id, tenant, workspace_id, \
+                    agent_worker_instance_id, isolation_instance_id, action, outcome, \
+                    failure_reason, occurred_at_unix, evidence_json::text \
+                 FROM managed_worker_isolation_evidence \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(managed_worker_isolation_evidence_from_row)
+            .collect())
     }
 
-    fn upsert_self_hosted_worker_registration(
+    async fn upsert_self_hosted_worker_registration(
         &self,
         registration: &StoredSelfHostedWorkerRegistration,
     ) -> Result<(), StorageError> {
@@ -3830,8 +3908,13 @@ impl PostgresControlPlaneStore {
         );
         let last_seen_at_unix = registration.last_seen_at_unix.map(saturating_i64);
         let identity_expires_at_unix = registration.identity_expires_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert self hosted worker registration");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO self_hosted_worker_registrations \
                  (id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
                   identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
@@ -3862,33 +3945,38 @@ impl PostgresControlPlaneStore {
                     &registration.trust_level,
                     &registration.capability_envelope_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_worker_registrations(
+    async fn self_hosted_worker_registrations(
         &self,
     ) -> Result<Vec<StoredSelfHostedWorkerRegistration>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
-                        identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
-                        last_seen_at_unix, trust_level, capability_envelope_json::text \
-                     FROM self_hosted_worker_registrations \
-                     ORDER BY registered_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(self_hosted_worker_registration_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list self hosted worker registrations");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
+                    identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
+                    last_seen_at_unix, trust_level, capability_envelope_json::text \
+                 FROM self_hosted_worker_registrations \
+                 ORDER BY registered_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_registration_from_row)
+            .collect())
     }
 
-    fn append_self_hosted_worker_heartbeat(
+    async fn append_self_hosted_worker_heartbeat(
         &self,
         heartbeat: &StoredSelfHostedWorkerHeartbeat,
     ) -> Result<(), StorageError> {
@@ -3897,8 +3985,13 @@ impl PostgresControlPlaneStore {
             saturating_i64(heartbeat.reported_at_unix.unwrap_or_else(now_unix_seconds));
         let observed_at_unix =
             saturating_i64(heartbeat.observed_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("append self hosted worker heartbeat");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO self_hosted_worker_heartbeats \
                  (id, worker_id, tenant, workspace_id, status, reported_at_unix, \
                   observed_at_unix, heartbeat_json) \
@@ -3914,32 +4007,37 @@ impl PostgresControlPlaneStore {
                     &observed_at_unix,
                     &heartbeat.heartbeat_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_worker_heartbeats(
+    async fn self_hosted_worker_heartbeats(
         &self,
     ) -> Result<Vec<StoredSelfHostedWorkerHeartbeat>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, worker_id, tenant, workspace_id, status, reported_at_unix, \
-                        observed_at_unix, heartbeat_json::text \
-                     FROM self_hosted_worker_heartbeats \
-                     ORDER BY reported_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(self_hosted_worker_heartbeat_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list self hosted worker heartbeats");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, status, reported_at_unix, \
+                    observed_at_unix, heartbeat_json::text \
+                 FROM self_hosted_worker_heartbeats \
+                 ORDER BY reported_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_heartbeat_from_row)
+            .collect())
     }
 
-    fn append_self_hosted_worker_telemetry_event(
+    async fn append_self_hosted_worker_telemetry_event(
         &self,
         event: &StoredSelfHostedWorkerTelemetryEvent,
     ) -> Result<(), StorageError> {
@@ -3948,8 +4046,13 @@ impl PostgresControlPlaneStore {
             saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
         let ingested_at_unix =
             saturating_i64(event.ingested_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("append self hosted worker telemetry event");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO self_hosted_worker_telemetry_events \
                  (id, worker_id, tenant, workspace_id, session_id, run_id, kind, trust_level, \
                   occurred_at_unix, ingested_at_unix, event_json) \
@@ -3968,32 +4071,37 @@ impl PostgresControlPlaneStore {
                     &ingested_at_unix,
                     &event.event_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_worker_telemetry_events(
+    async fn self_hosted_worker_telemetry_events(
         &self,
     ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
-                        trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
-                     FROM self_hosted_worker_telemetry_events \
-                     ORDER BY occurred_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(self_hosted_worker_telemetry_event_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list self hosted worker telemetry events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                 FROM self_hosted_worker_telemetry_events \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_telemetry_event_from_row)
+            .collect())
     }
 
-    fn upsert_self_hosted_worker_artifact(
+    async fn upsert_self_hosted_worker_artifact(
         &self,
         artifact: &StoredSelfHostedWorkerArtifact,
     ) -> Result<(), StorageError> {
@@ -4001,8 +4109,13 @@ impl PostgresControlPlaneStore {
         let size_bytes = saturating_i64(artifact.size_bytes);
         let created_at_unix =
             saturating_i64(artifact.created_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert self hosted worker artifact");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO self_hosted_worker_artifacts \
                  (id, worker_id, tenant, workspace_id, session_id, run_id, artifact_name, \
                   content_type, size_bytes, trust_level, created_at_unix, artifact_json) \
@@ -4032,33 +4145,38 @@ impl PostgresControlPlaneStore {
                     &created_at_unix,
                     &artifact.artifact_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_worker_artifacts(
+    async fn self_hosted_worker_artifacts(
         &self,
     ) -> Result<Vec<StoredSelfHostedWorkerArtifact>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
-                        artifact_name, content_type, size_bytes, trust_level, created_at_unix, \
-                        artifact_json::text \
-                     FROM self_hosted_worker_artifacts \
-                     ORDER BY created_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(self_hosted_worker_artifact_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list self hosted worker artifacts");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                    artifact_name, content_type, size_bytes, trust_level, created_at_unix, \
+                    artifact_json::text \
+                 FROM self_hosted_worker_artifacts \
+                 ORDER BY created_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_artifact_from_row)
+            .collect())
     }
 
-    fn upsert_self_hosted_worker_checkpoint(
+    async fn upsert_self_hosted_worker_checkpoint(
         &self,
         checkpoint: &StoredSelfHostedWorkerCheckpoint,
     ) -> Result<(), StorageError> {
@@ -4066,8 +4184,13 @@ impl PostgresControlPlaneStore {
         let size_bytes = saturating_i64(checkpoint.size_bytes);
         let created_at_unix =
             saturating_i64(checkpoint.created_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.worker_operation("upsert self hosted worker checkpoint");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO self_hosted_worker_checkpoints \
                  (id, worker_id, tenant, workspace_id, session_id, run_id, checkpoint_name, \
                   size_bytes, trust_level, created_at_unix, checkpoint_json) \
@@ -4095,33 +4218,38 @@ impl PostgresControlPlaneStore {
                     &created_at_unix,
                     &checkpoint.checkpoint_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_worker_checkpoints(
+    async fn self_hosted_worker_checkpoints(
         &self,
     ) -> Result<Vec<StoredSelfHostedWorkerCheckpoint>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
-                        checkpoint_name, size_bytes, trust_level, created_at_unix, \
-                        checkpoint_json::text \
-                     FROM self_hosted_worker_checkpoints \
-                     ORDER BY created_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            Ok(rows
-                .into_iter()
-                .map(self_hosted_worker_checkpoint_from_row)
-                .collect())
-        })
+        let operation = self.worker_operation("list self hosted worker checkpoints");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                    checkpoint_name, size_bytes, trust_level, created_at_unix, \
+                    checkpoint_json::text \
+                 FROM self_hosted_worker_checkpoints \
+                 ORDER BY created_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_checkpoint_from_row)
+            .collect())
     }
 
-    fn upsert_self_hosted_run_dispatch(
+    async fn upsert_self_hosted_run_dispatch(
         &self,
         dispatch: &StoredSelfHostedRunDispatch,
     ) -> Result<(), StorageError> {
@@ -4131,104 +4259,117 @@ impl PostgresControlPlaneStore {
         let lease_expires_at_unix = dispatch.lease_expires_at_unix.map(saturating_i64);
         let acknowledged_at_unix = dispatch.acknowledged_at_unix.map(saturating_i64);
         let attempt = saturating_i64(u64::from(dispatch.attempt));
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
+        let operation = self.worker_operation("upsert self hosted run dispatch");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .execute(
+                "INSERT INTO self_hosted_run_dispatches \
+                 (dispatch_id, action, tenant, workspace_id, session_id, run_id, \
+                  framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
+                  lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
+                  acknowledged_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                 ON CONFLICT (dispatch_id) DO UPDATE SET \
+                 action = EXCLUDED.action, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 session_id = EXCLUDED.session_id, \
+                 run_id = EXCLUDED.run_id, \
+                 framework_adapter = EXCLUDED.framework_adapter, \
+                 workload_ref = EXCLUDED.workload_ref, \
+                 queued_at_unix = EXCLUDED.queued_at_unix, \
+                 assigned_worker_id = EXCLUDED.assigned_worker_id, \
+                 lease_id = EXCLUDED.lease_id, \
+                 lease_expires_at_unix = EXCLUDED.lease_expires_at_unix, \
+                 attempt = EXCLUDED.attempt, \
+                 acknowledged_status = EXCLUDED.acknowledged_status, \
+                 acknowledged_at_unix = EXCLUDED.acknowledged_at_unix",
+                &[
+                    &dispatch.dispatch_id,
+                    &dispatch.action,
+                    &tenant_context_id,
+                    &dispatch.workspace_id,
+                    &dispatch.session_id,
+                    &dispatch.run_id,
+                    &dispatch.framework_adapter,
+                    &dispatch.workload_ref,
+                    &queued_at_unix,
+                    &dispatch.assigned_worker_id,
+                    &dispatch.lease_id,
+                    &lease_expires_at_unix,
+                    &attempt,
+                    &dispatch.acknowledged_status,
+                    &acknowledged_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction
+            .execute(
+                "DELETE FROM self_hosted_run_dispatch_capabilities WHERE dispatch_id = $1",
+                &[&dispatch.dispatch_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        for capability in &dispatch.required_capabilities {
             transaction
                 .execute(
-                    "INSERT INTO self_hosted_run_dispatches \
-                     (dispatch_id, action, tenant, workspace_id, session_id, run_id, \
-                      framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
-                      lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                      acknowledged_at_unix) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
-                     ON CONFLICT (dispatch_id) DO UPDATE SET \
-                     action = EXCLUDED.action, \
-                     tenant = EXCLUDED.tenant, \
-                     workspace_id = EXCLUDED.workspace_id, \
-                     session_id = EXCLUDED.session_id, \
-                     run_id = EXCLUDED.run_id, \
-                     framework_adapter = EXCLUDED.framework_adapter, \
-                     workload_ref = EXCLUDED.workload_ref, \
-                     queued_at_unix = EXCLUDED.queued_at_unix, \
-                     assigned_worker_id = EXCLUDED.assigned_worker_id, \
-                     lease_id = EXCLUDED.lease_id, \
-                     lease_expires_at_unix = EXCLUDED.lease_expires_at_unix, \
-                     attempt = EXCLUDED.attempt, \
-                     acknowledged_status = EXCLUDED.acknowledged_status, \
-                     acknowledged_at_unix = EXCLUDED.acknowledged_at_unix",
-                    &[
-                        &dispatch.dispatch_id,
-                        &dispatch.action,
-                        &tenant_context_id,
-                        &dispatch.workspace_id,
-                        &dispatch.session_id,
-                        &dispatch.run_id,
-                        &dispatch.framework_adapter,
-                        &dispatch.workload_ref,
-                        &queued_at_unix,
-                        &dispatch.assigned_worker_id,
-                        &dispatch.lease_id,
-                        &lease_expires_at_unix,
-                        &attempt,
-                        &dispatch.acknowledged_status,
-                        &acknowledged_at_unix,
-                    ],
+                    "INSERT INTO self_hosted_run_dispatch_capabilities \
+                     (dispatch_id, capability) VALUES ($1, $2) \
+                     ON CONFLICT (dispatch_id, capability) DO NOTHING",
+                    &[&dispatch.dispatch_id, capability],
                 )
+                .await
                 .map_err(postgres_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM self_hosted_run_dispatch_capabilities WHERE dispatch_id = $1",
-                    &[&dispatch.dispatch_id],
-                )
-                .map_err(postgres_error)?;
-            for capability in &dispatch.required_capabilities {
-                transaction
-                    .execute(
-                        "INSERT INTO self_hosted_run_dispatch_capabilities \
-                         (dispatch_id, capability) VALUES ($1, $2) \
-                         ON CONFLICT (dispatch_id, capability) DO NOTHING",
-                        &[&dispatch.dispatch_id, capability],
-                    )
-                    .map_err(postgres_error)?;
-            }
-            transaction.commit().map_err(postgres_error)?;
-            Ok(())
-        })
+        }
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn self_hosted_run_dispatches(&self) -> Result<Vec<StoredSelfHostedRunDispatch>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT dispatch_id, action, tenant, workspace_id, session_id, run_id, \
-                        framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
-                        lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                        acknowledged_at_unix \
-                     FROM self_hosted_run_dispatches \
-                     ORDER BY queued_at_unix ASC, dispatch_id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let capability_rows = client
-                .query(
-                    "SELECT dispatch_id, capability \
-                     FROM self_hosted_run_dispatch_capabilities \
-                     ORDER BY dispatch_id ASC, capability ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let mut capabilities = HashMap::<String, Vec<String>>::new();
-            for row in capability_rows {
-                capabilities
-                    .entry(row.get::<_, String>(0))
-                    .or_default()
-                    .push(row.get(1));
-            }
-            Ok(rows
-                .into_iter()
-                .map(|row| self_hosted_run_dispatch_from_row(row, &capabilities))
-                .collect())
-        })
+    async fn self_hosted_run_dispatches(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedRunDispatch>, StorageError> {
+        let operation = self.worker_operation("list self hosted run dispatches");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT dispatch_id, action, tenant, workspace_id, session_id, run_id, \
+                    framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
+                    lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
+                    acknowledged_at_unix \
+                 FROM self_hosted_run_dispatches \
+                 ORDER BY queued_at_unix ASC, dispatch_id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let capability_rows = client
+            .query(
+                "SELECT dispatch_id, capability \
+                 FROM self_hosted_run_dispatch_capabilities \
+                 ORDER BY dispatch_id ASC, capability ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut capabilities = HashMap::<String, Vec<String>>::new();
+        for row in capability_rows {
+            capabilities
+                .entry(row.get::<_, String>(0))
+                .or_default()
+                .push(row.get(1));
+        }
+        Ok(rows
+            .into_iter()
+            .map(|row| self_hosted_run_dispatch_from_row(row, &capabilities))
+            .collect())
     }
 
     fn billing_events_page(
@@ -7978,19 +8119,28 @@ impl RuntimeStorageRepositories {
             audit_events: bridge_runtime.block_on(self.audit_events()),
             agent_runs: bridge_runtime.block_on(self.agent_runs()),
             agent_run_events: bridge_runtime.block_on(self.agent_run_events()),
-            managed_worker_templates: self.managed_worker_templates(),
-            agent_worker_instances: self.agent_worker_instances(),
-            managed_worker_sessions: self.managed_worker_sessions(),
-            managed_worker_lifecycle_events: self.managed_worker_lifecycle_events(),
-            managed_worker_isolation_selections: self.managed_worker_isolation_selections(),
-            managed_worker_isolation_policies: self.managed_worker_isolation_policies(),
-            managed_worker_isolation_evidence: self.managed_worker_isolation_evidence(),
-            self_hosted_worker_registrations: self.self_hosted_worker_registrations(),
-            self_hosted_worker_heartbeats: self.self_hosted_worker_heartbeats(),
-            self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events(),
-            self_hosted_worker_artifacts: self.self_hosted_worker_artifacts(),
-            self_hosted_worker_checkpoints: self.self_hosted_worker_checkpoints(),
-            self_hosted_run_dispatches: self.self_hosted_run_dispatches(),
+            managed_worker_templates: bridge_runtime.block_on(self.managed_worker_templates()),
+            agent_worker_instances: bridge_runtime.block_on(self.agent_worker_instances()),
+            managed_worker_sessions: bridge_runtime.block_on(self.managed_worker_sessions()),
+            managed_worker_lifecycle_events: bridge_runtime
+                .block_on(self.managed_worker_lifecycle_events()),
+            managed_worker_isolation_selections: bridge_runtime
+                .block_on(self.managed_worker_isolation_selections()),
+            managed_worker_isolation_policies: bridge_runtime
+                .block_on(self.managed_worker_isolation_policies()),
+            managed_worker_isolation_evidence: bridge_runtime
+                .block_on(self.managed_worker_isolation_evidence()),
+            self_hosted_worker_registrations: bridge_runtime
+                .block_on(self.self_hosted_worker_registrations()),
+            self_hosted_worker_heartbeats: bridge_runtime
+                .block_on(self.self_hosted_worker_heartbeats()),
+            self_hosted_worker_telemetry_events: bridge_runtime
+                .block_on(self.self_hosted_worker_telemetry_events()),
+            self_hosted_worker_artifacts: bridge_runtime
+                .block_on(self.self_hosted_worker_artifacts()),
+            self_hosted_worker_checkpoints: bridge_runtime
+                .block_on(self.self_hosted_worker_checkpoints()),
+            self_hosted_run_dispatches: bridge_runtime.block_on(self.self_hosted_run_dispatches()),
         })
     }
 
@@ -8050,43 +8200,43 @@ impl RuntimeStorageRepositories {
             bridge_runtime.block_on(self.append_agent_run_event(event))?;
         }
         for template in snapshot.managed_worker_templates {
-            self.upsert_managed_worker_template(template)?;
+            bridge_runtime.block_on(self.upsert_managed_worker_template(template))?;
         }
         for instance in snapshot.agent_worker_instances {
-            self.upsert_agent_worker_instance(instance)?;
+            bridge_runtime.block_on(self.upsert_agent_worker_instance(instance))?;
         }
         for session in snapshot.managed_worker_sessions {
-            self.upsert_managed_worker_session(session)?;
+            bridge_runtime.block_on(self.upsert_managed_worker_session(session))?;
         }
         for event in snapshot.managed_worker_lifecycle_events {
-            self.append_managed_worker_lifecycle_event(event)?;
+            bridge_runtime.block_on(self.append_managed_worker_lifecycle_event(event))?;
         }
         for selection in snapshot.managed_worker_isolation_selections {
-            self.upsert_managed_worker_isolation_selection(selection)?;
+            bridge_runtime.block_on(self.upsert_managed_worker_isolation_selection(selection))?;
         }
         for policy in snapshot.managed_worker_isolation_policies {
-            self.upsert_managed_worker_isolation_policy(policy)?;
+            bridge_runtime.block_on(self.upsert_managed_worker_isolation_policy(policy))?;
         }
         for evidence in snapshot.managed_worker_isolation_evidence {
-            self.upsert_managed_worker_isolation_evidence(evidence)?;
+            bridge_runtime.block_on(self.upsert_managed_worker_isolation_evidence(evidence))?;
         }
         for registration in snapshot.self_hosted_worker_registrations {
-            self.upsert_self_hosted_worker_registration(registration)?;
+            bridge_runtime.block_on(self.upsert_self_hosted_worker_registration(registration))?;
         }
         for heartbeat in snapshot.self_hosted_worker_heartbeats {
-            self.append_self_hosted_worker_heartbeat(heartbeat)?;
+            bridge_runtime.block_on(self.append_self_hosted_worker_heartbeat(heartbeat))?;
         }
         for event in snapshot.self_hosted_worker_telemetry_events {
-            self.append_self_hosted_worker_telemetry_event(event)?;
+            bridge_runtime.block_on(self.append_self_hosted_worker_telemetry_event(event))?;
         }
         for artifact in snapshot.self_hosted_worker_artifacts {
-            self.upsert_self_hosted_worker_artifact(artifact)?;
+            bridge_runtime.block_on(self.upsert_self_hosted_worker_artifact(artifact))?;
         }
         for checkpoint in snapshot.self_hosted_worker_checkpoints {
-            self.upsert_self_hosted_worker_checkpoint(checkpoint)?;
+            bridge_runtime.block_on(self.upsert_self_hosted_worker_checkpoint(checkpoint))?;
         }
         for dispatch in snapshot.self_hosted_run_dispatches {
-            self.upsert_self_hosted_run_dispatch(dispatch)?;
+            bridge_runtime.block_on(self.upsert_self_hosted_run_dispatch(dispatch))?;
         }
         Ok(())
     }
@@ -9494,7 +9644,7 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn upsert_managed_worker_template(
+    pub async fn upsert_managed_worker_template(
         &self,
         template: StoredManagedWorkerTemplate,
     ) -> Result<(), StorageError> {
@@ -9506,25 +9656,28 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_managed_worker_template(&template)
+                control_plane
+                    .upsert_managed_worker_template(&template)
+                    .await
             }
         }
     }
 
-    pub fn managed_worker_templates(&self) -> Vec<StoredManagedWorkerTemplate> {
+    pub async fn managed_worker_templates(&self) -> Vec<StoredManagedWorkerTemplate> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .managed_worker_templates
                 .lock()
                 .map(|templates| templates.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.managed_worker_templates().unwrap_or_default()
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_templates()
+                .await
+                .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_agent_worker_instance(
+    pub async fn upsert_agent_worker_instance(
         &self,
         instance: StoredAgentWorkerInstance,
     ) -> Result<(), StorageError> {
@@ -9536,25 +9689,26 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_agent_worker_instance(&instance)
+                control_plane.upsert_agent_worker_instance(&instance).await
             }
         }
     }
 
-    pub fn agent_worker_instances(&self) -> Vec<StoredAgentWorkerInstance> {
+    pub async fn agent_worker_instances(&self) -> Vec<StoredAgentWorkerInstance> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .agent_worker_instances
                 .lock()
                 .map(|instances| instances.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.agent_worker_instances().unwrap_or_default()
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .agent_worker_instances()
+                .await
+                .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_managed_worker_session(
+    pub async fn upsert_managed_worker_session(
         &self,
         session: StoredManagedWorkerSession,
     ) -> Result<(), StorageError> {
@@ -9566,25 +9720,26 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_managed_worker_session(&session)
+                control_plane.upsert_managed_worker_session(&session).await
             }
         }
     }
 
-    pub fn managed_worker_sessions(&self) -> Vec<StoredManagedWorkerSession> {
+    pub async fn managed_worker_sessions(&self) -> Vec<StoredManagedWorkerSession> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .managed_worker_sessions
                 .lock()
                 .map(|sessions| sessions.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.managed_worker_sessions().unwrap_or_default()
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_sessions()
+                .await
+                .unwrap_or_default(),
         }
     }
 
-    pub fn append_managed_worker_lifecycle_event(
+    pub async fn append_managed_worker_lifecycle_event(
         &self,
         event: StoredManagedWorkerLifecycleEvent,
     ) -> Result<(), StorageError> {
@@ -9596,12 +9751,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_managed_worker_lifecycle_event(&event)
+                control_plane
+                    .append_managed_worker_lifecycle_event(&event)
+                    .await
             }
         }
     }
 
-    pub fn managed_worker_lifecycle_events(&self) -> Vec<StoredManagedWorkerLifecycleEvent> {
+    pub async fn managed_worker_lifecycle_events(&self) -> Vec<StoredManagedWorkerLifecycleEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .managed_worker_lifecycle_events
@@ -9610,11 +9767,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_lifecycle_events()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_managed_worker_isolation_selection(
+    pub async fn upsert_managed_worker_isolation_selection(
         &self,
         selection: StoredManagedWorkerIsolationSelection,
     ) -> Result<(), StorageError> {
@@ -9626,12 +9784,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_managed_worker_isolation_selection(&selection)
+                control_plane
+                    .upsert_managed_worker_isolation_selection(&selection)
+                    .await
             }
         }
     }
 
-    pub fn managed_worker_isolation_selections(
+    pub async fn managed_worker_isolation_selections(
         &self,
     ) -> Vec<StoredManagedWorkerIsolationSelection> {
         match &self.control_plane {
@@ -9642,11 +9802,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_selections()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_managed_worker_isolation_policy(
+    pub async fn upsert_managed_worker_isolation_policy(
         &self,
         policy: StoredManagedWorkerIsolationPolicy,
     ) -> Result<(), StorageError> {
@@ -9658,12 +9819,16 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_managed_worker_isolation_policy(&policy)
+                control_plane
+                    .upsert_managed_worker_isolation_policy(&policy)
+                    .await
             }
         }
     }
 
-    pub fn managed_worker_isolation_policies(&self) -> Vec<StoredManagedWorkerIsolationPolicy> {
+    pub async fn managed_worker_isolation_policies(
+        &self,
+    ) -> Vec<StoredManagedWorkerIsolationPolicy> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .managed_worker_isolation_policies
@@ -9672,11 +9837,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_policies()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_managed_worker_isolation_evidence(
+    pub async fn upsert_managed_worker_isolation_evidence(
         &self,
         evidence: StoredManagedWorkerIsolationEvidence,
     ) -> Result<(), StorageError> {
@@ -9688,12 +9854,16 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_managed_worker_isolation_evidence(&evidence)
+                control_plane
+                    .upsert_managed_worker_isolation_evidence(&evidence)
+                    .await
             }
         }
     }
 
-    pub fn managed_worker_isolation_evidence(&self) -> Vec<StoredManagedWorkerIsolationEvidence> {
+    pub async fn managed_worker_isolation_evidence(
+        &self,
+    ) -> Vec<StoredManagedWorkerIsolationEvidence> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .managed_worker_isolation_evidence
@@ -9702,11 +9872,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_evidence()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_self_hosted_worker_registration(
+    pub async fn upsert_self_hosted_worker_registration(
         &self,
         registration: StoredSelfHostedWorkerRegistration,
     ) -> Result<(), StorageError> {
@@ -9718,12 +9889,16 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_self_hosted_worker_registration(&registration)
+                control_plane
+                    .upsert_self_hosted_worker_registration(&registration)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_worker_registrations(&self) -> Vec<StoredSelfHostedWorkerRegistration> {
+    pub async fn self_hosted_worker_registrations(
+        &self,
+    ) -> Vec<StoredSelfHostedWorkerRegistration> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_worker_registrations
@@ -9732,11 +9907,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_registrations()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn append_self_hosted_worker_heartbeat(
+    pub async fn append_self_hosted_worker_heartbeat(
         &self,
         heartbeat: StoredSelfHostedWorkerHeartbeat,
     ) -> Result<(), StorageError> {
@@ -9748,12 +9924,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_self_hosted_worker_heartbeat(&heartbeat)
+                control_plane
+                    .append_self_hosted_worker_heartbeat(&heartbeat)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_worker_heartbeats(&self) -> Vec<StoredSelfHostedWorkerHeartbeat> {
+    pub async fn self_hosted_worker_heartbeats(&self) -> Vec<StoredSelfHostedWorkerHeartbeat> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_worker_heartbeats
@@ -9762,11 +9940,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_heartbeats()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn append_self_hosted_worker_telemetry_event(
+    pub async fn append_self_hosted_worker_telemetry_event(
         &self,
         event: StoredSelfHostedWorkerTelemetryEvent,
     ) -> Result<(), StorageError> {
@@ -9778,12 +9957,16 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_self_hosted_worker_telemetry_event(&event)
+                control_plane
+                    .append_self_hosted_worker_telemetry_event(&event)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_worker_telemetry_events(&self) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+    pub async fn self_hosted_worker_telemetry_events(
+        &self,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_worker_telemetry_events
@@ -9792,11 +9975,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_telemetry_events()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_self_hosted_worker_artifact(
+    pub async fn upsert_self_hosted_worker_artifact(
         &self,
         artifact: StoredSelfHostedWorkerArtifact,
     ) -> Result<(), StorageError> {
@@ -9808,12 +9992,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_self_hosted_worker_artifact(&artifact)
+                control_plane
+                    .upsert_self_hosted_worker_artifact(&artifact)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_worker_artifacts(&self) -> Vec<StoredSelfHostedWorkerArtifact> {
+    pub async fn self_hosted_worker_artifacts(&self) -> Vec<StoredSelfHostedWorkerArtifact> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_worker_artifacts
@@ -9822,11 +10008,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_artifacts()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_self_hosted_worker_checkpoint(
+    pub async fn upsert_self_hosted_worker_checkpoint(
         &self,
         checkpoint: StoredSelfHostedWorkerCheckpoint,
     ) -> Result<(), StorageError> {
@@ -9838,12 +10025,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_self_hosted_worker_checkpoint(&checkpoint)
+                control_plane
+                    .upsert_self_hosted_worker_checkpoint(&checkpoint)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_worker_checkpoints(&self) -> Vec<StoredSelfHostedWorkerCheckpoint> {
+    pub async fn self_hosted_worker_checkpoints(&self) -> Vec<StoredSelfHostedWorkerCheckpoint> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_worker_checkpoints
@@ -9852,11 +10041,12 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_checkpoints()
+                .await
                 .unwrap_or_default(),
         }
     }
 
-    pub fn upsert_self_hosted_run_dispatch(
+    pub async fn upsert_self_hosted_run_dispatch(
         &self,
         dispatch: StoredSelfHostedRunDispatch,
     ) -> Result<(), StorageError> {
@@ -9868,12 +10058,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_self_hosted_run_dispatch(&dispatch)
+                control_plane
+                    .upsert_self_hosted_run_dispatch(&dispatch)
+                    .await
             }
         }
     }
 
-    pub fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch> {
+    pub async fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .self_hosted_run_dispatches
@@ -9882,6 +10074,7 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_run_dispatches()
+                .await
                 .unwrap_or_default(),
         }
     }
@@ -10519,8 +10712,8 @@ mod tests {
             api_key_id: Some("key".into()),
         };
 
-        repositories
-            .upsert_managed_worker_template(StoredManagedWorkerTemplate {
+        block_on(
+            repositories.upsert_managed_worker_template(StoredManagedWorkerTemplate {
                 id: "template-firecracker-codex".into(),
                 framework_adapter: "codex".into(),
                 isolation_backend_kind: "firecracker_micro_vm".into(),
@@ -10529,10 +10722,11 @@ mod tests {
                 max_workspace_sessions: Some(4),
                 created_at_unix: Some(10),
                 updated_at_unix: Some(11),
-            })
-            .unwrap();
-        repositories
-            .upsert_agent_worker_instance(StoredAgentWorkerInstance {
+            }),
+        )
+        .unwrap();
+        block_on(
+            repositories.upsert_agent_worker_instance(StoredAgentWorkerInstance {
                 id: "agent-worker-1".into(),
                 process_name: "agent-worker".into(),
                 host_id: Some("host-a".into()),
@@ -10541,10 +10735,11 @@ mod tests {
                 started_at_unix: Some(12),
                 last_seen_at_unix: Some(13),
                 process_json: r#"{"pid":4242}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .upsert_managed_worker_session(StoredManagedWorkerSession {
+            }),
+        )
+        .unwrap();
+        block_on(
+            repositories.upsert_managed_worker_session(StoredManagedWorkerSession {
                 id: "session-1".into(),
                 run_id: "run-1".into(),
                 tenant: tenant.clone(),
@@ -10561,10 +10756,11 @@ mod tests {
                 cleanup_completed_at_unix: None,
                 capability_envelope_json: r#"{"id":"capability-envelope-1"}"#.into(),
                 resource_limits_json: r#"{"vcpu":2,"memory_mib":1024}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .append_managed_worker_lifecycle_event(StoredManagedWorkerLifecycleEvent {
+            }),
+        )
+        .unwrap();
+        block_on(repositories.append_managed_worker_lifecycle_event(
+            StoredManagedWorkerLifecycleEvent {
                 id: "lifecycle-1".into(),
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
@@ -10576,10 +10772,11 @@ mod tests {
                 outcome: "succeeded".into(),
                 occurred_at_unix: Some(16),
                 evidence_json: r#"{"microvm_id":"fc-vm-1"}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .upsert_managed_worker_isolation_selection(StoredManagedWorkerIsolationSelection {
+            },
+        ))
+        .unwrap();
+        block_on(repositories.upsert_managed_worker_isolation_selection(
+            StoredManagedWorkerIsolationSelection {
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
                 tenant: tenant.clone(),
@@ -10592,10 +10789,11 @@ mod tests {
                 gateway_controls_backend: false,
                 capability_envelope_id: "capability-envelope-1".into(),
                 selected_at_unix: Some(16),
-            })
-            .unwrap();
-        repositories
-            .upsert_managed_worker_isolation_policy(StoredManagedWorkerIsolationPolicy {
+            },
+        ))
+        .unwrap();
+        block_on(repositories.upsert_managed_worker_isolation_policy(
+            StoredManagedWorkerIsolationPolicy {
                 session_id: "session-1".into(),
                 cpu_count: 2,
                 memory_mib: 1024,
@@ -10607,10 +10805,11 @@ mod tests {
                 read_only_rootfs: true,
                 writable_workspace: true,
                 host_path_mounts: false,
-            })
-            .unwrap();
-        repositories
-            .upsert_managed_worker_isolation_evidence(StoredManagedWorkerIsolationEvidence {
+            },
+        ))
+        .unwrap();
+        block_on(repositories.upsert_managed_worker_isolation_evidence(
+            StoredManagedWorkerIsolationEvidence {
                 id: "isolation-evidence-1".into(),
                 session_id: "session-1".into(),
                 lifecycle_event_id: "lifecycle-1".into(),
@@ -10624,35 +10823,41 @@ mod tests {
                 failure_reason: None,
                 occurred_at_unix: Some(16),
                 evidence_json: r#"{"microvm_id":"fc-vm-1"}"#.into(),
-            })
-            .unwrap();
+            },
+        ))
+        .unwrap();
 
         assert_eq!(
-            repositories.managed_worker_templates()[0].isolation_backend_kind,
+            block_on(repositories.managed_worker_templates())[0].isolation_backend_kind,
             "firecracker_micro_vm"
         );
         assert_eq!(
-            repositories.agent_worker_instances()[0].process_name,
+            block_on(repositories.agent_worker_instances())[0].process_name,
             "agent-worker"
         );
         assert_eq!(
-            repositories.managed_worker_sessions()[0]
+            block_on(repositories.managed_worker_sessions())[0]
                 .microvm_id
                 .as_deref(),
             Some("fc-vm-1")
         );
         assert_eq!(
-            repositories.managed_worker_lifecycle_events()[0].action,
+            block_on(repositories.managed_worker_lifecycle_events())[0].action,
             "start"
         );
         assert_eq!(
-            repositories.managed_worker_isolation_selections()[0].host_lifecycle_owner,
+            block_on(repositories.managed_worker_isolation_selections())[0].host_lifecycle_owner,
             "agent-worker"
         );
-        assert!(!repositories.managed_worker_isolation_selections()[0].gateway_controls_backend);
-        assert!(!repositories.managed_worker_isolation_policies()[0].direct_public_egress);
+        assert!(
+            !block_on(repositories.managed_worker_isolation_selections())[0]
+                .gateway_controls_backend
+        );
+        assert!(
+            !block_on(repositories.managed_worker_isolation_policies())[0].direct_public_egress
+        );
         assert_eq!(
-            repositories.managed_worker_isolation_evidence()[0]
+            block_on(repositories.managed_worker_isolation_evidence())[0]
                 .isolation_instance_id
                 .as_deref(),
             Some("fc-vm-1")
@@ -10672,8 +10877,8 @@ mod tests {
             api_key_id: Some("key".into()),
         };
 
-        source
-            .upsert_managed_worker_template(StoredManagedWorkerTemplate {
+        block_on(
+            source.upsert_managed_worker_template(StoredManagedWorkerTemplate {
                 id: "template-1".into(),
                 framework_adapter: "codex".into(),
                 isolation_backend_kind: "firecracker_micro_vm".into(),
@@ -10682,10 +10887,11 @@ mod tests {
                 max_workspace_sessions: Some(6),
                 created_at_unix: Some(1),
                 updated_at_unix: Some(2),
-            })
-            .unwrap();
-        source
-            .upsert_agent_worker_instance(StoredAgentWorkerInstance {
+            }),
+        )
+        .unwrap();
+        block_on(
+            source.upsert_agent_worker_instance(StoredAgentWorkerInstance {
                 id: "agent-worker-1".into(),
                 process_name: "agent-worker".into(),
                 host_id: Some("host-a".into()),
@@ -10694,10 +10900,11 @@ mod tests {
                 started_at_unix: Some(3),
                 last_seen_at_unix: Some(4),
                 process_json: "{}".into(),
-            })
-            .unwrap();
-        source
-            .upsert_managed_worker_session(StoredManagedWorkerSession {
+            }),
+        )
+        .unwrap();
+        block_on(
+            source.upsert_managed_worker_session(StoredManagedWorkerSession {
                 id: "session-1".into(),
                 run_id: "run-1".into(),
                 tenant: tenant.clone(),
@@ -10714,10 +10921,11 @@ mod tests {
                 cleanup_completed_at_unix: Some(8),
                 capability_envelope_json: "{}".into(),
                 resource_limits_json: "{}".into(),
-            })
-            .unwrap();
-        source
-            .append_managed_worker_lifecycle_event(StoredManagedWorkerLifecycleEvent {
+            }),
+        )
+        .unwrap();
+        block_on(
+            source.append_managed_worker_lifecycle_event(StoredManagedWorkerLifecycleEvent {
                 id: "lifecycle-1".into(),
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
@@ -10729,10 +10937,11 @@ mod tests {
                 outcome: "succeeded".into(),
                 occurred_at_unix: Some(9),
                 evidence_json: "{}".into(),
-            })
-            .unwrap();
-        source
-            .upsert_managed_worker_isolation_selection(StoredManagedWorkerIsolationSelection {
+            }),
+        )
+        .unwrap();
+        block_on(source.upsert_managed_worker_isolation_selection(
+            StoredManagedWorkerIsolationSelection {
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
                 tenant: tenant.clone(),
@@ -10745,10 +10954,11 @@ mod tests {
                 gateway_controls_backend: false,
                 capability_envelope_id: "capability-envelope-1".into(),
                 selected_at_unix: Some(5),
-            })
-            .unwrap();
-        source
-            .upsert_managed_worker_isolation_policy(StoredManagedWorkerIsolationPolicy {
+            },
+        ))
+        .unwrap();
+        block_on(source.upsert_managed_worker_isolation_policy(
+            StoredManagedWorkerIsolationPolicy {
                 session_id: "session-1".into(),
                 cpu_count: 1,
                 memory_mib: 512,
@@ -10760,10 +10970,11 @@ mod tests {
                 read_only_rootfs: true,
                 writable_workspace: true,
                 host_path_mounts: false,
-            })
-            .unwrap();
-        source
-            .upsert_managed_worker_isolation_evidence(StoredManagedWorkerIsolationEvidence {
+            },
+        ))
+        .unwrap();
+        block_on(source.upsert_managed_worker_isolation_evidence(
+            StoredManagedWorkerIsolationEvidence {
                 id: "isolation-evidence-1".into(),
                 session_id: "session-1".into(),
                 lifecycle_event_id: "lifecycle-1".into(),
@@ -10777,8 +10988,9 @@ mod tests {
                 failure_reason: None,
                 occurred_at_unix: Some(9),
                 evidence_json: "{}".into(),
-            })
-            .unwrap();
+            },
+        ))
+        .unwrap();
 
         let snapshot = source.export_migration_snapshot().unwrap();
         let counts = snapshot.counts();
@@ -10794,13 +11006,22 @@ mod tests {
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         target.import_migration_snapshot(snapshot).unwrap();
 
-        assert_eq!(target.managed_worker_templates().len(), 1);
-        assert_eq!(target.agent_worker_instances().len(), 1);
-        assert_eq!(target.managed_worker_sessions().len(), 1);
-        assert_eq!(target.managed_worker_lifecycle_events().len(), 1);
-        assert_eq!(target.managed_worker_isolation_selections().len(), 1);
-        assert_eq!(target.managed_worker_isolation_policies().len(), 1);
-        assert_eq!(target.managed_worker_isolation_evidence().len(), 1);
+        assert_eq!(block_on(target.managed_worker_templates()).len(), 1);
+        assert_eq!(block_on(target.agent_worker_instances()).len(), 1);
+        assert_eq!(block_on(target.managed_worker_sessions()).len(), 1);
+        assert_eq!(block_on(target.managed_worker_lifecycle_events()).len(), 1);
+        assert_eq!(
+            block_on(target.managed_worker_isolation_selections()).len(),
+            1
+        );
+        assert_eq!(
+            block_on(target.managed_worker_isolation_policies()).len(),
+            1
+        );
+        assert_eq!(
+            block_on(target.managed_worker_isolation_evidence()).len(),
+            1
+        );
     }
 
     fn self_hosted_tenant() -> TenantContext {
@@ -10816,8 +11037,8 @@ mod tests {
 
     fn insert_self_hosted_worker_records(repositories: &RuntimeStorageRepositories) {
         let tenant = self_hosted_tenant();
-        repositories
-            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+        block_on(repositories.upsert_self_hosted_worker_registration(
+            StoredSelfHostedWorkerRegistration {
                 id: "self-hosted-worker-1".into(),
                 tenant: tenant.clone(),
                 workspace_id: "workspace-1".into(),
@@ -10830,10 +11051,11 @@ mod tests {
                 last_seen_at_unix: Some(21),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: r#"{"frameworks":["codex"]}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+            },
+        ))
+        .unwrap();
+        block_on(repositories.append_self_hosted_worker_heartbeat(
+            StoredSelfHostedWorkerHeartbeat {
                 id: "heartbeat-1".into(),
                 worker_id: "self-hosted-worker-1".into(),
                 tenant: tenant.clone(),
@@ -10842,10 +11064,11 @@ mod tests {
                 reported_at_unix: Some(22),
                 observed_at_unix: Some(23),
                 heartbeat_json: r#"{"load":0.42}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+            },
+        ))
+        .unwrap();
+        block_on(repositories.append_self_hosted_worker_telemetry_event(
+            StoredSelfHostedWorkerTelemetryEvent {
                 id: "telemetry-1".into(),
                 worker_id: "self-hosted-worker-1".into(),
                 tenant: tenant.clone(),
@@ -10857,10 +11080,11 @@ mod tests {
                 occurred_at_unix: Some(24),
                 ingested_at_unix: Some(25),
                 event_json: r#"{"tool":"bash"}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .upsert_self_hosted_worker_artifact(StoredSelfHostedWorkerArtifact {
+            },
+        ))
+        .unwrap();
+        block_on(
+            repositories.upsert_self_hosted_worker_artifact(StoredSelfHostedWorkerArtifact {
                 id: "artifact-1".into(),
                 worker_id: "self-hosted-worker-1".into(),
                 tenant: tenant.clone(),
@@ -10873,10 +11097,11 @@ mod tests {
                 trust_level: "reported_by_self_hosted_worker".into(),
                 created_at_unix: Some(26),
                 artifact_json: r#"{"path":"stdout.log"}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .upsert_self_hosted_worker_checkpoint(StoredSelfHostedWorkerCheckpoint {
+            }),
+        )
+        .unwrap();
+        block_on(repositories.upsert_self_hosted_worker_checkpoint(
+            StoredSelfHostedWorkerCheckpoint {
                 id: "checkpoint-1".into(),
                 worker_id: "self-hosted-worker-1".into(),
                 tenant,
@@ -10888,10 +11113,11 @@ mod tests {
                 trust_level: "reported_by_self_hosted_worker".into(),
                 created_at_unix: Some(27),
                 checkpoint_json: r#"{"version":1}"#.into(),
-            })
-            .unwrap();
-        repositories
-            .upsert_self_hosted_run_dispatch(StoredSelfHostedRunDispatch {
+            },
+        ))
+        .unwrap();
+        block_on(
+            repositories.upsert_self_hosted_run_dispatch(StoredSelfHostedRunDispatch {
                 dispatch_id: "dispatch-1".into(),
                 action: "start_run".into(),
                 tenant_id: "org".into(),
@@ -10908,8 +11134,9 @@ mod tests {
                 attempt: 1,
                 acknowledged_status: Some("accepted".into()),
                 acknowledged_at_unix: Some(29),
-            })
-            .unwrap();
+            }),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -10918,7 +11145,7 @@ mod tests {
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         insert_self_hosted_worker_records(&repositories);
 
-        let registrations = repositories.self_hosted_worker_registrations();
+        let registrations = block_on(repositories.self_hosted_worker_registrations());
         assert_eq!(registrations.len(), 1);
         assert_eq!(
             registrations[0].trust_level,
@@ -10926,23 +11153,23 @@ mod tests {
         );
         assert!(registrations[0].orchestration_enabled);
         assert_eq!(
-            repositories.self_hosted_worker_heartbeats()[0].status,
+            block_on(repositories.self_hosted_worker_heartbeats())[0].status,
             "online"
         );
         assert_eq!(
-            repositories.self_hosted_worker_telemetry_events()[0].kind,
+            block_on(repositories.self_hosted_worker_telemetry_events())[0].kind,
             "tool_call"
         );
         assert_eq!(
-            repositories.self_hosted_worker_artifacts()[0].artifact_name,
+            block_on(repositories.self_hosted_worker_artifacts())[0].artifact_name,
             "stdout.log"
         );
         assert_eq!(
-            repositories.self_hosted_worker_checkpoints()[0].checkpoint_name,
+            block_on(repositories.self_hosted_worker_checkpoints())[0].checkpoint_name,
             "resume-state"
         );
         assert_eq!(
-            repositories.self_hosted_run_dispatches()[0]
+            block_on(repositories.self_hosted_run_dispatches())[0]
                 .lease_id
                 .as_deref(),
             Some("dispatch-1:attempt-1")
@@ -10968,14 +11195,17 @@ mod tests {
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         target.import_migration_snapshot(snapshot).unwrap();
 
-        assert_eq!(target.self_hosted_worker_registrations().len(), 1);
-        assert_eq!(target.self_hosted_worker_heartbeats().len(), 1);
-        assert_eq!(target.self_hosted_worker_telemetry_events().len(), 1);
-        assert_eq!(target.self_hosted_worker_artifacts().len(), 1);
-        assert_eq!(target.self_hosted_worker_checkpoints().len(), 1);
-        assert_eq!(target.self_hosted_run_dispatches().len(), 1);
+        assert_eq!(block_on(target.self_hosted_worker_registrations()).len(), 1);
+        assert_eq!(block_on(target.self_hosted_worker_heartbeats()).len(), 1);
         assert_eq!(
-            target.self_hosted_run_dispatches()[0].required_capabilities,
+            block_on(target.self_hosted_worker_telemetry_events()).len(),
+            1
+        );
+        assert_eq!(block_on(target.self_hosted_worker_artifacts()).len(), 1);
+        assert_eq!(block_on(target.self_hosted_worker_checkpoints()).len(), 1);
+        assert_eq!(block_on(target.self_hosted_run_dispatches()).len(), 1);
+        assert_eq!(
+            block_on(target.self_hosted_run_dispatches())[0].required_capabilities,
             vec!["shell".to_string()]
         );
     }

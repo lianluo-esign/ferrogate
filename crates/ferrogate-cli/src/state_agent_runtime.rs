@@ -293,10 +293,12 @@ impl AppState {
         pagination: AdminPagination,
         tenant_scope: Option<&str>,
     ) -> AdminPage<crate::responses::AdminManagedWorkerSession> {
-        let lifecycle_events = self.repositories.managed_worker_lifecycle_events();
-        let mut sessions = self
-            .repositories
-            .managed_worker_sessions()
+        let lifecycle_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.managed_worker_lifecycle_events(),
+        );
+        let worker_sessions =
+            crate::gateway::block_on_sync_bridge(self.repositories.managed_worker_sessions());
+        let mut sessions = worker_sessions
             .into_iter()
             .map(|session| {
                 let events = lifecycle_events
@@ -411,9 +413,11 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        self.repositories
-            .upsert_self_hosted_worker_registration(registration.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_self_hosted_worker_registration(registration.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         self.rebuild_self_hosted_worker_dispatch_runtime()?;
         self.self_hosted_worker_records()
             .into_iter()
@@ -432,24 +436,26 @@ impl AppState {
     ) -> Result<crate::responses::AdminSelfHostedWorkerRotateResponse, SelfHostedWorkerRecordError>
     {
         validate_self_hosted_rotate_request(&request)?;
-        let mut registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| registration.id == worker_id)
-            .ok_or_else(|| {
-                SelfHostedWorkerRecordError::NotFound(format!(
-                    "self-hosted worker {worker_id} was not found"
-                ))
-            })?;
+        let mut registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| registration.id == worker_id)
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
         let previous_identity_fingerprint = registration.identity_fingerprint.clone();
         let previous_identity_expires_at_unix = registration.identity_expires_at_unix;
         registration.identity_fingerprint = request.identity_fingerprint.trim().to_string();
         registration.identity_expires_at_unix = request.identity_expires_at_unix;
         let rotated_at_unix = now_unix_seconds();
-        self.repositories
-            .upsert_self_hosted_worker_registration(registration.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_self_hosted_worker_registration(registration.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         self.rebuild_self_hosted_worker_dispatch_runtime()?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
@@ -468,8 +474,11 @@ impl AppState {
     fn rebuild_self_hosted_worker_dispatch_runtime(
         &self,
     ) -> Result<(), SelfHostedWorkerRecordError> {
-        let registrations = self.repositories.self_hosted_worker_registrations();
-        let dispatches = self.repositories.self_hosted_run_dispatches();
+        let registrations = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        );
+        let dispatches =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches());
         let records = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 dispatch
@@ -569,20 +578,20 @@ impl AppState {
         worker_id: &str,
         token_id: &str,
     ) -> Result<String, SelfHostedWorkerError> {
-        let registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| {
-                registration.id == worker_id
-                    && registration.workspace_id == workspace_id
-                    && self_hosted_tenant_id(&registration.tenant) == tenant_id
-            })
-            .ok_or_else(|| {
-                SelfHostedWorkerError::InvalidIdentity(format!(
-                    "self-hosted worker {worker_id} was not found for encrypted transport"
-                ))
-            })?;
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| {
+            registration.id == worker_id
+                && registration.workspace_id == workspace_id
+                && self_hosted_tenant_id(&registration.tenant) == tenant_id
+        })
+        .ok_or_else(|| {
+            SelfHostedWorkerError::InvalidIdentity(format!(
+                "self-hosted worker {worker_id} was not found for encrypted transport"
+            ))
+        })?;
         if registration.identity_fingerprint != token_id {
             return Err(SelfHostedWorkerError::InvalidIdentity(
                 "self-hosted worker encrypted transport token_id does not match registration"
@@ -604,16 +613,16 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_heartbeat_request(&request)?;
-        let mut registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| registration.id == worker_id)
-            .ok_or_else(|| {
-                SelfHostedWorkerRecordError::NotFound(format!(
-                    "self-hosted worker {worker_id} was not found"
-                ))
-            })?;
+        let mut registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| registration.id == worker_id)
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
         let observed_at_unix = now_unix_seconds();
         let heartbeat = StoredSelfHostedWorkerHeartbeat {
             id: next_self_hosted_heartbeat_id(),
@@ -628,14 +637,18 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        self.repositories
-            .append_self_hosted_worker_heartbeat(heartbeat.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .append_self_hosted_worker_heartbeat(heartbeat.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         registration.status = heartbeat.status.clone();
         registration.last_seen_at_unix = heartbeat.observed_at_unix;
-        self.repositories
-            .upsert_self_hosted_worker_registration(registration)
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_self_hosted_worker_registration(registration),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after heartbeat write".into(),
@@ -661,16 +674,16 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_telemetry_event_request(&request)?;
-        let registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| registration.id == worker_id)
-            .ok_or_else(|| {
-                SelfHostedWorkerRecordError::NotFound(format!(
-                    "self-hosted worker {worker_id} was not found"
-                ))
-            })?;
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| registration.id == worker_id)
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
         let ingested_at_unix = now_unix_seconds();
         let stored_event = StoredSelfHostedWorkerTelemetryEvent {
             id: next_self_hosted_telemetry_event_id(),
@@ -688,9 +701,11 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        self.repositories
-            .append_self_hosted_worker_telemetry_event(stored_event.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .append_self_hosted_worker_telemetry_event(stored_event.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after telemetry event write".into(),
@@ -721,16 +736,16 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_artifact_request(&request)?;
-        let registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| registration.id == worker_id)
-            .ok_or_else(|| {
-                SelfHostedWorkerRecordError::NotFound(format!(
-                    "self-hosted worker {worker_id} was not found"
-                ))
-            })?;
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| registration.id == worker_id)
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
         let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
         let stored_artifact = StoredSelfHostedWorkerArtifact {
             id: request.artifact_id.trim().to_string(),
@@ -749,9 +764,11 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        self.repositories
-            .upsert_self_hosted_worker_artifact(stored_artifact.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_self_hosted_worker_artifact(stored_artifact.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after artifact write".into(),
@@ -783,16 +800,16 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_checkpoint_request(&request)?;
-        let registration = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .into_iter()
-            .find(|registration| registration.id == worker_id)
-            .ok_or_else(|| {
-                SelfHostedWorkerRecordError::NotFound(format!(
-                    "self-hosted worker {worker_id} was not found"
-                ))
-            })?;
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .into_iter()
+        .find(|registration| registration.id == worker_id)
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
         let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
         let stored_checkpoint = StoredSelfHostedWorkerCheckpoint {
             id: request.checkpoint_id.trim().to_string(),
@@ -810,9 +827,11 @@ impl AppState {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
         };
-        self.repositories
-            .upsert_self_hosted_worker_checkpoint(stored_checkpoint.clone())
-            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_self_hosted_worker_checkpoint(stored_checkpoint.clone()),
+        )
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after checkpoint write".into(),
@@ -845,20 +864,20 @@ impl AppState {
         worker_id: &str,
         query: SelfHostedWorkerEventStreamQuery,
     ) -> Option<crate::responses::AdminSelfHostedWorkerEventStream> {
-        let worker_exists = self
-            .repositories
-            .self_hosted_worker_registrations()
-            .iter()
-            .any(|registration| registration.id == worker_id);
+        let worker_exists = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registrations(),
+        )
+        .iter()
+        .any(|registration| registration.id == worker_id);
         if !worker_exists {
             return None;
         }
-        let mut events = self
-            .repositories
-            .self_hosted_worker_telemetry_events()
-            .into_iter()
-            .filter(|event| event.worker_id == worker_id)
-            .collect::<Vec<_>>();
+        let mut events = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_telemetry_events(),
+        )
+        .into_iter()
+        .filter(|event| event.worker_id == worker_id)
+        .collect::<Vec<_>>();
         events.sort_by(|left, right| {
             left.occurred_at_unix
                 .cmp(&right.occurred_at_unix)
@@ -913,13 +932,18 @@ impl AppState {
     }
 
     fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
-        let heartbeats = self.repositories.self_hosted_worker_heartbeats();
-        let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
-        let artifacts = self.repositories.self_hosted_worker_artifacts();
-        let checkpoints = self.repositories.self_hosted_worker_checkpoints();
+        let heartbeats =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_heartbeats());
+        let telemetry_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_telemetry_events(),
+        );
+        let artifacts =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_artifacts());
+        let checkpoints = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_checkpoints(),
+        );
         let now_unix = now_unix_seconds();
-        self.repositories
-            .self_hosted_worker_registrations()
+        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_registrations())
             .into_iter()
             .map(|registration| {
                 let latest_heartbeat = latest_self_hosted_heartbeat(&heartbeats, &registration.id);
@@ -994,17 +1018,16 @@ impl AppState {
         if run_id.trim().is_empty() {
             return None;
         }
-        let mut events = self
-            .repositories
-            .self_hosted_worker_telemetry_events()
-            .into_iter()
-            .filter(|event| event.run_id.as_deref() == Some(run_id))
-            .filter(|event| {
-                tenant_scope.is_none_or(|tenant_id| {
-                    event.tenant.organization_id.as_deref() == Some(tenant_id)
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut events = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_telemetry_events(),
+        )
+        .into_iter()
+        .filter(|event| event.run_id.as_deref() == Some(run_id))
+        .filter(|event| {
+            tenant_scope
+                .is_none_or(|tenant_id| event.tenant.organization_id.as_deref() == Some(tenant_id))
+        })
+        .collect::<Vec<_>>();
         if events.is_empty() {
             return None;
         }
@@ -1359,7 +1382,9 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = self.repositories.upsert_agent_worker_instance(agent_worker) {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories.upsert_agent_worker_instance(agent_worker),
+        ) {
             warn!("failed to persist agent-worker instance record: {error}");
             return;
         }
@@ -1386,7 +1411,9 @@ impl AppState {
             .to_string(),
             resource_limits_json: "{}".to_string(),
         };
-        if let Err(error) = self.repositories.upsert_managed_worker_session(session) {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories.upsert_managed_worker_session(session),
+        ) {
             warn!("failed to persist managed worker session record: {error}");
             return;
         }
@@ -1406,10 +1433,10 @@ impl AppState {
             capability_envelope_id: record.capability_envelope_id.clone(),
             selected_at_unix: occurred_at_unix,
         };
-        if let Err(error) = self
-            .repositories
-            .upsert_managed_worker_isolation_selection(isolation_selection)
-        {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_managed_worker_isolation_selection(isolation_selection),
+        ) {
             warn!("failed to persist managed worker isolation selection record: {error}");
         }
 
@@ -1429,10 +1456,10 @@ impl AppState {
             writable_workspace: filesystem_policy.writable_workspace,
             host_path_mounts: filesystem_policy.host_path_mounts,
         };
-        if let Err(error) = self
-            .repositories
-            .upsert_managed_worker_isolation_policy(isolation_policy_record)
-        {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_managed_worker_isolation_policy(isolation_policy_record),
+        ) {
             warn!("failed to persist managed worker isolation policy record: {error}");
         }
 
@@ -1458,10 +1485,10 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = self
-            .repositories
-            .append_managed_worker_lifecycle_event(event)
-        {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .append_managed_worker_lifecycle_event(event),
+        ) {
             warn!("failed to persist managed worker lifecycle event record: {error}");
             return;
         }
@@ -1510,10 +1537,10 @@ impl AppState {
             })
             .to_string(),
         };
-        if let Err(error) = self
-            .repositories
-            .upsert_managed_worker_isolation_evidence(evidence)
-        {
+        if let Err(error) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .upsert_managed_worker_isolation_evidence(evidence),
+        ) {
             warn!("failed to persist managed worker isolation evidence record: {error}");
         }
     }
@@ -1534,6 +1561,14 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
 
     #[test]
     fn records_managed_worker_lifecycle_records_into_storage() {
@@ -1557,7 +1592,7 @@ mod tests {
 
         state.record_managed_worker_lifecycle(&record);
 
-        let agent_workers = state.repositories.agent_worker_instances();
+        let agent_workers = block_on(state.repositories.agent_worker_instances());
         assert_eq!(agent_workers.len(), 1);
         assert_eq!(agent_workers[0].id, "agent-worker-1");
         assert_eq!(agent_workers[0].process_name, "agent-worker");
@@ -1566,7 +1601,7 @@ mod tests {
             .process_json
             .contains("\"process_boundary\":\"external_process\""));
 
-        let sessions = state.repositories.managed_worker_sessions();
+        let sessions = block_on(state.repositories.managed_worker_sessions());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session-1");
         assert_eq!(sessions[0].run_id, "run-1");
@@ -1589,7 +1624,7 @@ mod tests {
         assert_eq!(sessions[0].capability_envelope_id, "capability-1");
         assert!(sessions[0].cleanup_completed_at_unix.is_some());
 
-        let events = state.repositories.managed_worker_lifecycle_events();
+        let events = block_on(state.repositories.managed_worker_lifecycle_events());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "session-1");
         assert_eq!(events[0].run_id, "run-1");
@@ -1613,7 +1648,7 @@ mod tests {
             .evidence_json
             .contains("\"isolation_backend_kind\":\"firecracker_microvm\""));
 
-        let selections = state.repositories.managed_worker_isolation_selections();
+        let selections = block_on(state.repositories.managed_worker_isolation_selections());
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].session_id, "session-1");
         assert_eq!(selections[0].backend_kind, "firecracker_microvm");
@@ -1627,7 +1662,7 @@ mod tests {
             Some("agent-worker-1")
         );
 
-        let policies = state.repositories.managed_worker_isolation_policies();
+        let policies = block_on(state.repositories.managed_worker_isolation_policies());
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].session_id, "session-1");
         assert!(!policies[0].direct_public_egress);
@@ -1636,7 +1671,7 @@ mod tests {
         assert!(policies[0].read_only_rootfs);
         assert!(!policies[0].host_path_mounts);
 
-        let isolation_evidence = state.repositories.managed_worker_isolation_evidence();
+        let isolation_evidence = block_on(state.repositories.managed_worker_isolation_evidence());
         assert_eq!(isolation_evidence.len(), 1);
         assert_eq!(isolation_evidence[0].session_id, "session-1");
         assert_eq!(isolation_evidence[0].lifecycle_event_id, events[0].id);
@@ -1711,9 +1746,8 @@ mod tests {
             api_key_id: Some("key".into()),
         };
 
-        state
-            .repositories
-            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+        block_on(state.repositories.upsert_self_hosted_worker_registration(
+            StoredSelfHostedWorkerRegistration {
                 id: "worker-1".into(),
                 tenant: tenant.clone(),
                 workspace_id: "workspace-1".into(),
@@ -1726,11 +1760,11 @@ mod tests {
                 last_seen_at_unix: Some(20),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: "{}".into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+            },
+        ))
+        .unwrap();
+        block_on(state.repositories.append_self_hosted_worker_heartbeat(
+            StoredSelfHostedWorkerHeartbeat {
                 id: "heartbeat-old".into(),
                 worker_id: "worker-1".into(),
                 tenant: tenant.clone(),
@@ -1739,11 +1773,11 @@ mod tests {
                 reported_at_unix: Some(21),
                 observed_at_unix: Some(22),
                 heartbeat_json: "{}".into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+            },
+        ))
+        .unwrap();
+        block_on(state.repositories.append_self_hosted_worker_heartbeat(
+            StoredSelfHostedWorkerHeartbeat {
                 id: "heartbeat-new".into(),
                 worker_id: "worker-1".into(),
                 tenant: tenant.clone(),
@@ -1752,27 +1786,29 @@ mod tests {
                 reported_at_unix: Some(23),
                 observed_at_unix: Some(24),
                 heartbeat_json: "{}".into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
-                id: "telemetry-1".into(),
-                worker_id: "worker-1".into(),
-                tenant: tenant.clone(),
-                workspace_id: "workspace-1".into(),
-                session_id: Some("session-1".into()),
-                run_id: Some("run-1".into()),
-                kind: "log".into(),
-                trust_level: "reported_by_self_hosted_worker".into(),
-                occurred_at_unix: Some(25),
-                ingested_at_unix: Some(26),
-                event_json: "{}".into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .upsert_self_hosted_worker_artifact(StoredSelfHostedWorkerArtifact {
+            },
+        ))
+        .unwrap();
+        block_on(
+            state
+                .repositories
+                .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                    id: "telemetry-1".into(),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    session_id: Some("session-1".into()),
+                    run_id: Some("run-1".into()),
+                    kind: "log".into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(25),
+                    ingested_at_unix: Some(26),
+                    event_json: "{}".into(),
+                }),
+        )
+        .unwrap();
+        block_on(state.repositories.upsert_self_hosted_worker_artifact(
+            StoredSelfHostedWorkerArtifact {
                 id: "artifact-1".into(),
                 worker_id: "worker-1".into(),
                 tenant: tenant.clone(),
@@ -1785,11 +1821,11 @@ mod tests {
                 trust_level: "reported_by_self_hosted_worker".into(),
                 created_at_unix: Some(27),
                 artifact_json: "{}".into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .upsert_self_hosted_worker_checkpoint(StoredSelfHostedWorkerCheckpoint {
+            },
+        ))
+        .unwrap();
+        block_on(state.repositories.upsert_self_hosted_worker_checkpoint(
+            StoredSelfHostedWorkerCheckpoint {
                 id: "checkpoint-1".into(),
                 worker_id: "worker-1".into(),
                 tenant,
@@ -1801,8 +1837,9 @@ mod tests {
                 trust_level: "reported_by_self_hosted_worker".into(),
                 created_at_unix: Some(28),
                 checkpoint_json: "{}".into(),
-            })
-            .unwrap();
+            },
+        ))
+        .unwrap();
 
         let page = state.self_hosted_worker_records_page(
             AdminPagination {
@@ -1864,38 +1901,42 @@ mod tests {
             user_id: None,
             api_key_id: Some("key".into()),
         };
-        state
-            .repositories
-            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
-                id: "event-tool".into(),
-                worker_id: "worker-1".into(),
-                tenant: tenant.clone(),
-                workspace_id: "workspace-1".into(),
-                session_id: Some("session-1".into()),
-                run_id: Some("run-1".into()),
-                kind: "tool_call".into(),
-                trust_level: "reported_by_self_hosted_worker".into(),
-                occurred_at_unix: Some(20),
-                ingested_at_unix: Some(21),
-                event_json: r#"{"tool":"shell"}"#.into(),
-            })
-            .unwrap();
-        state
-            .repositories
-            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
-                id: "event-lifecycle".into(),
-                worker_id: "worker-1".into(),
-                tenant,
-                workspace_id: "workspace-1".into(),
-                session_id: Some("session-1".into()),
-                run_id: Some("run-1".into()),
-                kind: "lifecycle".into(),
-                trust_level: "reported_by_self_hosted_worker".into(),
-                occurred_at_unix: Some(30),
-                ingested_at_unix: Some(31),
-                event_json: r#"{"state":"completed"}"#.into(),
-            })
-            .unwrap();
+        block_on(
+            state
+                .repositories
+                .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                    id: "event-tool".into(),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    session_id: Some("session-1".into()),
+                    run_id: Some("run-1".into()),
+                    kind: "tool_call".into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(20),
+                    ingested_at_unix: Some(21),
+                    event_json: r#"{"tool":"shell"}"#.into(),
+                }),
+        )
+        .unwrap();
+        block_on(
+            state
+                .repositories
+                .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                    id: "event-lifecycle".into(),
+                    worker_id: "worker-1".into(),
+                    tenant,
+                    workspace_id: "workspace-1".into(),
+                    session_id: Some("session-1".into()),
+                    run_id: Some("run-1".into()),
+                    kind: "lifecycle".into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(30),
+                    ingested_at_unix: Some(31),
+                    event_json: r#"{"state":"completed"}"#.into(),
+                }),
+        )
+        .unwrap();
 
         let timeline = state
             .self_hosted_run_timeline("run-1", None)
@@ -1936,9 +1977,8 @@ mod tests {
             user_id: None,
             api_key_id: Some("key".into()),
         };
-        state
-            .repositories
-            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+        block_on(state.repositories.upsert_self_hosted_worker_registration(
+            StoredSelfHostedWorkerRegistration {
                 id: "worker-1".into(),
                 tenant: tenant.clone(),
                 workspace_id: "workspace-1".into(),
@@ -1951,29 +1991,34 @@ mod tests {
                 last_seen_at_unix: Some(20),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: "{}".into(),
-            })
-            .unwrap();
+            },
+        ))
+        .unwrap();
         for (id, occurred_at_unix, kind) in [
             ("event-1", 10, "lifecycle"),
             ("event-2", 11, "tool_call"),
             ("event-3", 12, "log"),
         ] {
-            state
-                .repositories
-                .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
-                    id: id.into(),
-                    worker_id: "worker-1".into(),
-                    tenant: tenant.clone(),
-                    workspace_id: "workspace-1".into(),
-                    session_id: Some("session-1".into()),
-                    run_id: Some("run-1".into()),
-                    kind: kind.into(),
-                    trust_level: "reported_by_self_hosted_worker".into(),
-                    occurred_at_unix: Some(occurred_at_unix),
-                    ingested_at_unix: Some(occurred_at_unix + 100),
-                    event_json: "{}".into(),
-                })
-                .unwrap();
+            block_on(
+                state
+                    .repositories
+                    .append_self_hosted_worker_telemetry_event(
+                        StoredSelfHostedWorkerTelemetryEvent {
+                            id: id.into(),
+                            worker_id: "worker-1".into(),
+                            tenant: tenant.clone(),
+                            workspace_id: "workspace-1".into(),
+                            session_id: Some("session-1".into()),
+                            run_id: Some("run-1".into()),
+                            kind: kind.into(),
+                            trust_level: "reported_by_self_hosted_worker".into(),
+                            occurred_at_unix: Some(occurred_at_unix),
+                            ingested_at_unix: Some(occurred_at_unix + 100),
+                            event_json: "{}".into(),
+                        },
+                    ),
+            )
+            .unwrap();
         }
 
         let first = state
@@ -2076,7 +2121,7 @@ mod tests {
         assert_eq!(worker.last_seen_at_unix, None);
         assert!(worker.latest_heartbeat.is_none());
 
-        let records = state.repositories.self_hosted_worker_registrations();
+        let records = block_on(state.repositories.self_hosted_worker_registrations());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, worker.id);
         assert_eq!(records[0].tenant.organization_id.as_deref(), Some("org"));
@@ -2089,7 +2134,7 @@ mod tests {
             r#"{"frameworks":["codex"]}"#
         );
 
-        let dispatches = state.repositories.self_hosted_run_dispatches();
+        let dispatches = block_on(state.repositories.self_hosted_run_dispatches());
         assert_eq!(dispatches.len(), 1);
         assert_eq!(
             dispatches[0].dispatch_id,
@@ -2123,7 +2168,7 @@ mod tests {
             .expect("seed dispatch should be leased");
         assert_eq!(lease.attempt, 1);
 
-        let dispatches = state.repositories.self_hosted_run_dispatches();
+        let dispatches = block_on(state.repositories.self_hosted_run_dispatches());
         assert_eq!(
             dispatches[0].assigned_worker_id.as_deref(),
             Some(worker.id.as_str())
@@ -2154,7 +2199,7 @@ mod tests {
                 reported_at_unix: 101,
             })
             .expect("ack should be accepted");
-        let dispatches = state.repositories.self_hosted_run_dispatches();
+        let dispatches = block_on(state.repositories.self_hosted_run_dispatches());
         assert_eq!(
             dispatches[0].acknowledged_status.as_deref(),
             Some("accepted")
@@ -2208,10 +2253,7 @@ mod tests {
                 if message == "capability_envelope_json must be valid JSON when provided"
         ));
 
-        assert!(state
-            .repositories
-            .self_hosted_worker_registrations()
-            .is_empty());
+        assert!(block_on(state.repositories.self_hosted_worker_registrations()).is_empty());
     }
 
     #[test]
@@ -2249,7 +2291,7 @@ mod tests {
         assert_eq!(response.worker.identity_expires_at_unix, Some(200));
         assert!(response.rotated_at_unix.is_some());
 
-        let records = state.repositories.self_hosted_worker_registrations();
+        let records = block_on(state.repositories.self_hosted_worker_registrations());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].identity_fingerprint, "sha256:new");
         assert_eq!(records[0].identity_expires_at_unix, Some(200));
@@ -2298,7 +2340,7 @@ mod tests {
                 if message == "identity_fingerprint must not be empty"
         ));
 
-        let records = state.repositories.self_hosted_worker_registrations();
+        let records = block_on(state.repositories.self_hosted_worker_registrations());
         assert_eq!(records[0].identity_fingerprint, "sha256:old");
     }
 
@@ -2352,9 +2394,7 @@ mod tests {
             Some(heartbeat.id.as_str())
         );
 
-        let stored_registration = state
-            .repositories
-            .self_hosted_worker_registrations()
+        let stored_registration = block_on(state.repositories.self_hosted_worker_registrations())
             .into_iter()
             .find(|registration| registration.id == worker.id)
             .expect("registration should remain stored");
@@ -2364,7 +2404,7 @@ mod tests {
             heartbeat.observed_at_unix
         );
 
-        let stored_heartbeats = state.repositories.self_hosted_worker_heartbeats();
+        let stored_heartbeats = block_on(state.repositories.self_hosted_worker_heartbeats());
         assert_eq!(stored_heartbeats.len(), 1);
         assert_eq!(stored_heartbeats[0].worker_id, worker.id);
         assert_eq!(stored_heartbeats[0].heartbeat_json, r#"{"load":0.42}"#);
@@ -2429,10 +2469,7 @@ mod tests {
                 if message == "heartbeat_json must be valid JSON when provided"
         ));
 
-        assert!(state
-            .repositories
-            .self_hosted_worker_heartbeats()
-            .is_empty());
+        assert!(block_on(state.repositories.self_hosted_worker_heartbeats()).is_empty());
     }
 
     #[test]
@@ -2484,7 +2521,7 @@ mod tests {
         assert_eq!(updated_worker.telemetry_event_count, 1);
         assert_eq!(updated_worker.latest_event_at_unix, Some(456));
 
-        let stored_events = state.repositories.self_hosted_worker_telemetry_events();
+        let stored_events = block_on(state.repositories.self_hosted_worker_telemetry_events());
         assert_eq!(stored_events.len(), 1);
         assert_eq!(stored_events[0].worker_id, worker.id);
         assert_eq!(stored_events[0].event_json, r#"{"tool":"shell"}"#);
@@ -2555,10 +2592,7 @@ mod tests {
                 if message == "event_json must be valid JSON when provided"
         ));
 
-        assert!(state
-            .repositories
-            .self_hosted_worker_telemetry_events()
-            .is_empty());
+        assert!(block_on(state.repositories.self_hosted_worker_telemetry_events()).is_empty());
     }
 
     #[test]
@@ -2614,7 +2648,7 @@ mod tests {
         assert_eq!(updated_worker.artifact_count, 1);
         assert_eq!(updated_worker.latest_artifact_at_unix, Some(789));
 
-        let stored_artifacts = state.repositories.self_hosted_worker_artifacts();
+        let stored_artifacts = block_on(state.repositories.self_hosted_worker_artifacts());
         assert_eq!(stored_artifacts.len(), 1);
         assert_eq!(stored_artifacts[0].id, "artifact-1");
         assert_eq!(stored_artifacts[0].worker_id, worker.id);
@@ -2714,7 +2748,7 @@ mod tests {
                 if message == "artifact_json must be valid JSON when provided"
         ));
 
-        assert!(state.repositories.self_hosted_worker_artifacts().is_empty());
+        assert!(block_on(state.repositories.self_hosted_worker_artifacts()).is_empty());
     }
 
     #[test]
@@ -2768,7 +2802,7 @@ mod tests {
         assert_eq!(updated_worker.checkpoint_count, 1);
         assert_eq!(updated_worker.latest_checkpoint_at_unix, Some(890));
 
-        let stored_checkpoints = state.repositories.self_hosted_worker_checkpoints();
+        let stored_checkpoints = block_on(state.repositories.self_hosted_worker_checkpoints());
         assert_eq!(stored_checkpoints.len(), 1);
         assert_eq!(stored_checkpoints[0].id, "checkpoint-1");
         assert_eq!(stored_checkpoints[0].worker_id, worker.id);
@@ -2864,9 +2898,6 @@ mod tests {
                 if message == "checkpoint_json must be valid JSON when provided"
         ));
 
-        assert!(state
-            .repositories
-            .self_hosted_worker_checkpoints()
-            .is_empty());
+        assert!(block_on(state.repositories.self_hosted_worker_checkpoints()).is_empty());
     }
 }
