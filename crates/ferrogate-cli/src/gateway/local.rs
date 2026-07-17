@@ -5611,7 +5611,7 @@ impl FerroGateway {
                 }
 
                 match state.register_self_hosted_worker(payload) {
-                    Ok(worker) => {
+                    Ok((worker, transport_token_secret)) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -5626,6 +5626,7 @@ impl FerroGateway {
                         let body = AdminSelfHostedWorkerRegistrationResponse {
                             object: "self_hosted_worker",
                             worker,
+                            transport_token_secret,
                         };
                         write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id)
                             .await

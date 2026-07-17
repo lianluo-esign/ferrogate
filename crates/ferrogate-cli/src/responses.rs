@@ -351,6 +351,10 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationRequest {
 pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
+    /// The provisioned symmetric-AEAD transport secret, returned exactly once
+    /// at registration. Never present on the worker record surfaced by
+    /// GET/list -- the worker operator must capture it here.
+    pub(crate) transport_token_secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,6 +369,8 @@ pub(crate) struct AdminSelfHostedWorkerRotateRequest {
 pub(crate) struct AdminSelfHostedWorkerRotateResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
+    /// The freshly-issued transport secret, returned exactly once on rotation.
+    pub(crate) transport_token_secret: String,
     pub(crate) previous_identity_fingerprint: String,
     pub(crate) previous_identity_expires_at_unix: Option<u64>,
     pub(crate) rotated_at_unix: Option<u64>,

@@ -3542,8 +3542,12 @@ fn self_hosted_worker_runtime_identity(
         tenant_id: self_hosted_tenant_id(&registration.tenant),
         workspace_id: registration.workspace_id.clone(),
         worker_id: registration.id.clone(),
+        // token_id is the public lookup key (the fingerprint is fine here -- it
+        // is carried in cleartext in every frame). token_secret must be the
+        // server-provisioned secret, NOT the fingerprint, or the bearer/AEAD
+        // secret would be public.
         token_id: registration.identity_fingerprint.clone(),
-        token_secret: registration.identity_fingerprint.clone(),
+        token_secret: registration.token_secret.clone(),
         observed_at_unix: None,
     }
 }

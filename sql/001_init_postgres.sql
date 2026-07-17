@@ -232,7 +232,11 @@ CREATE TABLE IF NOT EXISTS self_hosted_worker_registrations (
     registered_at_unix BIGINT NOT NULL,
     last_seen_at_unix BIGINT,
     trust_level TEXT NOT NULL,
-    capability_envelope_json JSONB NOT NULL DEFAULT '{}'::JSONB
+    capability_envelope_json JSONB NOT NULL DEFAULT '{}'::JSONB,
+    -- High-entropy secret keying the symmetric-AEAD transport, provisioned
+    -- server-side (distinct from the public identity_fingerprint). Empty means
+    -- a pre-migration row: the transport fails closed until re-registration.
+    token_secret TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_tenant_status
@@ -249,6 +253,9 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity_expiry
 
 ALTER TABLE self_hosted_worker_registrations
     ADD COLUMN IF NOT EXISTS identity_expires_at_unix BIGINT;
+
+ALTER TABLE self_hosted_worker_registrations
+    ADD COLUMN IF NOT EXISTS token_secret TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
     id TEXT PRIMARY KEY,

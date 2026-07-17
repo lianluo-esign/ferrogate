@@ -987,6 +987,13 @@ pub struct StoredSelfHostedWorkerRegistration {
     pub last_seen_at_unix: Option<u64>,
     pub trust_level: String,
     pub capability_envelope_json: String,
+    /// High-entropy secret keying the symmetric-AEAD transport (and bearer
+    /// check), provisioned server-side at registration/rotation. Distinct from
+    /// the public `identity_fingerprint`. `#[serde(default)]` keeps rows written
+    /// before this field existed loadable; an empty secret fails closed (the
+    /// transport rejects a secret shorter than the required minimum).
+    #[serde(default)]
+    pub token_secret: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4194,8 +4201,8 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO self_hosted_worker_registrations \
                  (id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
                   identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
-                  last_seen_at_unix, trust_level, capability_envelope_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::text::jsonb) \
+                  last_seen_at_unix, trust_level, capability_envelope_json, token_secret) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::text::jsonb, $13) \
                  ON CONFLICT (id) DO UPDATE SET \
                  tenant = EXCLUDED.tenant, \
                  workspace_id = EXCLUDED.workspace_id, \
@@ -4206,7 +4213,8 @@ impl PostgresControlPlaneStore {
                  orchestration_enabled = EXCLUDED.orchestration_enabled, \
                  last_seen_at_unix = EXCLUDED.last_seen_at_unix, \
                  trust_level = EXCLUDED.trust_level, \
-                 capability_envelope_json = EXCLUDED.capability_envelope_json",
+                 capability_envelope_json = EXCLUDED.capability_envelope_json, \
+                 token_secret = EXCLUDED.token_secret",
                 &[
                     &registration.id,
                     &tenant_context_id,
@@ -4220,6 +4228,7 @@ impl PostgresControlPlaneStore {
                     &last_seen_at_unix,
                     &registration.trust_level,
                     &registration.capability_envelope_json,
+                    &registration.token_secret,
                 ],
             )
             .await
@@ -4239,7 +4248,7 @@ impl PostgresControlPlaneStore {
             .query(
                 "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
                     identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
-                    last_seen_at_unix, trust_level, capability_envelope_json::text \
+                    last_seen_at_unix, trust_level, capability_envelope_json::text, token_secret \
                  FROM self_hosted_worker_registrations \
                  ORDER BY registered_at_unix ASC, id ASC",
                 &[],
@@ -6112,6 +6121,7 @@ fn self_hosted_worker_registration_from_row(
         last_seen_at_unix: row.get::<_, Option<i64>>(9).map(nonnegative_u64),
         trust_level: row.get(10),
         capability_envelope_json: row.get(11),
+        token_secret: row.get(12),
     }
 }
 
@@ -11288,6 +11298,7 @@ mod tests {
                 last_seen_at_unix: Some(21),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: r#"{"frameworks":["codex"]}"#.into(),
+                token_secret: "transport-secret-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
             },
         ))
         .unwrap();

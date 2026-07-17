@@ -389,10 +389,15 @@ impl AppState {
         }
     }
 
+    /// Registers a self-hosted worker and returns the readable record plus the
+    /// freshly-provisioned transport secret. The secret is returned to the
+    /// caller exactly once (at registration); it is never included in the
+    /// worker record surfaced by GET/list.
     pub(crate) fn register_self_hosted_worker(
         &self,
         request: crate::responses::AdminSelfHostedWorkerRegistrationRequest,
-    ) -> Result<crate::responses::AdminSelfHostedWorkerRecord, SelfHostedWorkerRecordError> {
+    ) -> Result<(crate::responses::AdminSelfHostedWorkerRecord, String), SelfHostedWorkerRecordError>
+    {
         validate_self_hosted_registration_request(&request)?;
         let id = next_self_hosted_worker_id();
         let now = now_unix_seconds();
@@ -412,7 +417,12 @@ impl AppState {
                 .capability_envelope_json
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
+            // Provision an independent, high-entropy transport secret. This is
+            // the value the symmetric-AEAD transport keys off; it is returned to
+            // the caller ONCE below and never exposed in GET/list.
+            token_secret: ferrogate_runtime::generate_transport_token_secret(),
         };
+        let transport_token_secret = registration.token_secret.clone();
         crate::gateway::block_on_sync_bridge(
             self.repositories
                 .upsert_self_hosted_worker_registration(registration.clone()),
@@ -422,6 +432,7 @@ impl AppState {
         self.self_hosted_worker_records()
             .into_iter()
             .find(|record| record.id == id)
+            .map(|worker| (worker, transport_token_secret))
             .ok_or_else(|| {
                 SelfHostedWorkerRecordError::Storage(
                     "self-hosted worker registration was not readable after write".into(),
@@ -450,6 +461,11 @@ impl AppState {
         let previous_identity_expires_at_unix = registration.identity_expires_at_unix;
         registration.identity_fingerprint = request.identity_fingerprint.trim().to_string();
         registration.identity_expires_at_unix = request.identity_expires_at_unix;
+        // Rotation issues a fresh transport secret alongside the new identity
+        // fingerprint, so a compromised or leaked secret stops working. Returned
+        // once in the rotation response.
+        registration.token_secret = ferrogate_runtime::generate_transport_token_secret();
+        let transport_token_secret = registration.token_secret.clone();
         let rotated_at_unix = now_unix_seconds();
         crate::gateway::block_on_sync_bridge(
             self.repositories
@@ -465,6 +481,7 @@ impl AppState {
         Ok(crate::responses::AdminSelfHostedWorkerRotateResponse {
             object: "self_hosted_worker_identity_rotation",
             worker,
+            transport_token_secret,
             previous_identity_fingerprint,
             previous_identity_expires_at_unix,
             rotated_at_unix,
@@ -598,7 +615,12 @@ impl AppState {
                     .to_string(),
             ));
         }
-        Ok(registration.identity_fingerprint)
+        // The transport AEAD/bearer secret is the server-provisioned
+        // `token_secret`, NOT the public `identity_fingerprint`/`token_id`. A
+        // pre-migration registration has an empty secret; the transport's
+        // minimum-length check then fails closed rather than keying the cipher
+        // with a weak value.
+        Ok(registration.token_secret)
     }
 
     pub(crate) fn record_self_hosted_worker_heartbeat(
@@ -1760,6 +1782,7 @@ mod tests {
                 last_seen_at_unix: Some(20),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: "{}".into(),
+                token_secret: "transport-secret-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
             },
         ))
         .unwrap();
@@ -1991,6 +2014,7 @@ mod tests {
                 last_seen_at_unix: Some(20),
                 trust_level: "reported_by_self_hosted_worker".into(),
                 capability_envelope_json: "{}".into(),
+                token_secret: "transport-secret-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
             },
         ))
         .unwrap();
@@ -2085,7 +2109,7 @@ mod tests {
     #[test]
     fn register_self_hosted_worker_writes_durable_registration_record() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
@@ -2121,6 +2145,11 @@ mod tests {
         assert_eq!(worker.last_seen_at_unix, None);
         assert!(worker.latest_heartbeat.is_none());
 
+        // The transport secret is provisioned server-side: high-entropy and
+        // distinct from the public identity fingerprint / token_id.
+        assert_eq!(transport_secret.len(), 64);
+        assert_ne!(transport_secret, "sha256:worker");
+
         let records = block_on(state.repositories.self_hosted_worker_registrations());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, worker.id);
@@ -2128,6 +2157,8 @@ mod tests {
         assert_eq!(records[0].workspace_id, "workspace-1");
         assert_eq!(records[0].worker_name, "customer-worker");
         assert_eq!(records[0].identity_fingerprint, "sha256:worker");
+        // The stored secret matches what was returned once at registration.
+        assert_eq!(records[0].token_secret, transport_secret);
         assert_eq!(records[0].identity_expires_at_unix, Some(4_000_000_000));
         assert_eq!(
             records[0].capability_envelope_json,
@@ -2157,7 +2188,9 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_id: worker.id.clone(),
                     token_id: "sha256:worker".into(),
-                    token_secret: "sha256:worker".into(),
+                    // Authenticate with the provisioned secret, not the public
+                    // fingerprint (which is the token_id / lookup key).
+                    token_secret: transport_secret.clone(),
                     observed_at_unix: None,
                 },
                 supported_capabilities: vec!["shell".into()],
@@ -2188,7 +2221,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_id: worker.id,
                     token_id: "sha256:worker".into(),
-                    token_secret: "sha256:worker".into(),
+                    token_secret: transport_secret,
                     observed_at_unix: None,
                 },
                 dispatch_id: lease.dispatch_id,
@@ -2259,7 +2292,7 @@ mod tests {
     #[test]
     fn rotate_self_hosted_worker_identity_updates_durable_registration() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),
@@ -2314,7 +2347,7 @@ mod tests {
                 if message == "self-hosted worker missing-worker was not found"
         ));
 
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),
@@ -2347,7 +2380,7 @@ mod tests {
     #[test]
     fn record_self_hosted_worker_heartbeat_updates_status_and_latest_seen() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
@@ -2428,7 +2461,7 @@ mod tests {
                 if message == "self-hosted worker missing-worker was not found"
         ));
 
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),
@@ -2475,7 +2508,7 @@ mod tests {
     #[test]
     fn record_self_hosted_worker_telemetry_event_updates_event_projection() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
@@ -2547,7 +2580,7 @@ mod tests {
                 if message == "self-hosted worker missing-worker was not found"
         ));
 
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),
@@ -2598,7 +2631,7 @@ mod tests {
     #[test]
     fn record_self_hosted_worker_artifact_updates_artifact_projection() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
@@ -2678,7 +2711,7 @@ mod tests {
                 if message == "self-hosted worker missing-worker was not found"
         ));
 
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),
@@ -2754,7 +2787,7 @@ mod tests {
     #[test]
     fn record_self_hosted_worker_checkpoint_updates_checkpoint_projection() {
         let state = AppState::new(Config::default());
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
@@ -2831,7 +2864,7 @@ mod tests {
                 if message == "self-hosted worker missing-worker was not found"
         ));
 
-        let worker = state
+        let (worker, _transport_secret) = state
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext::default(),

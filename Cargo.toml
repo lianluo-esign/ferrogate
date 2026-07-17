@@ -59,6 +59,12 @@ deadpool-postgres = "0.14.1"
 # holds and rotate keys by key_id; a shared secret would let any verifier forge.
 ed25519-dalek = "2"
 futures-util = "0.3"
+# OS CSPRNG for provisioning per-worker transport secrets (self-hosted worker
+# symmetric-AEAD transport). 0.2.x is already in the resolved tree.
+getrandom = "0.2"
+# HKDF-SHA256 for deriving the self-hosted worker transport AEAD key from the
+# provisioned secret (replaces zero-pad-truncate). Pairs with sha2 0.10.
+hkdf = "0.12"
 hmac = "0.12"
 http = "1"
 # JSON Schema is a standard with references, combinators, numeric semantics,

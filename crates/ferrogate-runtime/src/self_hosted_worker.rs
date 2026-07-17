@@ -25,7 +25,9 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305,
 };
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 /// Compare two secrets without leaking the position of the first differing byte
@@ -37,7 +39,36 @@ fn constant_time_secret_eq(a: &str, b: &str) -> bool {
 
 const SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM: &str = "xchacha20poly1305";
+/// Minimum accepted length for a transport shared secret. The provisioned
+/// secret is 64 hex chars (256 bits); this floor fails closed on an empty or
+/// truncated/legacy secret so a weak value can never key the cipher.
+const SELF_HOSTED_WORKER_TRANSPORT_SECRET_MIN_LEN: usize = 32;
+/// HKDF salt + info for deriving the transport AEAD key (RFC 5869 domain
+/// separation). Bumping the info string rotates the derived key space.
+const SELF_HOSTED_WORKER_TRANSPORT_HKDF_SALT: &[u8] =
+    b"ferrogate/self-hosted-worker/transport-aead";
+const SELF_HOSTED_WORKER_TRANSPORT_HKDF_INFO: &[u8] = b"ferrogate-self-hosted-worker-transport-v1";
 static SELF_HOSTED_TRANSPORT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Provision a fresh, high-entropy transport secret for a self-hosted worker:
+/// 256 bits from the OS CSPRNG, hex-encoded (64 chars).
+///
+/// This is the value the symmetric-AEAD transport keys off. It MUST NOT be
+/// derived from or equal to any public value -- the `identity_fingerprint` /
+/// `token_id` are non-secret lookup keys returned in admin listings and carried
+/// in cleartext in every frame, so reusing them (as the pre-fix wiring did)
+/// makes the AEAD/bearer secret public and lets anyone forge and decrypt frames.
+pub fn generate_transport_token_secret() -> String {
+    use std::fmt::Write as _;
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .expect("OS CSPRNG must be available to provision a self-hosted worker transport secret");
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
 pub const SELF_HOSTED_WORKER_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1482,6 +1513,14 @@ fn validate_self_hosted_transport_shared_secret(
                 .to_string(),
         ));
     }
+    // Fail closed on a truncated/legacy secret: a worker registered before the
+    // provisioned-secret migration has an empty `token_secret`, and any short
+    // value lacks the entropy to safely key the cipher.
+    if shared_secret.len() < SELF_HOSTED_WORKER_TRANSPORT_SECRET_MIN_LEN {
+        return Err(SelfHostedWorkerError::InvalidTransport(format!(
+            "self-hosted worker symmetric AEAD transport secret must be at least {SELF_HOSTED_WORKER_TRANSPORT_SECRET_MIN_LEN} characters"
+        )));
+    }
     Ok(())
 }
 
@@ -1489,10 +1528,22 @@ fn self_hosted_transport_aead_cipher(
     shared_secret: &str,
 ) -> Result<XChaCha20Poly1305, SelfHostedWorkerError> {
     validate_self_hosted_transport_shared_secret(shared_secret)?;
+    // Derive the 32-byte XChaCha20Poly1305 key from the provisioned secret via
+    // HKDF-SHA256 (RFC 5869) with domain separation, rather than zero-padding /
+    // truncating the raw secret string. The pre-fix zero-pad both required a
+    // >=32-byte secret to get full-width key material and made the key simply
+    // the secret's first 32 bytes; HKDF removes both problems.
+    let hkdf = Hkdf::<Sha256>::new(
+        Some(SELF_HOSTED_WORKER_TRANSPORT_HKDF_SALT),
+        shared_secret.as_bytes(),
+    );
     let mut key = [0_u8; 32];
-    let secret = shared_secret.as_bytes();
-    let copy_len = secret.len().min(key.len());
-    key[..copy_len].copy_from_slice(&secret[..copy_len]);
+    hkdf.expand(SELF_HOSTED_WORKER_TRANSPORT_HKDF_INFO, &mut key)
+        .map_err(|_| {
+            SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker transport key derivation failed".to_string(),
+            )
+        })?;
     Ok(XChaCha20Poly1305::new((&key).into()))
 }
 
@@ -2499,6 +2550,13 @@ mod tests {
         assert!(lease.is_none());
     }
 
+    // Full-width transport secrets (>= 32 chars), the shape
+    // `generate_transport_token_secret` provisions. Distinct values so the
+    // wrong-secret case exercises a real AEAD authentication failure rather
+    // than the minimum-length guard.
+    const TEST_TRANSPORT_SECRET: &str = "transport-secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_TRANSPORT_SECRET_OTHER: &str = "transport-secret-bbbbbbbbbbbbbbbbbbbbbbbb";
+
     #[test]
     fn self_hosted_transport_frame_encrypts_request_with_context_bound_aead() {
         let identity = registration_identity();
@@ -2514,7 +2572,7 @@ mod tests {
             SELF_HOSTED_WORKER_PROTOCOL_VERSION,
             &identity,
             &plaintext_json,
-            "secret-1",
+            TEST_TRANSPORT_SECRET,
             [3_u8; 24],
         )
         .unwrap();
@@ -2526,7 +2584,7 @@ mod tests {
         assert_eq!(frame.tenant_id, "tenant-1");
         assert_eq!(frame.token_id, "token-1");
 
-        let decoded: SelfHostedRunPollRequest = frame.decode_json("secret-1").unwrap();
+        let decoded: SelfHostedRunPollRequest = frame.decode_json(TEST_TRANSPORT_SECRET).unwrap();
 
         assert_eq!(decoded, request);
     }
@@ -2549,20 +2607,38 @@ mod tests {
             SELF_HOSTED_WORKER_PROTOCOL_VERSION,
             &identity,
             &plaintext_json,
-            "secret-1",
+            TEST_TRANSPORT_SECRET,
             [4_u8; 24],
         )
         .unwrap();
 
+        // A different (valid-length) secret must fail AEAD authentication.
         assert!(frame
-            .decode_json::<SelfHostedRunAckRequest>("wrong-secret")
+            .decode_json::<SelfHostedRunAckRequest>(TEST_TRANSPORT_SECRET_OTHER)
             .is_err());
 
         frame.worker_id = "other-worker".to_string();
 
         assert!(frame
-            .decode_json::<SelfHostedRunAckRequest>("secret-1")
+            .decode_json::<SelfHostedRunAckRequest>(TEST_TRANSPORT_SECRET)
             .is_err());
+    }
+
+    #[test]
+    fn generated_transport_secret_is_high_entropy_and_short_secrets_are_rejected() {
+        let secret = generate_transport_token_secret();
+        // 256 bits, hex-encoded.
+        assert_eq!(secret.len(), 64);
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
+        // Two draws must differ (CSPRNG, not a constant).
+        assert_ne!(secret, generate_transport_token_secret());
+        assert!(secret.len() >= SELF_HOSTED_WORKER_TRANSPORT_SECRET_MIN_LEN);
+
+        // The AEAD refuses to key on an empty or truncated secret (fail closed
+        // for pre-migration registrations that carry no provisioned secret).
+        assert!(self_hosted_transport_aead_cipher("").is_err());
+        assert!(self_hosted_transport_aead_cipher("too-short").is_err());
+        assert!(self_hosted_transport_aead_cipher(&secret).is_ok());
     }
 
     #[test]
