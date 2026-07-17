@@ -342,10 +342,26 @@ pub struct CheckBinding {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
+    /// Permit the request/action unchanged.
     Allow,
+    /// Deny the request/action outright.
     Block,
+    /// Permit but strip the flagged content before it reaches the model/client.
     Redact,
+    /// Permit and record evidence only (no enforcement effect).
     Record,
+    /// The action requires an explicit human approval before it may execute
+    /// (issue #200 — managed MCP/Tool/CLI/filesystem/network/secret actions).
+    /// Fail-closed: an action awaiting approval must not execute. The approval
+    /// binding + pre-execution enforcement are wired in later #200 slices; on
+    /// the model-content path (which has no inline approval flow) this maps to a
+    /// hard deny.
+    RequireApproval,
+    /// Hold the action's output/artifact out of the model/client path pending
+    /// review — stronger than `Redact` (withholds the whole result), weaker than
+    /// a hard `Block` of the request (issue #200). Fail-closed: quarantined
+    /// output must never reach the model/client/normal logs unreviewed.
+    Quarantine,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -391,13 +407,42 @@ impl PolicyAction {
         }
     }
 
+    /// Require an explicit human approval before the action may execute
+    /// (issue #200). Carries the code/message surfaced to the operator.
+    pub fn require_approval(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind: ActionKind::RequireApproval,
+            code: Some(code.into()),
+            message: Some(message.into()),
+        }
+    }
+
+    /// Quarantine the action's output pending review (issue #200). Carries the
+    /// code/message surfaced to the operator.
+    pub fn quarantine(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind: ActionKind::Quarantine,
+            code: Some(code.into()),
+            message: Some(message.into()),
+        }
+    }
+
     fn validate(&self) -> Result<(), DetectorError> {
-        if matches!(self.kind, ActionKind::Block | ActionKind::Redact)
-            && (self.code.as_deref().is_none_or(str::is_empty)
-                || self.message.as_deref().is_none_or(str::is_empty))
+        // Every enforcing action (deny, redact, require-approval, quarantine)
+        // must carry an operator-facing code + message; only allow/record may
+        // omit them.
+        if matches!(
+            self.kind,
+            ActionKind::Block
+                | ActionKind::Redact
+                | ActionKind::RequireApproval
+                | ActionKind::Quarantine
+        ) && (self.code.as_deref().is_none_or(str::is_empty)
+            || self.message.as_deref().is_none_or(str::is_empty))
         {
             return Err(invalid_policy(
-                "block and redact actions require non-empty code and message",
+                "block, redact, require_approval, and quarantine actions require \
+                 non-empty code and message",
             ));
         }
         Ok(())

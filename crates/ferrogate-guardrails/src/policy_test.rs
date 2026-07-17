@@ -204,3 +204,75 @@ fn sequential_and_parallel_selection_preserve_declared_check_order() {
         );
     }
 }
+
+#[test]
+fn managed_action_kinds_round_trip_serde_in_snake_case() {
+    // #200: RequireApproval/Quarantine serialize snake_case, matching the
+    // existing action kinds' wire format, and round-trip cleanly.
+    for (kind, wire) in [
+        (ActionKind::RequireApproval, "\"require_approval\""),
+        (ActionKind::Quarantine, "\"quarantine\""),
+        (ActionKind::Block, "\"block\""),
+    ] {
+        assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+        assert_eq!(serde_json::from_str::<ActionKind>(wire).unwrap(), kind);
+    }
+    // A stored policy action using the new kind deserializes into the whole
+    // PolicyAction unchanged.
+    let action: PolicyAction = serde_json::from_str(
+        r#"{"kind":"require_approval","code":"needs_review","message":"human approval required"}"#,
+    )
+    .unwrap();
+    assert_eq!(action.kind, ActionKind::RequireApproval);
+    assert_eq!(action.code.as_deref(), Some("needs_review"));
+}
+
+#[test]
+fn managed_action_kinds_require_code_and_message_and_fail_closed_without_them() {
+    // Every enforcing action must carry an operator-facing code + message.
+    assert!(
+        PolicyAction::require_approval("needs_review", "human approval required")
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        PolicyAction::quarantine("held", "output withheld pending review")
+            .validate()
+            .is_ok()
+    );
+    for bad in [
+        PolicyAction {
+            kind: ActionKind::RequireApproval,
+            code: None,
+            message: Some("m".into()),
+        },
+        PolicyAction {
+            kind: ActionKind::Quarantine,
+            code: Some("c".into()),
+            message: None,
+        },
+        PolicyAction {
+            kind: ActionKind::RequireApproval,
+            code: Some(String::new()),
+            message: Some(String::new()),
+        },
+    ] {
+        assert!(
+            bad.validate().is_err(),
+            "enforcing action without code+message must be rejected"
+        );
+    }
+    // Allow/Record still validate with no code/message (backward compatible).
+    assert!(PolicyAction::allow().validate().is_ok());
+    assert!(PolicyAction::record().validate().is_ok());
+}
+
+#[test]
+fn managed_action_constructors_set_the_expected_kind() {
+    let approval = PolicyAction::require_approval("c", "m");
+    assert_eq!(approval.kind, ActionKind::RequireApproval);
+    assert_eq!(approval.code.as_deref(), Some("c"));
+    assert_eq!(approval.message.as_deref(), Some("m"));
+    let quarantine = PolicyAction::quarantine("c", "m");
+    assert_eq!(quarantine.kind, ActionKind::Quarantine);
+}

@@ -1338,6 +1338,13 @@ fn guardrail_enforcement(
             GuardrailActionKind::Allow | GuardrailActionKind::Record => continue,
             GuardrailActionKind::Block => GuardrailEffect::Deny,
             GuardrailActionKind::Redact => GuardrailEffect::Redact,
+            // #200: RequireApproval/Quarantine are managed-action kinds; their
+            // real enforcement (approval gating, output quarantine) is wired in
+            // #200 slices 3/4. On this model-content path there is no inline
+            // approval or output-hold, so they fail closed conservatively:
+            // require-approval → deny, quarantine → withhold (redact).
+            GuardrailActionKind::RequireApproval => GuardrailEffect::Deny,
+            GuardrailActionKind::Quarantine => GuardrailEffect::Redact,
         };
         let mut candidate = GuardrailMatch {
             rule_id: policy.revision.policy_id.clone(),
