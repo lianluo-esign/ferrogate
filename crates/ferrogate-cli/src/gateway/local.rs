@@ -21,9 +21,10 @@ use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
     config::{
-        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, GuardrailStage, PolicyRule,
-        PromptTemplate, PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
-        PromptTemplateVersionStatus, Provider, SkillPackage, SkillPackageCapabilityKind,
+        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, GuardrailEffect, GuardrailStage,
+        PolicyRule, PromptTemplate, PromptTemplateStatus, PromptTemplateTarget,
+        PromptTemplateVersion, PromptTemplateVersionStatus, Provider, SkillPackage,
+        SkillPackageCapabilityKind,
     },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
@@ -64,7 +65,7 @@ use crate::{
 use ferrogate_providers::provider_compatibility_kind;
 use ferrogate_providers::{ProviderHeader, SecretValue};
 
-use ferrogate_guardrails::ManagedActionClass;
+use ferrogate_guardrails::{ActionKind as GuardrailActionKind, ManagedActionClass};
 
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
@@ -3370,6 +3371,15 @@ impl FerroGateway {
         )
         .await
         {
+            // The action kind distinguishes the fail-closed reason on input:
+            // require-approval signals the caller to seek approval, quarantine a
+            // quarantined action, everything else a plain block. All deny — no
+            // tool ever runs on flagged input.
+            let code = match matched.action_kind {
+                GuardrailActionKind::RequireApproval => "guardrail_approval_required",
+                GuardrailActionKind::Quarantine => "guardrail_quarantined",
+                _ => "guardrail_blocked",
+            };
             state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
                 auth,
@@ -3378,13 +3388,13 @@ impl FerroGateway {
                 guardrail_target.clone(),
                 "rejected",
                 format!(
-                    "tool input blocked by guardrail policy {} ({}): {}",
-                    matched.rule_id, matched.code, matched.message
+                    "tool input {} by guardrail policy {} ({}): {}",
+                    code, matched.rule_id, matched.code, matched.message
                 ),
             ));
             return Err(ToolExecutionHttpError {
                 status: StatusCode::FORBIDDEN,
-                code: "guardrail_blocked",
+                code,
                 message: format!(
                     "tool input blocked by guardrail policy: {}",
                     matched.message
@@ -3486,9 +3496,11 @@ impl FerroGateway {
                     ),
                 ));
                 // #200: OUTPUT guardrail. Evaluate the tool result before the
-                // caller consumes it; a blocking match withholds the flagged
-                // content (fail-closed) and returns an error result in its
-                // place, so raw flagged output never leaves the gateway.
+                // caller consumes it. A `Redact`-effect match (quarantine with
+                // safe redaction evidence) rewrites the result in place via the
+                // detector's content patches; any other blocking match withholds
+                // the flagged content entirely (fail-closed). Either way, raw
+                // flagged output never leaves the gateway.
                 if let Some(matched) = evaluate_managed_action_guardrail_async(
                     &state,
                     GuardrailStage::Response,
@@ -3497,6 +3509,26 @@ impl FerroGateway {
                 )
                 .await
                 {
+                    if matched.effect == GuardrailEffect::Redact {
+                        let redacted = matched.redact_text(&payload_text(&response.content));
+                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "tool.guardrail",
+                            guardrail_target.clone(),
+                            "redacted",
+                            format!(
+                                "tool output redacted by guardrail policy {} ({}): {}",
+                                matched.rule_id, matched.code, matched.message
+                            ),
+                        ));
+                        return Ok(ToolExecutionResponse {
+                            content: serde_json::Value::String(redacted),
+                            is_error: false,
+                            ..response
+                        });
+                    }
                     state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
                         auth,

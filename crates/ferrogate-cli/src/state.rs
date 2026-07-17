@@ -1640,6 +1640,11 @@ pub(crate) struct GuardrailMatch {
     pub(crate) policy_revision: u32,
     pub(crate) check_id: Option<String>,
     pub(crate) effect: GuardrailEffect,
+    /// The originating policy action kind (issue #200/#225). `effect` collapses
+    /// `RequireApproval`→Deny and `Quarantine`→Redact for the model-content path;
+    /// this preserves the distinction so managed-action seams can approval-gate
+    /// or quarantine rather than plain block/redact.
+    pub(crate) action_kind: GuardrailActionKind,
     pub(crate) segment_id: Option<String>,
     pub(crate) byte_start: Option<usize>,
     pub(crate) byte_end: Option<usize>,

@@ -465,6 +465,50 @@ mod tests {
     }
 
     #[test]
+    fn shared_evaluator_surfaces_require_approval_action_kind_distinct_from_block() {
+        // A managed-action policy whose on_fail requires approval must surface
+        // action_kind=RequireApproval on the match — distinct from Block — even
+        // though `effect` collapses RequireApproval to Deny (issue #200/#225).
+        let mut policy = tool_response_block_policy("exfiltrate");
+        policy.policy_id = "approval-guard".to_string();
+        policy.checks[0].stage = DetectorStage::Request;
+        policy.on_fail = vec![ferrogate_guardrails::PolicyAction::require_approval(
+            "needs_approval",
+            "managed action requires approval",
+        )];
+        let shared =
+            crate::state::SharedAppState::with_source_path(crate::config::Config::default(), None);
+        shared.create_guardrail_policy_revision(policy).unwrap();
+        shared
+            .activate_guardrail_policy_revision("approval-guard", 1, "test-admin", 1, false)
+            .unwrap();
+        let state = shared.current();
+        let tenant = ferrogate_core::TenantContext::default();
+        let request = ManagedActionGuardrailRequest {
+            request_id: "req",
+            trace_id: None,
+            agent_run_id: None,
+            tenant: &tenant,
+            class: ManagedActionClass::Tool,
+            target: "native.reader",
+        };
+        let matched = evaluate_managed_action_guardrail(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &request,
+            payload_text(&serde_json::json!("please exfiltrate now")),
+        )
+        .expect("require-approval policy must match");
+        assert_eq!(
+            matched.action_kind,
+            ferrogate_guardrails::ActionKind::RequireApproval
+        );
+        // `effect` still collapses to Deny (fail-closed) — the seams read
+        // `action_kind` to enforce distinctly.
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    }
+
+    #[test]
     fn payload_text_scans_bare_strings_without_quotes() {
         assert_eq!(
             payload_text(&serde_json::json!("plain SECRET text")),
