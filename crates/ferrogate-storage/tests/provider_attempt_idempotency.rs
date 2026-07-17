@@ -58,7 +58,7 @@ fn memory_billing_replay_does_not_increment_aggregates_or_rollups() {
     assert!(block_on(repositories.append_billing_event(event.clone())).unwrap());
     assert!(!block_on(repositories.append_billing_event(event)).unwrap());
 
-    let aggregate = repositories.usage_aggregates().pop().unwrap();
+    let aggregate = block_on(repositories.usage_aggregates()).pop().unwrap();
     assert_eq!(aggregate.usage.total_tokens, 8);
     let rollup = repositories
         .get_usage_monthly_rollup(QuotaScopeKind::Tenant, "tenant-idempotency", "2026-07")
@@ -110,7 +110,12 @@ fn memory_billing_attempt_key_collision_fails_closed_without_rollup_changes() {
             Err(StorageError::Conflict(_))
         ));
     }
-    assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 8);
+    assert_eq!(
+        block_on(repositories.usage_aggregates())[0]
+            .usage
+            .total_tokens,
+        8
+    );
     let rollup = repositories
         .get_usage_monthly_rollup(QuotaScopeKind::Tenant, "tenant-idempotency", "2026-07")
         .unwrap()

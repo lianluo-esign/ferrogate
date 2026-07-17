@@ -216,7 +216,7 @@ fn in_memory_mcp_identity_audit_append_still_persists_when_operation_is_availabl
     )
     .expect("available audit repository must persist");
 
-    let events = repositories.audit_events();
+    let events = block_on(repositories.audit_events());
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, "audit-ok");
 }

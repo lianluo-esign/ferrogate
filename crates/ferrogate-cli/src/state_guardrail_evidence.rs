@@ -36,9 +36,7 @@ impl AppState {
             0,
             GUARDRAIL_INVESTIGATION_EVALUATION_LIMIT,
         )?;
-        let mut requests = self
-            .repositories
-            .request_logs()
+        let mut requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
             .filter(|log| investigation_matches_request(&filter, log))
             .collect::<Vec<_>>();
@@ -54,12 +52,11 @@ impl AppState {
             .into_iter()
             .filter(|event| investigation_matches_agent_event(&filter, event))
             .collect::<Vec<_>>();
-        let mut audit_events = self
-            .repositories
-            .audit_events()
-            .into_iter()
-            .filter(|event| investigation_matches_audit(&filter, event))
-            .collect::<Vec<_>>();
+        let mut audit_events =
+            crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+                .into_iter()
+                .filter(|event| investigation_matches_audit(&filter, event))
+                .collect::<Vec<_>>();
         let related_request_ids = requests
             .iter()
             .map(|request| request.request_id.as_str())

@@ -287,8 +287,7 @@ impl AppState {
         &self,
         tenant_id: &str,
     ) -> Vec<ferrogate_storage::StoredAuditEvent> {
-        self.repositories
-            .audit_events()
+        crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
             .into_iter()
             .filter(|event| event.action.starts_with("wallet.") && event.target == tenant_id)
             .collect()

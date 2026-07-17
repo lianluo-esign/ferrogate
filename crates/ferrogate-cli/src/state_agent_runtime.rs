@@ -12,11 +12,15 @@ use super::*;
 
 impl AppState {
     pub(crate) fn request_logs(&self) -> Vec<StoredRequestLog> {
-        self.repositories.request_logs()
+        // Sync wrapper bridging the async storage read (issue #221) — called
+        // from telemetry.rs's raw thread::spawn OTLP/analytics senders (no
+        // tokio runtime) as well as async handlers; block_on_sync_bridge
+        // handles both.
+        crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
     }
 
     pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
-        self.repositories.audit_events()
+        crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
     }
 
     pub(crate) fn metering_events(&self) -> Vec<BillingEvent> {
@@ -166,12 +170,11 @@ impl AppState {
         tenant_scope: Option<&str>,
     ) -> AdminPage<StoredRequestLog> {
         if let Some(tenant_id) = tenant_scope {
-            let filtered: Vec<StoredRequestLog> = self
-                .repositories
-                .request_logs()
-                .into_iter()
-                .filter(|log| log.tenant.organization_id.as_deref() == Some(tenant_id))
-                .collect();
+            let filtered: Vec<StoredRequestLog> =
+                crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
+                    .into_iter()
+                    .filter(|log| log.tenant.organization_id.as_deref() == Some(tenant_id))
+                    .collect();
             let total = filtered.len();
             let data = filtered
                 .into_iter()
@@ -185,9 +188,10 @@ impl AppState {
                 limit: pagination.limit,
             };
         }
-        let page = self
-            .repositories
-            .request_logs_page(pagination.offset, pagination.limit);
+        let page = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .request_logs_page(pagination.offset, pagination.limit),
+        );
         AdminPage {
             data: page.data,
             total: page.total,
@@ -206,8 +210,7 @@ impl AppState {
             .into_iter()
             .map(|event| (event.request_id, event.usage))
             .collect::<HashMap<_, _>>();
-        self.repositories
-            .request_logs()
+        crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
             .filter(|log| filter.matches(log))
             .take(filter.limit)
@@ -226,12 +229,11 @@ impl AppState {
         tenant_scope: Option<&str>,
     ) -> AdminPage<StoredAuditEvent> {
         if let Some(tenant_id) = tenant_scope {
-            let filtered: Vec<StoredAuditEvent> = self
-                .repositories
-                .audit_events()
-                .into_iter()
-                .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
-                .collect();
+            let filtered: Vec<StoredAuditEvent> =
+                crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
+                    .into_iter()
+                    .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
+                    .collect();
             let total = filtered.len();
             let data = filtered
                 .into_iter()
@@ -245,9 +247,10 @@ impl AppState {
                 limit: pagination.limit,
             };
         }
-        let page = self
-            .repositories
-            .audit_events_page(pagination.offset, pagination.limit);
+        let page = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .audit_events_page(pagination.offset, pagination.limit),
+        );
         AdminPage {
             data: page.data,
             total: page.total,
@@ -1091,9 +1094,7 @@ impl AppState {
             .filter(|event| event.run_id == id)
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
-        let requests = self
-            .repositories
-            .request_logs()
+        let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
             .filter(|log| log.agent_run_id.as_deref() == Some(id))
             .filter(|log| agent_run_matches_filter(&log.request_id, &log.tenant, &filter))
@@ -1105,9 +1106,7 @@ impl AppState {
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
-        let audit_events = self
-            .repositories
-            .audit_events()
+        let audit_events = crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
             .into_iter()
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
@@ -1143,9 +1142,9 @@ impl AppState {
     fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
         let runs = self.repositories.agent_runs();
         let agent_events = self.repositories.agent_run_events();
-        let requests = self.repositories.request_logs();
+        let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs());
         let billing_events = self.metering_events.list();
-        let audit_events = self.repositories.audit_events();
+        let audit_events = crate::gateway::block_on_sync_bridge(self.repositories.audit_events());
         let mut run_ids = runs
             .iter()
             .map(|run| run.id.clone())
@@ -1516,8 +1515,7 @@ impl AppState {
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
-        self.repositories
-            .audit_events()
+        crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
             .into_iter()
             .filter(|event| {
                 event.action == "tool.execute"

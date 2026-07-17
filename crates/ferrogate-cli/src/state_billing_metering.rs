@@ -417,7 +417,12 @@ impl AppState {
     /// `tenant_scope`: narrows to a single tenant's usage aggregates (issue
     /// #185); `None` (platform operator) is unfiltered, same as before.
     pub(crate) fn usage_aggregates(&self, tenant_scope: Option<&str>) -> Vec<StoredUsageAggregate> {
-        let aggregates = self.repositories.usage_aggregates();
+        // Bridges the now-async storage read (issue #221). Kept sync because
+        // callers include the raw std::thread::spawn analytics/OTLP senders in
+        // telemetry.rs (no tokio runtime) as well as async admin handlers;
+        // block_on_sync_bridge handles both. Same rationale as
+        // wallet_balance_exhausted.
+        let aggregates = crate::gateway::block_on_sync_bridge(self.repositories.usage_aggregates());
         let Some(tenant_id) = tenant_scope else {
             return aggregates;
         };
@@ -435,7 +440,10 @@ impl AppState {
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
         }
-        self.repositories.append_request_log(log);
+        // Fire-and-forget write bridged to the async pool (issue #221); the
+        // request path is async but the audit/analytics readers on the sync
+        // telemetry threads share the same wrappers, so bridge here.
+        crate::gateway::block_on_sync_bridge(self.repositories.append_request_log(log));
     }
 
     fn sanitize_request_log_bodies(&self, log: &mut StoredRequestLog) {
@@ -496,8 +504,8 @@ impl AppState {
     }
 
     pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
-        self.repositories
-            .append_audit_event(self.prepare_admin_audit_event(event));
+        let event = self.prepare_admin_audit_event(event);
+        crate::gateway::block_on_sync_bridge(self.repositories.append_audit_event(event));
     }
 
     pub(super) fn prepare_admin_audit_event(

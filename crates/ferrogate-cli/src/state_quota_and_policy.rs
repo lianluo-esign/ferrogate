@@ -250,8 +250,7 @@ impl AppState {
     }
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
-        self.repositories
-            .usage_aggregates()
+        crate::gateway::block_on_sync_bridge(self.repositories.usage_aggregates())
             .into_iter()
             .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
             .map(|aggregate| aggregate.usage.total_tokens)

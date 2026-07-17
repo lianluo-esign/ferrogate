@@ -25,7 +25,6 @@ use ferrogate_core::{TenantContext, WorkspaceScope};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
 use postgres::row::Row as PostgresRow;
-use postgres::Transaction as PostgresTransaction;
 use postgres::{Client as PostgresClient, NoTls};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
@@ -2980,7 +2979,11 @@ impl PostgresControlPlaneStore {
         Ok(same_billing_event_settlement(&existing, event))
     }
 
-    fn append_request_log(&self, log: &StoredRequestLog) -> Result<(), StorageError> {
+    fn observability_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn append_request_log(&self, log: &StoredRequestLog) -> Result<(), StorageError> {
         let request_json = serialize_storage_document(log)?;
         let tenant_context_id = tenant_storage_key(&log.tenant);
         let workflow_version = log.workflow_version.map(|value| value.to_string());
@@ -2988,8 +2991,13 @@ impl PostgresControlPlaneStore {
         let status_code = i32::from(log.status_code);
         let started_at_unix = saturating_i64(log.started_at_unix.unwrap_or_else(now_unix_seconds));
         let completed_at_unix = log.completed_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.observability_operation("append request log");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO request_logs \
                  (request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
                   workflow_node_id, cluster_id, node_id, tenant, route, provider, logical_model, \
@@ -3041,75 +3049,89 @@ impl PostgresControlPlaneStore {
                     &completed_at_unix,
                     &request_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn request_logs_page(
+    async fn request_logs_page(
         &self,
         offset: usize,
         limit: usize,
     ) -> Result<StoragePage<StoredRequestLog>, StorageError> {
         let offset = saturating_i64(offset as u64);
         let limit = saturating_i64(limit as u64);
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT request_json::text, count(*) OVER() \
-                     FROM request_logs \
-                     ORDER BY started_at_unix ASC, request_id ASC \
-                     OFFSET $1 LIMIT $2",
-                    &[&offset, &limit],
-                )
-                .map_err(postgres_error)?;
-            let total = rows
-                .first()
-                .map(|row| row.get::<_, i64>(1))
-                .unwrap_or_default();
-            let mut data = Vec::with_capacity(rows.len());
-            for row in rows {
-                data.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(StoragePage {
-                data,
-                total: usize::try_from(total).unwrap_or(usize::MAX),
-                offset: usize::try_from(offset).unwrap_or(usize::MAX),
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
-            })
+        let operation = self.observability_operation("request logs page");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT request_json::text, count(*) OVER() \
+                 FROM request_logs \
+                 ORDER BY started_at_unix ASC, request_id ASC \
+                 OFFSET $1 LIMIT $2",
+                &[&offset, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let total = rows
+            .first()
+            .map(|row| row.get::<_, i64>(1))
+            .unwrap_or_default();
+        let mut data = Vec::with_capacity(rows.len());
+        for row in rows {
+            data.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(StoragePage {
+            data,
+            total: usize::try_from(total).unwrap_or(usize::MAX),
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
         })
     }
 
-    fn request_logs(&self) -> Result<Vec<StoredRequestLog>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT request_json::text \
-                     FROM request_logs \
-                     ORDER BY started_at_unix ASC, request_id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let mut logs = Vec::with_capacity(rows.len());
-            for row in rows {
-                logs.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(logs)
-        })
+    async fn request_logs(&self) -> Result<Vec<StoredRequestLog>, StorageError> {
+        let operation = self.observability_operation("request logs");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT request_json::text \
+                 FROM request_logs \
+                 ORDER BY started_at_unix ASC, request_id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut logs = Vec::with_capacity(rows.len());
+        for row in rows {
+            logs.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(logs)
     }
 
-    fn append_audit_event(&self, event: &StoredAuditEvent) -> Result<(), StorageError> {
+    async fn append_audit_event(&self, event: &StoredAuditEvent) -> Result<(), StorageError> {
         let audit_json = serialize_storage_document(event)?;
         let tenant_context_id = tenant_storage_key(&event.tenant);
         let workflow_version = event.workflow_version.map(|value| value.to_string());
         let occurred_at_unix =
             saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.observability_operation("append audit event");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO audit_events \
                  (id, request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
                   workflow_node_id, cluster_id, node_id, actor_api_key_id, tenant, action, target, \
@@ -3135,65 +3157,74 @@ impl PostgresControlPlaneStore {
                     &occurred_at_unix,
                     &audit_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn audit_events_page(
+    async fn audit_events_page(
         &self,
         offset: usize,
         limit: usize,
     ) -> Result<StoragePage<StoredAuditEvent>, StorageError> {
         let offset = saturating_i64(offset as u64);
         let limit = saturating_i64(limit as u64);
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT audit_json::text, count(*) OVER() \
-                     FROM audit_events \
-                     ORDER BY occurred_at_unix ASC, id ASC \
-                     OFFSET $1 LIMIT $2",
-                    &[&offset, &limit],
-                )
-                .map_err(postgres_error)?;
-            let total = rows
-                .first()
-                .map(|row| row.get::<_, i64>(1))
-                .unwrap_or_default();
-            let mut data = Vec::with_capacity(rows.len());
-            for row in rows {
-                data.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(StoragePage {
-                data,
-                total: usize::try_from(total).unwrap_or(usize::MAX),
-                offset: usize::try_from(offset).unwrap_or(usize::MAX),
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
-            })
+        let operation = self.observability_operation("audit events page");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT audit_json::text, count(*) OVER() \
+                 FROM audit_events \
+                 ORDER BY occurred_at_unix ASC, id ASC \
+                 OFFSET $1 LIMIT $2",
+                &[&offset, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let total = rows
+            .first()
+            .map(|row| row.get::<_, i64>(1))
+            .unwrap_or_default();
+        let mut data = Vec::with_capacity(rows.len());
+        for row in rows {
+            data.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(StoragePage {
+            data,
+            total: usize::try_from(total).unwrap_or(usize::MAX),
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
         })
     }
 
-    fn audit_events(&self) -> Result<Vec<StoredAuditEvent>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT audit_json::text \
-                     FROM audit_events \
-                     ORDER BY occurred_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let mut events = Vec::with_capacity(rows.len());
-            for row in rows {
-                events.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(events)
-        })
+    async fn audit_events(&self) -> Result<Vec<StoredAuditEvent>, StorageError> {
+        let operation = self.observability_operation("audit events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT audit_json::text \
+                 FROM audit_events \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            events.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(events)
     }
 
     fn upsert_agent_run(&self, run: &StoredAgentRun) -> Result<(), StorageError> {
@@ -4219,7 +4250,10 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn upsert_usage_aggregate(&self, aggregate: &StoredUsageAggregate) -> Result<(), StorageError> {
+    async fn upsert_usage_aggregate(
+        &self,
+        aggregate: &StoredUsageAggregate,
+    ) -> Result<(), StorageError> {
         let tenant_context_id = tenant_parts_storage_key(
             aggregate.organization_id.as_deref(),
             None,
@@ -4231,38 +4265,47 @@ impl PostgresControlPlaneStore {
         let prompt_tokens = saturating_i64(aggregate.usage.prompt_tokens);
         let completion_tokens = saturating_i64(aggregate.usage.completion_tokens);
         let total_tokens = saturating_i64(aggregate.usage.total_tokens);
-        self.with_client(|client| {
-            let mut transaction = client.transaction()?;
-            upsert_tenant_context_parts(
-                &mut transaction,
-                &tenant_context_id,
-                &TenantContextParts {
-                    organization_id: aggregate.organization_id.as_deref(),
-                    team_id: None,
-                    project_id: aggregate.project_id.as_deref(),
-                    workspace_id: None,
-                    user_id: None,
-                    api_key_id: aggregate.api_key_id.as_deref(),
-                },
-            )?;
-            let rollup = UsageRollupUpsert {
-                id: &aggregate.id,
-                tenant_context_id: &tenant_context_id,
-                logical_model: &aggregate.logical_model,
-                provider: &aggregate.provider,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            };
-            replace_usage_rollup(&mut transaction, &rollup)?;
-            transaction.commit()?;
-            Ok(())
-        })
+        let operation = self.observability_operation("upsert usage aggregate");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        upsert_tenant_context_parts(
+            &transaction,
+            &tenant_context_id,
+            &TenantContextParts {
+                organization_id: aggregate.organization_id.as_deref(),
+                team_id: None,
+                project_id: aggregate.project_id.as_deref(),
+                workspace_id: None,
+                user_id: None,
+                api_key_id: aggregate.api_key_id.as_deref(),
+            },
+        )
+        .await?;
+        let rollup = UsageRollupUpsert {
+            id: &aggregate.id,
+            tenant_context_id: &tenant_context_id,
+            logical_model: &aggregate.logical_model,
+            provider: &aggregate.provider,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        };
+        replace_usage_rollup(&transaction, &rollup).await?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn usage_aggregates(&self) -> Result<Vec<StoredUsageAggregate>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+    async fn usage_aggregates(&self) -> Result<Vec<StoredUsageAggregate>, StorageError> {
+        let operation = self.observability_operation("usage aggregates");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT a.id, t.organization_id, t.project_id, t.api_key_id, \
                         a.logical_model, a.provider, \
                         a.prompt_tokens, a.completion_tokens, a.total_tokens \
@@ -4270,9 +4313,10 @@ impl PostgresControlPlaneStore {
                  JOIN tenant_contexts t ON t.id = a.tenant_context_id \
                  ORDER BY a.id ASC",
                 &[],
-            )?;
-            Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
     }
 
     fn with_client<T: Send>(
@@ -5348,26 +5392,29 @@ struct TenantContextParts<'a> {
     api_key_id: Option<&'a str>,
 }
 
-fn upsert_tenant_context_parts(
-    transaction: &mut PostgresTransaction<'_>,
+async fn upsert_tenant_context_parts(
+    transaction: &deadpool_postgres::Transaction<'_>,
     id: &str,
     parts: &TenantContextParts<'_>,
-) -> Result<(), postgres::Error> {
-    transaction.execute(
-        "INSERT INTO tenant_contexts \
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO tenant_contexts \
          (id, organization_id, team_id, project_id, workspace_id, user_id, api_key_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (id) DO NOTHING",
-        &[
-            &id,
-            &parts.organization_id,
-            &parts.team_id,
-            &parts.project_id,
-            &parts.workspace_id,
-            &parts.user_id,
-            &parts.api_key_id,
-        ],
-    )?;
+            &[
+                &id,
+                &parts.organization_id,
+                &parts.team_id,
+                &parts.project_id,
+                &parts.workspace_id,
+                &parts.user_id,
+                &parts.api_key_id,
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
     Ok(())
 }
 
@@ -5401,12 +5448,13 @@ async fn upsert_usage_rollup_delta(
     Ok(())
 }
 
-fn replace_usage_rollup(
-    transaction: &mut PostgresTransaction<'_>,
+async fn replace_usage_rollup(
+    transaction: &deadpool_postgres::Transaction<'_>,
     rollup: &UsageRollupUpsert<'_>,
-) -> Result<(), postgres::Error> {
-    transaction.execute(
-        "INSERT INTO usage_aggregate_rollups \
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO usage_aggregate_rollups \
          (id, tenant_context_id, logical_model, provider, prompt_tokens, completion_tokens, \
           total_tokens, updated_at_unix) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, EXTRACT(EPOCH FROM NOW())::BIGINT) \
@@ -5418,16 +5466,18 @@ fn replace_usage_rollup(
          completion_tokens = EXCLUDED.completion_tokens, \
          total_tokens = EXCLUDED.total_tokens, \
          updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
-        &[
-            &rollup.id,
-            &rollup.tenant_context_id,
-            &rollup.logical_model,
-            &rollup.provider,
-            &rollup.prompt_tokens,
-            &rollup.completion_tokens,
-            &rollup.total_tokens,
-        ],
-    )?;
+            &[
+                &rollup.id,
+                &rollup.tenant_context_id,
+                &rollup.logical_model,
+                &rollup.provider,
+                &rollup.prompt_tokens,
+                &rollup.completion_tokens,
+                &rollup.total_tokens,
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
     Ok(())
 }
 
@@ -7892,9 +7942,9 @@ impl RuntimeStorageRepositories {
             api_key_records: bridge_runtime.block_on(self.list_api_key_records())?,
             tool_approvals: self.control_plane_tool_approval_documents()?,
             billing_events: self.billing_events(),
-            usage_aggregates: self.usage_aggregates(),
-            request_logs: self.request_logs(),
-            audit_events: self.audit_events(),
+            usage_aggregates: bridge_runtime.block_on(self.usage_aggregates()),
+            request_logs: bridge_runtime.block_on(self.request_logs()),
+            audit_events: bridge_runtime.block_on(self.audit_events()),
             agent_runs: self.agent_runs(),
             agent_run_events: self.agent_run_events(),
             managed_worker_templates: self.managed_worker_templates(),
@@ -7954,13 +8004,13 @@ impl RuntimeStorageRepositories {
             bridge_runtime.block_on(self.append_billing_event(event))?;
         }
         for aggregate in snapshot.usage_aggregates {
-            self.replace_usage_aggregate(aggregate)?;
+            bridge_runtime.block_on(self.replace_usage_aggregate(aggregate))?;
         }
         for log in snapshot.request_logs {
-            self.append_request_log(log);
+            bridge_runtime.block_on(self.append_request_log(log));
         }
         for event in snapshot.audit_events {
-            self.append_audit_event(event);
+            bridge_runtime.block_on(self.append_audit_event(event));
         }
         for run in snapshot.agent_runs {
             self.upsert_agent_run(run)?;
@@ -9047,9 +9097,9 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn append_request_log(&self, log: StoredRequestLog) {
+    pub async fn append_request_log(&self, log: StoredRequestLog) {
         if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
-            let _ = control_plane.append_request_log(&log);
+            let _ = control_plane.append_request_log(&log).await;
             return;
         }
         if let Ok(mut logs) = self.request_logs.lock() {
@@ -9196,10 +9246,10 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn request_logs(&self) -> Vec<StoredRequestLog> {
+    pub async fn request_logs(&self) -> Vec<StoredRequestLog> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.request_logs().unwrap_or_default()
+                control_plane.request_logs().await.unwrap_or_default()
             }
             RuntimeControlPlaneBackend::Memory(_) => self
                 .request_logs
@@ -9209,10 +9259,15 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn request_logs_page(&self, offset: usize, limit: usize) -> StoragePage<StoredRequestLog> {
+    pub async fn request_logs_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoragePage<StoredRequestLog> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .request_logs_page(offset, limit)
+                .await
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
             RuntimeControlPlaneBackend::Memory(_) => self
                 .request_logs
@@ -9227,9 +9282,9 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn append_audit_event(&self, event: StoredAuditEvent) {
+    pub async fn append_audit_event(&self, event: StoredAuditEvent) {
         if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
-            let _ = control_plane.append_audit_event(&event);
+            let _ = control_plane.append_audit_event(&event).await;
             return;
         }
         if let Ok(mut events) = self.audit_events.lock() {
@@ -9251,10 +9306,10 @@ impl RuntimeStorageRepositories {
             .unwrap_or_else(|_| "audit-unknown".to_string())
     }
 
-    pub fn audit_events(&self) -> Vec<StoredAuditEvent> {
+    pub async fn audit_events(&self) -> Vec<StoredAuditEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.audit_events().unwrap_or_default()
+                control_plane.audit_events().await.unwrap_or_default()
             }
             RuntimeControlPlaneBackend::Memory(_) => self
                 .audit_events
@@ -9264,10 +9319,15 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn audit_events_page(&self, offset: usize, limit: usize) -> StoragePage<StoredAuditEvent> {
+    pub async fn audit_events_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoragePage<StoredAuditEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .audit_events_page(offset, limit)
+                .await
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
             RuntimeControlPlaneBackend::Memory(_) => self
                 .audit_events
@@ -9282,7 +9342,7 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn upsert_usage_aggregate(
+    pub async fn upsert_usage_aggregate(
         &self,
         id: impl Into<String>,
         build: impl FnOnce(Option<StoredUsageAggregate>) -> StoredUsageAggregate,
@@ -9299,12 +9359,12 @@ impl RuntimeStorageRepositories {
             ));
         };
         if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
-            control_plane.upsert_usage_aggregate(&aggregate)?;
+            control_plane.upsert_usage_aggregate(&aggregate).await?;
         }
         Ok(())
     }
 
-    pub fn replace_usage_aggregate(
+    pub async fn replace_usage_aggregate(
         &self,
         aggregate: StoredUsageAggregate,
     ) -> Result<(), StorageError> {
@@ -9317,15 +9377,15 @@ impl RuntimeStorageRepositories {
             ));
         }
         if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
-            control_plane.upsert_usage_aggregate(&aggregate)?;
+            control_plane.upsert_usage_aggregate(&aggregate).await?;
         }
         Ok(())
     }
 
-    pub fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
+    pub async fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.usage_aggregates().unwrap_or_default()
+                control_plane.usage_aggregates().await.unwrap_or_default()
             }
             RuntimeControlPlaneBackend::Memory(_) => self
                 .usage_aggregates
@@ -11011,7 +11071,7 @@ mod tests {
             .api_keys
             .is_empty());
 
-        repositories.append_request_log(StoredRequestLog {
+        block_on(repositories.append_request_log(StoredRequestLog {
             request_id: "fg-1".into(),
             trace_id: None,
             agent_run_id: None,
@@ -11036,8 +11096,8 @@ mod tests {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
-        });
-        repositories.append_request_log(StoredRequestLog {
+        }));
+        block_on(repositories.append_request_log(StoredRequestLog {
             request_id: "fg-2".into(),
             trace_id: None,
             agent_run_id: None,
@@ -11062,24 +11122,32 @@ mod tests {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
-        });
+        }));
 
-        let page = repositories.request_logs_page(0, 10);
+        let page = block_on(repositories.request_logs_page(0, 10));
         assert_eq!(page.total, 1);
         assert_eq!(page.data[0].request_id, "fg-2");
 
-        repositories
-            .upsert_usage_aggregate("org:project:fast-chat:openai", |_| StoredUsageAggregate {
-                id: "org:project:fast-chat:openai".into(),
-                organization_id: Some("org".into()),
-                project_id: Some("project".into()),
-                api_key_id: Some("key".into()),
-                logical_model: "fast-chat".into(),
-                provider: "openai".into(),
-                usage: TokenUsage::new(1, 2, 3),
-            })
-            .unwrap();
-        assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
+        block_on(
+            repositories.upsert_usage_aggregate("org:project:fast-chat:openai", |_| {
+                StoredUsageAggregate {
+                    id: "org:project:fast-chat:openai".into(),
+                    organization_id: Some("org".into()),
+                    project_id: Some("project".into()),
+                    api_key_id: Some("key".into()),
+                    logical_model: "fast-chat".into(),
+                    provider: "openai".into(),
+                    usage: TokenUsage::new(1, 2, 3),
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(repositories.usage_aggregates())[0]
+                .usage
+                .total_tokens,
+            3
+        );
     }
 
     fn memory_repositories() -> RuntimeStorageRepositories {
