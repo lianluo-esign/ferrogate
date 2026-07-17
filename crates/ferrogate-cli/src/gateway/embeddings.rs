@@ -266,6 +266,7 @@ impl FerroGateway {
                         provider: Some(&provider.name),
                         streaming: false,
                         envelope: &guardrail_envelope,
+                        managed_action: None,
                     },
                 )
                 .await

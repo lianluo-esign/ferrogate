@@ -1712,6 +1712,10 @@ pub(crate) struct GuardrailEvaluationContext<'a> {
     pub(crate) provider: Option<&'a str>,
     pub(crate) streaming: bool,
     pub(crate) envelope: &'a GuardrailEnvelope,
+    /// `Some` when evaluating a managed MCP/Tool/CLI/etc action (issue #200),
+    /// selecting managed-action guardrail policies instead of model-content
+    /// ones; `None` for model-content (chat/responses/embeddings) evaluation.
+    pub(crate) managed_action: Option<ferrogate_guardrails::ManagedActionContext<'a>>,
 }
 
 impl RequestLogExportFilter {

@@ -78,6 +78,7 @@ fn match_guardrail_for_test_with_streaming<'a>(
                 provider,
                 streaming,
                 envelope: &envelope,
+                managed_action: None,
             },
         ))
 }
@@ -551,6 +552,7 @@ fn streaming_buffer_limits_use_configured_error_action_and_sanitized_evidence() 
                     provider: Some("openai"),
                     streaming: true,
                     envelope: &envelope,
+                    managed_action: None,
                 },
                 error_code,
             ))
@@ -1643,4 +1645,84 @@ fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
     assert_eq!(grouped[0].scope_id, None);
     assert!((grouped[0].cost_usd - 0.006).abs() < 1e-9);
     assert_eq!(grouped[0].request_count, 2);
+}
+
+/// #200 Slice 3a: a managed-action-scoped guardrail policy is selected and
+/// evaluated ONLY when the evaluation context carries a matching
+/// `ManagedActionContext` (class + target). This exercises the
+/// `managed_action: context.managed_action` threading in `match_guardrail`'s
+/// policy selection: model-content contexts (`None`) and mismatched classes
+/// must not select the policy (mutual exclusivity, fail-closed selection).
+#[test]
+fn managed_action_context_selects_managed_action_scoped_policy() {
+    let shared = SharedAppState::with_source_path(Config::default(), None);
+    let scope = PolicyScopeSelector {
+        managed_action: Some(ferrogate_guardrails::ManagedActionSelector {
+            classes: vec![ferrogate_guardrails::ManagedActionClass::Mcp],
+            targets: vec!["github/create_issue".to_string()],
+        }),
+        ..PolicyScopeSelector::default()
+    };
+    let policy = durable_guardrail_revision("managed-guard", 1, "danger", scope);
+    shared.create_guardrail_policy_revision(policy).unwrap();
+    shared
+        .activate_guardrail_policy_revision("managed-guard", 1, "test-admin", 1, false)
+        .unwrap();
+
+    let state = shared.current();
+    let tenant = ferrogate_core::TenantContext::default();
+    let envelope = ferrogate_guardrails::GuardrailEnvelope::managed_action(
+        DetectorStage::Request,
+        "mcp:github/create_issue/arguments",
+        "please danger the repo",
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    let eval = |managed: Option<ferrogate_guardrails::ManagedActionContext<'_>>| {
+        runtime.block_on(state.match_guardrail(
+            crate::config::GuardrailStage::Request,
+            GuardrailEvaluationContext {
+                request_id: "managed-req",
+                trace_id: None,
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: None,
+                tenant: &tenant,
+                service_account_id: None,
+                gateway_config_id: None,
+                model: None,
+                provider: None,
+                streaming: false,
+                envelope: &envelope,
+                managed_action: managed,
+            },
+        ))
+    };
+
+    // Positive: matching class + target selects the policy; the keyword fires.
+    let matched = eval(Some(ferrogate_guardrails::ManagedActionContext {
+        class: ferrogate_guardrails::ManagedActionClass::Mcp,
+        target: Some("github/create_issue"),
+    }))
+    .expect("managed-action policy must be selected for a matching context");
+    assert_eq!(matched.code, "durable_guardrail_blocked");
+
+    // Negative A: model-content context (None) must NOT select a managed-action
+    // policy — the two target dimensions are mutually exclusive.
+    assert!(
+        eval(None).is_none(),
+        "managed-action policy must not apply to model-content evaluation"
+    );
+
+    // Negative B: a mismatched action class must NOT select the policy.
+    assert!(
+        eval(Some(ferrogate_guardrails::ManagedActionContext {
+            class: ferrogate_guardrails::ManagedActionClass::Tool,
+            target: Some("github/create_issue"),
+        }))
+        .is_none(),
+        "managed-action policy must not apply to a different action class"
+    );
 }

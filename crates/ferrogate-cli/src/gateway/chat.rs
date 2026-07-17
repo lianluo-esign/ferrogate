@@ -412,6 +412,7 @@ impl FerroGateway {
                         provider: Some(&provider.name),
                         streaming: request.stream,
                         envelope: &guardrail_envelope,
+                        managed_action: None,
                     },
                 )
                 .await
@@ -808,6 +809,7 @@ impl FerroGateway {
                                                     provider: Some(&provider.name),
                                                     streaming: true,
                                                     envelope: &empty_envelope,
+                                                    managed_action: None,
                                                 },
                                                 code,
                                             )
@@ -1087,6 +1089,7 @@ impl FerroGateway {
                                                     provider: Some(&provider.name),
                                                     streaming: true,
                                                     envelope: &empty_envelope,
+                                                    managed_action: None,
                                                 },
                                                 code,
                                             )
@@ -1153,6 +1156,7 @@ impl FerroGateway {
                                             provider: Some(&provider.name),
                                             streaming: true,
                                             envelope: &guardrail_envelope,
+                                            managed_action: None,
                                         },
                                     )
                                     .await
@@ -1392,6 +1396,7 @@ impl FerroGateway {
                                         provider: Some(&provider.name),
                                         streaming: true,
                                         envelope: &guardrail_envelope,
+                                        managed_action: None,
                                     };
                                     if captured.truncated {
                                         state
@@ -1743,6 +1748,7 @@ impl FerroGateway {
                                     provider: Some(&provider.name),
                                     streaming: false,
                                     envelope: &guardrail_envelope,
+                                    managed_action: None,
                                 },
                             )
                             .await
