@@ -169,13 +169,15 @@ fn login_rejects_unknown_email_and_disabled_account() {
     assert_eq!(unknown.status, 401);
 
     register(&console, "disabled@acme.test", "correct-horse-battery");
-    let mut user = console
-        .repositories
-        .get_admin_user_by_email("disabled@acme.test")
-        .unwrap()
-        .unwrap();
+    let mut user = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_by_email("disabled@acme.test"),
+    )
+    .unwrap()
+    .unwrap();
     user.disabled_at_unix = Some(now_unix_seconds() as i64);
-    console.repositories.upsert_admin_user(user).unwrap();
+    block_on_sync_bridge(console.repositories.upsert_admin_user(user)).unwrap();
 
     let disabled = handle_admin_login(
         &console,
@@ -374,20 +376,24 @@ fn invite_adds_an_existing_user_to_the_tenant_with_a_non_owner_role() {
     // StoredAdminUserMembership.role is now set to something other than
     // "owner" via a real code path (acceptance criterion for #162).
     let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
-    let memberships = console
-        .repositories
-        .list_admin_user_memberships_by_tenant(owner_tenant_id)
-        .unwrap();
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(owner_tenant_id),
+    )
+    .unwrap();
     assert!(memberships
         .iter()
         .any(|membership| membership.user_id == invitee_user_id && membership.role == "member"));
 
     // The invited user's own membership list now includes both tenants: the
     // one they registered (as owner) and the one they were invited into.
-    let invitee_memberships = console
-        .repositories
-        .list_admin_user_memberships_by_user(invitee_user_id)
-        .unwrap();
+    let invitee_memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(invitee_user_id),
+    )
+    .unwrap();
     assert_eq!(invitee_memberships.len(), 2);
 }
 
@@ -504,10 +510,12 @@ fn change_role_updates_the_membership_and_enforces_the_owner_gate() {
     );
     assert_eq!(change.status, 200);
 
-    let memberships = console
-        .repositories
-        .list_admin_user_memberships_by_tenant(owner_tenant_id)
-        .unwrap();
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(owner_tenant_id),
+    )
+    .unwrap();
     assert!(memberships
         .iter()
         .any(|membership| membership.user_id == member_user_id && membership.role == "admin"));
@@ -553,10 +561,12 @@ fn revoke_removes_a_teammate_and_refuses_to_remove_the_last_owner() {
     let revoke = handle_admin_team_revoke(&console, owner_token, member_user_id);
     assert_eq!(revoke.status, 200);
     let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
-    let memberships = console
-        .repositories
-        .list_admin_user_memberships_by_tenant(owner_tenant_id)
-        .unwrap();
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(owner_tenant_id),
+    )
+    .unwrap();
     assert!(!memberships
         .iter()
         .any(|membership| membership.user_id == member_user_id));
@@ -973,15 +983,19 @@ fn scim_user_create_provisions_a_new_account_with_the_given_role() {
     assert_eq!(body["ferrogateRole"], "admin");
     assert_eq!(body["active"], true);
 
-    let user = console
-        .repositories
-        .get_admin_user_by_email("scim-provisioned@acme.test")
-        .unwrap()
-        .unwrap();
-    let memberships = console
-        .repositories
-        .list_admin_user_memberships_by_tenant(&tenant_id)
-        .unwrap();
+    let user = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_by_email("scim-provisioned@acme.test"),
+    )
+    .unwrap()
+    .unwrap();
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&tenant_id),
+    )
+    .unwrap();
     let membership = memberships
         .iter()
         .find(|membership| membership.user_id == user.id)
@@ -1021,10 +1035,12 @@ fn scim_user_create_adds_membership_for_an_already_registered_user_without_dupli
     assert_eq!(body_json(&create)["id"], existing_user_id);
 
     // Same account, now with a second membership -- not a duplicate user.
-    let memberships = console
-        .repositories
-        .list_admin_user_memberships_by_user(&existing_user_id)
-        .unwrap();
+    let memberships = block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(&existing_user_id),
+    )
+    .unwrap();
     assert_eq!(memberships.len(), 2);
 }
 
@@ -1103,30 +1119,32 @@ fn scim_patch_deactivate_revokes_refresh_tokens_and_supports_reactivation() {
     )
     .unwrap();
     let refresh_hash = hash_virtual_api_key_secret(&refresh_secret);
-    assert!(console
-        .repositories
-        .get_admin_user_refresh_token_by_hash(&refresh_hash)
-        .unwrap()
-        .unwrap()
-        .revoked_at_unix
-        .is_none());
+    assert!(block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&refresh_hash)
+    )
+    .unwrap()
+    .unwrap()
+    .revoked_at_unix
+    .is_none());
 
     let patch_body = serde_json::to_vec(&serde_json::json!({ "active": false })).unwrap();
     let patch = handle_scim_user_patch(&console, &tenant_id, &user_id, &patch_body);
     assert_eq!(patch.status, 200);
     assert_eq!(body_json(&patch)["active"], false);
 
-    let user = console
-        .repositories
-        .get_admin_user_by_id(&user_id)
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&user_id))
         .unwrap()
         .unwrap();
     assert!(user.disabled_at_unix.is_some());
-    let refreshed = console
-        .repositories
-        .get_admin_user_refresh_token_by_hash(&refresh_hash)
-        .unwrap()
-        .unwrap();
+    let refreshed = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&refresh_hash),
+    )
+    .unwrap()
+    .unwrap();
     assert!(
         refreshed.revoked_at_unix.is_some(),
         "deactivation must revoke existing sessions, not just block future logins"
@@ -1140,9 +1158,7 @@ fn scim_patch_deactivate_revokes_refresh_tokens_and_supports_reactivation() {
     let reactivate = handle_scim_user_patch(&console, &tenant_id, &user_id, &standard_patch_body);
     assert_eq!(reactivate.status, 200);
     assert_eq!(body_json(&reactivate)["active"], true);
-    let user = console
-        .repositories
-        .get_admin_user_by_id(&user_id)
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&user_id))
         .unwrap()
         .unwrap();
     assert!(user.disabled_at_unix.is_none());
@@ -1197,9 +1213,7 @@ fn scim_delete_deprovisions_a_user() {
     let delete = handle_scim_user_delete(&console, &tenant_id, &user_id);
     assert_eq!(delete.status, 204);
 
-    let user = console
-        .repositories
-        .get_admin_user_by_id(&user_id)
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&user_id))
         .unwrap()
         .unwrap();
     assert!(user.disabled_at_unix.is_some());
@@ -1604,11 +1618,13 @@ fn sso_end_to_end_provisions_new_user_and_maps_group_to_role() {
         .starts_with("fg_"));
 
     // JIT-provisioned: a real StoredAdminUser + membership now exist.
-    let user = console
-        .repositories
-        .get_admin_user_by_email("sso-user@acme.test")
-        .unwrap()
-        .unwrap();
+    let user = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_by_email("sso-user@acme.test"),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         membership_role_in_tenant(&console, &tenant_id, &user.id).as_deref(),
         Some("admin")

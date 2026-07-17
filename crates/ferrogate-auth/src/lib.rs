@@ -1172,7 +1172,7 @@ fn handle_admin_register(
     if payload.password.len() < 8 {
         return unprocessable("password must be at least 8 characters");
     }
-    match console.repositories.get_admin_user_by_email(&email) {
+    match block_on_sync_bridge(console.repositories.get_admin_user_by_email(&email)) {
         Ok(Some(_)) => return conflict("an account with this email already exists"),
         Ok(None) => {}
         Err(error) => return storage_error(&error),
@@ -1240,7 +1240,7 @@ fn handle_admin_register(
         last_login_at_unix: Some(now),
         disabled_at_unix: None,
     };
-    if let Err(error) = console.repositories.upsert_admin_user(user) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(user)) {
         return storage_error(&error);
     }
     let membership = StoredAdminUserMembership {
@@ -1250,10 +1250,11 @@ fn handle_admin_register(
         role: "owner".into(),
         created_at_unix: now,
     };
-    if let Err(error) = console
-        .repositories
-        .upsert_admin_user_membership(membership)
-    {
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .upsert_admin_user_membership(membership),
+    ) {
         return storage_error(&error);
     }
 
@@ -1289,7 +1290,7 @@ fn handle_admin_register(
 
 fn handle_admin_login(console: &AdminConsoleState, payload: AdminLoginRequest) -> HttpResponse {
     let email = payload.email.trim().to_ascii_lowercase();
-    let user = match console.repositories.get_admin_user_by_email(&email) {
+    let user = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(&email)) {
         Ok(Some(user)) => user,
         Ok(None) => return unauthorized("invalid email or password"),
         Err(error) => return storage_error(&error),
@@ -1300,10 +1301,11 @@ fn handle_admin_login(console: &AdminConsoleState, payload: AdminLoginRequest) -
     if !verify_password(&payload.password, &user.password_hash) {
         return unauthorized("invalid email or password");
     }
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_user(&user.id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(&user.id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
@@ -1344,7 +1346,7 @@ fn handle_admin_login(console: &AdminConsoleState, payload: AdminLoginRequest) -
 
     let mut updated_user = user.clone();
     updated_user.last_login_at_unix = Some(now_unix_seconds() as i64);
-    if let Err(error) = console.repositories.upsert_admin_user(updated_user) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(updated_user)) {
         return storage_error(&error);
     }
 
@@ -1380,10 +1382,11 @@ fn handle_admin_login(console: &AdminConsoleState, payload: AdminLoginRequest) -
 
 fn handle_admin_refresh(console: &AdminConsoleState, payload: AdminRefreshRequest) -> HttpResponse {
     let token_hash = hash_virtual_api_key_secret(&payload.refresh_token);
-    let stored = match console
-        .repositories
-        .get_admin_user_refresh_token_by_hash(&token_hash)
-    {
+    let stored = match block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&token_hash),
+    ) {
         Ok(Some(token)) => token,
         Ok(None) => return unauthorized("invalid refresh token"),
         Err(error) => return storage_error(&error),
@@ -1394,24 +1397,27 @@ fn handle_admin_refresh(console: &AdminConsoleState, payload: AdminRefreshReques
     }
     let mut revoked = stored.clone();
     revoked.revoked_at_unix = Some(now);
-    if let Err(error) = console
-        .repositories
-        .upsert_admin_user_refresh_token(revoked)
-    {
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .upsert_admin_user_refresh_token(revoked),
+    ) {
         return storage_error(&error);
     }
-    let user = match console.repositories.get_admin_user_by_id(&stored.user_id) {
-        Ok(Some(user)) => user,
-        Ok(None) => return unauthorized("account no longer exists"),
-        Err(error) => return storage_error(&error),
-    };
+    let user =
+        match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&stored.user_id)) {
+            Ok(Some(user)) => user,
+            Ok(None) => return unauthorized("account no longer exists"),
+            Err(error) => return storage_error(&error),
+        };
     if user.disabled_at_unix.is_some() {
         return unauthorized("this account has been disabled");
     }
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_user(&user.id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(&user.id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
@@ -1439,14 +1445,17 @@ fn handle_admin_refresh(console: &AdminConsoleState, payload: AdminRefreshReques
 
 fn handle_admin_logout(console: &AdminConsoleState, payload: AdminLogoutRequest) -> HttpResponse {
     let token_hash = hash_virtual_api_key_secret(&payload.refresh_token);
-    match console
-        .repositories
-        .get_admin_user_refresh_token_by_hash(&token_hash)
-    {
+    match block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&token_hash),
+    ) {
         Ok(Some(mut stored)) => {
             if stored.revoked_at_unix.is_none() {
                 stored.revoked_at_unix = Some(now_unix_seconds() as i64);
-                if let Err(error) = console.repositories.upsert_admin_user_refresh_token(stored) {
+                if let Err(error) = block_on_sync_bridge(
+                    console.repositories.upsert_admin_user_refresh_token(stored),
+                ) {
                     return storage_error(&error);
                 }
             }
@@ -1462,15 +1471,16 @@ fn handle_admin_me(console: &AdminConsoleState, token: &str) -> HttpResponse {
         Ok(claims) => claims,
         Err(_) => return unauthorized("invalid or expired access token"),
     };
-    let user = match console.repositories.get_admin_user_by_id(&claims.sub) {
+    let user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&claims.sub)) {
         Ok(Some(user)) => user,
         Ok(None) => return unauthorized("account no longer exists"),
         Err(error) => return storage_error(&error),
     };
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_user(&user.id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(&user.id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
@@ -1513,15 +1523,16 @@ fn current_admin_session(
 ) -> Result<(StoredAdminUser, StoredAdminUserMembership), HttpResponse> {
     let claims = decode_access_token(console, token)
         .map_err(|_| unauthorized("invalid or expired access token"))?;
-    let user = match console.repositories.get_admin_user_by_id(&claims.sub) {
+    let user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&claims.sub)) {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unauthorized("account no longer exists")),
         Err(error) => return Err(storage_error(&error)),
     };
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_user(&user.id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(&user.id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return Err(storage_error(&error)),
     };
@@ -1555,16 +1566,17 @@ fn handle_admin_team_list(console: &AdminConsoleState, token: &str) -> HttpRespo
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_tenant(&membership.tenant_id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&membership.tenant_id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
     let mut members = Vec::with_capacity(memberships.len());
     for member in memberships {
-        match console.repositories.get_admin_user_by_id(&member.user_id) {
+        match block_on_sync_bridge(console.repositories.get_admin_user_by_id(&member.user_id)) {
             Ok(Some(user)) => members.push(AdminTeamMemberView {
                 user_id: user.id,
                 email: user.email,
@@ -1601,7 +1613,9 @@ fn handle_admin_team_invite(
     if role.is_empty() {
         return unprocessable("role must not be empty");
     }
-    let invited_user = match console.repositories.get_admin_user_by_email(&email) {
+    let invited_user = match block_on_sync_bridge(
+        console.repositories.get_admin_user_by_email(&email),
+    ) {
         Ok(Some(user)) => user,
         Ok(None) => {
             return HttpResponse::json(
@@ -1624,10 +1638,11 @@ fn handle_admin_team_invite(
         role: role.clone(),
         created_at_unix: now_unix_seconds() as i64,
     };
-    if let Err(error) = console
-        .repositories
-        .upsert_admin_user_membership(new_membership)
-    {
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .upsert_admin_user_membership(new_membership),
+    ) {
         return storage_error(&error);
     }
     HttpResponse::json(
@@ -1660,10 +1675,11 @@ fn handle_admin_team_change_role(
     if role.is_empty() {
         return unprocessable("role must not be empty");
     }
-    let existing = match console
-        .repositories
-        .list_admin_user_memberships_by_tenant(&membership.tenant_id)
-    {
+    let existing = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&membership.tenant_id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
@@ -1674,22 +1690,26 @@ fn handle_admin_team_change_role(
         return not_found("no such teammate in this tenant");
     };
     if target.role == "owner" && role != "owner" {
-        let owners = console
-            .repositories
-            .list_admin_user_memberships_by_tenant(&membership.tenant_id)
-            .map(|memberships| {
-                memberships
-                    .iter()
-                    .filter(|candidate| candidate.role == "owner")
-                    .count()
-            })
-            .unwrap_or(0);
+        let owners = block_on_sync_bridge(
+            console
+                .repositories
+                .list_admin_user_memberships_by_tenant(&membership.tenant_id),
+        )
+        .map(|memberships| {
+            memberships
+                .iter()
+                .filter(|candidate| candidate.role == "owner")
+                .count()
+        })
+        .unwrap_or(0);
         if owners <= 1 {
             return conflict("cannot demote the last owner of a tenant");
         }
     }
     target.role = role.clone();
-    if let Err(error) = console.repositories.upsert_admin_user_membership(target) {
+    if let Err(error) =
+        block_on_sync_bridge(console.repositories.upsert_admin_user_membership(target))
+    {
         return storage_error(&error);
     }
     HttpResponse::json(
@@ -1715,10 +1735,11 @@ fn handle_admin_team_revoke(
         return forbidden("only a tenant owner can remove teammates");
     }
     if caller.id == target_user_id {
-        let owners = match console
-            .repositories
-            .list_admin_user_memberships_by_tenant(&membership.tenant_id)
-        {
+        let owners = match block_on_sync_bridge(
+            console
+                .repositories
+                .list_admin_user_memberships_by_tenant(&membership.tenant_id),
+        ) {
             Ok(memberships) => memberships
                 .iter()
                 .filter(|candidate| candidate.role == "owner")
@@ -1729,10 +1750,11 @@ fn handle_admin_team_revoke(
             return conflict("cannot remove the last owner of a tenant");
         }
     }
-    match console
-        .repositories
-        .delete_admin_user_membership(target_user_id, &membership.tenant_id)
-    {
+    match block_on_sync_bridge(
+        console
+            .repositories
+            .delete_admin_user_membership(target_user_id, &membership.tenant_id),
+    ) {
         Ok(true) => HttpResponse::json(200, json!({ "object": "membership", "removed": true })),
         Ok(false) => not_found("no such teammate in this tenant"),
         Err(error) => storage_error(&error),
@@ -2087,29 +2109,33 @@ fn membership_role_in_tenant(
     tenant_id: &str,
     user_id: &str,
 ) -> Option<String> {
-    console
-        .repositories
-        .list_admin_user_memberships_by_tenant(tenant_id)
-        .ok()?
-        .into_iter()
-        .find(|membership| membership.user_id == user_id)
-        .map(|membership| membership.role)
+    block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(tenant_id),
+    )
+    .ok()?
+    .into_iter()
+    .find(|membership| membership.user_id == user_id)
+    .map(|membership| membership.role)
 }
 
 fn handle_scim_users_list(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_tenant(tenant_id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(tenant_id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
     let mut resources = Vec::with_capacity(memberships.len());
     for membership in &memberships {
-        match console
-            .repositories
-            .get_admin_user_by_id(&membership.user_id)
-        {
+        match block_on_sync_bridge(
+            console
+                .repositories
+                .get_admin_user_by_id(&membership.user_id),
+        ) {
             Ok(Some(user)) => resources.push(scim_user_resource(&user, &membership.role)),
             Ok(None) => {}
             Err(error) => return storage_error(&error),
@@ -2133,7 +2159,7 @@ fn handle_scim_user_get(
     let Some(role) = membership_role_in_tenant(console, tenant_id, user_id) else {
         return not_found("no such user in this tenant");
     };
-    match console.repositories.get_admin_user_by_id(user_id) {
+    match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
         Ok(Some(user)) => HttpResponse::json(200, scim_user_resource(&user, &role)),
         Ok(None) => not_found("no such user"),
         Err(error) => storage_error(&error),
@@ -2176,7 +2202,8 @@ fn handle_scim_user_create(
         .unwrap_or(&email)
         .to_string();
 
-    let existing = match console.repositories.get_admin_user_by_email(&email) {
+    let existing = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(&email))
+    {
         Ok(existing) => existing,
         Err(error) => return storage_error(&error),
     };
@@ -2199,7 +2226,9 @@ fn handle_scim_user_create(
                 last_login_at_unix: None,
                 disabled_at_unix: None,
             };
-            if let Err(error) = console.repositories.upsert_admin_user(user.clone()) {
+            if let Err(error) =
+                block_on_sync_bridge(console.repositories.upsert_admin_user(user.clone()))
+            {
                 return storage_error(&error);
             }
             user
@@ -2213,10 +2242,11 @@ fn handle_scim_user_create(
         role: role.clone(),
         created_at_unix: now_unix_seconds() as i64,
     };
-    if let Err(error) = console
-        .repositories
-        .upsert_admin_user_membership(membership)
-    {
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .upsert_admin_user_membership(membership),
+    ) {
         return storage_error(&error);
     }
 
@@ -2230,33 +2260,34 @@ fn handle_scim_user_create(
 }
 
 fn deactivate_admin_user(console: &AdminConsoleState, user_id: &str) -> Result<(), HttpResponse> {
-    let mut user = match console.repositories.get_admin_user_by_id(user_id) {
+    let mut user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
         Ok(Some(user)) => user,
         Ok(None) => return Err(not_found("no such user")),
         Err(error) => return Err(storage_error(&error)),
     };
     let now = now_unix_seconds() as i64;
     user.disabled_at_unix = Some(now);
-    if let Err(error) = console.repositories.upsert_admin_user(user) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(user)) {
         return Err(storage_error(&error));
     }
-    if let Err(error) = console
-        .repositories
-        .revoke_all_admin_user_refresh_tokens(user_id, now)
-    {
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .revoke_all_admin_user_refresh_tokens(user_id, now),
+    ) {
         return Err(storage_error(&error));
     }
     Ok(())
 }
 
 fn reactivate_admin_user(console: &AdminConsoleState, user_id: &str) -> Result<(), HttpResponse> {
-    let mut user = match console.repositories.get_admin_user_by_id(user_id) {
+    let mut user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
         Ok(Some(user)) => user,
         Ok(None) => return Err(not_found("no such user")),
         Err(error) => return Err(storage_error(&error)),
     };
     user.disabled_at_unix = None;
-    if let Err(error) = console.repositories.upsert_admin_user(user) {
+    if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(user)) {
         return Err(storage_error(&error));
     }
     Ok(())
@@ -2306,7 +2337,7 @@ fn handle_scim_user_patch(
         }
         None => return unprocessable("could not determine an 'active' value from the PATCH body"),
     }
-    match console.repositories.get_admin_user_by_id(user_id) {
+    match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
         Ok(Some(user)) => HttpResponse::json(200, scim_user_resource(&user, &role)),
         Ok(None) => not_found("no such user"),
         Err(error) => storage_error(&error),
@@ -2335,10 +2366,11 @@ fn handle_scim_user_delete(
 /// `ferrogateRole` extension on `POST /scim/v2/Users` (see
 /// `ScimUserRequest`), not by pushing SCIM group memberships.
 fn handle_scim_groups_list(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
-    let memberships = match console
-        .repositories
-        .list_admin_user_memberships_by_tenant(tenant_id)
-    {
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_tenant(tenant_id),
+    ) {
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
@@ -2682,7 +2714,8 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         .find_map(|group| config.group_role_mapping.get(group).cloned())
         .unwrap_or(config.default_role);
 
-    let existing = match console.repositories.get_admin_user_by_email(&email) {
+    let existing = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(&email))
+    {
         Ok(existing) => existing,
         Err(error) => return storage_error(&error),
     };
@@ -2705,7 +2738,9 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
                 last_login_at_unix: Some(now),
                 disabled_at_unix: None,
             };
-            if let Err(error) = console.repositories.upsert_admin_user(user.clone()) {
+            if let Err(error) =
+                block_on_sync_bridge(console.repositories.upsert_admin_user(user.clone()))
+            {
                 return storage_error(&error);
             }
             user
@@ -2728,10 +2763,11 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
                 role: mapped_role.clone(),
                 created_at_unix: now_unix_seconds() as i64,
             };
-            if let Err(error) = console
-                .repositories
-                .upsert_admin_user_membership(membership)
-            {
+            if let Err(error) = block_on_sync_bridge(
+                console
+                    .repositories
+                    .upsert_admin_user_membership(membership),
+            ) {
                 return storage_error(&error);
             }
             mapped_role
@@ -2800,9 +2836,11 @@ fn issue_session(
         expires_at_unix: now + ADMIN_SESSION_REFRESH_TOKEN_TTL_SECS as i64,
         revoked_at_unix: None,
     };
-    console
-        .repositories
-        .upsert_admin_user_refresh_token(refresh_token_row)?;
+    block_on_sync_bridge(
+        console
+            .repositories
+            .upsert_admin_user_refresh_token(refresh_token_row),
+    )?;
     Ok((access_token, refresh_secret))
 }
 

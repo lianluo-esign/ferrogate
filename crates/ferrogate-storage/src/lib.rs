@@ -1800,9 +1800,18 @@ impl PostgresControlPlaneStore {
         rows.iter().map(api_key_from_row).collect()
     }
 
-    fn upsert_admin_user(&self, user: &StoredAdminUser) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+    fn admin_user_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn upsert_admin_user(&self, user: &StoredAdminUser) -> Result<(), StorageError> {
+        let operation = self.admin_user_operation("upsert admin user");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO admin_users \
                  (id, email, password_hash, display_name, superadmin, created_at_unix, \
                   updated_at_unix, last_login_at_unix, disabled_at_unix) \
@@ -1824,44 +1833,65 @@ impl PostgresControlPlaneStore {
                     &user.last_login_at_unix,
                     &user.disabled_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_admin_user_by_id(&self, id: &str) -> Result<Option<StoredAdminUser>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+    async fn get_admin_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        let operation = self.admin_user_operation("get admin user by id");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, email, password_hash, display_name, superadmin, created_at_unix, \
                  updated_at_unix, last_login_at_unix, disabled_at_unix \
                  FROM admin_users WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(admin_user_from_row))
     }
 
-    fn get_admin_user_by_email(
+    async fn get_admin_user_by_email(
         &self,
         email: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.admin_user_operation("get admin user by email");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, email, password_hash, display_name, superadmin, created_at_unix, \
                  updated_at_unix, last_login_at_unix, disabled_at_unix \
                  FROM admin_users WHERE email = $1",
                 &[&email],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(admin_user_from_row))
     }
 
-    fn upsert_admin_user_membership(
+    async fn upsert_admin_user_membership(
         &self,
         membership: &StoredAdminUserMembership,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.admin_user_operation("upsert admin user membership");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO admin_user_tenant_memberships \
                  (id, user_id, tenant_id, role, created_at_unix) \
                  VALUES ($1, $2, $3, $4, $5) \
@@ -1873,59 +1903,83 @@ impl PostgresControlPlaneStore {
                     &membership.role,
                     &membership.created_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn list_admin_user_memberships_by_user(
+    async fn list_admin_user_memberships_by_user(
         &self,
         user_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.admin_user_operation("list admin user memberships by user");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, user_id, tenant_id, role, created_at_unix \
                  FROM admin_user_tenant_memberships WHERE user_id = $1 ORDER BY id ASC",
                 &[&user_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(rows.iter().map(admin_user_membership_from_row).collect())
     }
 
-    fn list_admin_user_memberships_by_tenant(
+    async fn list_admin_user_memberships_by_tenant(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.admin_user_operation("list admin user memberships by tenant");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, user_id, tenant_id, role, created_at_unix \
                  FROM admin_user_tenant_memberships WHERE tenant_id = $1 ORDER BY id ASC",
                 &[&tenant_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(rows.iter().map(admin_user_membership_from_row).collect())
     }
 
-    fn delete_admin_user_membership(
+    async fn delete_admin_user_membership(
         &self,
         user_id: &str,
         tenant_id: &str,
     ) -> Result<bool, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute(
+        let operation = self.admin_user_operation("delete admin user membership");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute(
                 "DELETE FROM admin_user_tenant_memberships WHERE user_id = $1 AND tenant_id = $2",
                 &[&user_id, &tenant_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(affected > 0)
     }
 
-    fn upsert_admin_user_refresh_token(
+    async fn upsert_admin_user_refresh_token(
         &self,
         token: &StoredAdminUserRefreshToken,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.admin_user_operation("upsert admin user refresh token");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO admin_user_refresh_tokens \
                  (id, user_id, token_hash, created_at_unix, expires_at_unix, revoked_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6) \
@@ -1938,40 +1992,53 @@ impl PostgresControlPlaneStore {
                     &token.expires_at_unix,
                     &token.revoked_at_unix,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn get_admin_user_refresh_token_by_hash(
+    async fn get_admin_user_refresh_token_by_hash(
         &self,
         token_hash: &str,
     ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.admin_user_operation("get admin user refresh token by hash");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, user_id, token_hash, created_at_unix, expires_at_unix, \
                  revoked_at_unix FROM admin_user_refresh_tokens WHERE token_hash = $1",
                 &[&token_hash],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(row.as_ref().map(admin_user_refresh_token_from_row))
     }
 
     /// Revokes every not-yet-revoked refresh token for a user (issue #161),
     /// used when a SCIM/admin deactivation must terminate live sessions
     /// immediately rather than waiting for access-token expiry.
-    fn revoke_all_admin_user_refresh_tokens(
+    async fn revoke_all_admin_user_refresh_tokens(
         &self,
         user_id: &str,
         revoked_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        let affected = self.with_client(|client| {
-            client.execute(
+        let operation = self.admin_user_operation("revoke all admin user refresh tokens");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute(
                 "UPDATE admin_user_refresh_tokens SET revoked_at_unix = $1 \
                  WHERE user_id = $2 AND revoked_at_unix IS NULL",
                 &[&revoked_at_unix, &user_id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         Ok(affected)
     }
 
@@ -8363,7 +8430,7 @@ impl RuntimeStorageRepositories {
 
     // --- Multi-tenant hierarchy: Tenant -> Project -> Workspace ---
 
-    pub fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+    pub async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -8372,24 +8439,27 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_admin_user(&user)
+                control_plane.upsert_admin_user(&user).await
             }
         }
     }
 
-    pub fn get_admin_user_by_id(&self, id: &str) -> Result<Option<StoredAdminUser>, StorageError> {
+    pub async fn get_admin_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_admin_user_by_id(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_admin_user_by_id(id)
+                control_plane.get_admin_user_by_id(id).await
             }
         }
     }
 
-    pub fn get_admin_user_by_email(
+    pub async fn get_admin_user_by_email(
         &self,
         email: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
@@ -8399,12 +8469,12 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_admin_user_by_email(email))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_admin_user_by_email(email)
+                control_plane.get_admin_user_by_email(email).await
             }
         }
     }
 
-    pub fn upsert_admin_user_membership(
+    pub async fn upsert_admin_user_membership(
         &self,
         membership: StoredAdminUserMembership,
     ) -> Result<(), StorageError> {
@@ -8416,12 +8486,14 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_admin_user_membership(&membership)
+                control_plane
+                    .upsert_admin_user_membership(&membership)
+                    .await
             }
         }
     }
 
-    pub fn list_admin_user_memberships_by_user(
+    pub async fn list_admin_user_memberships_by_user(
         &self,
         user_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
@@ -8431,14 +8503,16 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_admin_user_memberships_by_user(user_id))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_admin_user_memberships_by_user(user_id)
+                control_plane
+                    .list_admin_user_memberships_by_user(user_id)
+                    .await
             }
         }
     }
 
     /// Lists every teammate membership for a tenant (issue #162), used by the
     /// admin console's team-management view.
-    pub fn list_admin_user_memberships_by_tenant(
+    pub async fn list_admin_user_memberships_by_tenant(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
@@ -8448,14 +8522,16 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_admin_user_memberships_by_tenant(tenant_id))
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_admin_user_memberships_by_tenant(tenant_id)
+                control_plane
+                    .list_admin_user_memberships_by_tenant(tenant_id)
+                    .await
             }
         }
     }
 
     /// Revokes a teammate's membership in a tenant (issue #162). Returns
     /// `true` if a membership existed and was removed.
-    pub fn delete_admin_user_membership(
+    pub async fn delete_admin_user_membership(
         &self,
         user_id: &str,
         tenant_id: &str,
@@ -8468,12 +8544,14 @@ impl RuntimeStorageRepositories {
                 })
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_admin_user_membership(user_id, tenant_id)
+                control_plane
+                    .delete_admin_user_membership(user_id, tenant_id)
+                    .await
             }
         }
     }
 
-    pub fn upsert_admin_user_refresh_token(
+    pub async fn upsert_admin_user_refresh_token(
         &self,
         token: StoredAdminUserRefreshToken,
     ) -> Result<(), StorageError> {
@@ -8485,12 +8563,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_admin_user_refresh_token(&token)
+                control_plane.upsert_admin_user_refresh_token(&token).await
             }
         }
     }
 
-    pub fn get_admin_user_refresh_token_by_hash(
+    pub async fn get_admin_user_refresh_token_by_hash(
         &self,
         token_hash: &str,
     ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
@@ -8500,7 +8578,9 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_admin_user_refresh_token_by_hash(token_hash))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_admin_user_refresh_token_by_hash(token_hash)
+                control_plane
+                    .get_admin_user_refresh_token_by_hash(token_hash)
+                    .await
             }
         }
     }
@@ -8508,7 +8588,7 @@ impl RuntimeStorageRepositories {
     /// Revokes every live refresh token for a user (issue #161), so a SCIM
     /// or admin-console deactivation terminates existing browser sessions
     /// immediately rather than merely blocking future logins.
-    pub fn revoke_all_admin_user_refresh_tokens(
+    pub async fn revoke_all_admin_user_refresh_tokens(
         &self,
         user_id: &str,
         revoked_at_unix: i64,
@@ -8521,7 +8601,9 @@ impl RuntimeStorageRepositories {
                 })
                 .unwrap_or(0)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+                control_plane
+                    .revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+                    .await
             }
         }
     }
