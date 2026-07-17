@@ -70,6 +70,29 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        // CSRF / confused-deputy defense for admin mutations. In zero-config
+        // mode auth is disabled, so `authenticate()` admits any request; without
+        // this a malicious web page could drive a cross-site state-changing POST
+        // to an /admin route (e.g. config/reload) as a CORS "simple request"
+        // (text/plain, no preflight), using the victim's browser as a confused
+        // deputy to take over the gateway config. Reject browser cross-site
+        // mutations regardless of auth mode. Non-browser clients (curl, SDKs, the
+        // CLI, tests) send neither Sec-Fetch-Site nor Origin and are unaffected;
+        // the same-origin admin console sends `Sec-Fetch-Site: same-origin`.
+        if path.starts_with("/admin/") && admin_method_is_state_changing(&req.method) {
+            if let Some(reason) = admin_cross_site_rejection(&request_headers) {
+                write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    "cross_site_admin_denied",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+
         if let Err(error) = state.run_pre_request_hooks(&ctx.request_id, &path) {
             write_json_error(
                 session,
@@ -221,5 +244,100 @@ impl FerroGateway {
                 Ok(true)
             }
         }
+    }
+}
+
+/// State-changing HTTP methods (the CSRF-relevant ones for admin routes). Safe
+/// methods (GET/HEAD) and OPTIONS are excluded.
+fn admin_method_is_state_changing(method: &http::Method) -> bool {
+    matches!(
+        *method,
+        http::Method::POST | http::Method::PUT | http::Method::PATCH | http::Method::DELETE
+    )
+}
+
+/// Returns a rejection reason if an admin mutation looks like a cross-site
+/// browser request, else `None`.
+///
+/// `Sec-Fetch-Site` (sent by every modern browser and NOT settable by page
+/// JavaScript -- it is a forbidden header) is authoritative when present:
+/// `cross-site`/`same-site` are rejected, `same-origin`/`none` allowed. When it
+/// is absent the caller is either a non-browser client (no `Origin` -> allowed)
+/// or an older browser, in which case a present `Origin` must match the
+/// configured admin-console origin.
+fn admin_cross_site_rejection(headers: &http::HeaderMap) -> Option<&'static str> {
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+    {
+        if site.eq_ignore_ascii_case("cross-site") || site.eq_ignore_ascii_case("same-site") {
+            return Some("cross-site admin mutations are not permitted");
+        }
+        // same-origin / none: an actual same-origin request or a direct
+        // navigation / non-website initiator -- safe.
+        return None;
+    }
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        match cors_allowed_origin() {
+            Some(allowed) if origin == allowed => {}
+            _ => return Some("cross-origin admin mutations are not permitted"),
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod handlers_test {
+    use super::{admin_cross_site_rejection, admin_method_is_state_changing};
+    use http::{HeaderMap, HeaderValue, Method};
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn only_mutating_methods_are_guarded() {
+        assert!(admin_method_is_state_changing(&Method::POST));
+        assert!(admin_method_is_state_changing(&Method::DELETE));
+        assert!(!admin_method_is_state_changing(&Method::GET));
+        assert!(!admin_method_is_state_changing(&Method::OPTIONS));
+    }
+
+    #[test]
+    fn cross_site_browser_mutation_is_rejected() {
+        assert!(
+            admin_cross_site_rejection(&headers(&[("sec-fetch-site", "cross-site")])).is_some()
+        );
+        assert!(admin_cross_site_rejection(&headers(&[("sec-fetch-site", "same-site")])).is_some());
+    }
+
+    #[test]
+    fn same_origin_and_non_browser_are_allowed() {
+        // Modern same-origin admin console.
+        assert!(
+            admin_cross_site_rejection(&headers(&[("sec-fetch-site", "same-origin")])).is_none()
+        );
+        // Direct navigation / non-website initiator.
+        assert!(admin_cross_site_rejection(&headers(&[("sec-fetch-site", "none")])).is_none());
+        // Non-browser client (curl / SDK / CLI / test): no Sec-Fetch-Site, no Origin.
+        assert!(admin_cross_site_rejection(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn old_browser_cross_origin_by_origin_header_is_rejected() {
+        // No Sec-Fetch-Site, but a cross-origin Origin with no console configured.
+        assert!(
+            admin_cross_site_rejection(&headers(&[("origin", "https://evil.example")])).is_some()
+        );
     }
 }
