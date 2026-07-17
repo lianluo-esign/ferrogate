@@ -8012,8 +8012,19 @@ impl RuntimeStorageRepositorySets {
             managed_worker_isolation_policies: Mutex::new(InMemoryRepository::new()),
             managed_worker_isolation_evidence: Mutex::new(InMemoryRepository::new()),
             self_hosted_worker_registrations: Mutex::new(InMemoryRepository::new()),
-            self_hosted_worker_heartbeats: Mutex::new(InMemoryAppendRepository::new()),
-            self_hosted_worker_telemetry_events: Mutex::new(InMemoryAppendRepository::new()),
+            // Bounded like the other append-only analytics stores: heartbeats
+            // and telemetry are ingested from UNTRUSTED, customer-hosted
+            // self-hosted workers over an endpoint that performs no per-worker
+            // count/rate cap, so an uncapped store is a memory/DoS vector (and
+            // every write clones the whole store). Reuse the audit retention
+            // bound so the oldest records are evicted instead of growing without
+            // limit.
+            self_hosted_worker_heartbeats: Mutex::new(
+                InMemoryAppendRepository::with_retention_limit(audit_event_retention_records),
+            ),
+            self_hosted_worker_telemetry_events: Mutex::new(
+                InMemoryAppendRepository::with_retention_limit(audit_event_retention_records),
+            ),
             self_hosted_worker_artifacts: Mutex::new(InMemoryRepository::new()),
             self_hosted_worker_checkpoints: Mutex::new(InMemoryRepository::new()),
             self_hosted_run_dispatches: Mutex::new(InMemoryRepository::new()),
@@ -10944,6 +10955,69 @@ mod tests {
         assert_eq!(events[0].kind, "capability.denied");
         assert_eq!(events[0].target, "cli:bash");
         assert_eq!(events[0].outcome, "denied");
+    }
+
+    #[test]
+    fn self_hosted_worker_telemetry_and_heartbeats_are_retention_bounded() {
+        // Untrusted customer-hosted workers ingest heartbeats/telemetry over an
+        // endpoint with no per-worker count cap; the stores must evict rather
+        // than grow without bound. Retention is wired to the audit bound (10).
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            ..Default::default()
+        };
+
+        for index in 0..50 {
+            block_on(repositories.append_self_hosted_worker_telemetry_event(
+                StoredSelfHostedWorkerTelemetryEvent {
+                    id: format!("event-{index}"),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    session_id: None,
+                    run_id: None,
+                    kind: "log".into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(index),
+                    ingested_at_unix: Some(index),
+                    event_json: "{}".into(),
+                },
+            ))
+            .unwrap();
+            block_on(repositories.append_self_hosted_worker_heartbeat(
+                StoredSelfHostedWorkerHeartbeat {
+                    id: format!("heartbeat-{index}"),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    status: "online".into(),
+                    reported_at_unix: Some(index),
+                    observed_at_unix: Some(index),
+                    heartbeat_json: "{}".into(),
+                },
+            ))
+            .unwrap();
+        }
+
+        let events = block_on(repositories.self_hosted_worker_telemetry_events());
+        assert_eq!(
+            events.len(),
+            10,
+            "telemetry store must be retention-bounded"
+        );
+        // The most-recent events are retained, oldest evicted.
+        assert_eq!(events.last().unwrap().id, "event-49");
+        assert_eq!(events.first().unwrap().id, "event-40");
+
+        let heartbeats = block_on(repositories.self_hosted_worker_heartbeats());
+        assert_eq!(
+            heartbeats.len(),
+            10,
+            "heartbeat store must be retention-bounded"
+        );
+        assert_eq!(heartbeats.last().unwrap().id, "heartbeat-49");
     }
 
     #[test]
