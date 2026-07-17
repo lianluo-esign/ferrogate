@@ -365,14 +365,27 @@ impl DeterministicDetector {
             end,
         } = detected;
         let matched = &segment.text[start..end];
-        findings.push(self.finding(
-            category,
-            severity,
-            confidence,
-            Some(segment),
-            Some((start, end)),
-            Some(matched),
-        ));
+        // Both the coalesced-group scan and the per-segment scan funnel through
+        // here, so a match wholly inside one segment is offered twice. Dedupe
+        // findings by (segment_id, byte range, category) — mirroring the patch
+        // overlap guard below — so such a match is reported exactly once while
+        // the per-segment scan can still surface an anchored match the coalesced
+        // scan missed at a segment boundary.
+        if !findings.iter().any(|existing| {
+            existing.category.as_str() == category
+                && existing.segment_id.as_deref() == Some(segment.segment_id.as_str())
+                && existing.byte_start == Some(start)
+                && existing.byte_end == Some(end)
+        }) {
+            findings.push(self.finding(
+                category,
+                severity,
+                confidence,
+                Some(segment),
+                Some((start, end)),
+                Some(matched),
+            ));
+        }
         if is_mutable_text_segment(segment)
             && !patches.iter().any(|patch| {
                 patch.segment_id == segment.segment_id
@@ -589,6 +602,66 @@ impl GuardrailDetector for DeterministicDetector {
                         &mut findings,
                         &mut patches,
                         group,
+                        TextMatch {
+                            category: pattern.category(),
+                            severity: FindingSeverity::Critical,
+                            confidence: Some(0.99),
+                            start: matched.start(),
+                            end: matched.end(),
+                        },
+                    );
+                }
+            }
+        }
+
+        // Also scan each selected segment in isolation. The coalesced scan above
+        // concatenates same-source neighbours with no separator, which catches a
+        // token an attacker split across parts but destroys the word boundary in
+        // front of a `\b`/`^`-anchored pattern when the preceding segment ends in
+        // a word char (e.g. "mykey" + "AKIA…" hides the AWS key from the
+        // `\b`-anchored secret regex). Rerunning the same matchers over each
+        // segment restores that per-segment anchor context; add_text_match
+        // dedupes findings and patches, so a match wholly inside one segment that
+        // the coalesced scan already reported is not double-counted.
+        for segment in &selected {
+            for keyword in &self.config.keywords {
+                for (start, matched) in segment.text.match_indices(keyword) {
+                    self.add_text_match(
+                        &mut findings,
+                        &mut patches,
+                        segment,
+                        TextMatch {
+                            category: "contains",
+                            severity: FindingSeverity::High,
+                            confidence: Some(1.0),
+                            start,
+                            end: start + matched.len(),
+                        },
+                    );
+                }
+            }
+            for expression in &self.regex {
+                for matched in expression.find_iter(&segment.text) {
+                    self.add_text_match(
+                        &mut findings,
+                        &mut patches,
+                        segment,
+                        TextMatch {
+                            category: "regex",
+                            severity: FindingSeverity::High,
+                            confidence: Some(1.0),
+                            start: matched.start(),
+                            end: matched.end(),
+                        },
+                    );
+                }
+            }
+            for (pattern, expression) in &self.secrets {
+                for matched in expression.find_iter(&segment.text) {
+                    self.add_text_match(
+                        &mut findings,
+                        &mut patches,
+                        segment,
                         TextMatch {
                             category: pattern.category(),
                             severity: FindingSeverity::Critical,

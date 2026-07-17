@@ -586,3 +586,131 @@ fn token_within_one_segment_of_a_coalesced_run_matches_and_patches_as_before() {
     assert_eq!(result.patches[0].byte_start, local);
     assert_eq!(result.patches[0].byte_end, local + "blocked".len());
 }
+
+// --- Regression: coalescing a word-char-ending neighbour must not hide an
+// anchored pattern; individual segments are scanned too (with dedupe). ---
+
+#[test]
+fn anchored_secret_after_word_char_ending_adjacent_part_is_detected() {
+    // Assemble the AWS key literal from fragments so no contiguous `AKIA`+16
+    // token appears in this source file (scripts/security-check.sh gate).
+    let aws = concat!("AKIA", "IOSFODNN7", "EXAMPLE");
+    let mut detector_config = config(vec![ContentSource::User]);
+    detector_config.secret_patterns = vec![SecretPattern::AwsAccessKeyId];
+    let detector = DeterministicDetector::new(detector_config).unwrap();
+    let envelope = normalize_request(
+        GuardrailProtocol::ChatCompletions,
+        &serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "mykey"},
+                    {"type": "text", "text": aws}
+                ]
+            }]
+        }),
+    );
+    // The preceding part ends in a word char, so coalescing "mykey" + the key
+    // destroys the `\b` in front of AKIA; the coalesced scan alone returns Pass.
+    // The per-segment scan restores the boundary context and detects the key.
+    assert!(envelope.segments.len() >= 2);
+    let result = evaluate(&detector, &envelope, None, None).unwrap();
+    assert_eq!(result.verdict, DetectorVerdict::Fail);
+    let secret = result
+        .findings
+        .iter()
+        .find(|finding| finding.category == "secret.aws_access_key_id")
+        .expect("the boundary-anchored AWS key must be detected per segment");
+    assert_eq!(secret.severity, FindingSeverity::Critical);
+    // Evidence stays HMAC-only; the cleartext key never leaks and it is patched.
+    assert!(!result.patches.is_empty());
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(!serialized.contains(aws));
+    assert!(serialized.contains("hmac-sha256:"));
+}
+
+#[test]
+fn anchored_operator_regex_after_word_char_ending_adjacent_part_is_detected() {
+    let mut detector_config = config(vec![ContentSource::User]);
+    // A `\b`-anchored operator regex: only "secret<digits>" as a standalone
+    // word must match, not a substring of a larger word-char run.
+    detector_config.regex = vec![r"\bsecret[0-9]+\b".to_string()];
+    let detector = DeterministicDetector::new(detector_config).unwrap();
+    let envelope = normalize_request(
+        GuardrailProtocol::ChatCompletions,
+        &serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "notasecret"},
+                    {"type": "text", "text": "secret123"}
+                ]
+            }]
+        }),
+    );
+    // Coalesced "notasecretsecret123" is one unbroken word-char run: the `\b`
+    // before "secret123" is gone, so the coalesced scan alone returns Pass.
+    assert!(envelope.segments.len() >= 2);
+    let result = evaluate(&detector, &envelope, None, None).unwrap();
+    assert_eq!(result.verdict, DetectorVerdict::Fail);
+    let matched = result
+        .findings
+        .iter()
+        .find(|finding| finding.category == "regex")
+        .expect("the boundary-anchored regex must match the isolated segment");
+    // It matches the second segment ("secret123") on its own local offsets.
+    let segment = envelope
+        .segments
+        .iter()
+        .find(|segment| Some(&segment.segment_id) == matched.segment_id.as_ref())
+        .expect("finding must reference a real segment");
+    assert_eq!(segment.text, "secret123");
+    assert_eq!(matched.byte_start, Some(0));
+    assert_eq!(matched.byte_end, Some("secret123".len()));
+}
+
+#[test]
+fn secret_wholly_within_one_segment_of_a_run_is_not_double_counted() {
+    // Assemble the AWS key from fragments (secret-scanner gate) and surround it
+    // with non-word separators so both the coalesced and per-segment scans match
+    // the SAME range; the finding/patch dedupe must keep it to exactly one each.
+    let aws = concat!("AKIA", "IOSFODNN7", "EXAMPLE");
+    let mut detector_config = config(vec![ContentSource::User]);
+    detector_config.secret_patterns = vec![SecretPattern::AwsAccessKeyId];
+    let detector = DeterministicDetector::new(detector_config).unwrap();
+    let envelope = normalize_request(
+        GuardrailProtocol::ChatCompletions,
+        &serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "safe "},
+                    {"type": "text", "text": aws},
+                    {"type": "text", "text": " tail"}
+                ]
+            }]
+        }),
+    );
+    // All three parts coalesce into one same-source run, but the key sits wholly
+    // inside the middle segment with word boundaries preserved on both sides, so
+    // the coalesced scan and the per-segment scan both find the identical range.
+    assert!(envelope.segments.len() >= 3);
+    let result = evaluate(&detector, &envelope, None, None).unwrap();
+    assert_eq!(result.verdict, DetectorVerdict::Fail);
+    // Exactly one finding and one patch -- no double count from the two scans.
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.patches.len(), 1);
+    let finding = &result.findings[0];
+    assert_eq!(finding.category, "secret.aws_access_key_id");
+    let segment = envelope
+        .segments
+        .iter()
+        .find(|segment| Some(&segment.segment_id) == finding.segment_id.as_ref())
+        .expect("finding must reference a real segment");
+    assert_eq!(segment.text, aws);
+    assert_eq!(finding.byte_start, Some(0));
+    assert_eq!(finding.byte_end, Some(aws.len()));
+    assert_eq!(result.patches[0].segment_id, segment.segment_id);
+    assert_eq!(result.patches[0].byte_start, 0);
+    assert_eq!(result.patches[0].byte_end, aws.len());
+}
