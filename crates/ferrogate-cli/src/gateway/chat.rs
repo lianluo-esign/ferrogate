@@ -1018,6 +1018,7 @@ impl FerroGateway {
                                         .map(|profile| profile.id.as_str()),
                                     model: Some(&request.model),
                                     provider: Some(&provider.name),
+                                    managed_action: None,
                                 });
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::BufferAndEnforce

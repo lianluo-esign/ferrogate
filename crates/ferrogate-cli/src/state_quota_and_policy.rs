@@ -295,6 +295,7 @@ impl AppState {
             gateway_config_id: context.gateway_config_id,
             model: context.model,
             provider: context.provider,
+            managed_action: None,
         };
         let mut enforcement = None;
         let mut pending_evidence = Vec::new();
@@ -588,6 +589,7 @@ impl AppState {
             gateway_config_id: context.gateway_config_id,
             model: context.model,
             provider: context.provider,
+            managed_action: None,
         };
         let policies = self
             .guardrail_policies
@@ -655,6 +657,7 @@ impl AppState {
             gateway_config_id: context.gateway_config_id,
             model: context.model,
             provider: context.provider,
+            managed_action: None,
         };
         let policies = self
             .guardrail_policies

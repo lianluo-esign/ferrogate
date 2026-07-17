@@ -494,6 +494,7 @@ fn streaming_modes_reject_before_dispatch_or_force_shadow_evaluation() {
                 gateway_config_id: None,
                 model: None,
                 provider: None,
+                managed_action: None,
             }),
         StreamingGuardrailPlan::ShadowAfterComplete
     );

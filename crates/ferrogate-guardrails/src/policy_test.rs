@@ -136,6 +136,7 @@ fn organization_and_lower_scope_policies_merge_additively() {
             gateway_config_id: Some("approved-profile"),
             model: Some("fast-chat"),
             provider: Some("openai"),
+            managed_action: None,
         },
     );
     assert_eq!(
@@ -275,4 +276,108 @@ fn managed_action_constructors_set_the_expected_kind() {
     assert_eq!(approval.message.as_deref(), Some("m"));
     let quarantine = PolicyAction::quarantine("c", "m");
     assert_eq!(quarantine.kind, ActionKind::Quarantine);
+}
+
+#[test]
+fn managed_action_selector_matches_by_class_and_target() {
+    let mcp_github = ManagedActionContext {
+        class: ManagedActionClass::Mcp,
+        target: Some("github"),
+    };
+    // empty selector = any managed action
+    assert!(ManagedActionSelector::default().matches(&mcp_github));
+    // class filter
+    let mcp_only = ManagedActionSelector {
+        classes: vec![ManagedActionClass::Mcp],
+        targets: vec![],
+    };
+    assert!(mcp_only.matches(&mcp_github));
+    assert!(!mcp_only.matches(&ManagedActionContext {
+        class: ManagedActionClass::Cli,
+        target: Some("bash"),
+    }));
+    // target filter (class + concrete target)
+    let mcp_github_only = ManagedActionSelector {
+        classes: vec![ManagedActionClass::Mcp],
+        targets: vec!["github".into()],
+    };
+    assert!(mcp_github_only.matches(&mcp_github));
+    assert!(!mcp_github_only.matches(&ManagedActionContext {
+        class: ManagedActionClass::Mcp,
+        target: Some("slack"),
+    }));
+    // a target filter with no concrete target on the action fails closed
+    assert!(!mcp_github_only.matches(&ManagedActionContext {
+        class: ManagedActionClass::Mcp,
+        target: None,
+    }));
+}
+
+#[test]
+fn managed_action_and_model_content_policies_are_mutually_exclusive_targets() {
+    let action_scope = PolicyScopeSelector {
+        managed_action: Some(ManagedActionSelector {
+            classes: vec![ManagedActionClass::Mcp],
+            targets: vec![],
+        }),
+        ..Default::default()
+    };
+    let content_scope = PolicyScopeSelector::default();
+    let action_ctx = PolicySelectionContext {
+        managed_action: Some(ManagedActionContext {
+            class: ManagedActionClass::Mcp,
+            target: Some("github"),
+        }),
+        ..model_content_ctx()
+    };
+    let content_ctx = model_content_ctx();
+
+    // managed-action policy applies to the matching action, NOT to model content
+    assert!(action_scope.matches(action_ctx));
+    assert!(!action_scope.matches(content_ctx));
+    // model-content policy applies to model content, NOT to a managed action
+    assert!(content_scope.matches(content_ctx));
+    assert!(!content_scope.matches(action_ctx));
+}
+
+#[test]
+fn managed_action_selector_serde_is_backward_compatible_and_validated() {
+    // Pre-#200 policy scope (no managed_action field) deserializes as None.
+    let legacy: PolicyScopeSelector = serde_json::from_str(r#"{"models":["gpt-4"]}"#).unwrap();
+    assert!(legacy.managed_action.is_none());
+    assert!(legacy.validate().is_ok());
+    // New managed-action scope round-trips.
+    let scope: PolicyScopeSelector = serde_json::from_str(
+        r#"{"managed_action":{"classes":["mcp","secret"],"targets":["github"]}}"#,
+    )
+    .unwrap();
+    let selector = scope.managed_action.as_ref().unwrap();
+    assert_eq!(
+        selector.classes,
+        vec![ManagedActionClass::Mcp, ManagedActionClass::Secret]
+    );
+    assert!(scope.validate().is_ok());
+    // Empty target value is rejected (fail closed on malformed policy).
+    let bad = PolicyScopeSelector {
+        managed_action: Some(ManagedActionSelector {
+            classes: vec![],
+            targets: vec![" ".into()],
+        }),
+        ..Default::default()
+    };
+    assert!(bad.validate().is_err());
+}
+
+fn model_content_ctx() -> PolicySelectionContext<'static> {
+    PolicySelectionContext {
+        organization_id: None,
+        project_id: None,
+        workspace_id: None,
+        api_key_id: None,
+        service_account_id: None,
+        gateway_config_id: None,
+        model: None,
+        provider: None,
+        managed_action: None,
+    }
 }

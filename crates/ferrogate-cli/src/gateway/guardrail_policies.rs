@@ -657,6 +657,7 @@ impl FerroGateway {
             gateway_config_id: request.gateway_config_id.as_deref(),
             model: request.model.as_deref(),
             provider: request.provider.as_deref(),
+            managed_action: None,
         };
         let selected = view.revision.scope.matches(selection);
         let checks = if selected {

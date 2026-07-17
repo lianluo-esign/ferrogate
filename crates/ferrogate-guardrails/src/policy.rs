@@ -83,6 +83,68 @@ pub struct PolicyScopeSelector {
     pub models: Vec<String>,
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Restricts this policy to managed MCP/Tool/CLI/filesystem/network/secret/
+    /// REST actions (issue #200). `None` (the default, and the shape of every
+    /// pre-#200 policy) means the policy targets model content as before and is
+    /// NOT applied to managed actions. `Some(_)` means the policy targets ONLY
+    /// managed actions matching the selector and is NOT applied to model content
+    /// — explicit targeting in both directions.
+    #[serde(default)]
+    pub managed_action: Option<ManagedActionSelector>,
+}
+
+/// The class of a managed action a guardrail policy can target (issue #200).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedActionClass {
+    Mcp,
+    Tool,
+    Cli,
+    Filesystem,
+    Network,
+    Secret,
+    Rest,
+}
+
+/// Targets managed actions by class and (optionally) by concrete target name
+/// — the MCP server/tool, CLI program, filesystem path, host, secret name, or
+/// REST route the action addresses (issue #200). Empty `classes`/`targets`
+/// vectors mean "any" for that dimension; a selector with both empty matches
+/// every managed action.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedActionSelector {
+    #[serde(default)]
+    pub classes: Vec<ManagedActionClass>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+impl ManagedActionSelector {
+    fn matches(&self, action: &ManagedActionContext<'_>) -> bool {
+        (self.classes.is_empty() || self.classes.contains(&action.class))
+            && (self.targets.is_empty()
+                || action
+                    .target
+                    .is_some_and(|target| self.targets.iter().any(|allowed| allowed == target)))
+    }
+
+    fn validate(&self) -> Result<(), DetectorError> {
+        if self.targets.iter().any(|value| value.trim().is_empty()) {
+            return Err(invalid_policy(
+                "guardrail policy managed_action.targets cannot contain an empty value",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The managed action being evaluated, threaded into policy selection so
+/// `ManagedActionSelector`s can be matched (issue #200).
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedActionContext<'a> {
+    pub class: ManagedActionClass,
+    pub target: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,10 +157,22 @@ pub struct PolicySelectionContext<'a> {
     pub gateway_config_id: Option<&'a str>,
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
+    /// `Some` when evaluating a managed MCP/Tool/etc action (issue #200);
+    /// `None` when evaluating model content. Selects between managed-action
+    /// policies and model-content policies (see `ManagedActionSelector`).
+    pub managed_action: Option<ManagedActionContext<'a>>,
 }
 
 impl PolicyScopeSelector {
     pub fn matches(&self, context: PolicySelectionContext<'_>) -> bool {
+        // #200 managed-action dimension, checked first with explicit targeting
+        // in both directions: a managed-action policy applies ONLY to matching
+        // managed actions; a model-content policy applies ONLY to model content.
+        match (&self.managed_action, &context.managed_action) {
+            (None, None) => {}
+            (Some(selector), Some(action)) if selector.matches(action) => {}
+            _ => return false,
+        }
         let organization_matches = if self.tenant_ids.is_empty() && self.organization_ids.is_empty()
         {
             true
@@ -154,6 +228,9 @@ impl PolicyScopeSelector {
                     "guardrail policy scope {field} cannot contain an empty value"
                 )));
             }
+        }
+        if let Some(managed_action) = &self.managed_action {
+            managed_action.validate()?;
         }
         Ok(())
     }
