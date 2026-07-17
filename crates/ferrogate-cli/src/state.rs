@@ -4121,7 +4121,9 @@ impl AppState {
     pub(crate) fn list_usage_monthly_rollups(
         &self,
     ) -> anyhow::Result<Vec<StoredUsageMonthlyRollup>> {
-        Ok(self.repositories.list_usage_monthly_rollups()?)
+        Ok(crate::gateway::block_on_sync_bridge(
+            self.repositories.list_usage_monthly_rollups(),
+        )?)
     }
 
     #[cfg(test)]
@@ -4131,9 +4133,10 @@ impl AppState {
         scope_id: &str,
         period_month: &str,
     ) -> anyhow::Result<Option<StoredUsageMonthlyRollup>> {
-        Ok(self
-            .repositories
-            .get_usage_monthly_rollup(scope_type, scope_id, period_month)?)
+        Ok(crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .get_usage_monthly_rollup(scope_type, scope_id, period_month),
+        )?)
     }
 
     pub(crate) fn admin_pagination(&self, query: Option<&str>) -> AdminPagination {

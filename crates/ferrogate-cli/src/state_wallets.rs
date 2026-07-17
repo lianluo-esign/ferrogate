@@ -120,11 +120,12 @@ impl AppState {
             return Ok(false);
         };
         let period_month = self.current_period_month();
-        let spent = self
-            .repositories
-            .get_usage_monthly_rollup(scope_type, scope_id, &period_month)?
-            .map(|rollup| rollup.cost_usd)
-            .unwrap_or(0.0);
+        let spent = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .get_usage_monthly_rollup(scope_type, scope_id, &period_month),
+        )?
+        .map(|rollup| rollup.cost_usd)
+        .unwrap_or(0.0);
         Ok(spent >= budget_usd)
     }
 
@@ -508,22 +509,22 @@ impl AppState {
         if policy.alert_threshold_pcts.is_empty() {
             return;
         }
-        let spent_usd =
-            match self
-                .repositories
-                .get_usage_monthly_rollup(scope_type, scope_id, period_month)
-            {
-                Ok(rollup) => rollup.map(|rollup| rollup.cost_usd).unwrap_or(0.0),
-                Err(error) => {
-                    warn!(
-                        scope_type = %scope_type.as_str(),
-                        scope_id = %scope_id,
-                        error = %error,
-                        "failed to load usage rollup for budget threshold alert check"
-                    );
-                    return;
-                }
-            };
+        let spent_usd = match self
+            .repositories
+            .get_usage_monthly_rollup(scope_type, scope_id, period_month)
+            .await
+        {
+            Ok(rollup) => rollup.map(|rollup| rollup.cost_usd).unwrap_or(0.0),
+            Err(error) => {
+                warn!(
+                    scope_type = %scope_type.as_str(),
+                    scope_id = %scope_id,
+                    error = %error,
+                    "failed to load usage rollup for budget threshold alert check"
+                );
+                return;
+            }
+        };
         let percent_spent = (spent_usd / budget_usd) * 100.0;
         for threshold_pct in policy.alert_threshold_pcts.iter().copied() {
             if percent_spent + f64::EPSILON < f64::from(threshold_pct) {

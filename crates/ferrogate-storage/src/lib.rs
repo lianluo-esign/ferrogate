@@ -2589,14 +2589,27 @@ impl PostgresControlPlaneStore {
         Ok(affected > 0)
     }
 
-    fn get_usage_monthly_rollup(
+    fn usage_rollup_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    fn billing_ledger_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn get_usage_monthly_rollup(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
         period_month: &str,
     ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.usage_rollup_operation("get usage monthly rollup");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT id, period_month, scope_type, scope_id, prompt_tokens, \
                  completion_tokens, total_tokens, cost_usd, request_count, error_count, \
                  updated_at_unix \
@@ -2604,13 +2617,21 @@ impl PostgresControlPlaneStore {
                  WHERE scope_type = $1 AND scope_id = $2 AND period_month = $3",
                 &[&scope_type.as_str(), &scope_id, &period_month],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         row.as_ref().map(usage_monthly_rollup_from_row).transpose()
     }
 
-    fn list_usage_monthly_rollups(&self) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+    async fn list_usage_monthly_rollups(
+        &self,
+    ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
+        let operation = self.usage_rollup_operation("list usage monthly rollups");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT id, period_month, scope_type, scope_id, prompt_tokens, \
                  completion_tokens, total_tokens, cost_usd, request_count, error_count, \
                  updated_at_unix \
@@ -2618,11 +2639,12 @@ impl PostgresControlPlaneStore {
                  ORDER BY period_month DESC, scope_type ASC, scope_id ASC",
                 &[],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(usage_monthly_rollup_from_row).collect()
     }
 
-    fn append_billing_ledger_entry(
+    async fn append_billing_ledger_entry(
         &self,
         entry: &ferrogate_billing::LedgerEntry,
     ) -> Result<bool, StorageError> {
@@ -2634,8 +2656,13 @@ impl PostgresControlPlaneStore {
         let usage_source = entry.usage_source.as_str();
         let occurred_at_unix = entry.occurred_at_unix.map(saturating_i64);
         let created_at_unix = saturating_i64(now_unix_seconds());
-        let inserted = self.with_client(|client| {
-            client.execute(
+        let operation = self.billing_ledger_operation("append billing ledger entry");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let inserted = client
+            .execute(
                 "INSERT INTO billing_ledger \
                  (id, request_id, trace_id, provider_attempt_id, provider_attempt_index, \
                   organization_id, project_id, workspace_id, api_key_id, logical_model, provider, \
@@ -2673,16 +2700,20 @@ impl PostgresControlPlaneStore {
                     &created_at_unix,
                 ],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         if inserted > 0 {
             return Ok(true);
         }
-        let existing = self.get_billing_ledger_entry(&entry.id)?.ok_or_else(|| {
-            StorageError::Runtime(format!(
-                "billing ledger id {} conflicted but could not be reloaded",
-                entry.id
-            ))
-        })?;
+        let existing = self
+            .get_billing_ledger_entry(&entry.id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Runtime(format!(
+                    "billing ledger id {} conflicted but could not be reloaded",
+                    entry.id
+                ))
+            })?;
         if ferrogate_billing::same_provider_attempt_settlement(&existing, entry) {
             Ok(false)
         } else {
@@ -2699,14 +2730,19 @@ impl PostgresControlPlaneStore {
     /// fetching an unfiltered page and discarding rows in application code —
     /// otherwise a scoped page could silently come back empty/incomplete in a
     /// busy, multi-tenant ledger, and the tenant-time index would go unused.
-    fn list_billing_ledger_entries(
+    async fn list_billing_ledger_entries(
         &self,
         filter: &ferrogate_billing::LedgerListFilter,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
-        let rows = self.with_client(|client| {
-            client.query(
+        let operation = self.billing_ledger_operation("list billing ledger entries");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT entry_json::text FROM billing_ledger \
                  WHERE ($1::text IS NULL OR organization_id = $1) \
                    AND ($2::text IS NULL OR project_id = $2) \
@@ -2720,24 +2756,31 @@ impl PostgresControlPlaneStore {
                     &limit,
                 ],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         rows.iter().map(ledger_entry_from_row).collect()
     }
 
-    fn get_billing_ledger_entry(
+    async fn get_billing_ledger_entry(
         &self,
         id: &str,
     ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
-        let row = self.with_client(|client| {
-            client.query_opt(
+        let operation = self.billing_ledger_operation("get billing ledger entry");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT entry_json::text FROM billing_ledger WHERE id = $1",
                 &[&id],
             )
-        })?;
+            .await
+            .map_err(postgres_error)?;
         row.as_ref().map(ledger_entry_from_row).transpose()
     }
 
-    fn enqueue_billing_report(
+    async fn enqueue_billing_report(
         &self,
         id: &str,
         event: &ferrogate_billing::BillingEvent,
@@ -2745,16 +2788,22 @@ impl PostgresControlPlaneStore {
     ) -> Result<(), StorageError> {
         let event_json = serialize_storage_document(event)?;
         let created_at_unix = saturating_i64(now_unix_seconds());
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.billing_outbox_operation("enqueue billing report");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO billing_report_outbox \
                  (id, event_json, attempts, next_attempt_unix, created_at_unix, updated_at_unix) \
                  VALUES ($1, $2::text::jsonb, 0, $3, $4, $4) \
                  ON CONFLICT (id) DO NOTHING",
                 &[&id, &event_json, &next_attempt_unix, &created_at_unix],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
     fn billing_outbox_operation(&self, name: &'static str) -> StorageOperation {
@@ -4472,54 +4521,62 @@ impl PostgresControlPlaneStore {
             .collect())
     }
 
-    fn billing_events_page(
+    async fn billing_events_page(
         &self,
         offset: usize,
         limit: usize,
     ) -> Result<StoragePage<BillingEvent>, StorageError> {
         let offset = saturating_i64(offset as u64);
         let limit = saturating_i64(limit as u64);
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT e.event_json::text, count(*) OVER() \
+        let operation = self.billing_ledger_operation("billing events page");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT e.event_json::text, count(*) OVER() \
                  FROM metering_events e \
                  ORDER BY e.occurred_at_unix ASC, e.request_id ASC, e.provider_attempt_index ASC \
                  OFFSET $1 LIMIT $2",
-                    &[&offset, &limit],
-                )
-                .map_err(postgres_error)?;
-            let total = rows
-                .first()
-                .map(|row| row.get::<_, i64>(1))
-                .unwrap_or_default();
-            let data = rows
-                .into_iter()
-                .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
-                .collect::<Result<Vec<_>, StorageError>>()?;
-            Ok(StoragePage {
-                data,
-                total: usize::try_from(total).unwrap_or(usize::MAX),
-                offset: usize::try_from(offset).unwrap_or(usize::MAX),
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
-            })
+                &[&offset, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let total = rows
+            .first()
+            .map(|row| row.get::<_, i64>(1))
+            .unwrap_or_default();
+        let data = rows
+            .into_iter()
+            .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        Ok(StoragePage {
+            data,
+            total: usize::try_from(total).unwrap_or(usize::MAX),
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
         })
     }
 
-    fn billing_events(&self) -> Result<Vec<BillingEvent>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT e.event_json::text \
+    async fn billing_events(&self) -> Result<Vec<BillingEvent>, StorageError> {
+        let operation = self.billing_ledger_operation("list billing events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT e.event_json::text \
                  FROM metering_events e \
                  ORDER BY e.occurred_at_unix ASC, e.request_id ASC, e.provider_attempt_index ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            rows.into_iter()
-                .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
-                .collect()
-        })
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        rows.into_iter()
+            .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
+            .collect()
     }
 
     async fn upsert_usage_aggregate(
@@ -5525,13 +5582,44 @@ fn ledger_storage_error(error: StorageError) -> ferrogate_billing::BillingError 
     }
 }
 
+/// Bridge async storage calls out of the synchronous [`ferrogate_billing::
+/// LedgerSink`] trait seam. `LedgerSink` is a `Send + Sync` dyn trait defined in
+/// `ferrogate-billing` (which cannot depend on this crate), consumed by the
+/// synchronous `ferrogate billing serve` HTTP service (`ferrogate_billing::serve`
+/// is a sync fn with no tokio runtime). Rather than making the whole trait +
+/// service async, the three impl methods below bridge internally. Mirrors
+/// `ferrogate-cli`'s `gateway::block_on_sync_bridge` and `ferrogate-auth`'s
+/// copy: reuse a surrounding multi-thread runtime via `block_in_place`, else
+/// spin a scoped `current_thread` runtime.
+fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
+where
+    T: Send,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("sync-bridge runtime should build")
+                    .block_on(future)
+            })
+            .join()
+            .expect("sync-bridge runtime thread should not panic")
+    })
+}
+
 impl ferrogate_billing::LedgerSink for StorageLedgerSink {
     fn record(
         &self,
         entry: &ferrogate_billing::LedgerEntry,
     ) -> Result<bool, ferrogate_billing::BillingError> {
-        self.repositories
-            .append_billing_ledger_entry(entry)
+        block_on_sync_bridge(self.repositories.append_billing_ledger_entry(entry))
             .map_err(ledger_storage_error)
     }
 
@@ -5541,17 +5629,18 @@ impl ferrogate_billing::LedgerSink for StorageLedgerSink {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, ferrogate_billing::BillingError> {
-        self.repositories
-            .list_billing_ledger_entries(filter, offset, limit)
-            .map_err(ledger_storage_error)
+        block_on_sync_bridge(
+            self.repositories
+                .list_billing_ledger_entries(filter, offset, limit),
+        )
+        .map_err(ledger_storage_error)
     }
 
     fn get(
         &self,
         id: &str,
     ) -> Result<Option<ferrogate_billing::LedgerEntry>, ferrogate_billing::BillingError> {
-        self.repositories
-            .billing_ledger_entry(id)
+        block_on_sync_bridge(self.repositories.billing_ledger_entry(id))
             .map_err(ledger_storage_error)
     }
 }
@@ -8213,7 +8302,7 @@ impl RuntimeStorageRepositories {
             guardrail_policy_bindings: self.list_guardrail_policy_bindings()?,
             api_key_records: bridge_runtime.block_on(self.list_api_key_records())?,
             tool_approvals: self.control_plane_tool_approval_documents()?,
-            billing_events: self.billing_events(),
+            billing_events: bridge_runtime.block_on(self.billing_events()),
             usage_aggregates: bridge_runtime.block_on(self.usage_aggregates()),
             request_logs: bridge_runtime.block_on(self.request_logs()),
             audit_events: bridge_runtime.block_on(self.audit_events()),
@@ -8904,7 +8993,7 @@ impl RuntimeStorageRepositories {
 
     // --- P1-4 usage/cost monthly rollups ---
 
-    pub fn get_usage_monthly_rollup(
+    pub async fn get_usage_monthly_rollup(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
@@ -8918,12 +9007,14 @@ impl RuntimeStorageRepositories {
                 })
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_usage_monthly_rollup(scope_type, scope_id, period_month)
+                control_plane
+                    .get_usage_monthly_rollup(scope_type, scope_id, period_month)
+                    .await
             }
         }
     }
 
-    pub fn list_usage_monthly_rollups(
+    pub async fn list_usage_monthly_rollups(
         &self,
     ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
         match &self.control_plane {
@@ -8932,20 +9023,20 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_usage_monthly_rollups())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_usage_monthly_rollups()
+                control_plane.list_usage_monthly_rollups().await
             }
         }
     }
 
     /// Persist a settled billing ledger entry (issue #129). Idempotent on the
     /// entry id; returns `true` when newly inserted. Supabase/Postgres-only.
-    pub fn append_billing_ledger_entry(
+    pub async fn append_billing_ledger_entry(
         &self,
         entry: &ferrogate_billing::LedgerEntry,
     ) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_billing_ledger_entry(entry)
+                control_plane.append_billing_ledger_entry(entry).await
             }
             RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
@@ -8953,31 +9044,34 @@ impl RuntimeStorageRepositories {
 
     /// List settled ledger entries matching `filter`, oldest first, paginated.
     /// Supabase-only. The filter is pushed into the SQL query (issue #149).
-    pub fn list_billing_ledger_entries(
+    pub async fn list_billing_ledger_entries(
         &self,
         filter: &ferrogate_billing::LedgerListFilter,
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .list_billing_ledger_entries(
-                    filter,
-                    saturating_i64(offset as u64),
-                    saturating_i64(limit as u64),
-                ),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_billing_ledger_entries(
+                        filter,
+                        saturating_i64(offset as u64),
+                        saturating_i64(limit as u64),
+                    )
+                    .await
+            }
             RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
     }
 
     /// Fetch a single settled ledger entry by id. Supabase-only.
-    pub fn billing_ledger_entry(
+    pub async fn billing_ledger_entry(
         &self,
         id: &str,
     ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_billing_ledger_entry(id)
+                control_plane.get_billing_ledger_entry(id).await
             }
             RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
@@ -8986,7 +9080,7 @@ impl RuntimeStorageRepositories {
     /// Enqueue a gateway→billing usage report for durable delivery (issue #137).
     /// Idempotent on `id` (the ledger entry id). Supported on Postgres and the
     /// in-memory backend so the sweeper works in both production and tests.
-    pub fn enqueue_billing_report(
+    pub async fn enqueue_billing_report(
         &self,
         id: &str,
         event: &ferrogate_billing::BillingEvent,
@@ -9000,7 +9094,9 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.enqueue_billing_report(id, event, next_attempt_unix)
+                control_plane
+                    .enqueue_billing_report(id, event, next_attempt_unix)
+                    .await
             }
         }
     }
@@ -9487,6 +9583,7 @@ impl RuntimeStorageRepositories {
                 let recorded = self.append_billing_event(event.clone()).await?;
                 let enqueue_error = if recorded {
                     self.enqueue_billing_report(outbox_id, &event, outbox_next_attempt_unix)
+                        .await
                         .err()
                 } else {
                     None
@@ -9528,19 +9625,24 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn billing_events(&self) -> Vec<BillingEvent> {
+    pub async fn billing_events(&self) -> Vec<BillingEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.billing_events().unwrap_or_default()
+                control_plane.billing_events().await.unwrap_or_default()
             }
             RuntimeControlPlaneBackend::Memory(_) => Vec::new(),
         }
     }
 
-    pub fn billing_events_page(&self, offset: usize, limit: usize) -> StoragePage<BillingEvent> {
+    pub async fn billing_events_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoragePage<BillingEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .billing_events_page(offset, limit)
+                .await
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
             RuntimeControlPlaneBackend::Memory(_) => StoragePage::empty(offset, limit),
         }
@@ -11977,10 +12079,10 @@ mod tests {
             (QuotaScopeKind::Workspace, "workspace-a"),
             (QuotaScopeKind::Key, "key-a"),
         ] {
-            let rollup = repositories
-                .get_usage_monthly_rollup(scope_type, scope_id, "2026-07")
-                .unwrap()
-                .unwrap_or_else(|| panic!("rollup missing for {scope_type:?}/{scope_id}"));
+            let rollup =
+                block_on(repositories.get_usage_monthly_rollup(scope_type, scope_id, "2026-07"))
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("rollup missing for {scope_type:?}/{scope_id}"));
             assert_eq!(rollup.total_tokens, 165, "scope {scope_type:?}/{scope_id}");
             assert_eq!(rollup.request_count, 2, "scope {scope_type:?}/{scope_id}");
             assert_eq!(rollup.error_count, 1, "scope {scope_type:?}/{scope_id}");
@@ -11991,11 +12093,19 @@ mod tests {
             );
         }
 
-        assert!(repositories
-            .get_usage_monthly_rollup(QuotaScopeKind::Tenant, "tenant-a", "2026-06")
-            .unwrap()
-            .is_none());
-        assert_eq!(repositories.list_usage_monthly_rollups().unwrap().len(), 4);
+        assert!(block_on(repositories.get_usage_monthly_rollup(
+            QuotaScopeKind::Tenant,
+            "tenant-a",
+            "2026-06"
+        ))
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            block_on(repositories.list_usage_monthly_rollups())
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]
@@ -12074,10 +12184,13 @@ mod tests {
 
         // The same 3 events also drove the existing tenant-scope rollup
         // (issue #171 adds a new dimension, it doesn't disturb the old one).
-        let tenant_rollup = repositories
-            .get_usage_monthly_rollup(QuotaScopeKind::Tenant, "tenant-b", "2026-07")
-            .unwrap()
-            .expect("tenant rollup must still accumulate normally");
+        let tenant_rollup = block_on(repositories.get_usage_monthly_rollup(
+            QuotaScopeKind::Tenant,
+            "tenant-b",
+            "2026-07",
+        ))
+        .unwrap()
+        .expect("tenant rollup must still accumulate normally");
         assert_eq!(tenant_rollup.request_count, 3);
         assert_eq!(tenant_rollup.total_tokens, 160);
     }

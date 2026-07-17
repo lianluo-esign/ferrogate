@@ -646,7 +646,7 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
         RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
             .expect("re-open against existing schema must succeed");
 
-    let events = reopened.billing_events();
+    let events = block_on(reopened.billing_events());
     let event = events
         .iter()
         .find(|event| event.request_id == "req-cost-rt-1")
@@ -664,8 +664,7 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
         (QuotaScopeKind::Workspace, "workspace-cost-rt"),
         (QuotaScopeKind::Key, "key-cost-rt"),
     ] {
-        let rollup = reopened
-            .get_usage_monthly_rollup(scope_type, scope_id, "2026-07")
+        let rollup = block_on(reopened.get_usage_monthly_rollup(scope_type, scope_id, "2026-07"))
             .expect("get_usage_monthly_rollup must succeed")
             .unwrap_or_else(|| panic!("rollup missing for {scope_type:?}/{scope_id}"));
         assert_eq!(rollup.total_tokens, 150);
@@ -729,18 +728,16 @@ fn billing_ledger_round_trips_through_real_supabase() {
         ferrogate_billing::charge(&price_book, &event).expect("charge must price the event");
 
     // First write inserts; a retry is an idempotent no-op on the entry id.
-    assert!(storage
-        .append_billing_ledger_entry(&entry)
-        .expect("ledger insert must succeed"));
-    assert!(!storage
-        .append_billing_ledger_entry(&entry)
+    assert!(
+        block_on(storage.append_billing_ledger_entry(&entry)).expect("ledger insert must succeed")
+    );
+    assert!(!block_on(storage.append_billing_ledger_entry(&entry))
         .expect("ledger re-insert must be idempotent"));
 
     let reopened =
         RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
             .expect("re-open against existing schema must succeed");
-    let fetched = reopened
-        .billing_ledger_entry(&entry.id)
+    let fetched = block_on(reopened.billing_ledger_entry(&entry.id))
         .expect("get must succeed")
         .expect("ledger entry must exist after reconnect");
 
@@ -751,10 +748,13 @@ fn billing_ledger_round_trips_through_real_supabase() {
     assert!((fetched.credits - 570.0).abs() < 1e-6);
     assert_eq!(fetched.tenant.organization_id.as_deref(), Some("org_demo"));
     assert_eq!(
-        reopened
-            .list_billing_ledger_entries(&ferrogate_billing::LedgerListFilter::default(), 0, 10)
-            .unwrap()
-            .len(),
+        block_on(reopened.list_billing_ledger_entries(
+            &ferrogate_billing::LedgerListFilter::default(),
+            0,
+            10
+        ))
+        .unwrap()
+        .len(),
         1
     );
 }
@@ -810,28 +810,28 @@ fn billing_ledger_tenant_filter_is_pushed_into_the_query_through_real_supabase()
             wallet_balance_after_credits: None,
         };
         let entry = ferrogate_billing::charge(&price_book, &event).expect("must price");
-        storage
-            .append_billing_ledger_entry(&entry)
-            .expect("ledger insert must succeed");
+        block_on(storage.append_billing_ledger_entry(&entry)).expect("ledger insert must succeed");
     }
 
     // Unfiltered: both rows.
-    let all = storage
-        .list_billing_ledger_entries(&ferrogate_billing::LedgerListFilter::default(), 0, 10)
-        .unwrap();
+    let all = block_on(storage.list_billing_ledger_entries(
+        &ferrogate_billing::LedgerListFilter::default(),
+        0,
+        10,
+    ))
+    .unwrap();
     assert_eq!(all.len(), 2);
 
     // Scoped to org-a: only that tenant's row, straight from the SQL query.
-    let scoped = storage
-        .list_billing_ledger_entries(
-            &ferrogate_billing::LedgerListFilter {
-                organization_id: Some("org-a".into()),
-                ..Default::default()
-            },
-            0,
-            10,
-        )
-        .unwrap();
+    let scoped = block_on(storage.list_billing_ledger_entries(
+        &ferrogate_billing::LedgerListFilter {
+            organization_id: Some("org-a".into()),
+            ..Default::default()
+        },
+        0,
+        10,
+    ))
+    .unwrap();
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].tenant.organization_id.as_deref(), Some("org-a"));
 }
@@ -876,12 +876,18 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
     };
 
     // Enqueue is idempotent on the id; due at t=100.
-    storage
-        .enqueue_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", &event, 100)
-        .expect("enqueue must succeed");
-    storage
-        .enqueue_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", &event, 999)
-        .expect("re-enqueue must be a no-op");
+    block_on(storage.enqueue_billing_report(
+        "ferrogate:trace-outbox-rt:req-outbox-rt",
+        &event,
+        100,
+    ))
+    .expect("enqueue must succeed");
+    block_on(storage.enqueue_billing_report(
+        "ferrogate:trace-outbox-rt:req-outbox-rt",
+        &event,
+        999,
+    ))
+    .expect("re-enqueue must be a no-op");
 
     // Not due before its time; due at/after 100.
     assert!(block_on(storage.list_due_billing_reports(50, 10))
@@ -948,9 +954,7 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
         wallet_balance_after_credits: None,
     };
     let id = "ferrogate:trace-dead-letter-rt:req-dead-letter-rt";
-    storage
-        .enqueue_billing_report(id, &event, 100)
-        .expect("enqueue must succeed");
+    block_on(storage.enqueue_billing_report(id, &event, 100)).expect("enqueue must succeed");
 
     // Dead-lettering removes the entry from the due queue...
     block_on(storage.dead_letter_billing_report(id, 200)).expect("dead-letter must succeed");
@@ -1017,7 +1021,7 @@ fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
     assert!(outcome.enqueue_error.is_none());
 
     // Both the metering event and the outbox row exist from one call.
-    assert_eq!(storage.billing_events().len(), 1);
+    assert_eq!(block_on(storage.billing_events()).len(), 1);
     let due = block_on(storage.list_due_billing_reports(100, 10)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, outbox_id);
@@ -1028,7 +1032,7 @@ fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
     let retry = block_on(storage.append_billing_event_with_outbox_enqueue(event, outbox_id, 100))
         .expect("idempotent retry must succeed");
     assert!(!retry.recorded);
-    assert_eq!(storage.billing_events().len(), 1);
+    assert_eq!(block_on(storage.billing_events()).len(), 1);
     assert_eq!(
         block_on(storage.list_due_billing_reports(100, 10))
             .unwrap()

@@ -313,7 +313,7 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
-        let persisted = self.repositories.billing_events();
+        let persisted = crate::gateway::block_on_sync_bridge(self.repositories.billing_events());
         if persisted.is_empty() {
             self.metering_events.list()
         } else {
@@ -329,12 +329,11 @@ impl AppState {
         tenant_scope: Option<&str>,
     ) -> AdminPage<BillingEvent> {
         if let Some(tenant_id) = tenant_scope {
-            let filtered: Vec<BillingEvent> = self
-                .repositories
-                .billing_events()
-                .into_iter()
-                .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
-                .collect();
+            let filtered: Vec<BillingEvent> =
+                crate::gateway::block_on_sync_bridge(self.repositories.billing_events())
+                    .into_iter()
+                    .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
+                    .collect();
             let filtered = if filtered.is_empty() {
                 self.metering_events
                     .list()
@@ -358,9 +357,10 @@ impl AppState {
             };
         }
 
-        let page = self
-            .repositories
-            .billing_events_page(pagination.offset, pagination.limit);
+        let page = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .billing_events_page(pagination.offset, pagination.limit),
+        );
         if page.total > 0 || !page.data.is_empty() {
             return AdminPage {
                 data: page.data,

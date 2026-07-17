@@ -84,9 +84,7 @@ impl AppState {
             .collect::<Vec<_>>();
         let mut seen_billing_events = HashSet::new();
         let mut billing_events = Vec::new();
-        for event in self
-            .repositories
-            .billing_events()
+        for event in crate::gateway::block_on_sync_bridge(self.repositories.billing_events())
             .into_iter()
             .chain(self.metering_events.list())
             .filter(|event| investigation_matches_billing(&filter, event))

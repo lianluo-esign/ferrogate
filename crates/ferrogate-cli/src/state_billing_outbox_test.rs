@@ -70,9 +70,7 @@ fn sweep_dead_letters_after_max_attempts_and_stops_retrying() {
 
     let event = sample_billing_event("req-dead-letter");
     let id = ferrogate_billing::ledger::ledger_entry_id(&event);
-    state
-        .repositories
-        .enqueue_billing_report(&id, &event, 0)
+    block_on(state.repositories.enqueue_billing_report(&id, &event, 0))
         .expect("enqueue must succeed");
 
     // Drive the entry's attempt count up to one below the give-up threshold by
@@ -110,9 +108,7 @@ fn sweep_reschedules_with_backoff_before_the_attempt_threshold() {
     let state = AppState::new(unreachable_billing_config());
     let event = sample_billing_event("req-retry");
     let id = ferrogate_billing::ledger::ledger_entry_id(&event);
-    state
-        .repositories
-        .enqueue_billing_report(&id, &event, 0)
+    block_on(state.repositories.enqueue_billing_report(&id, &event, 0))
         .expect("enqueue must succeed");
 
     block_on(state.sweep_billing_outbox_once());
