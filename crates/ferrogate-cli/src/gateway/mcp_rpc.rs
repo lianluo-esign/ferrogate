@@ -4,7 +4,6 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use crate::approval::ApprovalStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
@@ -18,8 +17,9 @@ use crate::{
 
 use super::local::{
     tool_execution_entitlement_denial, validate_skill_tool_capability, SkillExecutionContext,
-    ToolExecuteBackend,
+    ToolExecuteBackend, ToolExecutionContext,
 };
+use super::FerroGateway;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
@@ -73,6 +73,7 @@ pub(super) fn required_scope(method: &str) -> Result<&'static str, MissingScopeM
 }
 
 pub(super) async fn handle_request(
+    gateway: &FerroGateway,
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
@@ -86,6 +87,7 @@ pub(super) async fn handle_request(
         "tools/list" => tools_list(state, ctx, auth, skill_context, rpc.id),
         "tools/call" => {
             tools_call(
+                gateway,
                 state,
                 ctx,
                 auth,
@@ -186,7 +188,9 @@ fn tools_list(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tools_call(
+    gateway: &FerroGateway,
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
@@ -220,11 +224,6 @@ async fn tools_call(
         route: Some("/v1/mcp".into()),
         session_id: None,
     };
-    let audit_details = tool_audit_details(&request.name);
-    let audit_target = audit_details
-        .as_ref()
-        .map(|(server_name, tool_name)| tool_audit_target(server_name, tool_name))
-        .unwrap_or_else(|| request.name.clone());
     if let Some(skill_context) = skill_context {
         if let Err(error_response) = validate_skill_tool_capability(
             state,
@@ -232,6 +231,9 @@ async fn tools_call(
             ToolExecuteBackend::Mcp,
             &request.name,
         ) {
+            let audit_target = tool_audit_details(&request.name)
+                .map(|(server_name, tool_name)| tool_audit_target(&server_name, &tool_name))
+                .unwrap_or_else(|| request.name.clone());
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
@@ -248,194 +250,40 @@ async fn tools_call(
             );
         }
     }
-    let Some(tool) = state.tool_by_name(&request.name) else {
-        let (code, message) = if audit_details.is_some() {
-            (
-                "tool_denied",
-                format!("MCP tool {} is not allowlisted for execution", request.name),
-            )
-        } else {
-            (
-                "tool_not_found",
-                format!("tool {} is not registered", request.name),
-            )
-        };
-        state.record_admin_audit_event(audit_event(
+    // Route execution through the SAME governed chokepoint that the REST
+    // endpoint `POST /v1/mcp/tool/execute` uses. A follow-up adversarial audit
+    // found that this JSON-RPC transport executed MCP tools directly via
+    // `execute_mcp_tool`, bypassing the #200/#204 managed-action guardrails
+    // (input block/quarantine, output redaction/withhold) and the approval gate
+    // that `execute_tool_request_with_governance` enforces for every other
+    // in-process tool backend. Delegating here closes that bypass so the
+    // JSON-RPC path inherits the input guardrail, approval, MCP identity
+    // resolution, and output guardrail identically to REST.
+    //
+    // The chokepoint owns the allowlist (`tool_by_name`) check, the approval
+    // gate, `resolve_mcp_identity` (fed the original bearer via
+    // `mcp_original_bearer`), execution, and the tool.execute / guardrail /
+    // approval / identity audit events. Those are therefore intentionally NOT
+    // repeated here — doing so would double-govern and double-audit. The
+    // entitlement gate and skill-capability check above run before governance,
+    // matching the REST handler which performs them prior to the chokepoint.
+    let execution = ToolExecutionContext {
+        skill_package_id: skill_context.map(|context| context.id.as_str()),
+        skill_package_version: skill_context.map(|context| context.version.as_str()),
+        mcp_original_bearer: original_bearer,
+        ..ToolExecutionContext::default()
+    };
+    match gateway
+        .execute_tool_request_with_governance(
             ctx,
             auth,
-            skill_context,
-            "tool.execute",
-            audit_target,
-            "error",
-            tool_audit_failure_message(audit_details.as_ref(), name, code, &message),
-        ));
-        return error(id, mcp_error_code(code), message);
-    };
-
-    if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
-        let approval = match state.create_tool_approval(crate::state::ToolApprovalCreateRequest {
-            tool: &request,
-            request_id: &ctx.request_id,
-            trace_id: ctx.trace_id.clone(),
-            tenant: auth.tenant_context(),
-            actor_api_key_id: auth.api_key_id.clone(),
-            server_name: audit_details
-                .as_ref()
-                .map(|(server, _)| server.clone())
-                .or_else(|| Some(tool.extension_id.clone())),
-            approval_policy: tool.approval_policy,
-            can_log_bodies: auth.can_record_bodies(state.config.telemetry.log_bodies),
-        }) {
-            Ok(approval) => approval,
-            Err(error_response) => {
-                state.record_admin_audit_event(audit_event(
-                    ctx,
-                    auth,
-                    skill_context,
-                    "tool.approval_requested",
-                    format!("tool:{name}"),
-                    "error",
-                    format!("tool approval persistence failed: {error_response}"),
-                ));
-                return error(
-                    id,
-                    -32003,
-                    "tool approval could not be persisted".to_string(),
-                );
-            }
-        };
-        state.record_admin_audit_event(audit_event(
-            ctx,
-            auth,
-            skill_context,
-            "tool.approval_requested",
-            format!("tool_approval:{}", approval.id),
-            "pending",
-            format!(
-                "approval {} fingerprint={} tool={} expires_at_unix={}",
-                approval.id, approval.fingerprint, approval.tool_name, approval.expires_at_unix
-            ),
-        ));
-        match state.wait_for_tool_approval(&approval).await {
-            Ok(resolved) => {
-                state.record_admin_audit_event(audit_event(
-                    ctx,
-                    auth,
-                    skill_context,
-                    "tool.approval_granted",
-                    format!("tool_approval:{}", resolved.id),
-                    "approved",
-                    format!(
-                        "approval {} fingerprint={} tool={} granted before execution",
-                        resolved.id, resolved.fingerprint, resolved.tool_name
-                    ),
-                ));
-            }
-            Err(error_response) => {
-                let latest = state.tool_approval(&approval.id).unwrap_or(approval);
-                let action = match latest.status {
-                    ApprovalStatus::Denied => "tool.approval_denied",
-                    ApprovalStatus::Expired => "tool.approval_expired",
-                    _ => "tool.approval_rejected",
-                };
-                state.record_admin_audit_event(audit_event(
-                    ctx,
-                    auth,
-                    skill_context,
-                    action,
-                    format!("tool_approval:{}", latest.id),
-                    "rejected",
-                    format!(
-                        "approval {} fingerprint={} tool={} ended before execution: {}",
-                        latest.id,
-                        latest.fingerprint,
-                        latest.tool_name,
-                        error_response.message()
-                    ),
-                ));
-                return error(
-                    id,
-                    mcp_error_code(error_response.code()),
-                    error_response.message(),
-                );
-            }
-        }
-    }
-    let Some((server_name, _)) = audit_details.as_ref() else {
-        return error(
-            id,
-            -32602,
-            "MCP tool name must use serverName-toolName namespace",
-        );
-    };
-    let identity = match state
-        .resolve_mcp_identity(auth, server_name, original_bearer)
-        .await
-    {
-        Ok(identity) => identity,
-        Err(identity_error) => {
-            state.record_mcp_identity_resolution_metric(false);
-            let audit = audit_event(
-                ctx,
-                auth,
-                skill_context,
-                "mcp.identity.resolve",
-                audit_target,
-                "rejected",
-                format!(
-                    "server={server_name} tool={name} decision=deny code={}",
-                    identity_error.code
-                ),
-            );
-            let identity_error = state
-                .record_mcp_identity_error_audit(audit, identity_error)
-                .await;
-            return error(
-                id,
-                mcp_error_code(identity_error.code),
-                identity_error.message,
-            );
-        }
-    };
-    state.record_mcp_identity_resolution_metric(true);
-    state.record_admin_audit_event(audit_event(
-        ctx,
-        auth,
-        skill_context,
-        "mcp.identity.resolve",
-        audit_target.clone(),
-        "allowed",
-        format!(
-            "server={server_name} tool={name} source={} subject={} decision=allow",
-            identity.credential_source,
-            identity.subject.as_deref().unwrap_or("none")
-        ),
-    ));
-    match state
-        .execute_mcp_tool(
+            execution,
             request,
-            ctx.request_id.clone(),
-            ctx.trace_id.clone(),
-            auth.tenant_context(),
-            identity.headers,
+            ToolExecuteBackend::Mcp,
         )
         .await
     {
         Ok(response) => {
-            state.record_admin_audit_event(audit_event(
-                ctx,
-                auth,
-                skill_context,
-                "tool.execute",
-                audit_target,
-                "success",
-                tool_audit_message(
-                    audit_details.as_ref(),
-                    &response.name,
-                    "executed through native MCP endpoint",
-                    Some(response.latency_ms),
-                ),
-            ));
             let content = response
                 .content
                 .get("content")
@@ -449,27 +297,11 @@ async fn tools_call(
                 }),
             )
         }
-        Err(error_response) => {
-            state.record_admin_audit_event(audit_event(
-                ctx,
-                auth,
-                skill_context,
-                "tool.execute",
-                audit_target,
-                "error",
-                tool_audit_failure_message(
-                    audit_details.as_ref(),
-                    name,
-                    error_response.code(),
-                    error_response.message(),
-                ),
-            ));
-            error(
-                id,
-                mcp_error_code(error_response.code()),
-                error_response.message(),
-            )
-        }
+        Err(error_response) => error(
+            id,
+            mcp_error_code(error_response.code),
+            error_response.message,
+        ),
     }
 }
 

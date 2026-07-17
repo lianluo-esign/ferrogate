@@ -2855,6 +2855,7 @@ impl FerroGateway {
             .get(MCP_ORIGINAL_BEARER_HEADER)
             .and_then(|value| value.to_str().ok());
         let response = mcp_rpc::handle_request(
+            self,
             &state,
             ctx,
             &auth,

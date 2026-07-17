@@ -1090,6 +1090,13 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
                 .unwrap()
                 .contains("native MCP endpoint")
     }));
+    // The native MCP JSON-RPC `tools/call` now executes through the shared
+    // governed tool chokepoint (`execute_tool_request_with_governance`), the same
+    // seam the REST `/v1/mcp/tool/execute` path uses, so it emits the chokepoint's
+    // unified `tool.execute` audit message ("MCP upstream mcp:github tool search
+    // executed") rather than the old JSON-RPC-only "executed through native MCP
+    // endpoint" wording. The routing change is what closes the guardrail/approval
+    // bypass proved in `mcp_jsonrpc_tool_governance_e2e`.
     assert!(audit_events.iter().any(|event| {
         event["action"] == "tool.execute"
             && event["target"] == "mcp:github/tool:search"
@@ -1098,7 +1105,7 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
             && event["message"]
                 .as_str()
                 .unwrap()
-                .contains("executed through native MCP endpoint")
+                .contains("MCP upstream mcp:github tool search executed")
     }));
     assert!(audit_events.iter().any(|event| {
         event["action"] == "tool.execute"
