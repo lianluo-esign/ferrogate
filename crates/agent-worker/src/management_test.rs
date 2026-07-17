@@ -219,6 +219,59 @@ fn routes_signed_provision_to_firecracker_lifecycle_branch_fail_closed() {
 }
 
 #[test]
+fn provision_fails_closed_when_docker_backend_enabled_but_daemon_unreachable() {
+    // Companion to the firecracker fail-closed test above: that covers a backend
+    // that is simply *not configured*; this covers a backend that is *enabled but
+    // unavailable/misconfigured* (Docker opted in via the env gate, but its daemon
+    // is unreachable). Both must fail closed at provision — the signed action is
+    // rejected with a non-retryable incompatible_backend error BEFORE any host
+    // container/microVM is provisioned, so no unisolated work is ever executed
+    // (issue #205: "backend unavailable/misconfigured requests fail before
+    // executing unisolated work").
+    let _env_lock = lock_firecracker_env();
+    for var in [
+        "AGENT_WORKER_FIRECRACKER_BIN",
+        "AGENT_WORKER_FIRECRACKER_JAILER",
+        "AGENT_WORKER_FIRECRACKER_KERNEL",
+        "AGENT_WORKER_FIRECRACKER_ROOTFS",
+        "AGENT_WORKER_FIRECRACKER_KVM_DEVICE",
+    ] {
+        std::env::remove_var(var);
+    }
+    std::env::set_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND", "1");
+    // This test asserts the daemon-*unreachable* path. If a real Docker daemon
+    // happens to be available on the host, that is the positive provisioning path
+    // (covered by docker_backend_provisions_and_execs_through_management_api_when_enabled),
+    // so skip rather than assert the wrong branch.
+    if crate::docker_backend::docker_backend_readiness().is_ok() {
+        std::env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
+        eprintln!("skipping docker-unreachable fail-closed test: docker daemon is available");
+        return;
+    }
+
+    let envelope = lifecycle_envelope(
+        AgentWorkerManagementAction::Provision,
+        "agent-worker-provision-docker-unreachable",
+    );
+    let input = serde_json::to_string(&envelope).unwrap();
+    let response_json =
+        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+            .unwrap();
+    std::env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
+    let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+    assert_eq!(response["accepted"], false, "{response}");
+    assert_eq!(response["action"], "provision", "{response}");
+    assert_eq!(
+        response["error"]["code"], "incompatible_backend",
+        "{response}"
+    );
+    assert_eq!(response["error"]["retryable"], false, "{response}");
+    // No lifecycle result: provisioning never ran, so no host work was attempted.
+    assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+}
+
+#[test]
 fn cleanup_lifecycle_action_returns_typed_noop_evidence_before_firecracker_start() {
     let envelope = lifecycle_envelope(AgentWorkerManagementAction::Cleanup, "agent-worker-cleanup");
     let input = serde_json::to_string(&envelope).unwrap();
