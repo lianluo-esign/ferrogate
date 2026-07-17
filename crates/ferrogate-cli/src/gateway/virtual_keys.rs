@@ -1111,6 +1111,23 @@ impl FerroGateway {
                 .await;
             }
         };
+        // A virtual key is a data-plane credential; it must never carry a
+        // privileged `admin.*` scope (defence in depth for the empty-scope
+        // escalation fixed in AuthContext::has_scope).
+        if let Some(admin_scope) = payload.scopes.as_ref().and_then(|scopes| {
+            scopes
+                .iter()
+                .find(|scope| crate::auth::AuthContext::is_privileged_scope(scope.as_str()))
+        }) {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_virtual_key",
+                format!("virtual keys may not hold the privileged scope '{admin_scope}'"),
+                &ctx.request_id,
+            )
+            .await;
+        }
         let scope = match state.resolve_workspace_scope(&workspace_id).await {
             Ok(Some(scope)) => scope,
             Ok(None) => {

@@ -54,8 +54,25 @@ pub(crate) struct AuthContext {
 }
 
 impl AuthContext {
+    /// A privileged scope must always be granted explicitly -- it is NOT
+    /// conferred by the "empty set means all data-plane scopes" convenience
+    /// default. Today that is the `admin.*` family (admin.read/admin.write),
+    /// the only non-data-plane scopes gated by `authenticate`.
+    pub(crate) fn is_privileged_scope(scope: &str) -> bool {
+        scope.starts_with("admin.")
+    }
+
     pub(crate) fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.is_empty() || self.scopes.contains(scope)
+        if self.scopes.contains(scope) {
+            return true;
+        }
+        // An empty scope set is the data-plane convenience default ("all
+        // ordinary scopes"), relied on by keys minted without an explicit
+        // scope list. It must NEVER confer a privileged `admin.*` scope --
+        // otherwise a virtual/data-plane key created with no scopes would
+        // silently become a full tenant admin (round-7 finding). Admin scopes
+        // require explicit membership.
+        self.scopes.is_empty() && !Self::is_privileged_scope(scope)
     }
 
     pub(crate) fn can_use_model(&self, model: &str) -> bool {

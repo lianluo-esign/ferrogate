@@ -831,6 +831,57 @@ fn extracts_bearer_and_x_api_key() {
     assert_eq!(extract_api_key(&headers).as_deref(), Some("other"));
 }
 
+fn auth_with_scopes(scopes: &[&str]) -> AuthContext {
+    AuthContext {
+        region_allowlist: HashSet::new(),
+        api_key_id: Some("key".into()),
+        scopes: scopes.iter().map(|s| (*s).to_string()).collect(),
+        allowed_models: HashSet::new(),
+        denied_models: HashSet::new(),
+        allowed_providers: HashSet::new(),
+        denied_providers: HashSet::new(),
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        organization_id: None,
+        team_id: None,
+        project_id: None,
+        workspace_id: None,
+        user_id: None,
+        log_bodies: false,
+        rbac_subject: None,
+        effective_quota: ferrogate_policy::EffectiveQuota::default(),
+    }
+}
+
+#[test]
+fn empty_scope_set_grants_data_plane_scopes_but_never_admin_scopes() {
+    // Empty scopes is the data-plane convenience default ("all ordinary
+    // scopes"), so ordinary scopes are granted...
+    let empty = auth_with_scopes(&[]);
+    assert!(empty.has_scope("chat.completions"));
+    assert!(empty.has_scope("tools.execute"));
+    // ...but a privileged admin scope is NEVER conferred implicitly (round-7:
+    // a virtual key minted without scopes must not become a tenant admin).
+    assert!(!empty.has_scope("admin.read"));
+    assert!(!empty.has_scope("admin.write"));
+
+    // An explicit scope set grants exactly what it lists.
+    let explicit = auth_with_scopes(&["chat.completions"]);
+    assert!(explicit.has_scope("chat.completions"));
+    assert!(!explicit.has_scope("tools.execute"));
+    assert!(!explicit.has_scope("admin.write"));
+
+    // Admin scopes only via explicit grant.
+    let admin = auth_with_scopes(&["admin.read", "admin.write"]);
+    assert!(admin.has_scope("admin.read"));
+    assert!(admin.has_scope("admin.write"));
+    // An explicit admin key does not implicitly gain data-plane scopes.
+    assert!(!admin.has_scope("chat.completions"));
+
+    assert!(AuthContext::is_privileged_scope("admin.read"));
+    assert!(!AuthContext::is_privileged_scope("chat.completions"));
+}
+
 #[test]
 fn auth_context_model_allowlist() {
     let auth = AuthContext {
