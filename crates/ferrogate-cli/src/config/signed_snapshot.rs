@@ -374,6 +374,133 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<(), R
     Ok(())
 }
 
+/// Outcome of feeding an envelope to a [`SignedSnapshotStore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotIngestOutcome {
+    /// The envelope verified and became the new last-known-good at `revision`.
+    Activated { revision: u64 },
+    /// The envelope failed verification; the prior last-known-good is retained
+    /// unchanged (acceptance #206: a forged/replayed/expired/... snapshot must
+    /// never replace good state).
+    Rejected(RejectReason),
+}
+
+/// The data plane's offline serving status, derived from the last-known-good
+/// snapshot and the current clock (issue #206 acceptance: continue on the last
+/// valid snapshot until expiry, then fail closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OfflineStatus {
+    /// No snapshot has ever been accepted -- the data plane has no policy to
+    /// serve and must fail closed for security-critical controls.
+    NoSnapshot,
+    /// Serving the last-known-good snapshot; it is still within its validity
+    /// window.
+    Active {
+        revision: u64,
+        not_after_unix: u64,
+        seconds_until_expiry: u64,
+    },
+    /// The last-known-good snapshot has passed its `not_after_unix`. Security
+    /// policy must NOT be served on an expired snapshot (no silent indefinite
+    /// operation on expired policy -- issue #206 non-goal); the data plane fails
+    /// closed until a fresh snapshot arrives.
+    ExpiredFailClosed { revision: u64, not_after_unix: u64 },
+}
+
+/// The data-plane side of the offline policy loop (issue #206): holds the last
+/// verified snapshot, accepts only strictly-newer authentic snapshots (via
+/// [`verify_snapshot`], keyed off the currently-active revision so replays and
+/// downgrades are rejected), and decides what may be served during a
+/// control-plane outage — continue on the last-known-good until its expiry,
+/// then fail closed.
+///
+/// This is the pure decision core; the outbound-only sync transport that feeds
+/// it envelopes and the activation wiring are separate (network/infra) steps.
+pub(crate) struct SignedSnapshotStore {
+    trusted_keys: BTreeMap<String, VerifyingKey>,
+    expected_tenant: String,
+    expected_deployment: String,
+    last_known_good: Option<VerifiedSnapshot>,
+}
+
+impl SignedSnapshotStore {
+    /// A store trusting `trusted_keys`, bound to a single tenant/deployment
+    /// identity, with no snapshot yet (so it fails closed until one arrives).
+    pub(crate) fn new(
+        trusted_keys: BTreeMap<String, VerifyingKey>,
+        expected_tenant: impl Into<String>,
+        expected_deployment: impl Into<String>,
+    ) -> Self {
+        Self {
+            trusted_keys,
+            expected_tenant: expected_tenant.into(),
+            expected_deployment: expected_deployment.into(),
+            last_known_good: None,
+        }
+    }
+
+    /// The currently-active revision (0 when no snapshot has been accepted),
+    /// used as the replay/downgrade floor for the next envelope.
+    pub(crate) fn active_revision(&self) -> u64 {
+        self.last_known_good
+            .as_ref()
+            .map(|snapshot| snapshot.revision)
+            .unwrap_or(0)
+    }
+
+    /// Verify `envelope` against the current active revision and, only if it
+    /// passes every check, adopt it as the new last-known-good. A rejected
+    /// envelope leaves the prior last-known-good untouched.
+    pub(crate) fn ingest(
+        &mut self,
+        envelope: &SignedSnapshotEnvelope,
+        now_unix: u64,
+    ) -> SnapshotIngestOutcome {
+        match verify_snapshot(
+            envelope,
+            &self.trusted_keys,
+            &self.expected_tenant,
+            &self.expected_deployment,
+            self.active_revision(),
+            now_unix,
+        ) {
+            Ok(verified) => {
+                let revision = verified.revision;
+                self.last_known_good = Some(verified);
+                SnapshotIngestOutcome::Activated { revision }
+            }
+            Err(reason) => SnapshotIngestOutcome::Rejected(reason),
+        }
+    }
+
+    /// The offline serving status at `now_unix`.
+    pub(crate) fn status(&self, now_unix: u64) -> OfflineStatus {
+        match &self.last_known_good {
+            None => OfflineStatus::NoSnapshot,
+            Some(snapshot) if now_unix <= snapshot.not_after_unix => OfflineStatus::Active {
+                revision: snapshot.revision,
+                not_after_unix: snapshot.not_after_unix,
+                seconds_until_expiry: snapshot.not_after_unix - now_unix,
+            },
+            Some(snapshot) => OfflineStatus::ExpiredFailClosed {
+                revision: snapshot.revision,
+                not_after_unix: snapshot.not_after_unix,
+            },
+        }
+    }
+
+    /// The payload safe to serve at `now_unix`: the last-known-good snapshot's
+    /// payload while it is unexpired, or `None` once expired (fail closed) or if
+    /// none has ever been accepted. Security-critical controls must treat `None`
+    /// as deny.
+    pub(crate) fn active_payload(&self, now_unix: u64) -> Option<&SignedSnapshotPayload> {
+        match &self.last_known_good {
+            Some(snapshot) if now_unix <= snapshot.not_after_unix => Some(&snapshot.payload),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "signed_snapshot_test.rs"]
 mod tests;

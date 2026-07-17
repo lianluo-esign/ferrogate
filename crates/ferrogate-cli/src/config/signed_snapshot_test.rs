@@ -14,8 +14,9 @@ use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 
 use super::super::types::{ApiKey, PolicyRule};
 use super::{
-    canonical_signing_bytes, sign_snapshot, verify_snapshot, RejectReason, SignedSnapshotEnvelope,
-    SignedSnapshotPayload, SIGNED_SNAPSHOT_SCHEMA_VERSION,
+    canonical_signing_bytes, sign_snapshot, verify_snapshot, OfflineStatus, RejectReason,
+    SignedSnapshotEnvelope, SignedSnapshotPayload, SignedSnapshotStore, SnapshotIngestOutcome,
+    SIGNED_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const TENANT: &str = "tenant-alpha";
@@ -394,6 +395,159 @@ fn unsupported_schema_version_is_rejected() {
 
     let result = verify_snapshot(&envelope, &keys, TENANT, DEPLOYMENT, 4, NOT_AFTER);
     assert_eq!(result.unwrap_err(), RejectReason::SchemaUnsupported);
+}
+
+// --- SignedSnapshotStore: the offline policy loop (issue #206 acceptance #3) ---
+
+/// A store trusting KEY_ID for TENANT/DEPLOYMENT, plus the signing key.
+fn store_fixture() -> (SignedSnapshotStore, SigningKey) {
+    let key = signing_key(7);
+    let store = SignedSnapshotStore::new(
+        trust_map(&[(KEY_ID, &key.verifying_key())]),
+        TENANT,
+        DEPLOYMENT,
+    );
+    (store, key)
+}
+
+fn envelope_at(key: &SigningKey, revision: u64, not_after: u64) -> SignedSnapshotEnvelope {
+    sign_snapshot(
+        sample_payload(),
+        TENANT,
+        DEPLOYMENT,
+        revision,
+        not_after,
+        key,
+        KEY_ID,
+    )
+    .expect("sign")
+}
+
+#[test]
+fn new_store_fails_closed_with_no_snapshot() {
+    let (store, _key) = store_fixture();
+    assert_eq!(store.active_revision(), 0);
+    assert_eq!(store.status(1_000), OfflineStatus::NoSnapshot);
+    // Nothing to serve -> security-critical controls must deny.
+    assert!(store.active_payload(1_000).is_none());
+}
+
+#[test]
+fn store_activates_a_valid_snapshot_then_serves_it_until_expiry_then_fails_closed() {
+    let (mut store, key) = store_fixture();
+    let envelope = envelope_at(&key, 5, NOT_AFTER);
+
+    assert_eq!(
+        store.ingest(&envelope, NOT_AFTER - 100),
+        SnapshotIngestOutcome::Activated { revision: 5 }
+    );
+    assert_eq!(store.active_revision(), 5);
+
+    // Within validity: served, status Active.
+    assert!(store.active_payload(NOT_AFTER - 100).is_some());
+    assert_eq!(
+        store.status(NOT_AFTER - 100),
+        OfflineStatus::Active {
+            revision: 5,
+            not_after_unix: NOT_AFTER,
+            seconds_until_expiry: 100,
+        }
+    );
+
+    // Boundary now == not_after: still valid.
+    assert!(store.active_payload(NOT_AFTER).is_some());
+
+    // Past expiry with no fresh snapshot (control-plane outage): fail closed.
+    assert_eq!(
+        store.status(NOT_AFTER + 1),
+        OfflineStatus::ExpiredFailClosed {
+            revision: 5,
+            not_after_unix: NOT_AFTER,
+        }
+    );
+    assert!(
+        store.active_payload(NOT_AFTER + 1).is_none(),
+        "expired policy must not be served (no silent operation on expired policy)"
+    );
+}
+
+#[test]
+fn store_rejects_a_forged_snapshot_without_replacing_last_known_good() {
+    let (mut store, key) = store_fixture();
+    store.ingest(&envelope_at(&key, 5, NOT_AFTER), 1_000);
+
+    // A newer-revision but forged (payload mutated after signing) envelope.
+    let mut forged = envelope_at(&key, 6, NOT_AFTER);
+    let name = &mut forged.payload.api_keys[0].name;
+    let mut bytes = name.clone().into_bytes();
+    bytes[0] ^= 0x01;
+    *name = String::from_utf8(bytes).expect("utf8");
+
+    assert_eq!(
+        store.ingest(&forged, 1_000),
+        SnapshotIngestOutcome::Rejected(RejectReason::BadSignature)
+    );
+    // Last-known-good is untouched: still rev 5, still serving.
+    assert_eq!(store.active_revision(), 5);
+    assert!(store.active_payload(1_000).is_some());
+}
+
+#[test]
+fn store_rejects_replay_and_downgrade_against_the_active_revision() {
+    let (mut store, key) = store_fixture();
+    store.ingest(&envelope_at(&key, 5, NOT_AFTER), 1_000);
+
+    // Replay the same revision.
+    assert_eq!(
+        store.ingest(&envelope_at(&key, 5, NOT_AFTER), 1_000),
+        SnapshotIngestOutcome::Rejected(RejectReason::StaleOrReplayedRevision)
+    );
+    // Downgrade to an older revision.
+    assert_eq!(
+        store.ingest(&envelope_at(&key, 3, NOT_AFTER), 1_000),
+        SnapshotIngestOutcome::Rejected(RejectReason::StaleOrReplayedRevision)
+    );
+    assert_eq!(store.active_revision(), 5);
+
+    // A strictly-newer authentic snapshot IS adopted.
+    assert_eq!(
+        store.ingest(&envelope_at(&key, 6, NOT_AFTER), 1_000),
+        SnapshotIngestOutcome::Activated { revision: 6 }
+    );
+    assert_eq!(store.active_revision(), 6);
+}
+
+#[test]
+fn store_rejects_cross_tenant_and_expired_without_replacing_good_state() {
+    let (mut store, key) = store_fixture();
+    store.ingest(&envelope_at(&key, 5, NOT_AFTER), 1_000);
+
+    // Cross-tenant: signed for a different tenant identity.
+    let cross_tenant = sign_snapshot(
+        sample_payload(),
+        "tenant-evil",
+        DEPLOYMENT,
+        6,
+        NOT_AFTER,
+        &key,
+        KEY_ID,
+    )
+    .expect("sign");
+    assert_eq!(
+        store.ingest(&cross_tenant, 1_000),
+        SnapshotIngestOutcome::Rejected(RejectReason::IdentityMismatch)
+    );
+
+    // Expired-on-arrival: a newer revision that is already past its expiry.
+    let already_expired = envelope_at(&key, 6, NOT_AFTER);
+    assert_eq!(
+        store.ingest(&already_expired, NOT_AFTER + 1),
+        SnapshotIngestOutcome::Rejected(RejectReason::Expired)
+    );
+
+    // Neither rejection replaced the rev-5 last-known-good.
+    assert_eq!(store.active_revision(), 5);
+    assert!(store.active_payload(1_000).is_some());
 }
 
 #[test]
