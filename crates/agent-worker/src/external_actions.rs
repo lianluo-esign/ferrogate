@@ -2750,6 +2750,17 @@ fn read_beneath_authorized_root(
                 "managed filesystem target identity changed after authorization".to_string(),
             ));
         }
+        // Defense in depth: the authorization layer already refuses hard-linked
+        // read targets, but a hard link is not a symlink, so openat2's
+        // NO_SYMLINKS/RESOLVE_BENEATH would happily open one whose inode also has
+        // a name outside the root. Refuse any multiply-linked read target here
+        // too, at the point of the actual read.
+        if metadata.nlink() > 1 {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "managed filesystem read target is hard-linked (st_nlink > 1); its inode may alias content outside the authorized root"
+                    .to_string(),
+            ));
+        }
     }
     let mut bytes = Vec::new();
     target_file.read_to_end(&mut bytes).map_err(|error| {

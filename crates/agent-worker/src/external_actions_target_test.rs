@@ -136,6 +136,52 @@ fn typed_filesystem_grant_executes_through_gateway_transport_and_bound_root() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn typed_filesystem_read_rejects_hardlink_escape() {
+    // A hard link at an in-workspace path can alias a sensitive inode that also
+    // has a name OUTSIDE the workspace. Empirically, before the fail-closed
+    // `st_nlink > 1` guard, this exact setup made `execute_governed_filesystem_action`
+    // return content_excerpt = "TOP SECRET OUTSIDE WORKSPACE": the authorization
+    // layer bound the outside inode, openat2(RESOLVE_BENEATH | NO_SYMLINKS) opened
+    // the in-root directory entry (a hard link is not a symlink), and the dev/ino
+    // re-check matched the aliased inode. It must now fail closed.
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret");
+    std::fs::write(&secret, "TOP SECRET OUTSIDE WORKSPACE").unwrap();
+    std::fs::hard_link(&secret, workspace.path().join("allowed_link.txt")).unwrap();
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            target_grants: vec![CapabilityTargetGrant {
+                action: CapabilityAction::Filesystem,
+                selector_id: "workspace-read".into(),
+                selector: CapabilityTargetSelector::Filesystem {
+                    workspace_root: workspace.path().display().to_string(),
+                    path_glob: "allowed*.txt".into(),
+                    operations: vec![TargetOperation::Read],
+                },
+            }],
+            ..CapabilityPolicy::default()
+        },
+    ));
+
+    let error = execute_governed_filesystem_action(
+        &gate,
+        session(),
+        ManagedFilesystemAction {
+            path: "allowed_link.txt".into(),
+            access: ManagedFilesystemAccess::Read,
+            workspace_relative: true,
+        },
+        workspace.path(),
+        false,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("hard-linked"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn typed_filesystem_execution_rejects_symlink_swap_after_authorization() {
     struct SwapAfterAuthorization<A> {
         inner: RuntimeGatewayExternalActionAuthorizer<A>,

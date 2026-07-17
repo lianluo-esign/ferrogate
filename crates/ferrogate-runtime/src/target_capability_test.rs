@@ -141,6 +141,128 @@ fn filesystem_rejects_traversal_and_symlink_escape() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn filesystem_rejects_hardlink_escape() {
+    // A hard link is not a symlink: a directory entry beneath the workspace root
+    // can alias an inode that ALSO has a name outside the root, so `canonicalize`
+    // + `starts_with(root)` (and the execution-layer openat2 RESOLVE_BENEATH /
+    // NO_SYMLINKS) accept it and disclose the outside content. Empirically, before
+    // the fail-closed `st_nlink > 1` guard, `bind` recorded the outside inode and a
+    // read returned "TOP SECRET OUTSIDE WORKSPACE". Fail closed on any hard link.
+    //
+    // A single base dir keeps the outside secret and the workspace on the same
+    // filesystem so a hard link between them is possible in the first place.
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let secret = base.path().join("outside_secret");
+    fs::write(&secret, "TOP SECRET OUTSIDE WORKSPACE").unwrap();
+    fs::hard_link(&secret, root.join("allowed_link.txt")).unwrap();
+
+    let selector = CapabilityTargetSelector::Filesystem {
+        workspace_root: root.display().to_string(),
+        path_glob: "allowed*.txt".into(),
+        operations: vec![TargetOperation::Read],
+    };
+    let escape =
+        canonical_filesystem_target("allowed_link.txt", TargetOperation::Read, true).unwrap();
+
+    let matches_error = escape.matches(&selector).unwrap_err();
+    assert!(matches_error.contains("hard-linked"), "{matches_error}");
+    let bind_error = escape.bind(&selector).unwrap_err();
+    assert!(bind_error.contains("hard-linked"), "{bind_error}");
+
+    // The guard is precise: a genuine single-link file under the same glob still
+    // binds, so we are not blanket-denying the whole workspace.
+    fs::write(root.join("allowed.txt"), "workspace-owned").unwrap();
+    let legit = canonical_filesystem_target("allowed.txt", TargetOperation::Read, true).unwrap();
+    assert!(legit.matches(&selector).unwrap());
+    assert!(legit.bind(&selector).unwrap().is_some());
+}
+
+#[test]
+fn network_rejects_percent_encoded_path_traversal() {
+    // `contains_ambiguous_percent_encoding` must reject encoded path separators
+    // and traversal before the URL is split, so an agent cannot smuggle `../`,
+    // `/`, `\`, or a NUL past `normalize_url_path`.
+    for encoded in [
+        "https://api.example.com/v1/%2e%2e/admin",
+        "https://api.example.com/v1/%2E%2E/admin",
+        "https://api.example.com/v1%2fadmin",
+        "https://api.example.com/v1%5cadmin",
+        "https://api.example.com/v1/data%00",
+    ] {
+        let error =
+            canonical_network_url(encoded, Some("GET"), &["203.0.113.10".into()], &[]).unwrap_err();
+        assert!(
+            error.contains("ambiguous encoded path separators or traversal"),
+            "{encoded} -> {error}"
+        );
+    }
+
+    // A clean, non-encoded path on the same host is still accepted, so the guard
+    // is specific to the ambiguous encodings rather than blanket-rejecting paths.
+    let selector = CapabilityTargetSelector::Network {
+        scheme: "https".into(),
+        host: "api.example.com".into(),
+        port: 443,
+        method: Some("GET".into()),
+        path_glob: "/v1/**".into(),
+        allowed_ips: vec!["203.0.113.10".parse().unwrap()],
+        allow_redirects: false,
+    };
+    let clean = canonical_network_url(
+        "https://api.example.com/v1/data",
+        Some("GET"),
+        &["203.0.113.10".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(clean.matches(&selector).unwrap());
+}
+
+#[test]
+fn network_rejects_idn_homoglyph_and_reports_punycode_behavior() {
+    // A raw non-ASCII homoglyph host (Cyrillic 'а' U+0430 in place of ASCII 'a')
+    // is denied by the `!value.is_ascii()` guard in `normalize_host`, both through
+    // the URL selector and directly.
+    let homoglyph = "https://\u{0430}pi.example.com/v1/data";
+    let url_error =
+        canonical_network_url(homoglyph, Some("GET"), &["203.0.113.10".into()], &[]).unwrap_err();
+    assert!(
+        url_error.contains("host notation is ambiguous"),
+        "{url_error}"
+    );
+    assert!(normalize_host("\u{0430}pi.example.com").is_err());
+    assert!(canonical_network_host("https", "\u{0430}pi.example.com", 443, &[]).is_err());
+
+    // FINDING: an already-punycode ASCII host (xn--) is NOT rejected or decoded by
+    // `normalize_host` — the `!value.is_ascii()` guard only catches the raw
+    // non-ASCII form. It is instead CONTAINED downstream by exact host equality:
+    // the punycode host does not equal a differently-named operator selector host,
+    // so it cannot match a grant for `api.example.com`.
+    let punycode = normalize_host("xn--pi-8ma.example.com").unwrap();
+    assert_eq!(punycode, "xn--pi-8ma.example.com");
+    let selector = CapabilityTargetSelector::Network {
+        scheme: "https".into(),
+        host: "api.example.com".into(),
+        port: 443,
+        method: Some("GET".into()),
+        path_glob: "/v1/**".into(),
+        allowed_ips: vec!["203.0.113.10".parse().unwrap()],
+        allow_redirects: false,
+    };
+    let punycode_target = canonical_network_url(
+        "https://xn--pi-8ma.example.com/v1/data",
+        Some("GET"),
+        &["203.0.113.10".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(!punycode_target.matches(&selector).unwrap());
+}
+
 #[test]
 fn filesystem_write_binds_existing_parent_and_absent_leaf() {
     let root = tempfile::tempdir().unwrap();

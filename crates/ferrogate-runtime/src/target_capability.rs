@@ -348,6 +348,14 @@ impl CanonicalCapabilityTarget {
                 if !resolved.starts_with(&root) {
                     return Err("filesystem target resolves outside workspace root".to_string());
                 }
+                // Reads/executes resolve to an existing inode; a hard link to that
+                // inode from outside the root would otherwise slip past the
+                // starts_with confinement (see `reject_hardlinked_read_target`).
+                // Writes are create-only (the leaf must not yet exist), so there is
+                // no inode to alias.
+                if *operation != TargetOperation::Write {
+                    reject_hardlinked_read_target(&resolved)?;
+                }
                 Ok(operations.contains(operation) && glob_matches(path_glob, path))
             }
             (
@@ -542,6 +550,11 @@ impl CanonicalCapabilityTarget {
                     if !target.starts_with(&root) {
                         return Err("filesystem target resolves outside workspace root".to_string());
                     }
+                    // A hard link beneath the root can alias an inode named from
+                    // outside the root; the dev/ino pin below would faithfully bind
+                    // that outside inode. Fail closed on any multiply-linked
+                    // read/execute target before recording its identity.
+                    reject_hardlinked_read_target(&target)?;
                     let (root_device, root_inode, target_device, target_inode) =
                         filesystem_object_identities(&root, &target)?;
                     let target_content_fingerprint = (*operation == TargetOperation::Execute)
@@ -603,6 +616,44 @@ fn filesystem_object_identities(
     _target: &std::path::Path,
 ) -> Result<(u64, u64, u64, u64), String> {
     Err("filesystem object identity binding is unsupported on this platform".to_string())
+}
+
+/// Fail closed on a read/execute target whose inode is reachable from more than
+/// one directory entry (a hard link).
+///
+/// `canonicalize` + `starts_with(root)` and the execution-layer
+/// `openat2(RESOLVE_BENEATH | NO_SYMLINKS)` both accept a hard link that lives
+/// beneath the workspace root, because the directory entry genuinely *is*
+/// beneath the root and a hard link is not a symlink. But a hard link is only an
+/// additional name for an inode: the same inode can simultaneously be named by a
+/// path *outside* the root (e.g. `/etc/shadow` hard-linked to
+/// `<root>/allowed.txt`), so reading the in-workspace name discloses the outside
+/// content and the dev/ino pin still matches. There is no feasible way to
+/// enumerate every alias of an inode without scanning the whole filesystem, so
+/// we reject any multiply-linked read/execute target outright.
+///
+/// Tradeoff: a legitimately hard-linked file that lives *entirely* inside the
+/// workspace is also refused for managed read/execute. That is the fail-closed
+/// price of not being able to prove the absence of an out-of-root alias; managed
+/// read/execute targets must therefore be single-link (`st_nlink == 1`) files.
+#[cfg(unix)]
+fn reject_hardlinked_read_target(target: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(target)
+        .map_err(|error| format!("filesystem target identity cannot be read: {error}"))?;
+    if metadata.nlink() > 1 {
+        return Err(
+            "filesystem target is hard-linked (st_nlink > 1); its inode may alias content outside the workspace root"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_hardlinked_read_target(_target: &std::path::Path) -> Result<(), String> {
+    Err("filesystem hard-link containment is unsupported on this platform".to_string())
 }
 
 pub fn opaque_reference_fingerprint(value: &str) -> String {
