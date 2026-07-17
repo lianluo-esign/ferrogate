@@ -943,6 +943,133 @@ fn matches_response_guardrail_with_redact_effect() {
     assert_eq!(snapshot.guardrail_redaction_total, 1);
 }
 
+// Bug B: a Redact policy must fail closed (Deny) when a flagged finding lands in
+// an immutable segment that no content patch can scrub -- even when a second,
+// mutable match makes the patch set non-empty. Otherwise redaction runs on the
+// mutable segment only while the immutable secret is returned verbatim and the
+// audit records a successful redaction.
+fn redact_secret_response_rule() -> crate::config::GuardrailRule {
+    crate::config::GuardrailRule {
+        id: "redact-secret".into(),
+        name: "Redact secret".into(),
+        enabled: true,
+        stage: crate::config::GuardrailStage::Response,
+        sources: ferrogate_guardrails::all_content_sources(),
+        organization_ids: vec![],
+        project_ids: vec![],
+        api_key_ids: vec![],
+        models: vec!["fast-chat".into()],
+        providers: vec!["openai".into()],
+        keywords: vec!["secret".into()],
+        regex: vec![],
+        max_input_bytes: None,
+        provider: GuardrailProviderKind::None,
+        provider_endpoint: None,
+        provider_timeout_ms: 2_000,
+        provider_runtime: Default::default(),
+        effect: crate::config::GuardrailEffect::Redact,
+        code: "guardrail_redacted".into(),
+        message: "redacted by guardrail".into(),
+    }
+}
+
+fn match_guardrail_for_response_envelope(
+    state: &AppState,
+    envelope: &ferrogate_guardrails::GuardrailEnvelope,
+) -> Option<GuardrailMatch> {
+    let tenant = ferrogate_core::TenantContext::default();
+    tokio::runtime::Runtime::new()
+        .expect("test runtime")
+        .block_on(state.match_guardrail(
+            crate::config::GuardrailStage::Response,
+            GuardrailEvaluationContext {
+                request_id: "test-request",
+                trace_id: Some("test-trace"),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: None,
+                tenant: &tenant,
+                service_account_id: None,
+                gateway_config_id: None,
+                model: Some("fast-chat"),
+                provider: Some("openai"),
+                streaming: false,
+                envelope,
+                managed_action: None,
+            },
+        ))
+}
+
+#[test]
+fn response_redact_denies_when_a_finding_lands_in_an_immutable_tool_call_segment() {
+    let state = AppState::new(Config {
+        providers: vec![test_provider()],
+        models: vec![test_model()],
+        guardrails: vec![redact_secret_response_rule()],
+        ..Config::default()
+    });
+    // The keyword appears in BOTH a mutable assistant content segment
+    // (redactable) and an immutable tool-call arguments segment (not
+    // redactable). The mutable match makes content_patches non-empty, so the
+    // pre-fix `content_patches.is_empty()` guard would leave the effect as
+    // Redact and return the tool-call secret verbatim.
+    let response = serde_json::json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "here is the secret value",
+                "tool_calls": [{
+                    "function": {"name": "exfiltrate", "arguments": "{\"token\":\"secret\"}"}
+                }]
+            }
+        }]
+    });
+    let envelope = ferrogate_guardrails::normalize_response(
+        ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+        &serde_json::to_vec(&response).expect("response fixture"),
+        false,
+    );
+    assert!(envelope.segments.iter().any(|segment| {
+        segment.source == ferrogate_guardrails::ContentSource::ToolArguments
+            && segment.text.contains("secret")
+    }));
+    let matched =
+        match_guardrail_for_response_envelope(&state, &envelope).expect("guardrail should match");
+    assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+    assert_eq!(matched.code, "guardrail_invalid_redaction");
+    state.record_guardrail_match(&matched);
+    let snapshot = state.prometheus_metrics_snapshot();
+    assert_eq!(snapshot.guardrail_denial_total, 1);
+    assert_eq!(snapshot.guardrail_redaction_total, 0);
+}
+
+#[test]
+fn response_redact_still_redacts_when_every_match_is_in_a_mutable_segment() {
+    let state = AppState::new(Config {
+        providers: vec![test_provider()],
+        models: vec![test_model()],
+        guardrails: vec![redact_secret_response_rule()],
+        ..Config::default()
+    });
+    // Control: the keyword only appears in the mutable assistant content, so a
+    // patch fully covers the finding and redaction remains valid (no over-broad
+    // downgrade from the has_unredactable_findings gate).
+    let response = serde_json::json!({
+        "choices": [{"message": {"role": "assistant", "content": "here is the secret value"}}]
+    });
+    let envelope = ferrogate_guardrails::normalize_response(
+        ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+        &serde_json::to_vec(&response).expect("response fixture"),
+        false,
+    );
+    let matched =
+        match_guardrail_for_response_envelope(&state, &envelope).expect("guardrail should match");
+    assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
+    assert!(!matched.content_patches.is_empty());
+}
+
 #[test]
 fn later_block_marks_an_earlier_redaction_as_not_enforced() {
     let base = crate::config::GuardrailRule {

@@ -390,6 +390,85 @@ impl DeterministicDetector {
             });
         }
     }
+
+    /// Map a match found in a coalesced group's contiguous text back to the
+    /// individual segments it covers, emitting a finding (and, for mutable
+    /// segments, a patch) for each per-segment sub-range. A match wholly inside
+    /// one segment resolves to exactly one sub-range identical to matching that
+    /// segment directly; a match that straddles a segment boundary resolves to
+    /// one sub-range per segment it overlaps so every mutable part is patched
+    /// and every immutable part still yields a finding.
+    fn add_group_match(
+        &self,
+        findings: &mut Vec<Finding>,
+        patches: &mut Vec<ContentPatch>,
+        group: &CoalescedGroup<'_>,
+        detected: TextMatch<'_>,
+    ) {
+        for (index, segment) in group.segments.iter().enumerate() {
+            let segment_start = group.starts[index];
+            let segment_end = segment_start + segment.text.len();
+            let overlap_start = detected.start.max(segment_start);
+            let overlap_end = detected.end.min(segment_end);
+            if overlap_start < overlap_end {
+                self.add_text_match(
+                    findings,
+                    patches,
+                    segment,
+                    TextMatch {
+                        start: overlap_start - segment_start,
+                        end: overlap_end - segment_start,
+                        ..detected
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// A maximal run of consecutive selected segments that share one
+/// [`ContentSource`]. Keyword/regex/secret matchers run against the
+/// concatenation of the run (no separator) so a token an attacker split across
+/// adjacent same-source text parts or same-source messages is still detected;
+/// `starts` records where each segment begins in `text` so match offsets map
+/// back to the individual segments for patching and evidence.
+struct CoalescedGroup<'a> {
+    text: String,
+    segments: Vec<&'a ContentSegment>,
+    starts: Vec<usize>,
+}
+
+/// Coalesce consecutive same-source selected segments into contiguous groups.
+///
+/// The run boundary is [`ContentSource`]: a source change (or the first
+/// segment) starts a new group, so content from a different speaker or a
+/// different tool is never concatenated into a single match. Segments are
+/// joined with no separator (unlike `GuardrailEnvelope::flattened_text`, whose
+/// `"\n"` joins would re-break a straddling token).
+fn coalesce_selected_segments<'a>(selected: &[&'a ContentSegment]) -> Vec<CoalescedGroup<'a>> {
+    let mut groups: Vec<CoalescedGroup<'a>> = Vec::new();
+    for &segment in selected {
+        let extend = groups.last().is_some_and(|group| {
+            group
+                .segments
+                .last()
+                .is_some_and(|last| last.source == segment.source)
+        });
+        if !extend {
+            groups.push(CoalescedGroup {
+                text: String::new(),
+                segments: Vec::new(),
+                starts: Vec::new(),
+            });
+        }
+        let group = groups
+            .last_mut()
+            .expect("a group was just pushed when not extending");
+        group.starts.push(group.text.len());
+        group.text.push_str(&segment.text);
+        group.segments.push(segment);
+    }
+    groups
 }
 
 #[async_trait]
@@ -466,13 +545,18 @@ impl GuardrailDetector for DeterministicDetector {
             ));
         }
 
-        for segment in &selected {
+        // Run keyword/regex/secret matchers over the contiguous concatenation
+        // of each same-source run so a token split across adjacent segments is
+        // detected; offsets are mapped back to the individual segments for
+        // patching. A token wholly inside one segment resolves to exactly the
+        // same per-segment sub-range as before, preserving prior behaviour.
+        for group in &coalesce_selected_segments(&selected) {
             for keyword in &self.config.keywords {
-                for (start, matched) in segment.text.match_indices(keyword) {
-                    self.add_text_match(
+                for (start, matched) in group.text.match_indices(keyword) {
+                    self.add_group_match(
                         &mut findings,
                         &mut patches,
-                        segment,
+                        group,
                         TextMatch {
                             category: "contains",
                             severity: FindingSeverity::High,
@@ -484,11 +568,11 @@ impl GuardrailDetector for DeterministicDetector {
                 }
             }
             for expression in &self.regex {
-                for matched in expression.find_iter(&segment.text) {
-                    self.add_text_match(
+                for matched in expression.find_iter(&group.text) {
+                    self.add_group_match(
                         &mut findings,
                         &mut patches,
-                        segment,
+                        group,
                         TextMatch {
                             category: "regex",
                             severity: FindingSeverity::High,
@@ -500,11 +584,11 @@ impl GuardrailDetector for DeterministicDetector {
                 }
             }
             for (pattern, expression) in &self.secrets {
-                for matched in expression.find_iter(&segment.text) {
-                    self.add_text_match(
+                for matched in expression.find_iter(&group.text) {
+                    self.add_group_match(
                         &mut findings,
                         &mut patches,
-                        segment,
+                        group,
                         TextMatch {
                             category: pattern.category(),
                             severity: FindingSeverity::Critical,
@@ -515,7 +599,13 @@ impl GuardrailDetector for DeterministicDetector {
                     );
                 }
             }
-            if let Some(json) = &self.json {
+        }
+
+        // JSON constraints are evaluated per segment: each JSON-valued segment
+        // is a self-contained document and must never be concatenated with a
+        // neighbour before parsing.
+        if let Some(json) = &self.json {
+            for segment in &selected {
                 evaluate_json_segment(self, json, segment, "json", &mut findings);
             }
         }

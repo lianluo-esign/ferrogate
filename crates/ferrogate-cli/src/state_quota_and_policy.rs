@@ -1158,6 +1158,12 @@ struct GuardrailCheckEvaluation {
     latency_ms: u64,
     finding_category_counts: BTreeMap<String, u64>,
     finding_count: u64,
+    /// True when at least one actionable (Fail) located finding is not covered
+    /// by a redaction patch on a mutable segment — e.g. a secret detected in an
+    /// immutable `ToolArguments`/`Json` segment. A `Redact` action must fail
+    /// closed (downgrade to `Deny`) in this case so flagged content is never
+    /// returned verbatim while the audit records a successful redaction.
+    has_unredactable_findings: bool,
 }
 
 #[derive(Debug)]
@@ -1252,6 +1258,7 @@ impl GuardrailCheckEvaluation {
             latency_ms: 0,
             finding_category_counts: BTreeMap::new(),
             finding_count: 0,
+            has_unredactable_findings: false,
         }
     }
 
@@ -1269,6 +1276,7 @@ impl GuardrailCheckEvaluation {
             latency_ms: 0,
             finding_category_counts: BTreeMap::new(),
             finding_count: 0,
+            has_unredactable_findings: false,
         }
     }
 }
@@ -1291,6 +1299,25 @@ fn external_guardrail_evaluation(
         .or_else(|| {
             (envelope.segments.len() == 1).then(|| envelope.segments[0].segment_id.clone())
         });
+    // A located finding (one tied to a concrete segment byte range) is only
+    // safely redactable if a content patch covers it. Patches are permission-
+    // validated to mutable segments before this point, so a located finding
+    // with no overlapping patch means flagged content sits in an immutable
+    // segment (e.g. tool-call arguments) that redaction cannot scrub. Structural
+    // findings without a byte range (size/request/json constraints) are not
+    // redaction-relevant and never mark the result unredactable here.
+    let has_unredactable_findings = result.findings.iter().any(|finding| {
+        let (Some(segment_id), Some(start), Some(end)) = (
+            finding.segment_id.as_deref(),
+            finding.byte_start,
+            finding.byte_end,
+        ) else {
+            return false;
+        };
+        !result.patches.iter().any(|patch| {
+            patch.segment_id == segment_id && patch.byte_start < end && start < patch.byte_end
+        })
+    });
     GuardrailCheckEvaluation {
         check_id: check_id.to_string(),
         outcome: match result.verdict {
@@ -1307,6 +1334,7 @@ fn external_guardrail_evaluation(
         latency_ms: 0,
         finding_category_counts,
         finding_count,
+        has_unredactable_findings,
     }
 }
 
@@ -1384,7 +1412,16 @@ fn guardrail_enforcement(
                 .clone()
                 .unwrap_or_else(|| "request blocked by guardrail policy".to_string()),
         };
-        if candidate.effect == GuardrailEffect::Redact && candidate.content_patches.is_empty() {
+        // Fail closed if the requested redaction cannot fully scrub the flagged
+        // content: either there is no patch at all, or at least one actionable
+        // finding landed in an immutable segment that no patch covers. Reporting
+        // such a case as a successful redaction would return the flagged content
+        // verbatim while the audit claims it was redacted.
+        let has_unredactable_findings =
+            evidence.is_some_and(|evaluation| evaluation.has_unredactable_findings);
+        if candidate.effect == GuardrailEffect::Redact
+            && (candidate.content_patches.is_empty() || has_unredactable_findings)
+        {
             candidate.effect = GuardrailEffect::Deny;
             candidate.code = "guardrail_invalid_redaction".to_string();
             candidate.message = format!(
