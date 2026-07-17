@@ -21,6 +21,19 @@ use crate::{
 
 static NEXT_SCHEMA: AtomicU64 = AtomicU64::new(1);
 
+/// Drives an async storage call to completion from this DSN-gated sync test
+/// (issue #221 made the inherent `PostgresControlPlaneStore` CAS methods
+/// async). Builds a fresh single-thread runtime per call so it works both on
+/// the main test thread and inside the raw `std::thread::spawn` CAS-race
+/// workers, which have no ambient tokio runtime.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("guardrail CAS test runtime")
+        .block_on(future)
+}
+
 struct LocalSchemaCleanup {
     dsn: String,
     schema: String,
@@ -241,10 +254,10 @@ fn live_local_postgres_concurrent_writers_have_one_cas_winner() {
     };
 
     let seed = binding(None, Vec::new(), 1);
-    store
-        .compare_and_swap_guardrail_policy_binding(None, &seed)
+    block_on(store.compare_and_swap_guardrail_policy_binding(None, &seed)).unwrap();
+    let previous = block_on(store.get_guardrail_policy_binding("pii"))
+        .unwrap()
         .unwrap();
-    let previous = store.get_guardrail_policy_binding("pii").unwrap().unwrap();
     let candidates = [
         next_guardrail_archive_binding(Some(&previous), "pii", 1, "writer-a", 20).unwrap(),
         next_guardrail_archive_binding(Some(&previous), "pii", 2, "writer-b", 20).unwrap(),
@@ -255,7 +268,7 @@ fn live_local_postgres_concurrent_writers_have_one_cas_winner() {
         let barrier = Arc::clone(&barrier);
         std::thread::spawn(move || {
             barrier.wait();
-            store.compare_and_swap_guardrail_policy_binding(Some(1), &candidate)
+            block_on(store.compare_and_swap_guardrail_policy_binding(Some(1), &candidate))
         })
     });
     barrier.wait();
@@ -271,7 +284,9 @@ fn live_local_postgres_concurrent_writers_have_one_cas_winner() {
             .count(),
         1
     );
-    let final_binding = store.get_guardrail_policy_binding("pii").unwrap().unwrap();
+    let final_binding = block_on(store.get_guardrail_policy_binding("pii"))
+        .unwrap()
+        .unwrap();
     assert_eq!(final_binding.generation, 2);
     assert!(matches!(
         final_binding.archived_revisions.as_slice(),

@@ -1378,122 +1378,153 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn insert_guardrail_policy_revision(
+    fn guardrail_policy_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn insert_guardrail_policy_revision(
         &self,
         revision: &StoredGuardrailPolicyRevision,
     ) -> Result<(), StorageError> {
         let revision_number = i64::from(revision.revision);
         let created_at_unix = saturating_i64(revision.created_at_unix);
-        self.with_client_storage(|client| {
-            let changed = client
-                .execute(
-                    "INSERT INTO guardrail_policy_revisions \
-                     (policy_id, revision, immutable_id, created_at_unix, created_by, policy_json) \
-                     VALUES ($1, $2, $3, $4, $5, $6::text::jsonb) \
-                     ON CONFLICT (policy_id, revision) DO NOTHING",
-                    &[
-                        &revision.policy_id,
-                        &revision_number,
-                        &revision.id,
-                        &created_at_unix,
-                        &revision.created_by,
-                        &revision.policy_json,
-                    ],
-                )
-                .map_err(postgres_error)?;
-            if changed == 0 {
-                return Err(StorageError::Conflict(format!(
-                    "guardrail policy revision {} already exists",
-                    revision.id
-                )));
-            }
-            Ok(())
-        })
+        let operation = self.guardrail_policy_operation("insert guardrail policy revision");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let changed = client
+            .execute(
+                "INSERT INTO guardrail_policy_revisions \
+                 (policy_id, revision, immutable_id, created_at_unix, created_by, policy_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6::text::jsonb) \
+                 ON CONFLICT (policy_id, revision) DO NOTHING",
+                &[
+                    &revision.policy_id,
+                    &revision_number,
+                    &revision.id,
+                    &created_at_unix,
+                    &revision.created_by,
+                    &revision.policy_json,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed == 0 {
+            return Err(StorageError::Conflict(format!(
+                "guardrail policy revision {} already exists",
+                revision.id
+            )));
+        }
+        Ok(())
     }
 
-    fn get_guardrail_policy_revision(
+    async fn get_guardrail_policy_revision(
         &self,
         policy_id: &str,
         revision: u32,
     ) -> Result<Option<StoredGuardrailPolicyRevision>, StorageError> {
         let revision = i64::from(revision);
-        self.with_client_storage(|client| {
-            let row = client
-                .query_opt(
-                    "SELECT immutable_id, policy_id, revision, policy_json::text, \
-                            created_at_unix, created_by \
-                     FROM guardrail_policy_revisions \
-                     WHERE policy_id = $1 AND revision = $2",
-                    &[&policy_id, &revision],
-                )
-                .map_err(postgres_error)?;
-            row.map(guardrail_policy_revision_from_row).transpose()
-        })
+        let operation = self.guardrail_policy_operation("get guardrail policy revision");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT immutable_id, policy_id, revision, policy_json::text, \
+                        created_at_unix, created_by \
+                 FROM guardrail_policy_revisions \
+                 WHERE policy_id = $1 AND revision = $2",
+                &[&policy_id, &revision],
+            )
+            .await
+            .map_err(postgres_error)?;
+        row.map(guardrail_policy_revision_from_row).transpose()
     }
 
-    fn list_guardrail_policy_revisions(
+    async fn list_guardrail_policy_revisions(
         &self,
         policy_id: Option<&str>,
     ) -> Result<Vec<StoredGuardrailPolicyRevision>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = match policy_id {
-                Some(policy_id) => client.query(
-                    "SELECT immutable_id, policy_id, revision, policy_json::text, \
-                            created_at_unix, created_by \
-                     FROM guardrail_policy_revisions WHERE policy_id = $1 \
-                     ORDER BY policy_id ASC, revision ASC",
-                    &[&policy_id],
-                ),
-                None => client.query(
-                    "SELECT immutable_id, policy_id, revision, policy_json::text, \
-                            created_at_unix, created_by \
-                     FROM guardrail_policy_revisions ORDER BY policy_id ASC, revision ASC",
-                    &[],
-                ),
+        let operation = self.guardrail_policy_operation("list guardrail policy revisions");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = match policy_id {
+            Some(policy_id) => {
+                client
+                    .query(
+                        "SELECT immutable_id, policy_id, revision, policy_json::text, \
+                                created_at_unix, created_by \
+                         FROM guardrail_policy_revisions WHERE policy_id = $1 \
+                         ORDER BY policy_id ASC, revision ASC",
+                        &[&policy_id],
+                    )
+                    .await
             }
-            .map_err(postgres_error)?;
-            rows.into_iter()
-                .map(guardrail_policy_revision_from_row)
-                .collect()
-        })
+            None => {
+                client
+                    .query(
+                        "SELECT immutable_id, policy_id, revision, policy_json::text, \
+                                created_at_unix, created_by \
+                         FROM guardrail_policy_revisions ORDER BY policy_id ASC, revision ASC",
+                        &[],
+                    )
+                    .await
+            }
+        }
+        .map_err(postgres_error)?;
+        rows.into_iter()
+            .map(guardrail_policy_revision_from_row)
+            .collect()
     }
 
-    fn get_guardrail_policy_binding(
+    async fn get_guardrail_policy_binding(
         &self,
         policy_id: &str,
     ) -> Result<Option<StoredGuardrailPolicyBinding>, StorageError> {
-        self.with_client_storage(|client| {
-            let row = client
-                .query_opt(
-                    "SELECT policy_id, active_revision, archived_revisions_json::text, \
-                            updated_at_unix, updated_by, generation \
-                     FROM guardrail_policy_bindings WHERE policy_id = $1",
-                    &[&policy_id],
-                )
-                .map_err(postgres_error)?;
-            row.map(guardrail_policy_binding_from_row).transpose()
-        })
+        let operation = self.guardrail_policy_operation("get guardrail policy binding");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT policy_id, active_revision, archived_revisions_json::text, \
+                        updated_at_unix, updated_by, generation \
+                 FROM guardrail_policy_bindings WHERE policy_id = $1",
+                &[&policy_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        row.map(guardrail_policy_binding_from_row).transpose()
     }
 
-    fn list_guardrail_policy_bindings(
+    async fn list_guardrail_policy_bindings(
         &self,
     ) -> Result<Vec<StoredGuardrailPolicyBinding>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT policy_id, active_revision, archived_revisions_json::text, \
-                            updated_at_unix, updated_by, generation \
-                     FROM guardrail_policy_bindings ORDER BY policy_id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            rows.into_iter()
-                .map(guardrail_policy_binding_from_row)
-                .collect()
-        })
+        let operation = self.guardrail_policy_operation("list guardrail policy bindings");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT policy_id, active_revision, archived_revisions_json::text, \
+                        updated_at_unix, updated_by, generation \
+                 FROM guardrail_policy_bindings ORDER BY policy_id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        rows.into_iter()
+            .map(guardrail_policy_binding_from_row)
+            .collect()
     }
 
-    fn compare_and_swap_guardrail_policy_binding(
+    async fn compare_and_swap_guardrail_policy_binding(
         &self,
         expected_generation: Option<u64>,
         current: &StoredGuardrailPolicyBinding,
@@ -1502,7 +1533,13 @@ impl PostgresControlPlaneStore {
         let archived_json = serialize_storage_document(&current.archived_revisions)?;
         let updated_at_unix = saturating_i64(current.updated_at_unix);
         let current_generation = guardrail_binding_generation_i64(current.generation)?;
-        let changed = self.with_client_storage(|client| match expected_generation {
+        let operation =
+            self.guardrail_policy_operation("compare and swap guardrail policy binding");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let changed = match expected_generation {
             Some(expected_generation) => {
                 let expected_generation = guardrail_binding_generation_i64(expected_generation)?;
                 client
@@ -1518,7 +1555,8 @@ impl PostgresControlPlaneStore {
                             &expected_generation,
                         ],
                     )
-                    .map_err(postgres_error)
+                    .await
+                    .map_err(postgres_error)?
             }
             None => client
                 .execute(
@@ -1532,8 +1570,9 @@ impl PostgresControlPlaneStore {
                         &current_generation,
                     ],
                 )
-                .map_err(postgres_error),
-        })?;
+                .await
+                .map_err(postgres_error)?,
+        };
         if changed != 1 {
             return Err(StorageError::Conflict(
                 GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE.into(),
@@ -1542,20 +1581,24 @@ impl PostgresControlPlaneStore {
         Ok(())
     }
 
-    fn delete_guardrail_policy_binding_cas(
+    async fn delete_guardrail_policy_binding_cas(
         &self,
         policy_id: &str,
         expected_generation: u64,
     ) -> Result<(), StorageError> {
         let expected_generation = guardrail_binding_generation_i64(expected_generation)?;
-        let changed = self.with_client_storage(|client| {
-            client
-                .execute(
-                    GUARDRAIL_POLICY_BINDING_DELETE_CAS_SQL,
-                    &[&policy_id, &expected_generation],
-                )
-                .map_err(postgres_error)
-        })?;
+        let operation = self.guardrail_policy_operation("delete guardrail policy binding cas");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let changed = client
+            .execute(
+                GUARDRAIL_POLICY_BINDING_DELETE_CAS_SQL,
+                &[&policy_id, &expected_generation],
+            )
+            .await
+            .map_err(postgres_error)?;
         if changed != 1 {
             return Err(StorageError::Conflict(
                 GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE.into(),
@@ -1564,7 +1607,7 @@ impl PostgresControlPlaneStore {
         Ok(())
     }
 
-    fn activate_guardrail_policy_revision(
+    async fn activate_guardrail_policy_revision(
         &self,
         policy_id: &str,
         revision: u32,
@@ -1573,16 +1616,22 @@ impl PostgresControlPlaneStore {
         rollback_only: bool,
     ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
         let revision_number = i64::from(revision);
-        let revision_exists = self.with_client_storage(|client| {
-            Ok(client
-                .query_opt(
-                    "SELECT 1 FROM guardrail_policy_revisions \
-                     WHERE policy_id = $1 AND revision = $2",
-                    &[&policy_id, &revision_number],
-                )
-                .map_err(postgres_error)?
-                .is_some())
-        })?;
+        let operation =
+            self.guardrail_policy_operation("check guardrail policy revision exists (activate)");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let revision_exists = client
+            .query_opt(
+                "SELECT 1 FROM guardrail_policy_revisions \
+                 WHERE policy_id = $1 AND revision = $2",
+                &[&policy_id, &revision_number],
+            )
+            .await
+            .map_err(postgres_error)?
+            .is_some();
+        drop(client);
         if !revision_exists {
             return Err(StorageError::NotFound(format!(
                 "guardrail policy revision {}",
@@ -1590,7 +1639,7 @@ impl PostgresControlPlaneStore {
             )));
         }
 
-        let previous = self.get_guardrail_policy_binding(policy_id)?;
+        let previous = self.get_guardrail_policy_binding(policy_id).await?;
         let current = next_guardrail_activation_binding(
             previous.as_ref(),
             policy_id,
@@ -1602,11 +1651,12 @@ impl PostgresControlPlaneStore {
         self.compare_and_swap_guardrail_policy_binding(
             previous.as_ref().map(|binding| binding.generation),
             &current,
-        )?;
+        )
+        .await?;
         Ok(GuardrailPolicyBindingTransition { previous, current })
     }
 
-    fn archive_guardrail_policy_revision(
+    async fn archive_guardrail_policy_revision(
         &self,
         policy_id: &str,
         revision: u32,
@@ -1614,16 +1664,22 @@ impl PostgresControlPlaneStore {
         updated_at_unix: u64,
     ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
         let revision_number = i64::from(revision);
-        let revision_exists = self.with_client_storage(|client| {
-            Ok(client
-                .query_opt(
-                    "SELECT 1 FROM guardrail_policy_revisions \
-                     WHERE policy_id = $1 AND revision = $2",
-                    &[&policy_id, &revision_number],
-                )
-                .map_err(postgres_error)?
-                .is_some())
-        })?;
+        let operation =
+            self.guardrail_policy_operation("check guardrail policy revision exists (archive)");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let revision_exists = client
+            .query_opt(
+                "SELECT 1 FROM guardrail_policy_revisions \
+                 WHERE policy_id = $1 AND revision = $2",
+                &[&policy_id, &revision_number],
+            )
+            .await
+            .map_err(postgres_error)?
+            .is_some();
+        drop(client);
         if !revision_exists {
             return Err(StorageError::NotFound(format!(
                 "guardrail policy revision {}",
@@ -1631,7 +1687,7 @@ impl PostgresControlPlaneStore {
             )));
         }
 
-        let previous = self.get_guardrail_policy_binding(policy_id)?;
+        let previous = self.get_guardrail_policy_binding(policy_id).await?;
         let current = next_guardrail_archive_binding(
             previous.as_ref(),
             policy_id,
@@ -1642,11 +1698,12 @@ impl PostgresControlPlaneStore {
         self.compare_and_swap_guardrail_policy_binding(
             previous.as_ref().map(|binding| binding.generation),
             &current,
-        )?;
+        )
+        .await?;
         Ok(GuardrailPolicyBindingTransition { previous, current })
     }
 
-    fn restore_guardrail_policy_binding(
+    async fn restore_guardrail_policy_binding(
         &self,
         policy_id: &str,
         expected_generation: Option<u64>,
@@ -1658,13 +1715,17 @@ impl PostgresControlPlaneStore {
                 restored.generation =
                     next_guardrail_binding_generation(expected_generation.unwrap_or_default())?;
                 self.compare_and_swap_guardrail_policy_binding(expected_generation, &restored)
+                    .await
             }
-            None => self.delete_guardrail_policy_binding_cas(
-                policy_id,
-                expected_generation.ok_or_else(|| {
-                    StorageError::Conflict(GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE.into())
-                })?,
-            ),
+            None => {
+                self.delete_guardrail_policy_binding_cas(
+                    policy_id,
+                    expected_generation.ok_or_else(|| {
+                        StorageError::Conflict(GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE.into())
+                    })?,
+                )
+                .await
+            }
         }
     }
 
@@ -10314,7 +10375,7 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                 })?
                 .insert_guardrail_policy_revision(revision),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.insert_guardrail_policy_revision(&revision)
+                block_on_sync_bridge(control_plane.insert_guardrail_policy_revision(&revision))
             }
         }
     }
@@ -10331,9 +10392,9 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                     StorageError::Runtime("guardrail policy repository lock poisoned".into())
                 })?
                 .get_guardrail_policy_revision(policy_id, revision)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_guardrail_policy_revision(policy_id, revision)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.get_guardrail_policy_revision(policy_id, revision),
+            ),
         }
     }
 
@@ -10349,7 +10410,7 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                 })?
                 .list_guardrail_policy_revisions(policy_id)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_guardrail_policy_revisions(policy_id)
+                block_on_sync_bridge(control_plane.list_guardrail_policy_revisions(policy_id))
             }
         }
     }
@@ -10366,7 +10427,7 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                 })?
                 .get_guardrail_policy_binding(policy_id)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_guardrail_policy_binding(policy_id)
+                block_on_sync_bridge(control_plane.get_guardrail_policy_binding(policy_id))
             }
         }
     }
@@ -10382,7 +10443,7 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                 })?
                 .list_guardrail_policy_bindings()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_guardrail_policy_bindings()
+                block_on_sync_bridge(control_plane.list_guardrail_policy_bindings())
             }
         }
     }
@@ -10408,14 +10469,15 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                     updated_at_unix,
                     rollback_only,
                 ),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .activate_guardrail_policy_revision(
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.activate_guardrail_policy_revision(
                     policy_id,
                     revision,
                     updated_by,
                     updated_at_unix,
                     rollback_only,
-                ),
+                ))
+            }
         }
     }
 
@@ -10438,13 +10500,14 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                     updated_by,
                     updated_at_unix,
                 ),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .archive_guardrail_policy_revision(
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.archive_guardrail_policy_revision(
                     policy_id,
                     revision,
                     updated_by,
                     updated_at_unix,
-                ),
+                ))
+            }
         }
     }
 
@@ -10461,8 +10524,13 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
                     StorageError::Runtime("guardrail policy repository lock poisoned".into())
                 })?
                 .restore_guardrail_policy_binding(policy_id, expected_generation, binding),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .restore_guardrail_policy_binding(policy_id, expected_generation, binding.as_ref()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.restore_guardrail_policy_binding(
+                    policy_id,
+                    expected_generation,
+                    binding.as_ref(),
+                ))
+            }
         }
     }
 }
