@@ -118,7 +118,11 @@ pub trait GuardrailEvaluationRepository {
 }
 
 impl PostgresControlPlaneStore {
-    fn append_guardrail_evidence(
+    fn guardrail_evidence_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn append_guardrail_evidence(
         &self,
         evaluation: &StoredGuardrailEvaluation,
         checks: &[StoredGuardrailCheckEvaluation],
@@ -127,107 +131,115 @@ impl PostgresControlPlaneStore {
         let evaluation_json = serialize_storage_document(evaluation)?;
         let policy_revision = i64::from(evaluation.policy_revision);
         let occurred_at_unix = saturating_i64(evaluation.occurred_at_unix);
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
-            set_guardrail_rls_context(
-                &mut transaction,
-                evaluation.tenant.organization_id.as_deref(),
-            )?;
+        let operation = self.guardrail_evidence_operation("append guardrail evidence");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        set_guardrail_rls_context(&transaction, evaluation.tenant.organization_id.as_deref())
+            .await?;
+        transaction
+            .execute(
+                "INSERT INTO guardrail_evaluations \
+                 (id, request_id, trace_id, agent_run_id, subject_id, tenant_id, \
+                  scope_type, scope_id, target, stage, mode, policy_id, policy_revision, \
+                  verdict, action, enforcement_status, occurred_at_unix, evaluation_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
+                         $14, $15, $16, $17, $18::text::jsonb)",
+                &[
+                    &evaluation.id,
+                    &evaluation.request_id,
+                    &evaluation.trace_id,
+                    &evaluation.agent_run_id,
+                    &evaluation.subject_id,
+                    &evaluation.tenant.organization_id,
+                    &evaluation.scope_type,
+                    &evaluation.scope_id,
+                    &evaluation.target,
+                    &evaluation.stage,
+                    &evaluation.mode,
+                    &evaluation.policy_id,
+                    &policy_revision,
+                    &evaluation.verdict,
+                    &evaluation.action,
+                    &evaluation.enforcement_status,
+                    &occurred_at_unix,
+                    &evaluation_json,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        for check in checks {
+            let check_json = serialize_storage_document(check)?;
             transaction
                 .execute(
-                    "INSERT INTO guardrail_evaluations \
-                     (id, request_id, trace_id, agent_run_id, subject_id, tenant_id, \
-                      scope_type, scope_id, target, stage, mode, policy_id, policy_revision, \
-                      verdict, action, enforcement_status, occurred_at_unix, evaluation_json) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-                             $14, $15, $16, $17, $18::text::jsonb)",
+                    "INSERT INTO guardrail_check_evaluations \
+                     (id, evaluation_id, check_id, detector_id, detector_version, \
+                      verdict, action, enforcement_status, error_kind, check_json) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::jsonb)",
                     &[
-                        &evaluation.id,
-                        &evaluation.request_id,
-                        &evaluation.trace_id,
-                        &evaluation.agent_run_id,
-                        &evaluation.subject_id,
-                        &evaluation.tenant.organization_id,
-                        &evaluation.scope_type,
-                        &evaluation.scope_id,
-                        &evaluation.target,
-                        &evaluation.stage,
-                        &evaluation.mode,
-                        &evaluation.policy_id,
-                        &policy_revision,
-                        &evaluation.verdict,
-                        &evaluation.action,
-                        &evaluation.enforcement_status,
-                        &occurred_at_unix,
-                        &evaluation_json,
+                        &check.id,
+                        &check.evaluation_id,
+                        &check.check_id,
+                        &check.detector_id,
+                        &check.detector_version,
+                        &check.verdict,
+                        &check.action,
+                        &check.enforcement_status,
+                        &check.error_kind,
+                        &check_json,
                     ],
                 )
+                .await
                 .map_err(postgres_error)?;
-            for check in checks {
-                let check_json = serialize_storage_document(check)?;
-                transaction
-                    .execute(
-                        "INSERT INTO guardrail_check_evaluations \
-                         (id, evaluation_id, check_id, detector_id, detector_version, \
-                          verdict, action, enforcement_status, error_kind, check_json) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::jsonb)",
-                        &[
-                            &check.id,
-                            &check.evaluation_id,
-                            &check.check_id,
-                            &check.detector_id,
-                            &check.detector_version,
-                            &check.verdict,
-                            &check.action,
-                            &check.enforcement_status,
-                            &check.error_kind,
-                            &check_json,
-                        ],
-                    )
-                    .map_err(postgres_error)?;
-            }
-            let retention_records = saturating_i64(retention_records as u64);
-            transaction
-                .execute(
-                    "DELETE FROM guardrail_evaluations WHERE id IN (\
-                       SELECT id FROM guardrail_evaluations \
-                       ORDER BY occurred_at_unix DESC, id DESC OFFSET $1\
-                     )",
-                    &[&retention_records],
-                )
-                .map_err(postgres_error)?;
-            transaction.commit().map_err(postgres_error)?;
-            Ok(())
-        })
+        }
+        let retention_records = saturating_i64(retention_records as u64);
+        transaction
+            .execute(
+                "DELETE FROM guardrail_evaluations WHERE id IN (\
+                   SELECT id FROM guardrail_evaluations \
+                   ORDER BY occurred_at_unix DESC, id DESC OFFSET $1\
+                 )",
+                &[&retention_records],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn guardrail_evaluations(
+    async fn guardrail_evaluations(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredGuardrailEvaluation>, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
-            set_guardrail_rls_context(&mut transaction, tenant_id)?;
-            let evaluations = transaction
-                .query(
-                    "SELECT evaluation_json::text FROM guardrail_evaluations \
-                     WHERE ($1::TEXT IS NULL OR tenant_id = $1) \
-                     ORDER BY occurred_at_unix DESC, id DESC",
-                    &[&tenant_id],
-                )
-                .map_err(postgres_error)?
-                .into_iter()
-                .map(|row| {
-                    let value = row.get::<_, String>(0);
-                    deserialize_storage_document(&value)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            transaction.commit().map_err(postgres_error)?;
-            Ok(evaluations)
-        })
+        let operation = self.guardrail_evidence_operation("list guardrail evaluations");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        set_guardrail_rls_context(&transaction, tenant_id).await?;
+        let evaluations = transaction
+            .query(
+                "SELECT evaluation_json::text FROM guardrail_evaluations \
+                 WHERE ($1::TEXT IS NULL OR tenant_id = $1) \
+                 ORDER BY occurred_at_unix DESC, id DESC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(|row| {
+                let value = row.get::<_, String>(0);
+                deserialize_storage_document(&value)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(evaluations)
     }
 
-    fn query_guardrail_evidence(
+    async fn query_guardrail_evidence(
         &self,
         query: &GuardrailEvaluationQuery,
     ) -> Result<GuardrailEvaluationQueryPage, StorageError> {
@@ -277,93 +289,103 @@ impl PostgresControlPlaneStore {
             &since_unix,
             &until_unix,
         ];
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
-            set_guardrail_rls_context(&mut transaction, query.tenant_id.as_deref())?;
+        let operation = self.guardrail_evidence_operation("query guardrail evidence");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        set_guardrail_rls_context(&transaction, query.tenant_id.as_deref()).await?;
 
-            let count_sql =
-                format!("SELECT count(*) FROM guardrail_evaluations AS evaluation WHERE {FILTER}");
-            let total = transaction
-                .query_one(&count_sql, &parameters)
-                .map_err(postgres_error)?
-                .get::<_, i64>(0);
-            let page_sql = format!(
-                "SELECT evaluation.evaluation_json::text \
-                 FROM guardrail_evaluations AS evaluation \
-                 WHERE {FILTER} \
-                 ORDER BY evaluation.occurred_at_unix DESC, evaluation.id DESC \
-                 OFFSET $17 LIMIT $18"
-            );
-            let mut page_parameters = parameters.to_vec();
-            page_parameters.push(&offset);
-            page_parameters.push(&limit);
-            let evaluations = transaction
-                .query(&page_sql, &page_parameters)
+        let count_sql =
+            format!("SELECT count(*) FROM guardrail_evaluations AS evaluation WHERE {FILTER}");
+        let total = transaction
+            .query_one(&count_sql, &parameters)
+            .await
+            .map_err(postgres_error)?
+            .get::<_, i64>(0);
+        let page_sql = format!(
+            "SELECT evaluation.evaluation_json::text \
+             FROM guardrail_evaluations AS evaluation \
+             WHERE {FILTER} \
+             ORDER BY evaluation.occurred_at_unix DESC, evaluation.id DESC \
+             OFFSET $17 LIMIT $18"
+        );
+        let mut page_parameters = parameters.to_vec();
+        page_parameters.push(&offset);
+        page_parameters.push(&limit);
+        let evaluations = transaction
+            .query(&page_sql, &page_parameters)
+            .await
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
+            .collect::<Result<Vec<StoredGuardrailEvaluation>, StorageError>>()?;
+        let evaluation_ids = evaluations
+            .iter()
+            .map(|evaluation| evaluation.id.clone())
+            .collect::<Vec<_>>();
+        let checks = if evaluation_ids.is_empty() {
+            Vec::new()
+        } else {
+            transaction
+                .query(
+                    "SELECT check_row.check_json::text \
+                     FROM guardrail_check_evaluations AS check_row \
+                     WHERE check_row.evaluation_id = ANY($1) \
+                     ORDER BY check_row.evaluation_id ASC, check_row.check_id ASC",
+                    &[&evaluation_ids],
+                )
+                .await
                 .map_err(postgres_error)?
                 .into_iter()
                 .map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
-                .collect::<Result<Vec<StoredGuardrailEvaluation>, StorageError>>()?;
-            let evaluation_ids = evaluations
-                .iter()
-                .map(|evaluation| evaluation.id.clone())
-                .collect::<Vec<_>>();
-            let checks = if evaluation_ids.is_empty() {
-                Vec::new()
-            } else {
-                transaction
-                    .query(
-                        "SELECT check_row.check_json::text \
-                         FROM guardrail_check_evaluations AS check_row \
-                         WHERE check_row.evaluation_id = ANY($1) \
-                         ORDER BY check_row.evaluation_id ASC, check_row.check_id ASC",
-                        &[&evaluation_ids],
-                    )
-                    .map_err(postgres_error)?
-                    .into_iter()
-                    .map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
-                    .collect::<Result<Vec<StoredGuardrailCheckEvaluation>, StorageError>>()?
-            };
-            transaction.commit().map_err(postgres_error)?;
-            Ok(GuardrailEvaluationQueryPage {
-                evaluations,
-                checks,
-                total: usize::try_from(total).unwrap_or(usize::MAX),
-                offset: query.offset,
-                limit: query.limit,
-            })
+                .collect::<Result<Vec<StoredGuardrailCheckEvaluation>, StorageError>>()?
+        };
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(GuardrailEvaluationQueryPage {
+            evaluations,
+            checks,
+            total: usize::try_from(total).unwrap_or(usize::MAX),
+            offset: query.offset,
+            limit: query.limit,
         })
     }
 
-    fn guardrail_check_evaluations(
+    async fn guardrail_check_evaluations(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredGuardrailCheckEvaluation>, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(postgres_error)?;
-            set_guardrail_rls_context(&mut transaction, tenant_id)?;
-            let checks = transaction
-                .query(
-                    "SELECT check_row.check_json::text FROM guardrail_check_evaluations AS check_row \
-                     JOIN guardrail_evaluations AS evaluation ON evaluation.id = check_row.evaluation_id \
-                     WHERE ($1::TEXT IS NULL OR evaluation.tenant_id = $1) \
-                     ORDER BY check_row.evaluation_id DESC, check_row.check_id ASC",
-                    &[&tenant_id],
-                )
-                .map_err(postgres_error)?
-                .into_iter()
-                .map(|row| {
-                    let value = row.get::<_, String>(0);
-                    deserialize_storage_document(&value)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            transaction.commit().map_err(postgres_error)?;
-            Ok(checks)
-        })
+        let operation = self.guardrail_evidence_operation("list guardrail check evaluations");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        set_guardrail_rls_context(&transaction, tenant_id).await?;
+        let checks = transaction
+            .query(
+                "SELECT check_row.check_json::text FROM guardrail_check_evaluations AS check_row \
+                 JOIN guardrail_evaluations AS evaluation ON evaluation.id = check_row.evaluation_id \
+                 WHERE ($1::TEXT IS NULL OR evaluation.tenant_id = $1) \
+                 ORDER BY check_row.evaluation_id DESC, check_row.check_id ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(|row| {
+                let value = row.get::<_, String>(0);
+                deserialize_storage_document(&value)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(checks)
     }
 }
 
-fn set_guardrail_rls_context(
-    transaction: &mut postgres::Transaction<'_>,
+async fn set_guardrail_rls_context(
+    transaction: &deadpool_postgres::Transaction<'_>,
     tenant_id: Option<&str>,
 ) -> Result<(), StorageError> {
     let platform_mode = if tenant_id.is_some() { "off" } else { "on" };
@@ -373,6 +395,7 @@ fn set_guardrail_rls_context(
                     set_config('ferrogate.platform_mode', $2, TRUE)",
             &[&tenant_id, &platform_mode],
         )
+        .await
         .map_err(postgres_error)?;
     Ok(())
 }
@@ -390,7 +413,11 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
                     .lock()
                     .map(|limit| *limit)
                     .unwrap_or(10_000);
-                control_plane.append_guardrail_evidence(&evaluation, &checks, retention_records)?;
+                block_on_sync_bridge(control_plane.append_guardrail_evidence(
+                    &evaluation,
+                    &checks,
+                    retention_records,
+                ))?;
             }
             RuntimeControlPlaneBackend::Memory(_) => {
                 self.guardrail_evidence
@@ -410,7 +437,7 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
     ) -> Result<GuardrailEvaluationQueryPage, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.query_guardrail_evidence(query)
+                block_on_sync_bridge(control_plane.query_guardrail_evidence(query))
             }
             RuntimeControlPlaneBackend::Memory(_) => {
                 let mut records = self
@@ -461,7 +488,7 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
     ) -> Result<Vec<StoredGuardrailEvaluation>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.guardrail_evaluations(tenant_id)
+                block_on_sync_bridge(control_plane.guardrail_evaluations(tenant_id))
             }
             RuntimeControlPlaneBackend::Memory(_) => Ok(self
                 .guardrail_evidence
@@ -487,7 +514,7 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
     ) -> Result<Vec<StoredGuardrailCheckEvaluation>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.guardrail_check_evaluations(tenant_id)
+                block_on_sync_bridge(control_plane.guardrail_check_evaluations(tenant_id))
             }
             RuntimeControlPlaneBackend::Memory(_) => Ok(self
                 .guardrail_evidence
