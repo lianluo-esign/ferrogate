@@ -40,18 +40,15 @@ impl AppState {
             .into_iter()
             .filter(|log| investigation_matches_request(&filter, log))
             .collect::<Vec<_>>();
-        let mut agent_runs = self
-            .repositories
-            .agent_runs()
+        let mut agent_runs = crate::gateway::block_on_sync_bridge(self.repositories.agent_runs())
             .into_iter()
             .filter(|run| investigation_matches_agent_run(&filter, run))
             .collect::<Vec<_>>();
-        let mut agent_events = self
-            .repositories
-            .agent_run_events()
-            .into_iter()
-            .filter(|event| investigation_matches_agent_event(&filter, event))
-            .collect::<Vec<_>>();
+        let mut agent_events =
+            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events())
+                .into_iter()
+                .filter(|event| investigation_matches_agent_event(&filter, event))
+                .collect::<Vec<_>>();
         let mut audit_events =
             crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
                 .into_iter()

@@ -1083,17 +1083,14 @@ impl AppState {
         // tenant than `filter.organization_id` would still surface via
         // `run` even though every related collection below is empty for
         // that tenant.
-        let run = self
-            .repositories
-            .agent_run(id)
+        let run = crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
             .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, &filter));
-        let agent_events = self
-            .repositories
-            .agent_run_events()
-            .into_iter()
-            .filter(|event| event.run_id == id)
-            .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
-            .collect::<Vec<_>>();
+        let agent_events =
+            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events())
+                .into_iter()
+                .filter(|event| event.run_id == id)
+                .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
+                .collect::<Vec<_>>();
         let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
             .filter(|log| log.agent_run_id.as_deref() == Some(id))
@@ -1140,8 +1137,9 @@ impl AppState {
     }
 
     fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
-        let runs = self.repositories.agent_runs();
-        let agent_events = self.repositories.agent_run_events();
+        let runs = crate::gateway::block_on_sync_bridge(self.repositories.agent_runs());
+        let agent_events =
+            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events());
         let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs());
         let billing_events = self.metering_events.list();
         let audit_events = crate::gateway::block_on_sync_bridge(self.repositories.audit_events());
@@ -1225,13 +1223,21 @@ impl AppState {
     }
 
     pub(crate) fn record_agent_run(&self, run: StoredAgentRun) {
-        if let Err(error) = self.repositories.upsert_agent_run(run) {
+        // Fire-and-forget write bridged to the async pool (issue #221). Kept
+        // sync because record_agent_run_event's sibling is reached from
+        // external_actions.rs's Unix-socket authorizer thread (no tokio
+        // runtime); block_on_sync_bridge handles both that and async handlers.
+        if let Err(error) =
+            crate::gateway::block_on_sync_bridge(self.repositories.upsert_agent_run(run))
+        {
             warn!("failed to persist agent run record: {error}");
         }
     }
 
     pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
-        if let Err(error) = self.repositories.append_agent_run_event(event) {
+        if let Err(error) =
+            crate::gateway::block_on_sync_bridge(self.repositories.append_agent_run_event(event))
+        {
             warn!("failed to persist agent run event record: {error}");
         }
     }

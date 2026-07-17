@@ -3227,13 +3227,22 @@ impl PostgresControlPlaneStore {
         Ok(events)
     }
 
-    fn upsert_agent_run(&self, run: &StoredAgentRun) -> Result<(), StorageError> {
+    fn agent_run_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn upsert_agent_run(&self, run: &StoredAgentRun) -> Result<(), StorageError> {
         let run_json = serialize_storage_document(run)?;
         let tenant_context_id = tenant_storage_key(&run.tenant);
         let started_at_unix = saturating_i64(run.started_at_unix.unwrap_or_else(now_unix_seconds));
         let completed_at_unix = run.completed_at_unix.map(saturating_i64);
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.agent_run_operation("upsert agent run");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO agent_runs \
                  (id, request_id, trace_id, tenant, status, provider, started_at_unix, \
                   completed_at_unix, run_json) \
@@ -3258,52 +3267,69 @@ impl PostgresControlPlaneStore {
                     &completed_at_unix,
                     &run_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn agent_run(&self, id: &str) -> Result<Option<StoredAgentRun>, StorageError> {
-        self.with_client_storage(|client| {
-            let row = client
-                .query_opt(
-                    "SELECT run_json::text FROM agent_runs WHERE id = $1",
-                    &[&id],
-                )
-                .map_err(postgres_error)?;
-            row.map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
-                .transpose()
-        })
+    async fn agent_run(&self, id: &str) -> Result<Option<StoredAgentRun>, StorageError> {
+        let operation = self.agent_run_operation("get agent run");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT run_json::text FROM agent_runs WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        row.map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
+            .transpose()
     }
 
-    fn agent_runs(&self) -> Result<Vec<StoredAgentRun>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT run_json::text \
-                     FROM agent_runs \
-                     ORDER BY started_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let mut runs = Vec::with_capacity(rows.len());
-            for row in rows {
-                runs.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(runs)
-        })
+    async fn agent_runs(&self) -> Result<Vec<StoredAgentRun>, StorageError> {
+        let operation = self.agent_run_operation("list agent runs");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT run_json::text \
+                 FROM agent_runs \
+                 ORDER BY started_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut runs = Vec::with_capacity(rows.len());
+        for row in rows {
+            runs.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(runs)
     }
 
-    fn append_agent_run_event(&self, event: &StoredAgentRunEvent) -> Result<(), StorageError> {
+    async fn append_agent_run_event(
+        &self,
+        event: &StoredAgentRunEvent,
+    ) -> Result<(), StorageError> {
         let event_json = serialize_storage_document(event)?;
         let tenant_context_id = tenant_storage_key(&event.tenant);
         let turn = saturating_i64(u64::from(event.turn));
         let occurred_at_unix =
             saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.agent_run_operation("append agent run event");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO agent_run_events \
                  (id, run_id, request_id, trace_id, tenant, turn, kind, target, outcome, \
                   occurred_at_unix, event_json) \
@@ -3322,29 +3348,34 @@ impl PostgresControlPlaneStore {
                     &occurred_at_unix,
                     &event_json,
                 ],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn agent_run_events(&self) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
-        self.with_client_storage(|client| {
-            let rows = client
-                .query(
-                    "SELECT event_json::text \
-                     FROM agent_run_events \
-                     ORDER BY occurred_at_unix ASC, id ASC",
-                    &[],
-                )
-                .map_err(postgres_error)?;
-            let mut events = Vec::with_capacity(rows.len());
-            for row in rows {
-                events.push(deserialize_storage_document(
-                    row.get::<_, String>(0).as_str(),
-                )?);
-            }
-            Ok(events)
-        })
+    async fn agent_run_events(&self) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
+        let operation = self.agent_run_operation("list agent run events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT event_json::text \
+                 FROM agent_run_events \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            events.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(events)
     }
 
     fn upsert_managed_worker_template(
@@ -7945,8 +7976,8 @@ impl RuntimeStorageRepositories {
             usage_aggregates: bridge_runtime.block_on(self.usage_aggregates()),
             request_logs: bridge_runtime.block_on(self.request_logs()),
             audit_events: bridge_runtime.block_on(self.audit_events()),
-            agent_runs: self.agent_runs(),
-            agent_run_events: self.agent_run_events(),
+            agent_runs: bridge_runtime.block_on(self.agent_runs()),
+            agent_run_events: bridge_runtime.block_on(self.agent_run_events()),
             managed_worker_templates: self.managed_worker_templates(),
             agent_worker_instances: self.agent_worker_instances(),
             managed_worker_sessions: self.managed_worker_sessions(),
@@ -8013,10 +8044,10 @@ impl RuntimeStorageRepositories {
             bridge_runtime.block_on(self.append_audit_event(event));
         }
         for run in snapshot.agent_runs {
-            self.upsert_agent_run(run)?;
+            bridge_runtime.block_on(self.upsert_agent_run(run))?;
         }
         for event in snapshot.agent_run_events {
-            self.append_agent_run_event(event)?;
+            bridge_runtime.block_on(self.append_agent_run_event(event))?;
         }
         for template in snapshot.managed_worker_templates {
             self.upsert_managed_worker_template(template)?;
@@ -9395,7 +9426,7 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    pub fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
+    pub async fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => {
                 if let Ok(mut runs) = self.agent_runs.lock() {
@@ -9404,23 +9435,23 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_agent_run(&run)
+                control_plane.upsert_agent_run(&run).await
             }
         }
     }
 
-    pub fn agent_run(&self, id: &str) -> Option<StoredAgentRun> {
+    pub async fn agent_run(&self, id: &str) -> Option<StoredAgentRun> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => {
                 self.agent_runs.lock().ok().and_then(|runs| runs.get(id))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.agent_run(id).unwrap_or_default()
+                control_plane.agent_run(id).await.unwrap_or_default()
             }
         }
     }
 
-    pub fn agent_runs(&self) -> Vec<StoredAgentRun> {
+    pub async fn agent_runs(&self) -> Vec<StoredAgentRun> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .agent_runs
@@ -9428,12 +9459,15 @@ impl RuntimeStorageRepositories {
                 .map(|runs| runs.list())
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.agent_runs().unwrap_or_default()
+                control_plane.agent_runs().await.unwrap_or_default()
             }
         }
     }
 
-    pub fn append_agent_run_event(&self, event: StoredAgentRunEvent) -> Result<(), StorageError> {
+    pub async fn append_agent_run_event(
+        &self,
+        event: StoredAgentRunEvent,
+    ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => {
                 if let Ok(mut events) = self.agent_run_events.lock() {
@@ -9442,12 +9476,12 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_agent_run_event(&event)
+                control_plane.append_agent_run_event(&event).await
             }
         }
     }
 
-    pub fn agent_run_events(&self) -> Vec<StoredAgentRunEvent> {
+    pub async fn agent_run_events(&self) -> Vec<StoredAgentRunEvent> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => self
                 .agent_run_events
@@ -9455,7 +9489,7 @@ impl RuntimeStorageRepositories {
                 .map(|events| events.list())
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.agent_run_events().unwrap_or_default()
+                control_plane.agent_run_events().await.unwrap_or_default()
             }
         }
     }
@@ -10434,40 +10468,38 @@ mod tests {
             api_key_id: Some("key".into()),
         };
 
-        repositories
-            .upsert_agent_run(StoredAgentRun {
-                id: "run-1".into(),
-                request_id: "fg-1".into(),
-                trace_id: Some("trace-1".into()),
-                tenant: tenant.clone(),
-                status: "running".into(),
-                provider: "managed.native-harness".into(),
-                turns_executed: 0,
-                output_recorded: false,
-                started_at_unix: Some(10),
-                completed_at_unix: None,
-            })
-            .unwrap();
-        repositories
-            .append_agent_run_event(StoredAgentRunEvent {
-                id: "event-1".into(),
-                run_id: "run-1".into(),
-                request_id: "fg-1".into(),
-                trace_id: Some("trace-1".into()),
-                tenant,
-                turn: 0,
-                kind: "capability.denied".into(),
-                target: "cli:bash".into(),
-                outcome: "denied".into(),
-                tool_call_id: None,
-                message: Some("cli is not allowed by capability policy".into()),
-                occurred_at_unix: Some(11),
-            })
-            .unwrap();
+        block_on(repositories.upsert_agent_run(StoredAgentRun {
+            id: "run-1".into(),
+            request_id: "fg-1".into(),
+            trace_id: Some("trace-1".into()),
+            tenant: tenant.clone(),
+            status: "running".into(),
+            provider: "managed.native-harness".into(),
+            turns_executed: 0,
+            output_recorded: false,
+            started_at_unix: Some(10),
+            completed_at_unix: None,
+        }))
+        .unwrap();
+        block_on(repositories.append_agent_run_event(StoredAgentRunEvent {
+            id: "event-1".into(),
+            run_id: "run-1".into(),
+            request_id: "fg-1".into(),
+            trace_id: Some("trace-1".into()),
+            tenant,
+            turn: 0,
+            kind: "capability.denied".into(),
+            target: "cli:bash".into(),
+            outcome: "denied".into(),
+            tool_call_id: None,
+            message: Some("cli is not allowed by capability policy".into()),
+            occurred_at_unix: Some(11),
+        }))
+        .unwrap();
 
-        let run = repositories.agent_run("run-1").unwrap();
+        let run = block_on(repositories.agent_run("run-1")).unwrap();
         assert_eq!(run.provider, "managed.native-harness");
-        let events = repositories.agent_run_events();
+        let events = block_on(repositories.agent_run_events());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "capability.denied");
         assert_eq!(events[0].target, "cli:bash");
