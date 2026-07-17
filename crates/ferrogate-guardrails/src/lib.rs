@@ -1036,9 +1036,16 @@ fn is_disallowed_v6(ip: Ipv6Addr) -> bool {
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 
+/// Versioned detector evaluation corpus + accuracy/latency runner (#201). Same
+/// gating as `conformance`: never in a production build.
+#[cfg(any(test, feature = "conformance"))]
+pub mod evaluation;
+
 #[cfg(test)]
 mod conformance_test;
 #[cfg(test)]
 mod deterministic_test;
+#[cfg(test)]
+mod evaluation_test;
 #[cfg(test)]
 mod lib_test;
