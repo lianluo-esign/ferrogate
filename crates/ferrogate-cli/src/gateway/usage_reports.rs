@@ -14,7 +14,7 @@ use super::FerroGateway;
 use crate::{
     auth::authenticate,
     responses::{write_json_error, write_json_response, AdminList},
-    state::UsageReportFilter,
+    state::{UsageReportFilter, UsageReportGroupBy},
 };
 
 impl FerroGateway {
@@ -30,6 +30,27 @@ impl FerroGateway {
             Ok(auth) => {
                 let mut filter = UsageReportFilter::from_query(query);
                 if let Some(tenant_id) = auth.organization_id.clone() {
+                    // `group_by=metadata.<key>` is served from
+                    // `usage_metadata_rollups`, an aggregation dimension with
+                    // NO tenant/scope column -- the scope narrowing below
+                    // cannot constrain it, so `usage_report` would hand a
+                    // tenant-scoped caller one row per distinct metadata value
+                    // seen across EVERY tenant, each summing token counts, USD
+                    // cost, and request/error counts. That leaks other tenants'
+                    // billing figures and end-customer/feature identifiers,
+                    // defeating the issue #185 narrowing. A metadata rollup is
+                    // inherently global, so this breakdown is restricted to
+                    // platform-operator keys (issue #185 follow-up).
+                    if matches!(filter.group_by, Some(UsageReportGroupBy::Metadata(_))) {
+                        return write_json_error(
+                            session,
+                            StatusCode::FORBIDDEN,
+                            "platform_operator_required",
+                            "group_by=metadata is a cross-tenant aggregation restricted to platform-operator keys",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                     match (filter.scope_type, filter.scope_id.as_deref()) {
                         (Some(scope_type), Some(scope_id)) => {
                             if let Err(error) = crate::auth::authorize_scoped_resource(

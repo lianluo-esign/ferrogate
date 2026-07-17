@@ -44,6 +44,13 @@ allowed_models = ["fast-chat"]
 id = "admin"
 name = "Admin bootstrap key"
 key = "admin-secret"
+
+[[api_keys]]
+id = "tenant-console"
+name = "Tenant admin-console session key"
+key = "tenant-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-meta-iso"
 "#
         ),
     )
@@ -204,6 +211,81 @@ fn oversized_metadata_is_rejected_with_a_clear_error_not_silently_truncated() {
         "a metadata map exceeding the entry cap must be rejected, not silently truncated: {response}"
     );
     assert!(response.contains("invalid_request_metadata"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// A tenant-scoped admin key must not be able to read the metadata
+/// breakdown: `usage_metadata_rollups` is a global aggregation dimension
+/// with no tenant column, so `group_by=metadata.<key>` would return one row
+/// per distinct value seen across EVERY tenant -- leaking other tenants'
+/// token volume, dollar cost, and end-customer/feature identifiers, which
+/// defeats the issue #185 tenant-scope narrowing. The breakdown is
+/// restricted to platform-operator keys; tenant-scoped callers get 403.
+#[test]
+fn tenant_scoped_key_cannot_read_the_cross_tenant_metadata_breakdown() {
+    let gateway_addr = free_addr();
+    // One tagged request so there is real cross-tenant metadata in the
+    // global rollup that the tenant-scoped caller must NOT be able to read.
+    let (provider_addr, _provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_meta","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1000,"completion_tokens":0,"total_tokens":1000}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(&config, &gateway_addr, &provider_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let tagged = chat(
+        &gateway_addr,
+        r#"{"model":"fast-chat","messages":[],"metadata":{"customer_id":"acme"}}"#,
+    );
+    assert!(
+        status_line(&tagged).contains("200 OK"),
+        "the seed tagged request should succeed: {tagged}"
+    );
+
+    // Tenant-scoped key: denied before any rollup is queried.
+    let stolen = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/usage-reports?group_by=metadata.customer_id",
+        &["Authorization: Bearer tenant-secret"],
+        "",
+    );
+    assert!(
+        status_line(&stolen).contains("403"),
+        "a tenant-scoped key must not read the global metadata breakdown: {stolen}"
+    );
+    assert!(
+        stolen.contains("platform_operator_required"),
+        "denial must be the operator gate: {stolen}"
+    );
+    assert!(
+        !stolen.contains("acme"),
+        "the denied response must not leak any metadata value: {stolen}"
+    );
+
+    // The platform operator retains the global breakdown, including the
+    // value the tenant-scoped caller was denied.
+    let operator = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/usage-reports?group_by=metadata.customer_id",
+        &admin_headers(),
+        "",
+    );
+    assert!(
+        status_line(&operator).contains("200 OK"),
+        "the platform operator must retain the metadata breakdown: {operator}"
+    );
+    assert!(
+        operator.contains("acme"),
+        "the operator breakdown must contain the tagged value: {operator}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
