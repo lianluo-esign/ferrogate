@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use std::{
     io::{Error as IoError, Read},
     sync::OnceLock,
@@ -171,6 +171,16 @@ pub(super) fn provider_http_client() -> AnyResult<Client> {
     let result = CLIENT.get_or_init(|| {
         ensure_provider_crypto_provider();
         Client::builder()
+            // Do not follow redirects on outbound provider/payment/catalog
+            // calls: the endpoint is operator-configured (so this is not a
+            // tenant-controlled SSRF), but following a redirect from a
+            // compromised or misbehaving upstream to an internal address is a
+            // needless egress risk, and API/payment endpoints never redirect.
+            // Matches the Policy::none() posture of every other egress client
+            // (function egress, guardrail detectors, MCP identity). No private-
+            // IP DNS guard here: operators legitimately configure internal /
+            // self-hosted provider base_urls.
+            .redirect(Policy::none())
             .no_gzip()
             .no_brotli()
             .no_zstd()
