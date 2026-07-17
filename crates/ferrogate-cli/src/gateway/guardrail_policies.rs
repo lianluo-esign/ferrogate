@@ -354,6 +354,9 @@ impl FerroGateway {
         if let Err(error) = authorize_guardrail_scope(&auth, &revision) {
             return write_auth_error(session, ctx, error).await;
         }
+        if let Err(error) = authorize_guardrail_secret_refs(&auth, &revision) {
+            return write_auth_error(session, ctx, error).await;
+        }
         if auth.organization_id.is_some() {
             match state.guardrail_policy_revision_views(Some(&revision.policy_id)) {
                 Ok(existing)
@@ -445,7 +448,15 @@ impl FerroGateway {
             return invalid_revision(session, ctx).await;
         }
         match state.guardrail_policy_revision_view(policy_id, revision) {
-            Ok(Some(view)) if guardrail_view_is_visible(&auth, &view) => {}
+            Ok(Some(view)) if guardrail_view_is_visible(&auth, &view) => {
+                // Defense in depth: a tenant-scoped caller must not activate a
+                // revision that dereferences a host secret, even one authored by
+                // an operator -- activation re-resolves every secret_ref against
+                // the host env/Vault.
+                if let Err(error) = authorize_guardrail_secret_refs(&auth, &view.revision) {
+                    return write_auth_error(session, ctx, error).await;
+                }
+            }
             Ok(_) => {
                 return write_json_error(
                     session,
@@ -789,6 +800,57 @@ fn guardrail_scope_denied() -> AuthError {
         code: "guardrail_policy_scope_denied",
         message: "the Guardrail policy must be explicitly scoped to the caller's tenant".into(),
     }
+}
+
+/// True when a detector dereferences a host secret. `CustomHttp.secret_ref` and
+/// `Local.fingerprint_secret_ref` are resolved against the GATEWAY's env/Vault
+/// (`SecretResolverRegistry::from_env`) during create/activate/reload.
+fn detector_references_host_secret(detector: &DetectorDefinition) -> bool {
+    matches!(
+        detector,
+        DetectorDefinition::CustomHttp {
+            secret_ref: Some(_),
+            ..
+        } | DetectorDefinition::Local {
+            fingerprint_secret_ref: Some(_),
+            ..
+        }
+    )
+}
+
+/// A tenant-scoped (org-scoped) guardrail author must not reference a host
+/// secret from any detector. Because those refs resolve against the gateway's
+/// own env/Vault -- not a tenant-scoped store -- a tenant could otherwise
+/// dereference the host `VAULT_TOKEN`, a sibling tenant's provider key, or the
+/// admin JWT secret, and a `CustomHttp` detector would ship the resolved value
+/// as a `Bearer` token to a caller-controlled endpoint (arbitrary host/cross-
+/// tenant secret exfiltration). Only platform operators (no `organization_id`)
+/// may author detectors that carry a secret reference.
+fn authorize_guardrail_secret_refs(
+    auth: &AuthContext,
+    revision: &PolicyRevision,
+) -> Result<(), AuthError> {
+    if auth.organization_id.is_none() {
+        return Ok(());
+    }
+    let references_host_secret = revision.checks.iter().any(|check| {
+        detector_references_host_secret(&check.detector)
+            || check
+                .fallback_detector
+                .as_ref()
+                .is_some_and(detector_references_host_secret)
+    });
+    if references_host_secret {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "guardrail_secret_ref_forbidden",
+            message: "tenant-scoped guardrail authors may not reference a host secret \
+                      (secret_ref / fingerprint_secret_ref); this is restricted to \
+                      platform-operator keys"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 async fn write_auth_error(

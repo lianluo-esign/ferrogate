@@ -59,3 +59,59 @@ fn tenant_guardrail_scope_requires_explicit_single_tenant_boundary() {
             .is_err()
     );
 }
+
+fn operator_auth() -> AuthContext {
+    let mut auth = tenant_auth("ignored");
+    auth.organization_id = None;
+    auth
+}
+
+fn revision_with_detector(detector: serde_json::Value) -> PolicyRevision {
+    serde_json::from_value(serde_json::json!({
+        "policy_id": "policy-1",
+        "revision": 1,
+        "name": "policy",
+        "scope": {"organization_ids": ["tenant-a"]},
+        "checks": [{
+            "id": "check",
+            "stage": "request",
+            "detector": detector
+        }],
+        "on_pass": [{"kind": "allow"}],
+        "on_fail": [{"kind": "block", "code": "blocked", "message": "blocked"}],
+        "on_error": [{"kind": "block", "code": "error", "message": "error"}],
+        "created_at_unix": 1,
+        "created_by": "key-1"
+    }))
+    .expect("test policy must deserialize")
+}
+
+#[test]
+fn tenant_authors_cannot_reference_host_secrets_but_operators_can() {
+    let custom_http_secret = revision_with_detector(serde_json::json!({
+        "kind": "custom_http",
+        "endpoint": "https://detector.example/scan",
+        "secret_ref": "env://VAULT_TOKEN"
+    }));
+    let local_fingerprint_secret = revision_with_detector(serde_json::json!({
+        "kind": "local",
+        "keywords": ["secret"],
+        "fingerprint_secret_ref": "env://VAULT_TOKEN"
+    }));
+    let no_secret = revision_with_detector(serde_json::json!({
+        "kind": "custom_http",
+        "endpoint": "https://detector.example/scan"
+    }));
+
+    // A tenant-scoped author cannot dereference a host secret from any detector.
+    let tenant = tenant_auth("tenant-a");
+    assert!(authorize_guardrail_secret_refs(&tenant, &custom_http_secret).is_err());
+    assert!(authorize_guardrail_secret_refs(&tenant, &local_fingerprint_secret).is_err());
+    // ...but a secret-free detector is fine.
+    assert!(authorize_guardrail_secret_refs(&tenant, &no_secret).is_ok());
+
+    // A platform operator retains the ability to reference host secrets.
+    let operator = operator_auth();
+    assert!(authorize_guardrail_secret_refs(&operator, &custom_http_secret).is_ok());
+    assert!(authorize_guardrail_secret_refs(&operator, &local_fingerprint_secret).is_ok());
+}
