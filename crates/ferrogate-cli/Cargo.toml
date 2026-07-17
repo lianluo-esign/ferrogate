@@ -30,6 +30,7 @@ blake2.workspace = true
 bytes.workspace = true
 chacha20poly1305.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
 ferrogate-config = { path = "../ferrogate-config" }

@@ -9,6 +9,7 @@ mod provider;
 mod secrets;
 #[cfg(test)]
 mod serde_tests;
+mod signed_snapshot;
 mod snapshot;
 #[cfg(test)]
 mod tests;
