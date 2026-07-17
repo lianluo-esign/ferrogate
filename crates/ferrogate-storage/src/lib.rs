@@ -1155,19 +1155,31 @@ impl PostgresControlPlaneStore {
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
-            store.initialize_schema(schema_timeout_millis)?;
+            block_on_sync_bridge(store.initialize_schema(schema_timeout_millis))?;
         }
-        store.validate_schema()?;
-        store.seed_missing_resources("api_key", bootstrap.api_keys)?;
-        store.seed_missing_resources("tenant", bootstrap.tenants)?;
-        store.seed_missing_resources("policy", bootstrap.policies)?;
-        store.seed_missing_resources("gateway_config", bootstrap.gateway_configs)?;
-        store.seed_missing_resources("agent_workflow", bootstrap.agent_workflows)?;
-        store.seed_missing_resources("skill_package", bootstrap.skill_packages)?;
-        store.seed_missing_resources("prompt_template", bootstrap.prompt_templates)?;
-        store.seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)?;
-        store.seed_missing_resources("mcp_server", bootstrap.mcp_servers)?;
-        store.seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)?;
+        block_on_sync_bridge(store.validate_schema())?;
+        block_on_sync_bridge(store.seed_missing_resources("api_key", bootstrap.api_keys))?;
+        block_on_sync_bridge(store.seed_missing_resources("tenant", bootstrap.tenants))?;
+        block_on_sync_bridge(store.seed_missing_resources("policy", bootstrap.policies))?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("gateway_config", bootstrap.gateway_configs),
+        )?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("agent_workflow", bootstrap.agent_workflows),
+        )?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("skill_package", bootstrap.skill_packages),
+        )?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("prompt_template", bootstrap.prompt_templates),
+        )?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("plugin_registration", bootstrap.plugin_registrations),
+        )?;
+        block_on_sync_bridge(store.seed_missing_resources("mcp_server", bootstrap.mcp_servers))?;
+        block_on_sync_bridge(
+            store.seed_missing_resources("agent_upstream", bootstrap.agent_upstreams),
+        )?;
         Ok(store)
     }
 
@@ -1193,144 +1205,208 @@ impl PostgresControlPlaneStore {
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
-            store.initialize_schema(schema_timeout_millis)?;
+            block_on_sync_bridge(store.initialize_schema(schema_timeout_millis))?;
         }
         if validate_schema {
-            store.validate_schema()?;
+            block_on_sync_bridge(store.validate_schema())?;
         }
         Ok(store)
     }
 
-    fn initialize_schema(&self, statement_timeout_millis: u64) -> Result<(), StorageError> {
+    fn document_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn initialize_schema(&self, statement_timeout_millis: u64) -> Result<(), StorageError> {
         let statement_timeout = format!("{statement_timeout_millis}ms");
-        self.with_client(|client| {
-            let mut transaction = client.transaction()?;
-            transaction.query_one(
+        // Schema DDL runs under an advisory-locked transaction and can take a
+        // while on a cold database, so the pool-acquire/commit deadline uses the
+        // (longer) schema-initialization timeout rather than the default
+        // statement timeout.
+        let operation = StorageOperation::new(
+            "initialize schema",
+            Duration::from_millis(statement_timeout_millis),
+        );
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .query_one(
                 "SELECT set_config('statement_timeout', $1, true)",
                 &[&statement_timeout],
-            )?;
-            transaction.query_one(
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction
+            .query_one(
                 "SELECT set_config('lock_timeout', $1, true)",
                 &[&statement_timeout],
-            )?;
-            transaction.query_one(
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction
+            .query_one(
                 "SELECT pg_advisory_xact_lock(\
                     hashtextextended(current_database() || ':' || current_schema(), 0)\
                  )",
                 &[],
-            )?;
-            transaction.batch_execute(POSTGRES_SCHEMA_SQL)?;
-            transaction.commit()
-        })?;
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction
+            .batch_execute(POSTGRES_SCHEMA_SQL)
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
-    fn validate_schema(&self) -> Result<(), StorageError> {
-        self.with_client_storage(validate_postgres_schema)
+    async fn validate_schema(&self) -> Result<(), StorageError> {
+        let operation = self.document_operation("validate schema");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        validate_postgres_schema(&client).await
     }
 
     fn schema_evidence(&self) -> StorageSchemaEvidence {
         self.schema.clone()
     }
 
-    fn seed_missing_resources(
+    async fn seed_missing_resources(
         &self,
         kind: &'static str,
         records: Vec<(String, String)>,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            for (id, document_json) in records {
-                client.execute(
+        let operation = self.document_operation("seed missing resources");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        for (id, document_json) in records {
+            client
+                .execute(
                     "INSERT INTO control_plane_resources \
                      (resource_kind, resource_id, document_json) VALUES ($1, $2, $3::text::jsonb) \
                      ON CONFLICT (resource_kind, resource_id) DO NOTHING",
                     &[&kind, &id, &document_json],
-                )?;
-            }
-            Ok(())
-        })
+                )
+                .await
+                .map_err(postgres_error)?;
+        }
+        Ok(())
     }
 
-    fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+    async fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
         Ok(ControlPlaneSnapshot {
-            api_keys: self.list_documents("api_key")?,
-            tenants: self.list_documents("tenant")?,
-            policies: self.list_documents("policy")?,
-            gateway_configs: self.list_documents("gateway_config")?,
-            agent_workflows: self.list_documents("agent_workflow")?,
-            skill_packages: self.list_documents("skill_package")?,
-            prompt_templates: self.list_documents("prompt_template")?,
-            plugin_registrations: self.list_documents("plugin_registration")?,
-            mcp_servers: self.list_documents("mcp_server")?,
-            agent_upstreams: self.list_documents("agent_upstream")?,
+            api_keys: self.list_documents("api_key").await?,
+            tenants: self.list_documents("tenant").await?,
+            policies: self.list_documents("policy").await?,
+            gateway_configs: self.list_documents("gateway_config").await?,
+            agent_workflows: self.list_documents("agent_workflow").await?,
+            skill_packages: self.list_documents("skill_package").await?,
+            prompt_templates: self.list_documents("prompt_template").await?,
+            plugin_registrations: self.list_documents("plugin_registration").await?,
+            mcp_servers: self.list_documents("mcp_server").await?,
+            agent_upstreams: self.list_documents("agent_upstream").await?,
         })
     }
 
-    fn documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
+    async fn documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
         Ok(ControlPlaneDocuments {
-            api_keys: self.list_resource_documents("api_key")?,
-            tenants: self.list_resource_documents("tenant")?,
-            policies: self.list_resource_documents("policy")?,
-            gateway_configs: self.list_resource_documents("gateway_config")?,
-            agent_workflows: self.list_resource_documents("agent_workflow")?,
-            skill_packages: self.list_resource_documents("skill_package")?,
-            prompt_templates: self.list_resource_documents("prompt_template")?,
-            plugin_registrations: self.list_resource_documents("plugin_registration")?,
-            mcp_servers: self.list_resource_documents("mcp_server")?,
-            agent_upstreams: self.list_resource_documents("agent_upstream")?,
+            api_keys: self.list_resource_documents("api_key").await?,
+            tenants: self.list_resource_documents("tenant").await?,
+            policies: self.list_resource_documents("policy").await?,
+            gateway_configs: self.list_resource_documents("gateway_config").await?,
+            agent_workflows: self.list_resource_documents("agent_workflow").await?,
+            skill_packages: self.list_resource_documents("skill_package").await?,
+            prompt_templates: self.list_resource_documents("prompt_template").await?,
+            plugin_registrations: self.list_resource_documents("plugin_registration").await?,
+            mcp_servers: self.list_resource_documents("mcp_server").await?,
+            agent_upstreams: self.list_resource_documents("agent_upstream").await?,
         })
     }
 
-    fn list_resource_documents(
+    async fn list_resource_documents(
         &self,
         kind: &'static str,
     ) -> Result<Vec<(String, String)>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+        let operation = self.document_operation("list resource documents");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT resource_id, document_json::text FROM control_plane_resources \
                  WHERE resource_kind = $1 ORDER BY resource_id ASC",
                 &[&kind],
-            )?;
-            Ok(rows
-                .into_iter()
-                .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
-                .collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect())
     }
 
-    fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
+    async fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
+        let operation = self.document_operation("list documents");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
                 "SELECT document_json::text FROM control_plane_resources \
                  WHERE resource_kind = $1 ORDER BY resource_id ASC",
                 &[&kind],
-            )?;
-            Ok(rows
-                .into_iter()
-                .map(|row| row.get::<_, String>(0))
-                .collect())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
     }
 
-    fn get_document(&self, kind: &'static str, id: String) -> Result<Option<String>, StorageError> {
-        self.with_client(|client| {
-            let row = client.query_opt(
+    async fn get_document(
+        &self,
+        kind: &'static str,
+        id: String,
+    ) -> Result<Option<String>, StorageError> {
+        let operation = self.document_operation("get document");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
                 "SELECT document_json::text FROM control_plane_resources \
                  WHERE resource_kind = $1 AND resource_id = $2",
                 &[&kind, &id],
-            )?;
-            Ok(row.map(|row| row.get::<_, String>(0)))
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(|row| row.get::<_, String>(0)))
     }
 
-    fn upsert(
+    async fn upsert(
         &self,
         kind: &'static str,
         id: String,
         document_json: String,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.execute(
+        let operation = self.document_operation("upsert control plane document");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
                 "INSERT INTO control_plane_resources \
                  (resource_kind, resource_id, document_json, revision, updated_at_unix) \
                  VALUES ($1, $2, $3::text::jsonb, 1, EXTRACT(EPOCH FROM NOW())::BIGINT) \
@@ -1339,43 +1415,59 @@ impl PostgresControlPlaneStore {
                  revision = control_plane_resources.revision + 1, \
                  updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
                 &[&kind, &id, &document_json],
-            )?;
-            Ok(())
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn replace_kind(
+    async fn replace_kind(
         &self,
         kind: &'static str,
         records: Vec<(String, String)>,
     ) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            let mut transaction = client.transaction()?;
-            transaction.execute(
+        let operation = self.document_operation("replace control plane kind");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .execute(
                 "DELETE FROM control_plane_resources WHERE resource_kind = $1",
                 &[&kind],
-            )?;
-            for (id, document_json) in records {
-                transaction.execute(
+            )
+            .await
+            .map_err(postgres_error)?;
+        for (id, document_json) in records {
+            transaction
+                .execute(
                     "INSERT INTO control_plane_resources \
                      (resource_kind, resource_id, document_json) VALUES ($1, $2, $3::text::jsonb)",
                     &[&kind, &id, &document_json],
-                )?;
-            }
-            transaction.commit()?;
-            Ok(())
-        })
+                )
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
     }
 
-    fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
-        self.with_client(|client| {
-            let rows_changed = client.execute(
+    async fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
+        let operation = self.document_operation("delete control plane document");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows_changed = client
+            .execute(
                 "DELETE FROM control_plane_resources \
                  WHERE resource_kind = $1 AND resource_id = $2",
                 &[&kind, &id],
-            )?;
-            Ok(rows_changed > 0)
-        })
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows_changed > 0)
     }
 
     fn guardrail_policy_operation(&self, name: &'static str) -> StorageOperation {
@@ -4709,13 +4801,6 @@ impl PostgresControlPlaneStore {
         Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
     }
 
-    fn with_client<T: Send>(
-        &self,
-        action: impl FnOnce(&mut PostgresClient) -> Result<T, postgres::Error> + Send,
-    ) -> Result<T, StorageError> {
-        self.with_client_storage(|client| action(client).map_err(postgres_error))
-    }
-
     fn with_client_storage<T: Send>(
         &self,
         action: impl FnOnce(&mut PostgresClient) -> Result<T, StorageError> + Send,
@@ -4907,7 +4992,7 @@ fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageError> {
+async fn validate_postgres_schema(client: &deadpool_postgres::Object) -> Result<(), StorageError> {
     const TABLES: &[&str] = &[
         "control_plane_resources",
         "agent_runs",
@@ -4968,6 +5053,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
     for table in TABLES {
         let exists = client
             .query_one("SELECT to_regclass($1) IS NOT NULL", &[table])
+            .await
             .map_err(postgres_error)?
             .get::<_, bool>(0);
         if !exists {
@@ -5012,6 +5098,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                    AND column_name = $2",
                 &[table, column],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, String>(0));
         if data_type.as_deref() != Some("jsonb") {
@@ -5029,6 +5116,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                AND column_name = 'generation'",
             &[],
         )
+        .await
         .map_err(postgres_error)?
         .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)));
     if guardrail_generation != Some(("bigint".into(), "NO".into())) {
@@ -5056,6 +5144,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                    AND table_name = $1 AND column_name = $2",
                 &[table, column],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)));
         if definition.as_ref().map(|(value, _)| value.as_str()) != Some(*expected_type)
@@ -5086,6 +5175,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                  ORDER BY key.position",
                 &[&table],
             )
+            .await
             .map_err(postgres_error)?
             .into_iter()
             .map(|row| row.get::<_, String>(0))
@@ -5112,6 +5202,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                 PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
                 &[&table, &constraint_name],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| {
                 (
@@ -5151,6 +5242,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                  WHERE namespace.nspname = current_schema() AND class.relname = $1",
                 &[&table],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, bool>(0));
         if row_level_security != Some(true) {
@@ -5189,6 +5281,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                    AND policyname = $2",
                 &[&table, &policy],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, bool>(0));
         if policy_is_complete != Some(true) {
@@ -5211,6 +5304,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                    AND column_name = $2",
                 &[table, column],
             )
+            .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, String>(0));
         if data_type.as_deref() != Some("bigint") {
@@ -5287,6 +5381,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                  WHERE schemaname = current_schema() AND indexname = $1",
                 &[index],
             )
+            .await
             .map_err(postgres_error)?
             .get::<_, i64>(0);
         if count != 1 {
@@ -5304,6 +5399,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                AND indexname = 'idx_mcp_oauth_flows_pending_subject'",
             &[],
         )
+        .await
         .map_err(postgres_error)?
         .map(|row| row.get::<_, String>(0));
     if pending_flow_index.as_deref().is_none_or(|definition| {
@@ -5322,6 +5418,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
             "SELECT name FROM storage_schema_migrations WHERE version = $1",
             &[&(POSTGRES_SCHEMA_VERSION as i64)],
         )
+        .await
         .map_err(postgres_error)?;
     let name = row.map(|row| row.get::<_, String>(0));
     if name.as_deref() != Some(POSTGRES_SCHEMA_NAME) {
@@ -8304,7 +8401,9 @@ impl RuntimeStorageRepositories {
                     mcp_servers: Vec::new(),
                     agent_upstreams: Vec::new(),
                 })),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.snapshot(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.snapshot())
+            }
         }
     }
 
@@ -8320,17 +8419,31 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.replace_kind("api_key", documents.api_keys)?;
-                control_plane.replace_kind("tenant", documents.tenants)?;
-                control_plane.replace_kind("policy", documents.policies)?;
-                control_plane.replace_kind("gateway_config", documents.gateway_configs)?;
-                control_plane.replace_kind("agent_workflow", documents.agent_workflows)?;
-                control_plane.replace_kind("skill_package", documents.skill_packages)?;
-                control_plane.replace_kind("prompt_template", documents.prompt_templates)?;
-                control_plane
-                    .replace_kind("plugin_registration", documents.plugin_registrations)?;
-                control_plane.replace_kind("mcp_server", documents.mcp_servers)?;
-                control_plane.replace_kind("agent_upstream", documents.agent_upstreams)?;
+                block_on_sync_bridge(control_plane.replace_kind("api_key", documents.api_keys))?;
+                block_on_sync_bridge(control_plane.replace_kind("tenant", documents.tenants))?;
+                block_on_sync_bridge(control_plane.replace_kind("policy", documents.policies))?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("gateway_config", documents.gateway_configs),
+                )?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("agent_workflow", documents.agent_workflows),
+                )?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("skill_package", documents.skill_packages),
+                )?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("prompt_template", documents.prompt_templates),
+                )?;
+                block_on_sync_bridge(
+                    control_plane
+                        .replace_kind("plugin_registration", documents.plugin_registrations),
+                )?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("mcp_server", documents.mcp_servers),
+                )?;
+                block_on_sync_bridge(
+                    control_plane.replace_kind("agent_upstream", documents.agent_upstreams),
+                )?;
                 Ok(())
             }
         }
@@ -8342,7 +8455,9 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|control_plane| control_plane.documents())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.documents()?,
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.documents())?
+            }
         };
         // Same sync CLI migration tool as `import_migration_snapshot` below --
         // no tokio runtime anywhere in its call chain, so bridge the one
@@ -8504,7 +8619,7 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("api_key", id.into(), document_json)
+                block_on_sync_bridge(control_plane.upsert("api_key", id.into(), document_json))
             }
         }
     }
@@ -8516,7 +8631,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_api_key(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("api_key", id.to_string())
+                block_on_sync_bridge(control_plane.delete("api_key", id.to_string()))
             }
         }
     }
@@ -9270,7 +9385,7 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("policy", id.into(), document_json)
+                block_on_sync_bridge(control_plane.upsert("policy", id.into(), document_json))
             }
         }
     }
@@ -9282,7 +9397,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_policy(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("policy", id.to_string())
+                block_on_sync_bridge(control_plane.delete("policy", id.to_string()))
             }
         }
     }
@@ -9299,9 +9414,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("gateway_config", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("gateway_config", id.into(), document_json),
+            ),
         }
     }
 
@@ -9312,7 +9427,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_gateway_config(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("gateway_config", id.to_string())
+                block_on_sync_bridge(control_plane.delete("gateway_config", id.to_string()))
             }
         }
     }
@@ -9329,9 +9444,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("agent_workflow", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("agent_workflow", id.into(), document_json),
+            ),
         }
     }
 
@@ -9342,7 +9457,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_agent_workflow(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("agent_workflow", id.to_string())
+                block_on_sync_bridge(control_plane.delete("agent_workflow", id.to_string()))
             }
         }
     }
@@ -9359,9 +9474,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("skill_package", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("skill_package", id.into(), document_json),
+            ),
         }
     }
 
@@ -9372,7 +9487,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_skill_package(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("skill_package", id.to_string())
+                block_on_sync_bridge(control_plane.delete("skill_package", id.to_string()))
             }
         }
     }
@@ -9389,9 +9504,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("prompt_template", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("prompt_template", id.into(), document_json),
+            ),
         }
     }
 
@@ -9407,9 +9522,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("plugin_registration", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("plugin_registration", id.into(), document_json),
+            ),
         }
     }
 
@@ -9420,7 +9535,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_plugin_registration(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("plugin_registration", id.to_string())
+                block_on_sync_bridge(control_plane.delete("plugin_registration", id.to_string()))
             }
         }
     }
@@ -9438,7 +9553,7 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("mcp_server", id.into(), document_json)
+                block_on_sync_bridge(control_plane.upsert("mcp_server", id.into(), document_json))
             }
         }
     }
@@ -9450,7 +9565,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_mcp_server(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("mcp_server", id.to_string())
+                block_on_sync_bridge(control_plane.delete("mcp_server", id.to_string()))
             }
         }
     }
@@ -9467,9 +9582,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("agent_upstream", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("agent_upstream", id.into(), document_json),
+            ),
         }
     }
 
@@ -9480,7 +9595,7 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_agent_upstream(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("agent_upstream", id.to_string())
+                block_on_sync_bridge(control_plane.delete("agent_upstream", id.to_string()))
             }
         }
     }
@@ -9497,9 +9612,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("tool_approval", id.into(), document_json)
-            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.upsert("tool_approval", id.into(), document_json),
+            ),
         }
     }
 
@@ -9510,7 +9625,7 @@ impl RuntimeStorageRepositories {
                 .ok()
                 .and_then(|control_plane| control_plane.tool_approval(id))),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_document("tool_approval", id.to_string())
+                block_on_sync_bridge(control_plane.get_document("tool_approval", id.to_string()))
             }
         }
     }
@@ -9522,7 +9637,7 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.tool_approvals())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_documents("tool_approval")
+                block_on_sync_bridge(control_plane.list_documents("tool_approval"))
             }
         }
     }
@@ -9536,7 +9651,7 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.tool_approval_documents())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_resource_documents("tool_approval")
+                block_on_sync_bridge(control_plane.list_resource_documents("tool_approval"))
             }
         }
     }
