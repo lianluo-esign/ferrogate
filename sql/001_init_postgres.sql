@@ -1090,9 +1090,16 @@ ALTER TABLE metering_events
 -- instead of) usage_monthly_rollups. A settled request with N metadata
 -- pairs increments N of these rows -- mirrors how one request fans out
 -- into up to four usage_monthly_rollups rows (one per scope level).
+-- organization_id scopes each rollup to its originating tenant so a tenant
+-- admin sees only its own group_by=metadata breakdown (issue #226). The
+-- deterministic PK `id` encodes (period_month, organization_id, metadata_key,
+-- metadata_value), so it is the dedup key for the upsert -- no separate tuple
+-- UNIQUE constraint is needed (and the pre-#226 one is dropped in the migration
+-- below).
 CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
     id TEXT PRIMARY KEY,
     period_month TEXT NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT '',
     metadata_key TEXT NOT NULL,
     metadata_value TEXT NOT NULL,
     prompt_tokens BIGINT NOT NULL DEFAULT 0,
@@ -1101,12 +1108,39 @@ CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
     cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
     request_count BIGINT NOT NULL DEFAULT 0,
     error_count BIGINT NOT NULL DEFAULT 0,
-    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
-    UNIQUE (period_month, metadata_key, metadata_value)
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_key
     ON usage_metadata_rollups(metadata_key, period_month);
+
+-- Per-tenant lookup index for the scoped group_by=metadata read path (#226).
+CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
+    ON usage_metadata_rollups(organization_id, metadata_key, period_month);
+
+-- Migration 033 (#226): add organization_id to existing tables and drop the
+-- pre-#226 (period_month, metadata_key, metadata_value) UNIQUE constraint, which
+-- would otherwise reject two tenants sharing a metadata key/value in the same
+-- month. Idempotent + safe: existing rows default organization_id='' (legacy,
+-- operator-only) and keep their historical totals; the deterministic PK now
+-- dedups on the org-scoped id. Pre-migration rows cannot be re-attributed to a
+-- tenant (their originating tenant is unrecoverable post-aggregation).
+ALTER TABLE usage_metadata_rollups
+    ADD COLUMN IF NOT EXISTS organization_id TEXT NOT NULL DEFAULT '';
+
+DO $$
+DECLARE
+    constraint_name TEXT;
+BEGIN
+    SELECT conname INTO constraint_name
+    FROM pg_constraint
+    WHERE conrelid = 'usage_metadata_rollups'::regclass
+      AND contype = 'u'
+      AND pg_get_constraintdef(oid) = 'UNIQUE (period_month, metadata_key, metadata_value)';
+    IF constraint_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE usage_metadata_rollups DROP CONSTRAINT %I', constraint_name);
+    END IF;
+END $$;
 
 -- plans: sellable subscription tiers (issue #168). A named bundle of feature
 -- flags plus default quota values that seed the effective-quota merge chain
@@ -1710,4 +1744,8 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (32, '032_guardrail_policy_binding_generation')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (33, '033_usage_metadata_rollups_per_tenant')
 ON CONFLICT (version) DO NOTHING;

@@ -39,6 +39,7 @@ name = "Tagged client"
 key = "tagged-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+organization_id = "tenant-meta-iso"
 
 [[api_keys]]
 id = "admin"
@@ -51,6 +52,13 @@ name = "Tenant admin-console session key"
 key = "tenant-secret"
 scopes = ["admin.read", "admin.write"]
 organization_id = "tenant-meta-iso"
+
+[[api_keys]]
+id = "tenant-other-console"
+name = "Other tenant admin-console session key"
+key = "tenant-other-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-other-iso"
 "#
         ),
     )
@@ -216,18 +224,19 @@ fn oversized_metadata_is_rejected_with_a_clear_error_not_silently_truncated() {
     gateway.wait().unwrap();
 }
 
-/// A tenant-scoped admin key must not be able to read the metadata
-/// breakdown: `usage_metadata_rollups` is a global aggregation dimension
-/// with no tenant column, so `group_by=metadata.<key>` would return one row
-/// per distinct value seen across EVERY tenant -- leaking other tenants'
-/// token volume, dollar cost, and end-customer/feature identifiers, which
-/// defeats the issue #185 tenant-scope narrowing. The breakdown is
-/// restricted to platform-operator keys; tenant-scoped callers get 403.
+/// Issue #226: a tenant-scoped admin key reads only ITS OWN metadata
+/// breakdown, never another tenant's. `usage_metadata_rollups` carries an
+/// `organization_id` scoping each rollup to the tenant whose request produced
+/// it, so `group_by=metadata.<key>` narrows to the caller's tenant. This
+/// restores the per-tenant breakdown that the earlier containment (ea1040b,
+/// which returned 403 to tenant-scoped callers to stop a cross-tenant leak)
+/// removed, while keeping tenants isolated. Platform operators keep the global
+/// cross-tenant view.
 #[test]
-fn tenant_scoped_key_cannot_read_the_cross_tenant_metadata_breakdown() {
+fn tenant_scoped_key_sees_only_its_own_metadata_breakdown() {
     let gateway_addr = free_addr();
-    // One tagged request so there is real cross-tenant metadata in the
-    // global rollup that the tenant-scoped caller must NOT be able to read.
+    // One tagged request, attributed to tenant-meta-iso (the tagged_client key's
+    // organization). Its metadata rollup belongs to that tenant.
     let (provider_addr, _provider_handle) = spawn_provider_upstream(
         1,
         r#"{"id":"chatcmpl_meta","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1000,"completion_tokens":0,"total_tokens":1000}}"#,
@@ -248,8 +257,9 @@ fn tenant_scoped_key_cannot_read_the_cross_tenant_metadata_breakdown() {
         "the seed tagged request should succeed: {tagged}"
     );
 
-    // Tenant-scoped key: denied before any rollup is queried.
-    let stolen = http_request(
+    // The owning tenant (tenant-meta-iso) reads its own breakdown -- no longer
+    // 403, and it contains its own tagged value.
+    let owner = http_request(
         &gateway_addr,
         "GET",
         "/admin/v1/usage-reports?group_by=metadata.customer_id",
@@ -257,20 +267,32 @@ fn tenant_scoped_key_cannot_read_the_cross_tenant_metadata_breakdown() {
         "",
     );
     assert!(
-        status_line(&stolen).contains("403"),
-        "a tenant-scoped key must not read the global metadata breakdown: {stolen}"
+        status_line(&owner).contains("200 OK"),
+        "the owning tenant must read its own metadata breakdown: {owner}"
     );
     assert!(
-        stolen.contains("platform_operator_required"),
-        "denial must be the operator gate: {stolen}"
-    );
-    assert!(
-        !stolen.contains("acme"),
-        "the denied response must not leak any metadata value: {stolen}"
+        owner.contains("acme"),
+        "the owning tenant's breakdown must contain its tagged value: {owner}"
     );
 
-    // The platform operator retains the global breakdown, including the
-    // value the tenant-scoped caller was denied.
+    // A DIFFERENT tenant (tenant-other-iso) must NOT see tenant-meta-iso's data.
+    let other_tenant = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/usage-reports?group_by=metadata.customer_id",
+        &["Authorization: Bearer tenant-other-secret"],
+        "",
+    );
+    assert!(
+        status_line(&other_tenant).contains("200 OK"),
+        "a different tenant's request should succeed (with no rows): {other_tenant}"
+    );
+    assert!(
+        !other_tenant.contains("acme"),
+        "a different tenant must not see tenant-meta-iso's metadata value: {other_tenant}"
+    );
+
+    // The platform operator retains the global cross-tenant breakdown.
     let operator = http_request(
         &gateway_addr,
         "GET",

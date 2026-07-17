@@ -94,12 +94,21 @@ impl AppState {
     /// rollups for the `/admin/v1/usage-reports` surface. `YYYY-MM` period
     /// strings sort and compare lexicographically, so `from_month`/
     /// `to_month` range bounds are plain string comparisons.
+    ///
+    /// `organization_id` is the caller's tenant scope (issue #226): `Some(org)`
+    /// for a tenant-scoped caller (the metadata breakdown is narrowed to that
+    /// org), `None` for a platform operator (global cross-tenant view). It is an
+    /// authorization input supplied by the handler from the authenticated key,
+    /// never a request-controlled query parameter.
     pub(crate) async fn usage_report(
         &self,
         filter: &UsageReportFilter,
+        organization_id: Option<&str>,
     ) -> anyhow::Result<Vec<crate::responses::AdminUsageReportRow>> {
         if let Some(UsageReportGroupBy::Metadata(metadata_key)) = &filter.group_by {
-            return Ok(self.metadata_usage_report(metadata_key, filter).await);
+            return Ok(self
+                .metadata_usage_report(metadata_key, filter, organization_id)
+                .await);
         }
         let rollups: Vec<StoredUsageMonthlyRollup> = self
             .list_usage_monthly_rollups()?
@@ -156,17 +165,19 @@ impl AppState {
     /// distinct value ever seen for `metadata_key`, summed across every
     /// period_month within `filter`'s range. Sourced from
     /// `usage_metadata_rollups`, an aggregation dimension orthogonal to the
-    /// tenant/project/workspace/key scope chain `usage_monthly_rollups`
-    /// covers -- `filter.scope_type`/`scope_id` don't apply here (a
-    /// metadata rollup has no scope), only the period range does.
+    /// tenant/project/workspace/key scope chain `usage_monthly_rollups` covers.
+    /// `organization_id` (issue #226) narrows the rollups to the caller's own
+    /// tenant when `Some`; `None` (a platform operator) sees the global
+    /// cross-tenant breakdown.
     async fn metadata_usage_report(
         &self,
         metadata_key: &str,
         filter: &UsageReportFilter,
+        organization_id: Option<&str>,
     ) -> Vec<crate::responses::AdminUsageReportRow> {
         let rollups = self
             .repositories
-            .list_usage_metadata_rollups(metadata_key)
+            .list_usage_metadata_rollups(metadata_key, organization_id)
             .await
             .unwrap_or_default();
         let mut groups: std::collections::BTreeMap<String, crate::responses::AdminUsageReportRow> =

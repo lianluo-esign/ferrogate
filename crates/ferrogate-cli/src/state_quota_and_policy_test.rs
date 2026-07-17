@@ -1728,11 +1728,14 @@ fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
     }
 
     // Scoped to a single key: exactly one row, matching that key's own spend.
-    let key_a_rows = block_on(state.usage_report(&UsageReportFilter {
-        scope_type: Some(QuotaScopeKind::Key),
-        scope_id: Some("key-a".into()),
-        ..UsageReportFilter::default()
-    }))
+    let key_a_rows = block_on(state.usage_report(
+        &UsageReportFilter {
+            scope_type: Some(QuotaScopeKind::Key),
+            scope_id: Some("key-a".into()),
+            ..UsageReportFilter::default()
+        },
+        None,
+    ))
     .unwrap();
     assert_eq!(key_a_rows.len(), 1);
     assert_eq!(key_a_rows[0].scope_id.as_deref(), Some("key-a"));
@@ -1740,32 +1743,41 @@ fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
     assert_eq!(key_a_rows[0].request_count, 1);
 
     // Both keys roll up into a single tenant-scope row.
-    let tenant_rows = block_on(state.usage_report(&UsageReportFilter {
-        scope_type: Some(QuotaScopeKind::Tenant),
-        scope_id: Some("org-shared".into()),
-        ..UsageReportFilter::default()
-    }))
+    let tenant_rows = block_on(state.usage_report(
+        &UsageReportFilter {
+            scope_type: Some(QuotaScopeKind::Tenant),
+            scope_id: Some("org-shared".into()),
+            ..UsageReportFilter::default()
+        },
+        None,
+    ))
     .unwrap();
     assert_eq!(tenant_rows.len(), 1);
     assert!((tenant_rows[0].cost_usd - 0.006).abs() < 1e-9);
     assert_eq!(tenant_rows[0].request_count, 2);
 
     // A future-only window excludes every real (current-month) row.
-    let out_of_range = block_on(state.usage_report(&UsageReportFilter {
-        scope_type: Some(QuotaScopeKind::Key),
-        from_month: Some("9999-12".into()),
-        ..UsageReportFilter::default()
-    }))
+    let out_of_range = block_on(state.usage_report(
+        &UsageReportFilter {
+            scope_type: Some(QuotaScopeKind::Key),
+            from_month: Some("9999-12".into()),
+            ..UsageReportFilter::default()
+        },
+        None,
+    ))
     .unwrap();
     assert!(out_of_range.is_empty());
 
     // group_by=period_month sums both key-scope rows (same real month)
     // into a single row, dropping the per-scope identity.
-    let grouped = block_on(state.usage_report(&UsageReportFilter {
-        scope_type: Some(QuotaScopeKind::Key),
-        group_by: Some(UsageReportGroupBy::PeriodMonth),
-        ..UsageReportFilter::default()
-    }))
+    let grouped = block_on(state.usage_report(
+        &UsageReportFilter {
+            scope_type: Some(QuotaScopeKind::Key),
+            group_by: Some(UsageReportGroupBy::PeriodMonth),
+            ..UsageReportFilter::default()
+        },
+        None,
+    ))
     .unwrap();
     assert_eq!(grouped.len(), 1);
     assert_eq!(grouped[0].scope_type, None);

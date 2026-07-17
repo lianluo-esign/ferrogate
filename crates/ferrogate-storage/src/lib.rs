@@ -3193,6 +3193,7 @@ impl PostgresControlPlaneStore {
             .await?;
             increment_usage_metadata_rollups(
                 &transaction,
+                &event.tenant,
                 &event.metadata,
                 &period_month,
                 &usage_delta,
@@ -9574,6 +9575,7 @@ impl RuntimeStorageRepositories {
                     &usage_delta,
                 );
                 control_plane.increment_usage_metadata_rollups(
+                    &event.tenant,
                     &event.metadata,
                     &period_month,
                     &usage_delta,
@@ -12257,7 +12259,9 @@ mod tests {
         block_on(repositories.append_billing_event(event("req-meta-3", "globex", 10, 0.001)))
             .unwrap();
 
-        let acme = block_on(repositories.list_usage_metadata_rollups("customer_id"))
+        // Platform-operator view (organization_id == None): the global
+        // cross-tenant breakdown.
+        let acme = block_on(repositories.list_usage_metadata_rollups("customer_id", None))
             .unwrap()
             .into_iter()
             .find(|rollup| rollup.metadata_value == "acme")
@@ -12265,8 +12269,9 @@ mod tests {
         assert_eq!(acme.request_count, 2);
         assert_eq!(acme.total_tokens, 150);
         assert!((acme.cost_usd - 0.015).abs() < 1e-9, "{}", acme.cost_usd);
+        assert_eq!(acme.organization_id, "tenant-b");
 
-        let globex = block_on(repositories.list_usage_metadata_rollups("customer_id"))
+        let globex = block_on(repositories.list_usage_metadata_rollups("customer_id", None))
             .unwrap()
             .into_iter()
             .find(|rollup| rollup.metadata_value == "globex")
@@ -12278,9 +12283,29 @@ mod tests {
         // are scoped per requested key, not a flattened union of every key
         // ever seen.
         assert!(
-            block_on(repositories.list_usage_metadata_rollups("no_such_key"))
+            block_on(repositories.list_usage_metadata_rollups("no_such_key", None))
                 .unwrap()
                 .is_empty()
+        );
+
+        // Per-tenant scoping (issue #226): the owning tenant sees its own rows;
+        // a different tenant sees none of them.
+        let tenant_b_scoped =
+            block_on(repositories.list_usage_metadata_rollups("customer_id", Some("tenant-b")))
+                .unwrap();
+        assert_eq!(
+            tenant_b_scoped.len(),
+            2,
+            "tenant-b must see its own acme + globex rows"
+        );
+        assert!(tenant_b_scoped
+            .iter()
+            .all(|rollup| rollup.organization_id == "tenant-b"));
+        assert!(
+            block_on(repositories.list_usage_metadata_rollups("customer_id", Some("other-tenant")))
+                .unwrap()
+                .is_empty(),
+            "a different tenant must not see tenant-b's metadata breakdown"
         );
 
         // The same 3 events also drove the existing tenant-scope rollup
