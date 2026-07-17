@@ -68,6 +68,27 @@ pub struct DetectorInput<'a> {
     pub segments: &'a [ContentSegment],
 }
 
+/// How a detector authenticates to its backend. Declared in the descriptor so
+/// operators can audit which detectors carry credentials without inspecting
+/// their (secret-bearing) configuration.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectorCredentialType {
+    None,
+    BearerToken,
+}
+
+/// Where a detector processes content. `InRepo` never leaves the gateway
+/// process; `ProviderSaas` projects content to an external vendor; `CustomerVpc`
+/// reaches a customer-operated endpoint.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataResidency {
+    InRepo,
+    ProviderSaas,
+    CustomerVpc,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DetectorDescriptor {
     pub id: String,
@@ -76,6 +97,15 @@ pub struct DetectorDescriptor {
     pub supports_response: bool,
     pub supports_transform: bool,
     pub supported_sources: Vec<ContentSource>,
+    /// Credential class this detector presents to its backend.
+    pub credential: DetectorCredentialType,
+    /// Where this detector processes content.
+    pub data_residency: DataResidency,
+    /// Upper bound on the projected request payload this detector accepts.
+    pub max_payload_bytes: usize,
+    /// Failure modes this detector may surface. Every runtime error's kind is a
+    /// member of this set (declared is a superset of what is emitted).
+    pub declared_failure_modes: Vec<DetectorErrorKind>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -498,6 +528,29 @@ impl GuardrailDetector for CustomHttpDetector {
             supports_response: true,
             supports_transform: true,
             supported_sources: self.config.supported_sources.clone(),
+            credential: if self.config.bearer_token.is_some() {
+                DetectorCredentialType::BearerToken
+            } else {
+                DetectorCredentialType::None
+            },
+            data_residency: DataResidency::ProviderSaas,
+            max_payload_bytes: self.config.max_payload_bytes,
+            // The external SaaS path can surface the full network/circuit/patch
+            // error surface; only ProtectedPath is unreachable here (it is a
+            // patch-application concern owned by the gateway, not the detector).
+            declared_failure_modes: vec![
+                DetectorErrorKind::Timeout,
+                DetectorErrorKind::Unavailable,
+                DetectorErrorKind::InvalidResponse,
+                DetectorErrorKind::Overloaded,
+                DetectorErrorKind::Unauthorized,
+                DetectorErrorKind::PayloadTooLarge,
+                DetectorErrorKind::CircuitOpen,
+                DetectorErrorKind::InvalidConfiguration,
+                DetectorErrorKind::InvalidPatch,
+                DetectorErrorKind::StalePatch,
+                DetectorErrorKind::Internal,
+            ],
         }
     }
 
@@ -977,6 +1030,14 @@ fn is_disallowed_v6(ip: Ipv6Addr) -> bool {
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
+/// Reusable detector conformance harness and its in-repo mock adapter. Gated so
+/// the mock never enters a production build: available under `cfg(test)` and
+/// behind the opt-in `conformance` feature for downstream adapter authors.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
+
+#[cfg(test)]
+mod conformance_test;
 #[cfg(test)]
 mod deterministic_test;
 #[cfg(test)]

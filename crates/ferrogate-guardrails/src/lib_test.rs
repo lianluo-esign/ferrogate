@@ -494,6 +494,67 @@ fn bearer_token_is_sent_but_never_debugged() {
 }
 
 #[test]
+fn custom_http_descriptor_reports_credential_residency_and_payload_metadata() {
+    let mut config = detector_config("https://example.com/check".to_string());
+    config.max_payload_bytes = 4096;
+    let detector = CustomHttpDetector::new(config).unwrap();
+    let descriptor = detector.descriptor();
+    assert_eq!(descriptor.credential, DetectorCredentialType::None);
+    assert_eq!(descriptor.data_residency, DataResidency::ProviderSaas);
+    assert_eq!(descriptor.max_payload_bytes, 4096);
+    for kind in [
+        DetectorErrorKind::Timeout,
+        DetectorErrorKind::Unauthorized,
+        DetectorErrorKind::Overloaded,
+        DetectorErrorKind::CircuitOpen,
+        DetectorErrorKind::PayloadTooLarge,
+        DetectorErrorKind::InvalidResponse,
+        DetectorErrorKind::StalePatch,
+    ] {
+        assert!(
+            descriptor.declared_failure_modes.contains(&kind),
+            "custom_http should declare {}",
+            kind.as_str()
+        );
+    }
+    // ProtectedPath is a gateway patch-application concern, never emitted here.
+    assert!(!descriptor
+        .declared_failure_modes
+        .contains(&DetectorErrorKind::ProtectedPath));
+
+    let mut config = detector_config("https://example.com/check".to_string());
+    config.bearer_token = Some(DetectorSecret::new("configured-token".to_string()));
+    let detector = CustomHttpDetector::new(config).unwrap();
+    assert_eq!(
+        detector.descriptor().credential,
+        DetectorCredentialType::BearerToken
+    );
+}
+
+#[test]
+fn deterministic_descriptor_reports_in_repo_metadata() {
+    let detector = DeterministicDetector::new(DeterministicDetectorConfig {
+        id: "local".to_string(),
+        supported_sources: vec![ContentSource::User],
+        keywords: vec!["forbidden".to_string()],
+        regex: Vec::new(),
+        max_input_bytes: Some(2048),
+        json: None,
+        request: None,
+        secret_patterns: Vec::new(),
+        fingerprint_key: None,
+    })
+    .unwrap();
+    let descriptor = detector.descriptor();
+    assert_eq!(descriptor.credential, DetectorCredentialType::None);
+    assert_eq!(descriptor.data_residency, DataResidency::InRepo);
+    assert_eq!(descriptor.max_payload_bytes, 2048);
+    assert!(descriptor
+        .declared_failure_modes
+        .contains(&DetectorErrorKind::Timeout));
+}
+
+#[test]
 fn rejects_private_and_special_use_ip_ranges() {
     for ip in [
         "0.0.0.0",

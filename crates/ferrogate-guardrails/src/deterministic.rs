@@ -5,10 +5,10 @@
 // description: Deterministic structured Guardrail detectors with sanitized findings.
 
 use crate::{
-    ContentPatch, ContentSegment, ContentSource, DetectorDescriptor, DetectorError,
-    DetectorErrorKind, DetectorHealth, DetectorInput, DetectorResult, DetectorSecret,
-    DetectorVerdict, Finding, FindingSeverity, GuardrailDetector, GuardrailProtocol,
-    SegmentContentType,
+    ContentPatch, ContentSegment, ContentSource, DataResidency, DetectorCredentialType,
+    DetectorDescriptor, DetectorError, DetectorErrorKind, DetectorHealth, DetectorInput,
+    DetectorResult, DetectorSecret, DetectorVerdict, Finding, FindingSeverity, GuardrailDetector,
+    GuardrailProtocol, SegmentContentType,
 };
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -402,6 +402,20 @@ impl GuardrailDetector for DeterministicDetector {
             supports_response: true,
             supports_transform: true,
             supported_sources: self.config.supported_sources.clone(),
+            // In-repo, deterministic evaluation: no backend, no credential.
+            credential: DetectorCredentialType::None,
+            data_residency: DataResidency::InRepo,
+            // The input cap is advisory (an oversized input yields a finding, not
+            // a rejection); an unset cap means no declared upper bound.
+            max_payload_bytes: self.config.max_input_bytes.unwrap_or(usize::MAX),
+            // At runtime this detector only surfaces Timeout (expired deadline);
+            // InvalidConfiguration is emitted at construction, and Internal is
+            // declared conservatively for defensive HMAC/lock failures.
+            declared_failure_modes: vec![
+                DetectorErrorKind::Timeout,
+                DetectorErrorKind::Internal,
+                DetectorErrorKind::InvalidConfiguration,
+            ],
         }
     }
 
