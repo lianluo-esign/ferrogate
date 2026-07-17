@@ -70,7 +70,6 @@ matchit = "0.8"
 pingora = { version = "=0.8.0", features = ["proxy", "rustls"] }
 redis = "0.25"
 native-tls = "0.2"
-postgres = "0.19"
 postgres-native-tls = "0.5"
 rcgen = "0.14.7"
 regex = "1"
