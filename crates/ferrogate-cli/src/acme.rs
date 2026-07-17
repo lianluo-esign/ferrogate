@@ -1370,15 +1370,47 @@ fn dns01_record_name(domain: &str) -> String {
 }
 
 fn write_private_file(path: &Path, bytes: &[u8], mode: u32) -> AnyResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write as _;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+        // Create the storage directory 0o700 so the private-key files are not
+        // even listable by other local users.
+        if let Some(parent) = path.parent() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        // Create the temp file with the restrictive mode UP FRONT (O_CREAT |
+        // O_EXCL via create_new) rather than write-then-chmod: the previous
+        // fs::write created it 0o644 under the default umask and only chmod'd
+        // afterwards, leaving a window in which the private key was
+        // world-readable, and a crash in that window left a predictable-path
+        // 0o644 temp behind. O_EXCL also refuses to follow a pre-planted
+        // symlink at the (predictable) temp path.
+        let _ = fs::remove_file(&tmp); // clear a stale temp from a prior crash
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        // Normalize to exactly `mode` (the create above is `mode & ~umask`, i.e.
+        // only ever more restrictive, so this never widens an intermediate
+        // window); harmless belt-and-suspenders.
         fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        drop(file);
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&tmp, bytes)?;
     }
     fs::rename(tmp, path)?;
     Ok(())
@@ -1400,6 +1432,33 @@ mod tests {
             dns01_record_name("api.example.com."),
             "_acme-challenge.api.example.com."
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_is_owner_only_with_private_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("certificates").join("api.example.com");
+        let key_path = nested.join("privkey.pem");
+        write_private_file(&key_path, b"test-private-key-material", 0o600).unwrap();
+
+        // The key file is owner read/write only -- never world/group readable.
+        let file_mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "private key must be 0o600, got {file_mode:o}"
+        );
+        // The created storage directory is not traversable/listable by others.
+        let dir_mode = fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "storage dir must be 0o700, got {dir_mode:o}"
+        );
+        // No world-readable temp is left behind.
+        assert!(!key_path.with_extension("tmp").exists());
+        assert_eq!(fs::read(&key_path).unwrap(), b"test-private-key-material");
     }
 
     #[test]
