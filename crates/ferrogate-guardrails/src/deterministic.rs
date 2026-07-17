@@ -17,10 +17,24 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::Sha256;
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    time::Instant,
+};
 
 const DETERMINISTIC_VERSION: &str = "deterministic/1";
 const REDACTION: &str = "[REDACTED]";
+
+/// Hard cap on the findings a single `evaluate` call will enumerate. An
+/// absurdly repetitive input (e.g. a 1 MB body that is one repeated 1-char
+/// keyword) produces ~N matches; even with O(1) dedup that is N `Finding` + N
+/// `ContentPatch` structs, an O(N) MEMORY amplifier that concurrent requests
+/// could turn into an OOM. Once this many findings exist the content is already
+/// conclusively flagged, so enumeration stops and a single truncation marker is
+/// emitted (see `add_text_match`). The bound is deliberately generous: real
+/// inputs never approach it, so normal detection is byte-for-byte unchanged and
+/// only pathological floods are capped.
+pub(crate) const MAX_FINDINGS_PER_EVALUATION: usize = 10_000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +273,41 @@ struct TextMatch<'a> {
     end: usize,
 }
 
+/// Mutable accumulator for text-scan results plus the indexes that keep both the
+/// finding and patch de-duplication sub-linear per match. Every keyword/regex/
+/// secret match from both the coalesced-group scan and the per-segment scan
+/// funnels through [`DeterministicDetector::add_text_match`], so the dedup cost
+/// is paid once per match: with linear `Vec::iter().any(...)` rescans that was
+/// O(matches^2) (a single long keyword run is a request-level DoS), whereas the
+/// `seen_findings` set and per-segment interval maps below make it O(log n) per
+/// match — O(n log n) overall.
+#[derive(Default)]
+struct TextMatchSink {
+    findings: Vec<Finding>,
+    patches: Vec<ContentPatch>,
+    /// Exact `(category, segment_id, byte_start, byte_end)` keys already emitted
+    /// as findings. A match wholly inside one segment is offered by both scans,
+    /// so this set collapses the duplicate to one finding at O(1) amortized while
+    /// still letting the per-segment scan surface a boundary-anchored match the
+    /// coalesced scan missed. This is exactly the key the old linear guard used.
+    seen_findings: HashSet<(String, String, usize, usize)>,
+    /// Accepted patch intervals per segment (`byte_start -> byte_end`), kept
+    /// non-overlapping. A candidate patch overlapping an accepted one is dropped
+    /// — the exact semantics of the old linear overlap guard. Overlap avoidance
+    /// is REQUIRED, not cosmetic: `validate_content_patches_for_segments` rejects
+    /// any overlapping patch set downstream, which collapses surgical redaction
+    /// into a whole-field `[REDACTED]`; and distinct matches can genuinely
+    /// overlap (e.g. keywords `abc` and `bcd` over `abcd`), so an exact-duplicate
+    /// set would not suffice. Sorted-interval neighbour probes make the overlap
+    /// test O(log n) instead of an O(n) rescan.
+    patched_intervals: HashMap<String, BTreeMap<usize, usize>>,
+    /// Set once `MAX_FINDINGS_PER_EVALUATION` findings have been enumerated. When
+    /// set, every further match is dropped in O(1) and a single truncation marker
+    /// stands in for the un-enumerated remainder, bounding the evidence (and thus
+    /// per-request memory) no matter how many matches the input contains.
+    truncated: bool,
+}
+
 impl DeterministicDetector {
     pub fn new(config: DeterministicDetectorConfig) -> Result<Self, DetectorError> {
         validate_config(&config)?;
@@ -352,11 +401,38 @@ impl DeterministicDetector {
 
     fn add_text_match(
         &self,
-        findings: &mut Vec<Finding>,
-        patches: &mut Vec<ContentPatch>,
+        sink: &mut TextMatchSink,
         segment: &ContentSegment,
         detected: TextMatch<'_>,
     ) {
+        // Bounded evidence (belt-and-suspenders on top of the O(1) dedup): once
+        // MAX_FINDINGS_PER_EVALUATION findings exist the content is already
+        // conclusively flagged, so stop enumerating and drop every further match
+        // in O(1). This caps per-request memory (Finding + ContentPatch structs)
+        // to a constant regardless of input size, closing the O(N) memory
+        // amplifier a repetitive flood would otherwise open. Detection is not
+        // weakened: the verdict is still Fail. The single truncation marker below
+        // is a *located* finding with no covering patch, so downstream
+        // has_unredactable_findings forces a Redact action to fail closed (Deny)
+        // — a truncated result can never be fully scrubbed.
+        if sink.truncated {
+            return;
+        }
+        if sink.findings.len() >= MAX_FINDINGS_PER_EVALUATION {
+            sink.truncated = true;
+            // Zero-width marker at offset 0: no positive-width patch can ever
+            // cover [0, 0) (a patch needs byte_start < 0), so this finding is
+            // guaranteed unredactable, which is exactly the fail-closed signal.
+            sink.findings.push(self.finding(
+                "detector.truncated",
+                FindingSeverity::Critical,
+                Some(1.0),
+                Some(segment),
+                Some((0, 0)),
+                None,
+            ));
+            return;
+        }
         let TextMatch {
             category,
             severity,
@@ -367,17 +443,17 @@ impl DeterministicDetector {
         let matched = &segment.text[start..end];
         // Both the coalesced-group scan and the per-segment scan funnel through
         // here, so a match wholly inside one segment is offered twice. Dedupe
-        // findings by (segment_id, byte range, category) — mirroring the patch
-        // overlap guard below — so such a match is reported exactly once while
-        // the per-segment scan can still surface an anchored match the coalesced
-        // scan missed at a segment boundary.
-        if !findings.iter().any(|existing| {
-            existing.category.as_str() == category
-                && existing.segment_id.as_deref() == Some(segment.segment_id.as_str())
-                && existing.byte_start == Some(start)
-                && existing.byte_end == Some(end)
-        }) {
-            findings.push(self.finding(
+        // findings by the exact (category, segment_id, byte range) key via a
+        // seen-set — the same key the old linear guard used — so such a match is
+        // reported exactly once at O(1) amortized (the old `findings.iter()
+        // .any(...)` rescan was O(current findings) per match -> O(n^2) over n
+        // matches). The per-segment scan can still surface an anchored match the
+        // coalesced scan missed at a segment boundary.
+        if sink
+            .seen_findings
+            .insert((category.to_string(), segment.segment_id.clone(), start, end))
+        {
+            sink.findings.push(self.finding(
                 category,
                 severity,
                 confidence,
@@ -386,21 +462,37 @@ impl DeterministicDetector {
                 Some(matched),
             ));
         }
-        if is_mutable_text_segment(segment)
-            && !patches.iter().any(|patch| {
-                patch.segment_id == segment.segment_id
-                    && start < patch.byte_end
-                    && patch.byte_start < end
-            })
-        {
-            patches.push(ContentPatch {
-                segment_id: segment.segment_id.clone(),
-                expected_fingerprint: segment.fingerprint.clone(),
-                protocol_location: segment.protocol_location.clone(),
-                byte_start: start,
-                byte_end: end,
-                replacement: REDACTION.to_string(),
-            });
+        // Emit a redaction patch for mutable segments, skipping any candidate
+        // that overlaps an already-accepted patch on the same segment. Overlap
+        // avoidance preserves the old guard's semantics and is REQUIRED, not
+        // cosmetic (see TextMatchSink::patched_intervals). Accepted intervals are
+        // kept in a per-segment sorted map, so overlap is decided by two O(log n)
+        // neighbour probes instead of the old O(current patches) rescan per match
+        // — the other half of the former O(n^2) blowup.
+        if is_mutable_text_segment(segment) {
+            let intervals = sink
+                .patched_intervals
+                .entry(segment.segment_id.clone())
+                .or_default();
+            let overlaps = intervals
+                .range(..=start)
+                .next_back()
+                .is_some_and(|(_, &existing_end)| start < existing_end)
+                || intervals
+                    .range(start..)
+                    .next()
+                    .is_some_and(|(&existing_start, _)| existing_start < end);
+            if !overlaps {
+                intervals.insert(start, end);
+                sink.patches.push(ContentPatch {
+                    segment_id: segment.segment_id.clone(),
+                    expected_fingerprint: segment.fingerprint.clone(),
+                    protocol_location: segment.protocol_location.clone(),
+                    byte_start: start,
+                    byte_end: end,
+                    replacement: REDACTION.to_string(),
+                });
+            }
         }
     }
 
@@ -413,8 +505,7 @@ impl DeterministicDetector {
     /// and every immutable part still yields a finding.
     fn add_group_match(
         &self,
-        findings: &mut Vec<Finding>,
-        patches: &mut Vec<ContentPatch>,
+        sink: &mut TextMatchSink,
         group: &CoalescedGroup<'_>,
         detected: TextMatch<'_>,
     ) {
@@ -425,8 +516,7 @@ impl DeterministicDetector {
             let overlap_end = detected.end.min(segment_end);
             if overlap_start < overlap_end {
                 self.add_text_match(
-                    findings,
-                    patches,
+                    sink,
                     segment,
                     TextMatch {
                         start: overlap_start - segment_start,
@@ -538,8 +628,7 @@ impl GuardrailDetector for DeterministicDetector {
             .iter()
             .filter(|segment| self.config.supported_sources.contains(&segment.source))
             .collect::<Vec<_>>();
-        let mut findings = Vec::new();
-        let mut patches = Vec::new();
+        let mut sink = TextMatchSink::default();
 
         if self.config.max_input_bytes.is_some_and(|limit| {
             selected
@@ -548,7 +637,7 @@ impl GuardrailDetector for DeterministicDetector {
                 .sum::<usize>()
                 > limit
         }) {
-            findings.push(self.finding(
+            sink.findings.push(self.finding(
                 "size.input_bytes",
                 FindingSeverity::High,
                 Some(1.0),
@@ -567,8 +656,7 @@ impl GuardrailDetector for DeterministicDetector {
             for keyword in &self.config.keywords {
                 for (start, matched) in group.text.match_indices(keyword) {
                     self.add_group_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         group,
                         TextMatch {
                             category: "contains",
@@ -583,8 +671,7 @@ impl GuardrailDetector for DeterministicDetector {
             for expression in &self.regex {
                 for matched in expression.find_iter(&group.text) {
                     self.add_group_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         group,
                         TextMatch {
                             category: "regex",
@@ -599,8 +686,7 @@ impl GuardrailDetector for DeterministicDetector {
             for (pattern, expression) in &self.secrets {
                 for matched in expression.find_iter(&group.text) {
                     self.add_group_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         group,
                         TextMatch {
                             category: pattern.category(),
@@ -627,8 +713,7 @@ impl GuardrailDetector for DeterministicDetector {
             for keyword in &self.config.keywords {
                 for (start, matched) in segment.text.match_indices(keyword) {
                     self.add_text_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         segment,
                         TextMatch {
                             category: "contains",
@@ -643,8 +728,7 @@ impl GuardrailDetector for DeterministicDetector {
             for expression in &self.regex {
                 for matched in expression.find_iter(&segment.text) {
                     self.add_text_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         segment,
                         TextMatch {
                             category: "regex",
@@ -659,8 +743,7 @@ impl GuardrailDetector for DeterministicDetector {
             for (pattern, expression) in &self.secrets {
                 for matched in expression.find_iter(&segment.text) {
                     self.add_text_match(
-                        &mut findings,
-                        &mut patches,
+                        &mut sink,
                         segment,
                         TextMatch {
                             category: pattern.category(),
@@ -679,13 +762,16 @@ impl GuardrailDetector for DeterministicDetector {
         // neighbour before parsing.
         if let Some(json) = &self.json {
             for segment in &selected {
-                evaluate_json_segment(self, json, segment, "json", &mut findings);
+                evaluate_json_segment(self, json, segment, "json", &mut sink.findings);
             }
         }
 
         if let Some(request) = &self.request {
-            evaluate_request_constraints(self, request, input, &selected, &mut findings);
+            evaluate_request_constraints(self, request, input, &selected, &mut sink.findings);
         }
+        let TextMatchSink {
+            findings, patches, ..
+        } = sink;
         Ok(DetectorResult {
             verdict: if findings.is_empty() {
                 DetectorVerdict::Pass

@@ -714,3 +714,115 @@ fn secret_wholly_within_one_segment_of_a_run_is_not_double_counted() {
     assert_eq!(result.patches[0].byte_start, 0);
     assert_eq!(result.patches[0].byte_end, aws.len());
 }
+
+// --- Regression: dedup must be non-quadratic AND evidence must be bounded ---
+
+#[test]
+fn dense_keyword_flood_is_flagged_and_bounded_without_cpu_or_memory_blowup() {
+    // A single long run of a configured keyword yields ~N matches. Before the
+    // fix, add_text_match deduped each match with an O(current) `Vec::iter()
+    // .any(...)` rescan (once for findings, once for patches), so N matches cost
+    // O(N^2) -- a single request could pin a CPU (max_input_bytes defaults to no
+    // cap). The O(1)/O(log N) dedup removes that, but without a cap the detector
+    // still allocates one Finding + one ContentPatch per match -- an O(N) MEMORY
+    // amplifier (a ~1 MB body -> ~1M structs, OOM under concurrency). The
+    // per-evaluation cap bounds the evidence and fails redaction closed.
+    let cap = crate::deterministic::MAX_FINDINGS_PER_EVALUATION;
+    let occurrences = cap * 5;
+    assert!(
+        occurrences > cap,
+        "the flood must exceed the cap to exercise truncation"
+    );
+    let mut detector_config = config(vec![ContentSource::User]);
+    detector_config.keywords = vec!["a".to_string()];
+    // Keyword detection needs no fingerprint key; dropping it keeps the timing
+    // about the dedup/cap path rather than a per-finding HMAC.
+    detector_config.fingerprint_key = None;
+    let detector = DeterministicDetector::new(detector_config).unwrap();
+    let envelope = GuardrailEnvelope::from_text(
+        GuardrailProtocol::ChatCompletions,
+        DetectorStage::Request,
+        ContentSource::User,
+        "messages[0].content",
+        "a".repeat(occurrences),
+    );
+
+    let started = Instant::now();
+    let result = evaluate(&detector, &envelope, None, None).unwrap();
+    let elapsed = started.elapsed();
+
+    // Detection is never weakened: the flood still fails closed.
+    assert_eq!(result.verdict, DetectorVerdict::Fail);
+    // Evidence is bounded regardless of input size: at most `cap` enumerated
+    // findings plus one truncation marker, and never more patches than findings.
+    // This is the fix for the O(N) memory amplifier.
+    assert!(
+        result.findings.len() <= cap + 1,
+        "findings {} exceeded cap {} + 1",
+        result.findings.len(),
+        cap
+    );
+    assert!(result.patches.len() <= cap);
+    // Exactly one synthetic truncation marker is present, standing in for the
+    // un-enumerated remainder while keeping the Fail verdict.
+    let truncation = result
+        .findings
+        .iter()
+        .find(|finding| finding.category == "detector.truncated")
+        .expect("a truncated evaluation must emit a truncation marker");
+    // The marker is a located finding covered by NO patch, so downstream
+    // has_unredactable_findings is true and a Redact action fails closed to Deny
+    // (a truncated result can never be fully scrubbed). We assert the exact
+    // predicate state_quota_and_policy::has_unredactable_findings evaluates.
+    let (Some(seg), Some(start), Some(end)) = (
+        truncation.segment_id.as_deref(),
+        truncation.byte_start,
+        truncation.byte_end,
+    ) else {
+        panic!("truncation marker must be located to force fail-closed redaction");
+    };
+    let covered = result
+        .patches
+        .iter()
+        .any(|patch| patch.segment_id == seg && patch.byte_start < end && start < patch.byte_end);
+    assert!(
+        !covered,
+        "truncation marker must be unredactable (no covering patch) to force Deny"
+    );
+    // Non-quadratic + bounded: completes fast even at 5x the cap. Kept loose (2s)
+    // so this is a blowup detector, not a flaky micro-benchmark on a slow box.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "dense keyword flood took {elapsed:?}; expected bounded, non-quadratic completion"
+    );
+}
+
+#[test]
+fn below_cap_dense_run_keeps_exact_per_match_evidence_and_no_truncation() {
+    // Normal inputs (well under the cap) must be byte-for-byte unchanged: one
+    // finding + one adjacent, non-overlapping patch per distinct match, deduped
+    // to no double count from the two-pass scan, and NO truncation marker.
+    let occurrences = crate::deterministic::MAX_FINDINGS_PER_EVALUATION / 100;
+    let mut detector_config = config(vec![ContentSource::User]);
+    detector_config.keywords = vec!["a".to_string()];
+    detector_config.fingerprint_key = None;
+    let detector = DeterministicDetector::new(detector_config).unwrap();
+    let envelope = GuardrailEnvelope::from_text(
+        GuardrailProtocol::ChatCompletions,
+        DetectorStage::Request,
+        ContentSource::User,
+        "messages[0].content",
+        "a".repeat(occurrences),
+    );
+    let result = evaluate(&detector, &envelope, None, None).unwrap();
+    assert_eq!(result.verdict, DetectorVerdict::Fail);
+    assert_eq!(result.findings.len(), occurrences);
+    assert_eq!(result.patches.len(), occurrences);
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|finding| finding.category == "detector.truncated"),
+        "a below-cap input must not be truncated"
+    );
+}
