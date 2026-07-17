@@ -2484,6 +2484,18 @@ fn configure_and_start_firecracker(
         }),
         deadline,
     )?;
+    // SECURITY / ISOLATION (tracked): the shared host rootfs image is attached
+    // read-write and booted `root=/dev/vda rw`, which contradicts the declared
+    // IsolationFilesystemPolicy.read_only_rootfs=true. Every microVM boots from
+    // the SAME backing file, so concurrent boots corrupt the ext4 image and
+    // sequential boots carry state across tenants. This is only latent today
+    // because guest workload execution is not wired (the guest RPC start
+    // entrypoint returns not_implemented); it MUST be fixed before tenant
+    // workloads run inside the guest. The correct fix (attach the rootfs
+    // read-only + a per-VM writable workspace/overlay, or give each VM a
+    // per-instance CoW copy) requires a real Firecracker host to validate the
+    // guest boot and is tracked in a dedicated issue -- do NOT wire guest
+    // execution until the rootfs is per-VM isolated.
     firecracker_put_json(
         &artifacts.api_socket,
         "/drives/rootfs",
