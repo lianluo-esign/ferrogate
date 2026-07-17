@@ -139,29 +139,29 @@ pub trait McpCredentialRepository {
         request: &McpIdentityAccessRequest,
         operation: &StorageOperation,
     ) -> Result<McpIdentityAccessOutcome, StorageError>;
-    fn begin_mcp_oauth_flow(
+    async fn begin_mcp_oauth_flow(
         &self,
         flow: StoredMcpOauthFlow,
     ) -> Result<StoredMcpOauthFlow, StorageError>;
-    fn consume_mcp_oauth_flow(
+    async fn consume_mcp_oauth_flow(
         &self,
         id: &str,
         consumed_at_unix: i64,
     ) -> Result<Option<StoredMcpOauthFlow>, StorageError>;
-    fn commit_mcp_oauth_callback(
+    async fn commit_mcp_oauth_callback(
         &self,
         flow: &StoredMcpOauthFlow,
         credential: StoredMcpOauthCredential,
         permission_key: &str,
     ) -> Result<McpOauthCallbackCommitOutcome, StorageError>;
-    fn get_mcp_oauth_credential(
+    async fn get_mcp_oauth_credential(
         &self,
         tenant_id: &str,
         workspace_id: &str,
         user_id: &str,
         server_name: &str,
     ) -> Result<Option<StoredMcpOauthCredential>, StorageError>;
-    fn list_mcp_oauth_credentials(
+    async fn list_mcp_oauth_credentials(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredMcpOauthCredential>, StorageError>;
@@ -217,13 +217,13 @@ pub trait McpCredentialRepository {
         outcome: &str,
         operation: &StorageOperation,
     ) -> Result<bool, StorageError>;
-    fn revoke_mcp_oauth_identity(
+    async fn revoke_mcp_oauth_identity(
         &self,
         request: &McpIdentityAccessRequest,
         revoked_at_unix: i64,
         outcome: &str,
     ) -> Result<Option<McpIdentityRevocationOutcome>, StorageError>;
-    fn update_mcp_oauth_revocation_outcome(
+    async fn update_mcp_oauth_revocation_outcome(
         &self,
         tenant_id: &str,
         workspace_id: &str,
@@ -668,28 +668,6 @@ fn mcp_refresh_transaction_setup_query() -> &'static str {
             set_config('statement_timeout', $3, true)"
 }
 
-fn prepare_mcp_refresh_transaction(
-    transaction: &mut postgres::Transaction<'_>,
-    tenant_id: &str,
-    operation: Option<&StorageOperation>,
-    stage: &'static str,
-) -> Result<(), StorageError> {
-    let lock_timeout = format!("{}ms", mcp_refresh_mutation_lock_timeout_millis(operation)?);
-    let statement_timeout_millis =
-        mcp_refresh_transaction_statement_timeout_millis(operation, stage)?;
-    let statement_timeout = format!("{statement_timeout_millis}ms");
-    transaction
-        .execute(
-            mcp_refresh_transaction_setup_query(),
-            &[&tenant_id, &lock_timeout, &statement_timeout],
-        )
-        .map_err(super::postgres_error)?;
-    if let Some(operation) = operation {
-        operation.check_active(stage)?;
-    }
-    Ok(())
-}
-
 fn mcp_refresh_transaction_statement_timeout_millis(
     operation: Option<&StorageOperation>,
     stage: &'static str,
@@ -892,8 +870,8 @@ fn release_in_memory_mcp_oauth_refresh(
     Ok(true)
 }
 
-fn set_mcp_rls_context(
-    transaction: &mut postgres::Transaction<'_>,
+async fn set_mcp_rls_context_async(
+    transaction: &deadpool_postgres::Transaction<'_>,
     tenant_id: Option<&str>,
 ) -> Result<(), StorageError> {
     let platform_mode = if tenant_id.is_some() { "off" } else { "on" };
@@ -903,6 +881,7 @@ fn set_mcp_rls_context(
                     set_config('ferrogate.platform_mode', $2, TRUE)",
             &[&tenant_id, &platform_mode],
         )
+        .await
         .map_err(super::postgres_error)?;
     Ok(())
 }
@@ -1253,93 +1232,119 @@ impl PostgresControlPlaneStore {
         })?
     }
 
-    fn begin_mcp_oauth_flow(
+    fn mcp_oauth_operation(&self, name: &'static str) -> StorageOperation {
+        StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    async fn begin_mcp_oauth_flow(
         &self,
         flow: &StoredMcpOauthFlow,
     ) -> Result<StoredMcpOauthFlow, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, Some(&flow.tenant_id))?;
+        let operation = self.mcp_oauth_operation("begin MCP OAuth flow");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
             transaction
-                .execute(
-                    "INSERT INTO mcp_oauth_authorization_states \
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(super::postgres_error)?;
+        }
+        set_mcp_rls_context_async(&transaction, Some(&flow.tenant_id)).await?;
+        transaction
+            .execute(
+                "INSERT INTO mcp_oauth_authorization_states \
                      (tenant_id,workspace_id,user_id,server_name,generation,updated_at_unix) \
                      VALUES ($1,$2,$3,$4,1,$5) ON CONFLICT DO NOTHING",
-                    &[
-                        &flow.tenant_id,
-                        &flow.workspace_id,
-                        &flow.user_id,
-                        &flow.server_name,
-                        &flow.created_at_unix,
-                    ],
-                )
-                .map_err(super::postgres_error)?;
-            let generation = transaction
-                .query_one(
-                    "SELECT generation FROM mcp_oauth_authorization_states \
+                &[
+                    &flow.tenant_id,
+                    &flow.workspace_id,
+                    &flow.user_id,
+                    &flow.server_name,
+                    &flow.created_at_unix,
+                ],
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        let generation = transaction
+            .query_one(
+                "SELECT generation FROM mcp_oauth_authorization_states \
                      WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4",
-                    &[
-                        &flow.tenant_id,
-                        &flow.workspace_id,
-                        &flow.user_id,
-                        &flow.server_name,
-                    ],
-                )
-                .map_err(super::postgres_error)?
-                .get::<_, i64>(0);
-            let mut flow = flow.clone();
-            flow.authorization_generation = u64::try_from(generation).unwrap_or(u64::MAX);
-            transaction
-                .execute(
-                    "INSERT INTO mcp_oauth_flows \
+                &[
+                    &flow.tenant_id,
+                    &flow.workspace_id,
+                    &flow.user_id,
+                    &flow.server_name,
+                ],
+            )
+            .await
+            .map_err(super::postgres_error)?
+            .get::<_, i64>(0);
+        let mut flow = flow.clone();
+        flow.authorization_generation = u64::try_from(generation).unwrap_or(u64::MAX);
+        transaction
+            .execute(
+                "INSERT INTO mcp_oauth_flows \
                      (id,tenant_id,workspace_id,user_id,server_name,pkce_nonce,pkce_ciphertext, \
                       oidc_nonce,authorization_generation,created_at_unix,expires_at_unix,consumed_at_unix) \
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-                    &[
-                        &flow.id,
-                        &flow.tenant_id,
-                        &flow.workspace_id,
-                        &flow.user_id,
-                        &flow.server_name,
-                        &flow.pkce_nonce,
-                        &flow.pkce_ciphertext,
-                        &flow.oidc_nonce,
-                        &generation,
-                        &flow.created_at_unix,
-                        &flow.expires_at_unix,
-                        &flow.consumed_at_unix,
-                    ],
-                )
-                .map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            Ok(flow)
-        })
+                &[
+                    &flow.id,
+                    &flow.tenant_id,
+                    &flow.workspace_id,
+                    &flow.user_id,
+                    &flow.server_name,
+                    &flow.pkce_nonce,
+                    &flow.pkce_ciphertext,
+                    &flow.oidc_nonce,
+                    &generation,
+                    &flow.created_at_unix,
+                    &flow.expires_at_unix,
+                    &flow.consumed_at_unix,
+                ],
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        Ok(flow)
     }
 
-    fn consume_mcp_oauth_flow(
+    async fn consume_mcp_oauth_flow(
         &self,
         id: &str,
         consumed_at_unix: i64,
     ) -> Result<Option<StoredMcpOauthFlow>, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, None)?;
-            let row = transaction
-                .query_opt(
-                    "UPDATE mcp_oauth_flows SET consumed_at_unix = $2 \
+        let operation = self.mcp_oauth_operation("consume MCP OAuth flow");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(super::postgres_error)?;
+        }
+        set_mcp_rls_context_async(&transaction, None).await?;
+        let row = transaction
+            .query_opt(
+                "UPDATE mcp_oauth_flows SET consumed_at_unix = $2 \
                  WHERE id = $1 AND consumed_at_unix IS NULL AND expires_at_unix >= $2 \
                  RETURNING id, tenant_id, workspace_id, user_id, server_name, pkce_nonce, \
                  pkce_ciphertext, oidc_nonce, authorization_generation, created_at_unix, \
                  expires_at_unix, consumed_at_unix",
-                    &[&id, &consumed_at_unix],
-                )
-                .map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            Ok(row.as_ref().map(oauth_flow_from_row))
-        })
+                &[&id, &consumed_at_unix],
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        Ok(row.as_ref().map(oauth_flow_from_row))
     }
 
-    fn commit_mcp_oauth_callback(
+    async fn commit_mcp_oauth_callback(
         &self,
         flow: &StoredMcpOauthFlow,
         credential: &StoredMcpOauthCredential,
@@ -1349,10 +1354,20 @@ impl PostgresControlPlaneStore {
         let key_version = i64::from(credential.key_version);
         let version = super::saturating_i64(credential.version);
         let generation = super::saturating_i64(flow.authorization_generation);
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, Some(&flow.tenant_id))?;
-            let row = transaction.query_opt(
+        let operation = self.mcp_oauth_operation("commit MCP OAuth callback");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(super::postgres_error)?;
+        }
+        set_mcp_rls_context_async(&transaction, Some(&flow.tenant_id)).await?;
+        let row = transaction.query_opt(
                 "INSERT INTO mcp_oauth_credentials \
                  (id,tenant_id,workspace_id,user_id,server_name,issuer,subject,token_type,scopes_json, \
                   access_token_nonce,access_token_ciphertext,refresh_token_nonce,refresh_token_ciphertext, \
@@ -1394,17 +1409,16 @@ impl PostgresControlPlaneStore {
                     &credential.updated_at_unix,&credential.revoked_at_unix,
                     &credential.last_refresh_outcome,&credential.last_revocation_outcome,&permission_key,
                 ],
-            ).map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            Ok(if row.is_some() {
-                McpOauthCallbackCommitOutcome::Committed
-            } else {
-                McpOauthCallbackCommitOutcome::AuthorizationChanged
-            })
+            ).await.map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        Ok(if row.is_some() {
+            McpOauthCallbackCommitOutcome::Committed
+        } else {
+            McpOauthCallbackCommitOutcome::AuthorizationChanged
         })
     }
 
-    fn get_mcp_oauth_credential(
+    async fn get_mcp_oauth_credential(
         &self,
         tenant_id: &str,
         workspace_id: &str,
@@ -1415,18 +1429,28 @@ impl PostgresControlPlaneStore {
             "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
              WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4"
         );
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
-            let row = transaction
-                .query_opt(&query, &[&tenant_id, &workspace_id, &user_id, &server_name])
+        let operation = self.mcp_oauth_operation("get MCP OAuth credential");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
                 .map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            row.as_ref().map(oauth_credential_from_row).transpose()
-        })
+        }
+        set_mcp_rls_context_async(&transaction, Some(tenant_id)).await?;
+        let row = transaction
+            .query_opt(&query, &[&tenant_id, &workspace_id, &user_id, &server_name])
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        row.as_ref().map(oauth_credential_from_row).transpose()
     }
 
-    fn list_mcp_oauth_credentials(
+    async fn list_mcp_oauth_credentials(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredMcpOauthCredential>, StorageError> {
@@ -1434,15 +1458,25 @@ impl PostgresControlPlaneStore {
             "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
              WHERE tenant_id=$1 ORDER BY user_id,workspace_id,server_name"
         );
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
-            let rows = transaction
-                .query(&query, &[&tenant_id])
+        let operation = self.mcp_oauth_operation("list MCP OAuth credentials");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
                 .map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            rows.iter().map(oauth_credential_from_row).collect()
-        })
+        }
+        set_mcp_rls_context_async(&transaction, Some(tenant_id)).await?;
+        let rows = transaction
+            .query(&query, &[&tenant_id])
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        rows.iter().map(oauth_credential_from_row).collect()
     }
 
     async fn claim_mcp_oauth_refresh(
@@ -1958,48 +1992,67 @@ impl PostgresControlPlaneStore {
         Ok(true)
     }
 
-    fn revoke_mcp_oauth_identity(
+    async fn revoke_mcp_oauth_identity(
         &self,
         request: &McpIdentityAccessRequest,
         revoked_at_unix: i64,
         outcome: &str,
     ) -> Result<Option<McpIdentityRevocationOutcome>, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_refresh_transaction(
-                &mut transaction,
-                &request.tenant_id,
-                None,
-                "MCP identity revoke CAS",
-            )?;
-            let query = postgres_mcp_identity_revoke_query();
-            let row = transaction
-                .query_opt(
-                    &query,
-                    &[
-                        &request.tenant_id,
-                        &request.workspace_id,
-                        &request.user_id,
-                        &request.server_name,
-                        &revoked_at_unix,
-                        &outcome,
-                    ],
-                )
+        let operation = self.mcp_oauth_operation("revoke MCP identity");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
                 .map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            row.as_ref()
-                .map(oauth_credential_from_row)
-                .transpose()
-                .map(|credential| {
-                    credential.map(|credential| McpIdentityRevocationOutcome {
-                        credential,
-                        revoked_at_unix,
-                    })
+        }
+        // Preserve the synchronous CAS setup: `prepare_mcp_refresh_transaction`
+        // with `None` sets the tenant RLS context (platform_mode off) plus the
+        // fixed mutation lock/statement timeouts, so replicate that exactly here.
+        let lock_timeout = format!("{}ms", mcp_refresh_mutation_lock_timeout_millis(None)?);
+        let statement_timeout = format!(
+            "{}ms",
+            mcp_refresh_transaction_statement_timeout_millis(None, "MCP identity revoke CAS")?
+        );
+        transaction
+            .execute(
+                mcp_refresh_transaction_setup_query(),
+                &[&request.tenant_id, &lock_timeout, &statement_timeout],
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        let query = postgres_mcp_identity_revoke_query();
+        let row = transaction
+            .query_opt(
+                &query,
+                &[
+                    &request.tenant_id,
+                    &request.workspace_id,
+                    &request.user_id,
+                    &request.server_name,
+                    &revoked_at_unix,
+                    &outcome,
+                ],
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        row.as_ref()
+            .map(oauth_credential_from_row)
+            .transpose()
+            .map(|credential| {
+                credential.map(|credential| McpIdentityRevocationOutcome {
+                    credential,
+                    revoked_at_unix,
                 })
-        })
+            })
     }
 
-    fn update_mcp_oauth_revocation_outcome(
+    async fn update_mcp_oauth_revocation_outcome(
         &self,
         tenant_id: &str,
         workspace_id: &str,
@@ -2007,18 +2060,30 @@ impl PostgresControlPlaneStore {
         server_name: &str,
         outcome: &str,
     ) -> Result<bool, StorageError> {
-        self.with_client_storage(|client| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
-            let affected = transaction.execute(
+        let operation = self.mcp_oauth_operation("update MCP revocation outcome");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(super::postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(super::postgres_error)?;
+        }
+        set_mcp_rls_context_async(&transaction, Some(tenant_id)).await?;
+        let affected = transaction
+            .execute(
                 "UPDATE mcp_oauth_credentials SET last_revocation_outcome=$5,version=version+1 \
                  WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4 \
                  AND revoked_at_unix IS NOT NULL",
                 &[&tenant_id, &workspace_id, &user_id, &server_name, &outcome],
-            ).map_err(super::postgres_error)?;
-            transaction.commit().map_err(super::postgres_error)?;
-            Ok(affected == 1)
-        })
+            )
+            .await
+            .map_err(super::postgres_error)?;
+        transaction.commit().await.map_err(super::postgres_error)?;
+        Ok(affected == 1)
     }
 }
 
@@ -2156,7 +2221,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn begin_mcp_oauth_flow(
+    async fn begin_mcp_oauth_flow(
         &self,
         mut flow: StoredMcpOauthFlow,
     ) -> Result<StoredMcpOauthFlow, StorageError> {
@@ -2190,11 +2255,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 store.mcp_oauth_flows.insert(flow.id.clone(), flow.clone());
                 Ok(flow)
             }
-            RuntimeControlPlaneBackend::Postgres(store) => store.begin_mcp_oauth_flow(&flow),
+            RuntimeControlPlaneBackend::Postgres(store) => store.begin_mcp_oauth_flow(&flow).await,
         }
     }
 
-    fn consume_mcp_oauth_flow(
+    async fn consume_mcp_oauth_flow(
         &self,
         id: &str,
         consumed_at_unix: i64,
@@ -2215,12 +2280,12 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 Ok(Some(flow))
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.consume_mcp_oauth_flow(id, consumed_at_unix)
+                store.consume_mcp_oauth_flow(id, consumed_at_unix).await
             }
         }
     }
 
-    fn commit_mcp_oauth_callback(
+    async fn commit_mcp_oauth_callback(
         &self,
         flow: &StoredMcpOauthFlow,
         mut credential: StoredMcpOauthCredential,
@@ -2263,12 +2328,14 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 Ok(McpOauthCallbackCommitOutcome::Committed)
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.commit_mcp_oauth_callback(flow, &credential, permission_key)
+                store
+                    .commit_mcp_oauth_callback(flow, &credential, permission_key)
+                    .await
             }
         }
     }
 
-    fn get_mcp_oauth_credential(
+    async fn get_mcp_oauth_credential(
         &self,
         tenant_id: &str,
         workspace_id: &str,
@@ -2291,12 +2358,14 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                         && row.server_name == server_name
                 })),
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.get_mcp_oauth_credential(tenant_id, workspace_id, user_id, server_name)
+                store
+                    .get_mcp_oauth_credential(tenant_id, workspace_id, user_id, server_name)
+                    .await
             }
         }
     }
 
-    fn list_mcp_oauth_credentials(
+    async fn list_mcp_oauth_credentials(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredMcpOauthCredential>, StorageError> {
@@ -2312,7 +2381,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 .filter(|row| row.tenant_id == tenant_id)
                 .collect()),
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.list_mcp_oauth_credentials(tenant_id)
+                store.list_mcp_oauth_credentials(tenant_id).await
             }
         }
     }
@@ -2552,7 +2621,7 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn revoke_mcp_oauth_identity(
+    async fn revoke_mcp_oauth_identity(
         &self,
         request: &McpIdentityAccessRequest,
         revoked_at_unix: i64,
@@ -2610,12 +2679,14 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 }))
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.revoke_mcp_oauth_identity(request, revoked_at_unix, outcome)
+                store
+                    .revoke_mcp_oauth_identity(request, revoked_at_unix, outcome)
+                    .await
             }
         }
     }
 
-    fn update_mcp_oauth_revocation_outcome(
+    async fn update_mcp_oauth_revocation_outcome(
         &self,
         tenant_id: &str,
         workspace_id: &str,
@@ -2646,14 +2717,17 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .insert(credential.id.clone(), credential);
                 Ok(true)
             }
-            RuntimeControlPlaneBackend::Postgres(store) => store
-                .update_mcp_oauth_revocation_outcome(
-                    tenant_id,
-                    workspace_id,
-                    user_id,
-                    server_name,
-                    outcome,
-                ),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store
+                    .update_mcp_oauth_revocation_outcome(
+                        tenant_id,
+                        workspace_id,
+                        user_id,
+                        server_name,
+                        outcome,
+                    )
+                    .await
+            }
         }
     }
 }

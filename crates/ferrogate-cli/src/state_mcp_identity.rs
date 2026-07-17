@@ -322,9 +322,8 @@ impl AppState {
         let now = now_i64();
         let stored_oidc_nonce = oidc_nonce.clone();
         let stored_server_name = server_name.to_string();
-        let repositories = Arc::clone(&self.repositories);
-        self.run_mcp_identity_storage("begin OAuth flow", move || {
-            repositories.begin_mcp_oauth_flow(StoredMcpOauthFlow {
+        self.repositories
+            .begin_mcp_oauth_flow(StoredMcpOauthFlow {
                 id: state_id,
                 tenant_id: actor.tenant_id.clone(),
                 workspace_id: actor.workspace_id.clone(),
@@ -338,8 +337,8 @@ impl AppState {
                 expires_at_unix: now + OAUTH_FLOW_TTL_SECS,
                 consumed_at_unix: None,
             })
-        })
-        .await?;
+            .await
+            .map_err(storage_identity_error)?;
         let mut authorize_url =
             reqwest::Url::parse(&discovery.authorization_endpoint).map_err(|_| {
                 McpIdentityError::unavailable(
@@ -384,13 +383,11 @@ impl AppState {
         }
         let now = now_i64();
         let state_id = sha256_hex(state.as_bytes());
-        let repositories = Arc::clone(&self.repositories);
-        let consumed_state_id = state_id.clone();
         let flow = self
-            .run_mcp_identity_storage("consume OAuth flow", move || {
-                repositories.consume_mcp_oauth_flow(&consumed_state_id, now)
-            })
-            .await?
+            .repositories
+            .consume_mcp_oauth_flow(&state_id, now)
+            .await
+            .map_err(storage_identity_error)?
             .ok_or_else(|| {
                 McpIdentityError::unauthorized(
                     "mcp_oauth_state_invalid",
@@ -503,17 +500,11 @@ impl AppState {
             last_refresh_outcome: Some("connected".into()),
             last_revocation_outcome: None,
         };
-        let repositories = Arc::clone(&self.repositories);
-        let committed_flow = flow.clone();
         let commit = self
-            .run_mcp_identity_storage("commit OAuth callback", move || {
-                repositories.commit_mcp_oauth_callback(
-                    &committed_flow,
-                    credential,
-                    "mcp.identity.connect",
-                )
-            })
-            .await?;
+            .repositories
+            .commit_mcp_oauth_callback(&flow, credential, "mcp.identity.connect")
+            .await
+            .map_err(storage_identity_error)?;
         if commit != McpOauthCallbackCommitOutcome::Committed {
             return Err(McpIdentityError::forbidden(
                 "mcp_oauth_authorization_changed",
@@ -599,12 +590,11 @@ impl AppState {
             })?;
         let now = now_i64();
         let request = actor.access_request(server_name, "mcp.identity.revoke");
-        let repositories = Arc::clone(&self.repositories);
         let revoked = self
-            .run_mcp_identity_storage("revoke MCP identity", move || {
-                repositories.revoke_mcp_oauth_identity(&request, now, "local_revoked")
-            })
-            .await?;
+            .repositories
+            .revoke_mcp_oauth_identity(&request, now, "local_revoked")
+            .await
+            .map_err(storage_identity_error)?;
         if revoked.is_none() {
             return Err(McpIdentityError::not_found(
                 "MCP identity is already revoked",
@@ -656,22 +646,16 @@ impl AppState {
                 }
             }
         }
-        let repositories = Arc::clone(&self.repositories);
-        let tenant_id = actor.tenant_id.clone();
-        let workspace_id = actor.workspace_id.clone();
-        let user_id = actor.user_id.clone();
-        let server_name_owned = server_name.to_string();
-        let stored_outcome = outcome.clone();
-        self.run_mcp_identity_storage("record MCP revocation outcome", move || {
-            repositories.update_mcp_oauth_revocation_outcome(
-                &tenant_id,
-                &workspace_id,
-                &user_id,
-                &server_name_owned,
-                &stored_outcome,
+        self.repositories
+            .update_mcp_oauth_revocation_outcome(
+                &actor.tenant_id,
+                &actor.workspace_id,
+                &actor.user_id,
+                server_name,
+                &outcome,
             )
-        })
-        .await?;
+            .await
+            .map_err(storage_identity_error)?;
         Ok(McpIdentityStatusView {
             object: "mcp_identity",
             server_name: server_name.into(),
@@ -1454,26 +1438,6 @@ impl AppState {
                 ))
             }
         }
-    }
-
-    async fn run_mcp_identity_storage<T, F>(
-        &self,
-        operation: &'static str,
-        action: F,
-    ) -> Result<T, McpIdentityError>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> Result<T, StorageError> + Send + 'static,
-    {
-        tokio::task::spawn_blocking(action)
-            .await
-            .map_err(|error| {
-                McpIdentityError::unavailable(
-                    "mcp_identity_storage_unavailable",
-                    format!("failed to {operation}: blocking task failed: {error}"),
-                )
-            })?
-            .map_err(storage_identity_error)
     }
 
     async fn run_mcp_refresh_async_storage<T, F, Fut>(

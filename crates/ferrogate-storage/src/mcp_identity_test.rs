@@ -421,10 +421,10 @@ fn in_memory_refresh_renewal_waiting_on_lock_past_deadline_cannot_extend_later()
             commit_started: false,
         })
     ));
-    let after = repositories
-        .get_mcp_oauth_credential("tenant", "workspace", "user", "server")
-        .unwrap()
-        .expect("credential");
+    let after =
+        block_on(repositories.get_mcp_oauth_credential("tenant", "workspace", "user", "server"))
+            .unwrap()
+            .expect("credential");
     assert_eq!(after.refresh_lease_expires_at_unix, Some(30));
 }
 
@@ -454,11 +454,11 @@ fn renew(
     now_unix: i64,
     lease_ttl_secs: i64,
 ) -> McpRefreshRenewOutcome {
-    let expected_lease_expires_at_unix = repositories
-        .get_mcp_oauth_credential("tenant", "workspace", "user", "server")
-        .expect("credential lookup")
-        .and_then(|credential| credential.refresh_lease_expires_at_unix)
-        .unwrap_or(now_unix);
+    let expected_lease_expires_at_unix =
+        block_on(repositories.get_mcp_oauth_credential("tenant", "workspace", "user", "server"))
+            .expect("credential lookup")
+            .and_then(|credential| credential.refresh_lease_expires_at_unix)
+            .unwrap_or(now_unix);
     block_on(
         repositories.renew_mcp_oauth_refresh(&McpRefreshRenewRequest {
             tenant_id: "tenant".into(),
@@ -1048,8 +1048,7 @@ fn revoke_supersedes_refresh_lease_and_pending_flow() {
             lease_expires_at_unix: 30
         }
     );
-    repositories
-        .revoke_mcp_oauth_identity(&request, 11, "local_revoked")
+    block_on(repositories.revoke_mcp_oauth_identity(&request, 11, "local_revoked"))
         .expect("revoke")
         .expect("active credential");
     assert_eq!(
