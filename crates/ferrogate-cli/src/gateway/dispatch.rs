@@ -91,20 +91,40 @@ pub(super) async fn dispatch_provider_request(
             );
         }
     }
-    let body = response
-        .bytes()
-        .await
-        .context("failed to read provider response body")?;
-    if body.len() > max_body_bytes {
-        bail!(
-            "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
-        );
-    }
+    // Read chunk-by-chunk with a hard cap: `response.bytes()` buffers the whole
+    // body first, so the post-read length check did not protect against a
+    // chunked / no-Content-Length (or Content-Length-lying) upstream, which
+    // could force unbounded in-memory buffering. Abort as soon as the
+    // accumulated length would exceed the cap (holds at most cap + one chunk).
+    let body = read_bounded_response_body(response, max_body_bytes).await?;
     Ok(ProviderHttpResponse {
         status,
         content_type,
-        body: body.to_vec(),
+        body,
     })
+}
+
+/// Reads a reqwest response body chunk-by-chunk, bailing as soon as the
+/// accumulated length would exceed `max_body_bytes`, so a chunked or
+/// `Content-Length`-lying upstream cannot force unbounded buffering.
+async fn read_bounded_response_body(
+    mut response: reqwest::Response,
+    max_body_bytes: usize,
+) -> AnyResult<Vec<u8>> {
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("failed to read provider response body")?
+    {
+        if body.len() + chunk.len() > max_body_bytes {
+            bail!(
+                "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 pub(super) async fn dispatch_provider_streaming_request(
@@ -147,19 +167,11 @@ pub(super) async fn dispatch_provider_catalog_request(
             );
         }
     }
-    let body = response
-        .bytes()
-        .await
-        .context("failed to read provider model catalog response body")?;
-    if body.len() > max_body_bytes {
-        bail!(
-            "provider_catalog_body_too_large: provider model catalog exceeds {max_body_bytes} bytes"
-        );
-    }
-    Ok(ProviderCatalogHttpResponse {
-        status,
-        body: body.to_vec(),
-    })
+    // Chunk-bounded read (see read_bounded_response_body): the post-read length
+    // check alone did not bound a chunked / Content-Length-lying catalog
+    // response.
+    let body = read_bounded_response_body(response, max_body_bytes).await?;
+    Ok(ProviderCatalogHttpResponse { status, body })
 }
 
 /// Shared reqwest client + crypto-provider setup for outbound HTTPS calls
