@@ -15,9 +15,9 @@ use std::env;
 use ferrogate_runtime::{
     select_isolation_backend, AgentWorkerFrameworkArtifactResult, AgentWorkerLifecycleResult,
     AgentWorkerManagementAction, AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode,
-    AgentWorkerManagementResult, IsolationBackendDescriptor, IsolationBackendKind,
-    IsolationBackendLifecycle, IsolationExecRequest, IsolationPolicy, IsolationPrepareRequest,
-    ManagedWorkerError, ManagedWorkerSessionStatus,
+    AgentWorkerManagementResult, FrameworkAdapterMode, IsolationBackendDescriptor,
+    IsolationBackendKind, IsolationBackendLifecycle, IsolationExecRequest, IsolationPolicy,
+    IsolationPrepareRequest, ManagedWorkerError, ManagedWorkerSessionStatus,
 };
 
 use crate::{
@@ -34,6 +34,7 @@ use crate::{
         stream_native_harness_status,
     },
     local_process_backend::LocalProcessIsolationBackend,
+    self_hosted_execution::self_hosted_report_only_exec_marker,
     state::AgentWorkerStateStore,
 };
 
@@ -41,11 +42,12 @@ pub(crate) fn dispatch_lifecycle_action(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
     external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
         AgentWorkerManagementAction::Provision => provision(state, envelope),
         AgentWorkerManagementAction::ExecOrAttach => {
-            exec_or_attach(state, envelope, external_action_authorizer)
+            exec_or_attach(state, envelope, external_action_authorizer, worker_mode)
         }
         AgentWorkerManagementAction::Stop => stop(state, envelope),
         AgentWorkerManagementAction::SnapshotOrCheckpoint => {
@@ -579,6 +581,7 @@ fn exec_or_attach_local_process(
     envelope: &AgentWorkerManagementEnvelope,
     session_id: &str,
     run_id: &str,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let backend = state
         .get_local_process_backend_mut(session_id, run_id)
@@ -603,6 +606,30 @@ fn exec_or_attach_local_process(
             )
         })?;
     let succeeded = exec.exit_code == Some(0);
+    // Self-hosted worker sessions run the workload through the local-process
+    // backend just like cloud, but they cannot hard-enforce on the customer
+    // host: the capability that ran is recorded as report-only telemetry
+    // (customer_owned_host boundary, reported_by_self_hosted_worker trust,
+    // server-clock-stamped identity expiry) rather than gateway-enforced. Cloud
+    // sessions emit no such marker — their capability path is enforced (#242).
+    let report_only_evidence = match worker_mode {
+        FrameworkAdapterMode::SelfHosted => Some(self_hosted_report_only_exec_marker(
+            "cli",
+            "agent://managed/readiness",
+            envelope.issued_at_unix_millis,
+        )),
+        FrameworkAdapterMode::Managed => None,
+    };
+    let base_message = format!(
+        "local-process instance {} exec by agent-worker; exit_code={:?}; output={}",
+        instance_id.as_deref().unwrap_or("unknown"),
+        exec.exit_code,
+        exec.message
+    );
+    let message = match report_only_evidence {
+        Some(marker) => format!("{base_message}; {marker}"),
+        None => base_message,
+    };
     let lifecycle = lifecycle_result_for_backend(
         envelope,
         if succeeded {
@@ -611,12 +638,7 @@ fn exec_or_attach_local_process(
             ManagedWorkerSessionStatus::Failed
         },
         if succeeded { "executed" } else { "exec_failed" },
-        &format!(
-            "local-process instance {} exec by agent-worker; exit_code={:?}; output={}",
-            instance_id.as_deref().unwrap_or("unknown"),
-            exec.exit_code,
-            exec.message
-        ),
+        &message,
         &identity,
         instance_id,
     )?;
@@ -876,6 +898,7 @@ fn exec_or_attach(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
     _external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
@@ -889,7 +912,7 @@ fn exec_or_attach(
         .get_local_process_backend_mut(&session_id, &run_id)
         .is_some()
     {
-        return exec_or_attach_local_process(state, envelope, &session_id, &run_id);
+        return exec_or_attach_local_process(state, envelope, &session_id, &run_id, worker_mode);
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();

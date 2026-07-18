@@ -18,6 +18,7 @@ mod handlers;
 mod lifecycle;
 mod local_process_backend;
 mod management;
+mod self_hosted_execution;
 mod state;
 
 #[cfg(test)]
@@ -104,6 +105,16 @@ struct Cli {
 enum Command {
     /// Print the resolved worker type and its trust/enforcement semantics.
     WorkerType,
+    /// Run a self-hosted report-only governed CLI workload through the
+    /// local-process isolation backend. Only meaningful under
+    /// `--worker-type self-hosted`: a capability cloud would BLOCK is recorded
+    /// as report-only and the workload runs anyway (issue #242).
+    SelfHostedGovernedExecutionSmoke {
+        /// Server-clock override (unix millis) for deterministic identity
+        /// expiry stamping in contract tests.
+        #[arg(long)]
+        now_unix_millis: Option<u64>,
+    },
     /// Run a local management protocol smoke test without starting Firecracker.
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
@@ -292,22 +303,61 @@ fn print_worker_type(worker_type: WorkerType) -> Result<()> {
     Ok(())
 }
 
-/// Self-hosted execution is a policy toggle in name only today: no
-/// subcommand's capability gate (`validate_managed_worker_session`) or
-/// management-serving path implements report-only, non-enforced execution
-/// yet — only event/evidence *labeling* does. Rather than silently accepting
-/// `--worker-type self-hosted` and running every real subcommand as if it
-/// were `cloud` anyway (issue #148), fail closed here with an explicit,
-/// actionable error. The one exception is the `worker-type` diagnostic
-/// itself, which only ever prints the resolved policy and never executes
-/// anything.
+/// Per-command self-hosted support classification.
+///
+/// Self-hosted execution is no longer a blanket fail-closed toggle (issue
+/// #242). Covered commands run real report-only, non-enforced execution
+/// through the local-process isolation backend; genuinely-uncovered commands
+/// stay fail-closed with an accurate, actionable message rather than silently
+/// running as `cloud`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfHostedCommandSupport {
+    /// Diagnostic-only: never executes a workload (just prints resolved policy).
+    Diagnostic,
+    /// Runs real report-only self-hosted execution (issue #242, first slice).
+    ReportOnly,
+    /// Not yet covered under self-hosted; fails closed with an honest message.
+    FailClosed,
+}
+
+/// Which self-hosted execution surface a command is on.
+///
+/// Covered (first slice, issue #242): the `worker-type` diagnostic, the
+/// management-serving path (`ServeManagementUnix`/`ServeManagementHttp`/
+/// `AcceptManagementJson`), and the dedicated
+/// `SelfHostedGovernedExecutionSmoke` governed execution entrypoint. Everything
+/// else remains fail-closed until wired in a later slice.
+fn self_hosted_command_support(command: &Command) -> SelfHostedCommandSupport {
+    match command {
+        Command::WorkerType => SelfHostedCommandSupport::Diagnostic,
+        Command::SelfHostedGovernedExecutionSmoke { .. }
+        | Command::ServeManagementUnix { .. }
+        | Command::ServeManagementHttp { .. }
+        | Command::AcceptManagementJson { .. } => SelfHostedCommandSupport::ReportOnly,
+        // TODO(#242): extend report-only coverage to the remaining governed
+        // execution smokes and Firecracker/handler paths. Until then they stay
+        // fail-closed rather than silently running as cloud.
+        _ => SelfHostedCommandSupport::FailClosed,
+    }
+}
+
+/// Fail closed for commands not yet covered under self-hosted, with an accurate
+/// per-command message. Covered and diagnostic commands are allowed through so
+/// they can run real report-only execution.
 fn reject_unsupported_self_hosted_execution(
     worker_type: WorkerType,
     command: &Command,
 ) -> Result<()> {
-    if worker_type == WorkerType::SelfHosted && !matches!(command, Command::WorkerType) {
+    if worker_type == WorkerType::SelfHosted
+        && self_hosted_command_support(command) == SelfHostedCommandSupport::FailClosed
+    {
         bail!(
-            "--worker-type self-hosted is not yet implemented for `{command:?}`: this build only tags events/evidence as self-hosted, it does not run any subcommand in a report-only, non-enforced mode. Use --worker-type cloud (the default), or run `agent-worker worker-type --worker-type self-hosted` to inspect the resolved policy without executing anything (see issue #148)."
+            "--worker-type self-hosted is not yet implemented for `{command:?}`: this build \
+             wires report-only self-hosted execution for the management-serving path \
+             (serve-management-unix/http, accept-management-json) and the \
+             self-hosted-governed-execution-smoke entrypoint, but not this subcommand yet. Use \
+             --worker-type cloud (the default) for it, or run a covered command under \
+             --worker-type self-hosted (see issue #242)."
         );
     }
     Ok(())
@@ -331,6 +381,11 @@ fn main() -> Result<()> {
     let worker_mode = cli.worker_type.framework_adapter_mode();
     match command {
         Command::WorkerType => print_worker_type(cli.worker_type),
+        Command::SelfHostedGovernedExecutionSmoke { now_unix_millis } => {
+            self_hosted_execution::self_hosted_governed_execution_smoke_command(
+                now_unix_millis.unwrap_or_else(management::current_unix_millis),
+            )
+        }
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),
@@ -417,7 +472,12 @@ fn main() -> Result<()> {
             key_id,
             shared_secret,
             now_unix_millis,
-        } => management::accept_management_json_command(&key_id, &shared_secret, now_unix_millis),
+        } => management::accept_management_json_command(
+            &key_id,
+            &shared_secret,
+            now_unix_millis,
+            worker_mode,
+        ),
         Command::ServeManagementUnix {
             socket_path,
             key_id,
@@ -438,6 +498,7 @@ fn main() -> Result<()> {
                 external_action_authorizer_socket,
                 external_action_authorizer_pid,
             )?,
+            worker_mode,
         ),
         Command::ServeManagementHttp {
             listen,
@@ -459,6 +520,7 @@ fn main() -> Result<()> {
                 external_action_authorizer_socket,
                 external_action_authorizer_pid,
             )?,
+            worker_mode,
         ),
     }
 }

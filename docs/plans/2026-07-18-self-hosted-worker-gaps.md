@@ -34,6 +34,25 @@ self-hosted management session executes a workload through the local-process
 backend and emits report-only capability evidence; the cloud path stays
 enforced (regression).
 
+**Status (first slice landed, #242):**
+- Covered under `--worker-type self-hosted` (real report-only execution):
+  - `self-hosted-governed-execution-smoke` — a governed CLI workload runs through
+    the local-process backend under a policy that would DENY; the denied
+    capability is recorded (`report_only=true`, `cloud_would_block=true`,
+    `trust_level=reported_by_self_hosted_worker`,
+    `enforcement_boundary=customer_owned_host`, server-clock identity expiry)
+    and the workload runs anyway.
+  - `serve-management-unix` / `serve-management-http` / `accept-management-json`
+    now run under a self-hosted runtime; a self-hosted management
+    `exec_or_attach` on the local-process backend emits a report-only capability
+    marker alongside the workload, while cloud stays enforced (no marker).
+  - Enforcement engine: `crates/agent-worker/src/self_hosted_execution.rs`
+    (`run_governed_cli_workload` — cloud enforces/blocks, self-hosted
+    observes+reports; both anchor on the same gateway capability decision).
+- Deferred (still fail-closed, accurate per-command message, TODO(#242)): the
+  remaining `governed-*-execution-smoke` families, the external-action smokes,
+  and the Firecracker/guest-handler execution paths.
+
 ## Gap 2 (P1, needs design) — production mTLS transport not implemented
 `production_mtls_transport_implemented: false`; the
 `x-ferrogate-transport-security` header is a contract marker only — no cert

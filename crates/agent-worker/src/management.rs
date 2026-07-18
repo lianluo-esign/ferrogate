@@ -21,7 +21,7 @@ use ferrogate_runtime::{
     AgentWorkerManagementFrame, AgentWorkerManagementKey, AgentWorkerManagementResponse,
     AgentWorkerManagementResult, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
     AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
-    InMemoryAgentWorkerManagementTransport, ManagedWorkerError,
+    FrameworkAdapterMode, InMemoryAgentWorkerManagementTransport, ManagedWorkerError,
     AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES, AGENT_WORKER_PROTOCOL_VERSION,
 };
 
@@ -35,9 +35,20 @@ use crate::{
 
 const SMOKE_SHARED_SECRET: &str = "agent-worker-smoke-secret";
 
-#[derive(Default)]
 struct AgentWorkerRuntime {
     external_action_authorizer: Option<Box<dyn GatewayExternalActionAuthorizer + Send + Sync>>,
+    /// Cloud (managed) vs self-hosted enforcement policy for this serving loop.
+    /// Self-hosted runs report-only; cloud enforces (issue #242).
+    worker_mode: FrameworkAdapterMode,
+}
+
+impl Default for AgentWorkerRuntime {
+    fn default() -> Self {
+        Self {
+            external_action_authorizer: None,
+            worker_mode: FrameworkAdapterMode::Managed,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -58,7 +69,17 @@ impl AgentWorkerRuntime {
                     expected_gateway_pid,
                 ),
             )),
+            worker_mode: FrameworkAdapterMode::Managed,
         }
+    }
+
+    fn with_worker_mode(mut self, worker_mode: FrameworkAdapterMode) -> Self {
+        self.worker_mode = worker_mode;
+        self
+    }
+
+    fn worker_mode(&self) -> FrameworkAdapterMode {
+        self.worker_mode
     }
 
     fn external_action_authorizer(&self) -> Option<&dyn GatewayExternalActionAuthorizer> {
@@ -190,6 +211,7 @@ pub(crate) fn accept_management_json_command(
     key_id: &str,
     shared_secret: &str,
     now_unix_millis: Option<u64>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<()> {
     let mut input = String::new();
     read_management_stream(&mut io::stdin(), &mut input)?;
@@ -198,11 +220,13 @@ pub(crate) fn accept_management_json_command(
         key_id,
         shared_secret,
         now_unix_millis.unwrap_or_else(current_unix_millis),
+        worker_mode,
     )?;
     println!("{response}");
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_management_unix_command(
     socket_path: &Path,
     key_id: &str,
@@ -211,6 +235,7 @@ pub(crate) fn serve_management_unix_command(
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
     external_action_authorizer: Option<ExternalAuthorizerConfig>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<()> {
     let responses = serve_management_unix_with_external_authorizer(
         socket_path,
@@ -220,6 +245,7 @@ pub(crate) fn serve_management_unix_command(
         max_requests,
         idle_timeout_millis,
         external_action_authorizer,
+        worker_mode,
     )?;
     if let Some(response) = responses.last() {
         println!(
@@ -234,6 +260,7 @@ pub(crate) fn serve_management_unix_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_management_http_command(
     listen: SocketAddr,
     key_id: &str,
@@ -242,6 +269,7 @@ pub(crate) fn serve_management_http_command(
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
     external_action_authorizer: Option<ExternalAuthorizerConfig>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<()> {
     let responses = serve_management_http(
         listen,
@@ -251,6 +279,7 @@ pub(crate) fn serve_management_http_command(
         max_requests,
         idle_timeout_millis,
         external_action_authorizer,
+        worker_mode,
     )?;
     if let Some(response) = responses.last() {
         println!(
@@ -265,6 +294,7 @@ pub(crate) fn serve_management_http_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_management_http(
     listen: SocketAddr,
     key_id: &str,
@@ -273,6 +303,7 @@ fn serve_management_http(
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
     external_action_authorizer: Option<ExternalAuthorizerConfig>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -286,9 +317,11 @@ fn serve_management_http(
         max_requests,
         idle_timeout_millis,
         external_action_authorizer,
+        worker_mode,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_management_http_listener(
     listener: TcpListener,
     key_id: &str,
@@ -297,6 +330,7 @@ fn serve_management_http_listener(
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
     external_action_authorizer: Option<ExternalAuthorizerConfig>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -308,13 +342,16 @@ fn serve_management_http_listener(
         }])?,
     )));
     let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
-    let runtime = Arc::new(match external_action_authorizer {
-        Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
-            config.socket_path,
-            config.gateway_pid,
-        ),
-        None => AgentWorkerRuntime::default(),
-    });
+    let runtime = Arc::new(
+        match external_action_authorizer {
+            Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
+                config.socket_path,
+                config.gateway_pid,
+            ),
+            None => AgentWorkerRuntime::default(),
+        }
+        .with_worker_mode(worker_mode),
+    );
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
@@ -571,9 +608,11 @@ fn serve_management_unix(
         max_requests,
         idle_timeout_millis,
         None,
+        FrameworkAdapterMode::Managed,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_management_unix_with_external_authorizer(
     socket_path: &Path,
     key_id: &str,
@@ -582,6 +621,7 @@ fn serve_management_unix_with_external_authorizer(
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
     external_action_authorizer: Option<ExternalAuthorizerConfig>,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -597,13 +637,16 @@ fn serve_management_unix_with_external_authorizer(
         }])?,
     )));
     let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
-    let runtime = Arc::new(match external_action_authorizer {
-        Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
-            config.socket_path,
-            config.gateway_pid,
-        ),
-        None => AgentWorkerRuntime::default(),
-    });
+    let runtime = Arc::new(
+        match external_action_authorizer {
+            Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
+                config.socket_path,
+                config.gateway_pid,
+            ),
+            None => AgentWorkerRuntime::default(),
+        }
+        .with_worker_mode(worker_mode),
+    );
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
@@ -723,6 +766,7 @@ fn accept_management_json(
     key_id: &str,
     shared_secret: &str,
     now_unix_millis: u64,
+    worker_mode: FrameworkAdapterMode,
 ) -> Result<String> {
     if input.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
         anyhow::bail!("agent-worker management request exceeds maximum message size");
@@ -736,7 +780,7 @@ fn accept_management_json(
             },
         ])?);
     let mut state = InMemoryAgentWorkerStateStore::new();
-    let runtime = AgentWorkerRuntime::default();
+    let runtime = AgentWorkerRuntime::default().with_worker_mode(worker_mode);
     let response = accept_management_envelope(
         &mut transport,
         &mut state,
@@ -842,13 +886,16 @@ fn dispatch_management_action(
         | AgentWorkerManagementAction::SnapshotOrCheckpoint
         | AgentWorkerManagementAction::Cleanup
         | AgentWorkerManagementAction::StreamStatus
-        | AgentWorkerManagementAction::CollectArtifacts => {
-            dispatch_lifecycle_action(state, &envelope, runtime.external_action_authorizer())
-        }
+        | AgentWorkerManagementAction::CollectArtifacts => dispatch_lifecycle_action(
+            state,
+            &envelope,
+            runtime.external_action_authorizer(),
+            runtime.worker_mode(),
+        ),
     }
 }
 
-fn current_unix_millis() -> u64 {
+pub(crate) fn current_unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

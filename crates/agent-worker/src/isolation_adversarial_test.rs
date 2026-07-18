@@ -549,6 +549,77 @@ fn assert_governed_provision_fails_closed(request: &str) {
 }
 
 #[test]
+fn self_hosted_management_session_runs_workload_report_only_while_cloud_stays_enforced() {
+    // Acceptance for issue #242: a self-hosted management session executes a
+    // workload through the local-process backend and emits report-only
+    // capability evidence (customer_owned_host boundary, server-clock identity
+    // expiry). The cloud (managed) session runs the same workload but emits NO
+    // report-only marker — its capability path stays enforced.
+    let _env_lock = lock_firecracker_env();
+    let _guard = SuiteEnvGuard::engage();
+
+    if let Err(reason) = crate::local_process_backend::local_process_backend_readiness() {
+        eprintln!(
+            "self-hosted management session: namespace stack unavailable ({reason}); \
+             asserting fail-closed provision instead"
+        );
+        assert_governed_provision_fails_closed("self-hosted-unavailable-stack");
+        return;
+    }
+
+    let exec_message_for = |worker_mode: ferrogate_runtime::FrameworkAdapterMode| -> String {
+        let mut transport = suite_transport();
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        let runtime = AgentWorkerRuntime::default().with_worker_mode(worker_mode);
+        let provision = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            adversarial_envelope(AgentWorkerManagementAction::Provision, "sh-provision"),
+            1_000,
+        );
+        let lifecycle = expect_lifecycle(&provision, "self-hosted provision");
+        assert_eq!(lifecycle.backend_name, "local-process");
+        let exec = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            adversarial_envelope(AgentWorkerManagementAction::ExecOrAttach, "sh-exec"),
+            1_000,
+        );
+        let lifecycle = expect_lifecycle(&exec, "self-hosted exec");
+        // The workload really ran through the local-process backend in both modes.
+        assert_eq!(lifecycle.outcome, "executed");
+        assert!(lifecycle
+            .message
+            .contains("agent-worker-local-process-ready"));
+        lifecycle.message
+    };
+
+    // Self-hosted: workload ran AND report-only capability evidence is emitted.
+    let self_hosted = exec_message_for(ferrogate_runtime::FrameworkAdapterMode::SelfHosted);
+    assert!(
+        self_hosted.contains("report_only_capability[enforcement_boundary=customer_owned_host"),
+        "self-hosted exec must emit report-only capability evidence: {self_hosted}"
+    );
+    assert!(
+        self_hosted.contains("trust_level=reported_by_self_hosted_worker"),
+        "{self_hosted}"
+    );
+    assert!(
+        self_hosted.contains("identity_expiry_clock=server"),
+        "{self_hosted}"
+    );
+
+    // Cloud: same workload, but NO report-only marker (capability stays enforced).
+    let cloud = exec_message_for(ferrogate_runtime::FrameworkAdapterMode::Managed);
+    assert!(
+        !cloud.contains("report_only_capability"),
+        "cloud exec must stay enforced with no report-only marker: {cloud}"
+    );
+}
+
+#[test]
 fn local_process_provision_fails_closed_through_governed_path_when_stack_unavailable() {
     // Companion negative to the containment suite: local-process ENABLED but
     // the namespace stack is unavailable (unshare missing). The signed

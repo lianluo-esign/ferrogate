@@ -39,24 +39,58 @@ fn cloud_worker_type_is_allowed_on_every_subcommand() {
 }
 
 #[test]
-fn self_hosted_worker_type_is_allowed_on_the_diagnostic_command_only() {
+fn self_hosted_worker_type_is_allowed_on_the_diagnostic_command() {
     reject_unsupported_self_hosted_execution(WorkerType::SelfHosted, &Command::WorkerType)
         .expect("the worker-type diagnostic must never be rejected");
+    assert_eq!(
+        self_hosted_command_support(&Command::WorkerType),
+        SelfHostedCommandSupport::Diagnostic
+    );
 }
 
 #[test]
-fn self_hosted_worker_type_is_rejected_on_real_execution_subcommands() {
-    // Sample across a few command families named in issue #148 (the smoke
-    // family and the two real serving commands) rather than just one, since
-    // the point of the guard is that it applies uniformly.
+fn self_hosted_worker_type_runs_report_only_on_the_covered_first_slice() {
+    // The management-serving path and the dedicated governed execution
+    // entrypoint are the first slice covered under self-hosted (issue #242):
+    // they run real report-only execution and must NOT fail closed.
+    let covered = [
+        Command::SelfHostedGovernedExecutionSmoke {
+            now_unix_millis: Some(1_000),
+        },
+        Command::AcceptManagementJson {
+            key_id: "k".to_string(),
+            shared_secret: "s".to_string(),
+            now_unix_millis: None,
+        },
+    ];
+    for command in covered {
+        assert_eq!(
+            self_hosted_command_support(&command),
+            SelfHostedCommandSupport::ReportOnly,
+            "{command:?} must be a covered report-only command"
+        );
+        reject_unsupported_self_hosted_execution(WorkerType::SelfHosted, &command)
+            .expect("covered self-hosted commands must not fail closed");
+    }
+}
+
+#[test]
+fn self_hosted_worker_type_is_rejected_on_uncovered_execution_subcommands() {
+    // Governed smokes not yet wired for report-only self-hosted execution stay
+    // fail-closed rather than silently running as cloud. The message must be
+    // accurate and reference the tracking issue (#242).
     for command in [
         Command::GovernedToolExecutionSmoke,
         Command::GovernedCliExecutionSmoke,
         Command::ExternalActionSmoke,
     ] {
+        assert_eq!(
+            self_hosted_command_support(&command),
+            SelfHostedCommandSupport::FailClosed
+        );
         let error = reject_unsupported_self_hosted_execution(WorkerType::SelfHosted, &command)
-            .expect_err("self-hosted must be rejected for real execution subcommands");
+            .expect_err("self-hosted must be rejected for uncovered execution subcommands");
         assert!(error.to_string().contains("--worker-type self-hosted"));
-        assert!(error.to_string().contains("issue #148"));
+        assert!(error.to_string().contains("issue #242"));
     }
 }

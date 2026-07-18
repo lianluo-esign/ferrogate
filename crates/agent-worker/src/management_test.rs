@@ -67,9 +67,14 @@ fn smoke_envelope_uses_signed_management_contract() {
 fn accepts_signed_management_json_from_gateway_contract() {
     let input = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -91,8 +96,14 @@ fn accepts_signed_management_json_from_gateway_contract() {
 fn rejects_management_json_with_wrong_secret_as_standard_response() {
     let input = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", "wrong-secret", 1_000).unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        "wrong-secret",
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], false);
@@ -112,9 +123,14 @@ fn rejects_management_json_with_unencrypted_channel_marker() {
         .unwrap();
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], false);
@@ -139,9 +155,14 @@ fn accepts_encrypted_management_frame_from_gateway_contract() {
             .unwrap();
     let input = serde_json::to_string(&frame).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -203,9 +224,14 @@ fn routes_signed_provision_to_firecracker_lifecycle_branch_fail_closed() {
     );
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], false);
@@ -254,9 +280,14 @@ fn provision_fails_closed_when_docker_backend_enabled_but_daemon_unreachable() {
         "agent-worker-provision-docker-unreachable",
     );
     let input = serde_json::to_string(&envelope).unwrap();
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     std::env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
@@ -276,9 +307,14 @@ fn cleanup_lifecycle_action_returns_typed_noop_evidence_before_firecracker_start
     let envelope = lifecycle_envelope(AgentWorkerManagementAction::Cleanup, "agent-worker-cleanup");
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -353,9 +389,14 @@ fn stream_status_lifecycle_action_reports_not_started_without_gateway_execution(
     );
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -377,9 +418,14 @@ fn exec_or_attach_without_microvm_provision_returns_lifecycle_evidence() {
     );
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -499,9 +545,14 @@ fn routes_signed_backend_listing_to_firecracker_registry_result() {
         .unwrap();
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
     assert_eq!(response["accepted"], true);
@@ -676,9 +727,14 @@ fn provision_records_failed_lifecycle_when_firecracker_bundle_is_configured() {
     );
     let input = serde_json::to_string(&envelope).unwrap();
 
-    let response_json =
-        accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
-            .unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
     std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
     std::env::remove_var("AGENT_WORKER_FIRECRACKER_JAILER");
     std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
@@ -1874,6 +1930,7 @@ fn serve_management_http_bound_to_ephemeral_port(
         max_requests,
         None,
         None,
+        FrameworkAdapterMode::Managed,
     )
 }
 
