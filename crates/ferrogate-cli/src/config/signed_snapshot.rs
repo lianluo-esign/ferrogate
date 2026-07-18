@@ -6,13 +6,23 @@
 
 //! Signed policy-snapshot sign/verify primitives (issue #206).
 //!
-//! This module provides the *isolated* cryptographic core for authenticating a
-//! policy snapshot as it travels from the control plane to the data plane. It is
-//! intentionally NOT wired into the live control-plane activation path
-//! (`SharedFileControlPlane::load` / `sync_shared_control_plane`) in this pass;
-//! wiring changes runtime behaviour and is a separate, reviewed step. The
-//! existing fnv1a64 change-detection (`config::snapshot::config_snapshot_id` and
-//! `state::shared_control_plane_revision`) is left untouched.
+//! This module provides the cryptographic core for authenticating a policy
+//! snapshot as it travels from the control plane to the data plane, plus the
+//! config-driven [`build_snapshot_crypto`] builder and the [`SnapshotSigner`] /
+//! [`SnapshotVerifier`] holders that wire it into the file-backed control plane.
+//!
+//! Wiring (opt-in, backward compatible): when a node configures
+//! `cluster.snapshot_signing_key`, `SharedFileControlPlane::publish_from_config`
+//! embeds a signed envelope in the published snapshot; when a node configures
+//! `cluster.snapshot_trusted_keys`, `SharedAppState::sync_shared_control_plane`
+//! verifies that envelope (identity + strictly-newer revision + unexpired)
+//! BEFORE activating, and activates the cryptographically authenticated payload
+//! — a rejected snapshot leaves the running config (last known good) untouched.
+//! With neither configured, snapshots stay unsigned and the fnv1a64
+//! change-detection (`state::shared_control_plane_revision`) behaves exactly as
+//! before. The pure-offline [`SignedSnapshotStore`] decision core (last-known-
+//! good buffering / expiry) remains available for the offline data-plane loop
+//! but is not itself on the sync path.
 //!
 //! ## Why asymmetric (Ed25519)
 //!
@@ -38,9 +48,10 @@
 //! [`verify_snapshot`] rejects on any missing/empty/unparseable field with a
 //! typed [`RejectReason`]; a verification error is NEVER swallowed into `Ok`.
 
-// This module is deliberately not referenced by production code yet (see the
-// module docs: wiring into the activation path is a separate reviewed step), so
-// its public surface is dead code in a bin-only build. The tests exercise it.
+// The sign/verify path and config builder are now referenced by production code
+// (state.rs), but some of the offline-loop surface (SignedSnapshotStore,
+// OfflineStatus, active_payload/status) is not yet on a live path, so keep the
+// module-level allow to avoid dead-code churn until the offline loop is wired.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -289,6 +300,290 @@ pub(crate) fn verify_snapshot(
         not_after_unix: envelope.not_after_unix,
         payload: envelope.payload.clone(),
     })
+}
+
+/// Ed25519 key material is 32 bytes (both the signing seed and the public key).
+const ED25519_KEY_LEN: usize = 32;
+
+/// Reasons a configured snapshot key or identity is unusable. Surfaced both at
+/// config-validation time and at runtime construction (they share
+/// [`build_snapshot_crypto`], so validation and the live gate never diverge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotConfigError {
+    /// A base64 key field did not decode.
+    InvalidBase64 { field: &'static str },
+    /// A key decoded but was not 32 bytes.
+    WrongKeyLength { field: &'static str, len: usize },
+    /// A signing/verification identity field was required but missing/empty.
+    MissingIdentity { field: &'static str },
+    /// `snapshot_signing_key` was set without a `snapshot_signing_key_id`.
+    MissingSigningKeyId,
+    /// A trusted key entry had an empty `key_id`.
+    EmptyTrustedKeyId,
+    /// Two trusted key entries shared a `key_id`.
+    DuplicateTrustedKeyId { key_id: String },
+    /// `snapshot_max_age_secs` was zero while signing was enabled.
+    ZeroMaxAge,
+}
+
+impl fmt::Display for SnapshotConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SnapshotConfigError::InvalidBase64 { field } => {
+                write!(f, "field {field}: must be valid base64")
+            }
+            SnapshotConfigError::WrongKeyLength { field, len } => {
+                write!(f, "field {field}: expected a 32-byte ed25519 key, got {len} bytes")
+            }
+            SnapshotConfigError::MissingIdentity { field } => {
+                write!(f, "field {field}: required when snapshot signing or verification is enabled")
+            }
+            SnapshotConfigError::MissingSigningKeyId => f.write_str(
+                "field cluster.snapshot_signing_key_id: required when cluster.snapshot_signing_key is set",
+            ),
+            SnapshotConfigError::EmptyTrustedKeyId => {
+                f.write_str("field cluster.snapshot_trusted_keys: key_id cannot be empty")
+            }
+            SnapshotConfigError::DuplicateTrustedKeyId { key_id } => {
+                write!(f, "field cluster.snapshot_trusted_keys: duplicate key_id {key_id:?}")
+            }
+            SnapshotConfigError::ZeroMaxAge => f.write_str(
+                "field cluster.snapshot_max_age_secs: must be greater than zero when signing is enabled",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotConfigError {}
+
+fn decode_ed25519_bytes(
+    b64: &str,
+    field: &'static str,
+) -> Result<[u8; ED25519_KEY_LEN], SnapshotConfigError> {
+    let bytes = BASE64_STANDARD
+        .decode(b64.trim().as_bytes())
+        .map_err(|_| SnapshotConfigError::InvalidBase64 { field })?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| SnapshotConfigError::WrongKeyLength {
+            field,
+            len: bytes.len(),
+        })
+}
+
+/// Parse a base64 (standard) 32-byte Ed25519 seed into a [`SigningKey`].
+pub(crate) fn parse_signing_key(
+    b64_seed: &str,
+    field: &'static str,
+) -> Result<SigningKey, SnapshotConfigError> {
+    Ok(SigningKey::from_bytes(&decode_ed25519_bytes(
+        b64_seed, field,
+    )?))
+}
+
+/// Parse a base64 (standard) 32-byte Ed25519 public key into a [`VerifyingKey`].
+pub(crate) fn parse_verifying_key(
+    b64_public: &str,
+    field: &'static str,
+) -> Result<VerifyingKey, SnapshotConfigError> {
+    VerifyingKey::from_bytes(&decode_ed25519_bytes(b64_public, field)?).map_err(|_| {
+        SnapshotConfigError::WrongKeyLength {
+            field,
+            len: ED25519_KEY_LEN,
+        }
+    })
+}
+
+/// Producer-side signing material for file-backed control-plane snapshots (#206).
+pub(crate) struct SnapshotSigner {
+    signing_key: SigningKey,
+    key_id: String,
+    tenant_id: String,
+    deployment_id: String,
+    max_age_secs: u64,
+}
+
+// Redacting Debug impls: the signing seed and trust map must never reach logs.
+impl fmt::Debug for SnapshotSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SnapshotSigner")
+            .field("key_id", &self.key_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("deployment_id", &self.deployment_id)
+            .field("max_age_secs", &self.max_age_secs)
+            .field("signing_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl SnapshotSigner {
+    /// Sign `payload` for `revision`, stamping expiry `now_unix + max_age_secs`.
+    pub(crate) fn sign(
+        &self,
+        payload: SignedSnapshotPayload,
+        revision: u64,
+        now_unix: u64,
+    ) -> Result<SignedSnapshotEnvelope, SignError> {
+        let not_after_unix = now_unix.saturating_add(self.max_age_secs);
+        sign_snapshot(
+            payload,
+            &self.tenant_id,
+            &self.deployment_id,
+            revision,
+            not_after_unix,
+            &self.signing_key,
+            &self.key_id,
+        )
+    }
+}
+
+/// Consumer-side verification material for file-backed control-plane snapshots.
+pub(crate) struct SnapshotVerifier {
+    trusted_keys: BTreeMap<String, VerifyingKey>,
+    expected_tenant: String,
+    expected_deployment: String,
+}
+
+impl fmt::Debug for SnapshotVerifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SnapshotVerifier")
+            .field("expected_tenant", &self.expected_tenant)
+            .field("expected_deployment", &self.expected_deployment)
+            .field(
+                "trusted_key_ids",
+                &self.trusted_keys.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl SnapshotVerifier {
+    /// Verify `envelope` against the configured trust map/identity, requiring
+    /// `revision > active_revision` and an unexpired `not_after_unix`.
+    pub(crate) fn verify(
+        &self,
+        envelope: &SignedSnapshotEnvelope,
+        active_revision: u64,
+        now_unix: u64,
+    ) -> Result<VerifiedSnapshot, RejectReason> {
+        verify_snapshot(
+            envelope,
+            &self.trusted_keys,
+            &self.expected_tenant,
+            &self.expected_deployment,
+            active_revision,
+            now_unix,
+        )
+    }
+}
+
+/// The signing/verification material derived from a node's cluster config.
+/// `signer` is `Some` when this node publishes signed snapshots; `verifier` is
+/// `Some` when this node must verify snapshots before activating them. Either,
+/// both, or neither may be enabled.
+#[derive(Debug)]
+pub(crate) struct SnapshotCrypto {
+    pub(crate) signer: Option<SnapshotSigner>,
+    pub(crate) verifier: Option<SnapshotVerifier>,
+}
+
+/// Build the snapshot signing/verification material from cluster config, or
+/// return the first configuration error. Called BOTH by `Config::validate`
+/// (result discarded) and at runtime construction, so a config that validates
+/// is guaranteed to build. When neither signing nor verification is configured,
+/// returns a crypto with both fields `None` (legacy unsigned behavior).
+pub(crate) fn build_snapshot_crypto(
+    cluster: &super::types::ClusterConfig,
+) -> Result<SnapshotCrypto, SnapshotConfigError> {
+    let signing_enabled = cluster
+        .snapshot_signing_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let verification_enabled = !cluster.snapshot_trusted_keys.is_empty();
+
+    if !signing_enabled && !verification_enabled {
+        return Ok(SnapshotCrypto {
+            signer: None,
+            verifier: None,
+        });
+    }
+
+    let tenant_id = cluster
+        .snapshot_tenant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(SnapshotConfigError::MissingIdentity {
+            field: "cluster.snapshot_tenant_id",
+        })?
+        .to_string();
+    let deployment_id = cluster
+        .snapshot_deployment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(SnapshotConfigError::MissingIdentity {
+            field: "cluster.snapshot_deployment_id",
+        })?
+        .to_string();
+
+    let signer = if signing_enabled {
+        if cluster.snapshot_max_age_secs == 0 {
+            return Err(SnapshotConfigError::ZeroMaxAge);
+        }
+        let key_id = cluster
+            .snapshot_signing_key_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(SnapshotConfigError::MissingSigningKeyId)?
+            .to_string();
+        let signing_key = parse_signing_key(
+            cluster.snapshot_signing_key.as_deref().unwrap_or_default(),
+            "cluster.snapshot_signing_key",
+        )?;
+        Some(SnapshotSigner {
+            signing_key,
+            key_id,
+            tenant_id: tenant_id.clone(),
+            deployment_id: deployment_id.clone(),
+            max_age_secs: cluster.snapshot_max_age_secs,
+        })
+    } else {
+        None
+    };
+
+    let verifier = if verification_enabled {
+        let mut trusted_keys = BTreeMap::new();
+        for entry in &cluster.snapshot_trusted_keys {
+            let key_id = entry.key_id.trim();
+            if key_id.is_empty() {
+                return Err(SnapshotConfigError::EmptyTrustedKeyId);
+            }
+            let verifying_key = parse_verifying_key(
+                &entry.public_key,
+                "cluster.snapshot_trusted_keys.public_key",
+            )?;
+            if trusted_keys
+                .insert(key_id.to_string(), verifying_key)
+                .is_some()
+            {
+                return Err(SnapshotConfigError::DuplicateTrustedKeyId {
+                    key_id: key_id.to_string(),
+                });
+            }
+        }
+        Some(SnapshotVerifier {
+            trusted_keys,
+            expected_tenant: tenant_id,
+            expected_deployment: deployment_id,
+        })
+    } else {
+        None
+    };
+
+    Ok(SnapshotCrypto { signer, verifier })
 }
 
 /// Deterministic canonical byte encoding of every envelope field except the

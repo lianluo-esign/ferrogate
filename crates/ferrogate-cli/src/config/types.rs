@@ -236,6 +236,45 @@ pub(crate) struct ClusterConfig {
     pub(crate) heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_config_poll_interval_secs")]
     pub(crate) config_poll_interval_secs: u64,
+    /// Ed25519 signing key (base64 standard, 32-byte seed) THIS node uses to
+    /// sign the file-backed control-plane snapshots it publishes. When set,
+    /// `publish_from_config` embeds a signed envelope in the snapshot; when
+    /// unset, snapshots are published unsigned (legacy behavior). Issue #206.
+    #[serde(default)]
+    pub(crate) snapshot_signing_key: Option<String>,
+    /// Key id advertised in signed snapshots this node publishes; peers look it
+    /// up in their `snapshot_trusted_keys`. Required when `snapshot_signing_key`
+    /// is set.
+    #[serde(default)]
+    pub(crate) snapshot_signing_key_id: Option<String>,
+    /// Trusted Ed25519 verifying keys (key_id -> base64 standard 32-byte public
+    /// key). When non-empty, a loaded file-backed snapshot MUST carry a valid
+    /// signature from one of these keys (matching identity + a strictly newer
+    /// revision + unexpired) before it is activated; a snapshot that fails
+    /// verification is rejected and the running config (last known good) is
+    /// retained. Empty = verification disabled (legacy behavior).
+    #[serde(default)]
+    pub(crate) snapshot_trusted_keys: Vec<ClusterSnapshotKey>,
+    /// Tenant identity the snapshot signature must bind to. Required when
+    /// signing or verification is enabled.
+    #[serde(default)]
+    pub(crate) snapshot_tenant_id: Option<String>,
+    /// Deployment identity the snapshot signature must bind to. Required when
+    /// signing or verification is enabled.
+    #[serde(default)]
+    pub(crate) snapshot_deployment_id: Option<String>,
+    /// TTL (seconds) applied to signed snapshots this node publishes:
+    /// `not_after_unix = now + this`. Peers reject a snapshot once expired.
+    #[serde(default = "default_cluster_snapshot_max_age_secs")]
+    pub(crate) snapshot_max_age_secs: u64,
+}
+
+/// A trusted Ed25519 verifying key for signed control-plane snapshots (#206).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ClusterSnapshotKey {
+    pub(crate) key_id: String,
+    /// Base64 (standard alphabet) of the 32-byte Ed25519 public key.
+    pub(crate) public_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1490,6 +1529,10 @@ fn default_cluster_config_poll_interval_secs() -> u64 {
     5
 }
 
+fn default_cluster_snapshot_max_age_secs() -> u64 {
+    3_600
+}
+
 fn default_agent_runtime_max_turns() -> u32 {
     4
 }
@@ -1854,6 +1897,12 @@ impl Default for ClusterConfig {
             counter_timeout_millis: default_cluster_counter_timeout_millis(),
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             config_poll_interval_secs: default_cluster_config_poll_interval_secs(),
+            snapshot_signing_key: None,
+            snapshot_signing_key_id: None,
+            snapshot_trusted_keys: Vec::new(),
+            snapshot_tenant_id: None,
+            snapshot_deployment_id: None,
+            snapshot_max_age_secs: default_cluster_snapshot_max_age_secs(),
         }
     }
 }

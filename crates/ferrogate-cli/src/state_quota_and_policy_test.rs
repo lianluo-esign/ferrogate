@@ -1967,6 +1967,133 @@ fn activating_guardrail_policy_bumps_shared_control_plane_revision_for_peers() {
     );
 }
 
+fn signed_snapshot_test_api_key(id: &str) -> crate::config::ApiKey {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "name": id,
+        "key": format!("{id}-secret"),
+        "scopes": ["chat.completions"],
+    }))
+    .expect("valid test api key")
+}
+
+/// #206 wiring: a signed file-backed control-plane snapshot is verified before
+/// activation. A peer that trusts the signing key activates the
+/// cryptographically authenticated payload; a snapshot whose signature does not
+/// verify is rejected and the peer retains its last-known-good running config.
+#[test]
+fn signed_shared_snapshot_verifies_activates_and_rejects_forgery() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Deterministic ed25519 keypair from a fixed seed (no rng in tests).
+    let seed = [7u8; 32];
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_b64 = b64.encode(signing_key.verifying_key().to_bytes());
+    let seed_b64 = b64.encode(seed);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("cluster-state.json");
+    let path_str = state_path.to_string_lossy().into_owned();
+
+    let trusted = || {
+        vec![crate::config::ClusterSnapshotKey {
+            key_id: "k1".to_string(),
+            public_key: public_b64.clone(),
+        }]
+    };
+    let file_cluster = |cfg: &mut Config| {
+        cfg.cluster.enabled = true;
+        cfg.cluster.state_backend = "file".to_string();
+        cfg.cluster.file_state_path = Some(path_str.clone());
+        cfg.cluster.snapshot_tenant_id = Some("tenant-a".to_string());
+        cfg.cluster.snapshot_deployment_id = Some("deploy-a".to_string());
+    };
+
+    // Publisher node: signs the snapshots it publishes.
+    let mut publisher_cfg = Config::default();
+    file_cluster(&mut publisher_cfg);
+    publisher_cfg.cluster.snapshot_signing_key = Some(seed_b64.clone());
+    publisher_cfg.cluster.snapshot_signing_key_id = Some("k1".to_string());
+    publisher_cfg.api_keys = vec![signed_snapshot_test_api_key("publisher-key-alpha")];
+    publisher_cfg.validate().expect("publisher config valid");
+
+    let publisher = SharedAppState::with_source_path(publisher_cfg, None);
+    publisher
+        .sync_shared_control_plane()
+        .expect("publisher bootstrap publish");
+
+    let published = std::fs::read_to_string(&state_path).expect("published file");
+    assert!(
+        published.contains("\"signature\""),
+        "published snapshot must carry a signature envelope: {published}"
+    );
+    assert!(published.contains("publisher-key-alpha"));
+
+    // Verifier peer: trusts k1, starts from a DIFFERENT api-key set.
+    let mut verifier_cfg = Config::default();
+    file_cluster(&mut verifier_cfg);
+    verifier_cfg.cluster.snapshot_trusted_keys = trusted();
+    verifier_cfg.api_keys = vec![signed_snapshot_test_api_key("verifier-seed-key")];
+    verifier_cfg.validate().expect("verifier config valid");
+
+    let verifier = SharedAppState::with_source_path(verifier_cfg, None);
+    let reload = verifier
+        .sync_shared_control_plane()
+        .expect("verifier sync must not error")
+        .expect("verifier must activate a verified snapshot");
+    assert!(reload.committed, "a verified snapshot must activate");
+    let ids: Vec<String> = verifier
+        .current()
+        .config
+        .api_keys
+        .iter()
+        .map(|key| key.id.clone())
+        .collect();
+    assert!(
+        ids.iter().any(|id| id == "publisher-key-alpha"),
+        "verifier must activate the publisher's authenticated payload, got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "verifier-seed-key"),
+        "the verified payload replaces the peer's local api-keys, got {ids:?}"
+    );
+
+    // Forgery: tamper the signed payload; the signature no longer matches.
+    let tampered = published.replace("publisher-key-alpha", "attacker-injected-key");
+    assert_ne!(tampered, published, "tamper must change the file");
+    std::fs::write(&state_path, &tampered).expect("write tampered file");
+
+    // A fresh verifier (replay floor 0) must reject the forgery and keep its own
+    // last-known-good config, never activating the injected key.
+    let mut defender_cfg = Config::default();
+    file_cluster(&mut defender_cfg);
+    defender_cfg.cluster.snapshot_trusted_keys = trusted();
+    defender_cfg.api_keys = vec![signed_snapshot_test_api_key("last-known-good-key")];
+    defender_cfg.validate().expect("defender config valid");
+
+    let defender = SharedAppState::with_source_path(defender_cfg, None);
+    let rejected = defender
+        .sync_shared_control_plane()
+        .expect("sync must not surface an error for a rejected snapshot");
+    assert!(
+        rejected.is_none(),
+        "a snapshot failing signature verification must not activate"
+    );
+    let defender_ids: Vec<String> = defender
+        .current()
+        .config
+        .api_keys
+        .iter()
+        .map(|key| key.id.clone())
+        .collect();
+    assert_eq!(
+        defender_ids,
+        vec!["last-known-good-key".to_string()],
+        "running config must remain last-known-good after rejecting a forgery",
+    );
+}
+
 fn guardrail_match_for_merge(
     effect: GuardrailEffect,
     action_kind: GuardrailActionKind,

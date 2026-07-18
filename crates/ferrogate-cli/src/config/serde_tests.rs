@@ -27,6 +27,7 @@ fn config_model_supports_serde_roundtrip() {
             counter_timeout_millis: 500,
             heartbeat_interval_secs: 11,
             config_poll_interval_secs: 3,
+            ..ClusterConfig::default()
         },
         upstreams: vec![Upstream {
             name: "backend".into(),

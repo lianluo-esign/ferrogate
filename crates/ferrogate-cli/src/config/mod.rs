@@ -9,7 +9,7 @@ mod provider;
 mod secrets;
 #[cfg(test)]
 mod serde_tests;
-mod signed_snapshot;
+pub(crate) mod signed_snapshot;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -30,8 +30,8 @@ pub(crate) use self::types::{
     AgentUpstreamCapability, AgentUpstreamConfig, AgentUpstreamProtocol, AgentWorkflowEdge,
     AgentWorkflowNode, AgentWorkflowNodeKind, AgentWorkflowPolicy, AnalyticsConfig,
     AnalyticsProvider, ApiKey, AssetBucketConfig, AuthServiceConfig, BillingAlertsConfig,
-    BillingServiceConfig, CacheConfig, CacheMode, ClusterConfig, Config, ExtensionConfig,
-    ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
+    BillingServiceConfig, CacheConfig, CacheMode, ClusterConfig, ClusterSnapshotKey, Config,
+    ExtensionConfig, ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
     GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailProviderRuntimeConfig,
     GuardrailRule, GuardrailStage, HeaderMatcher, HeaderMutation,
     ManagedWorkerCapabilityActionConfig, ManagedWorkerCapabilityTargetGrantConfig, McpAuthType,

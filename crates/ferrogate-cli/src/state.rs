@@ -23,6 +23,10 @@ use crate::approval::{
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
 use crate::billing_client::BillingReporter;
+use crate::config::signed_snapshot::{
+    build_snapshot_crypto, SignedSnapshotEnvelope, SignedSnapshotPayload, SnapshotCrypto,
+    SnapshotSigner,
+};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
     AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
@@ -136,6 +140,15 @@ struct SharedFileSnapshot {
     /// existed loadable -- they read back as generation 0.
     #[serde(default)]
     generation: u64,
+    /// Ed25519-signed envelope binding this snapshot's payload to a monotonic
+    /// revision, expiry, and tenant/deployment identity (#206). Present only
+    /// when the publishing node is configured with a signing key;
+    /// `skip_serializing_if` keeps unsigned snapshots byte-identical to the
+    /// pre-#206 format so verification is strictly opt-in and backward
+    /// compatible. When a verifying node has trusted keys configured, a snapshot
+    /// missing this field (or carrying an invalid one) is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature: Option<SignedSnapshotEnvelope>,
     api_keys: Vec<ApiKey>,
     policies: Vec<ConfigPolicyRule>,
 }
@@ -176,7 +189,11 @@ impl SharedFileControlPlane {
         Ok(Some(snapshot))
     }
 
-    fn publish_from_config(&self, config: &Config) -> anyhow::Result<String> {
+    fn publish_from_config(
+        &self,
+        config: &Config,
+        signer: Option<&SnapshotSigner>,
+    ) -> anyhow::Result<String> {
         // Bump the monotonic generation off the last published snapshot so the
         // cross-node revision changes on every committed mutation, even ones
         // (guardrail policy bindings) that leave `api_keys`/`policies`
@@ -190,10 +207,35 @@ impl SharedFileControlPlane {
             .saturating_add(1);
         let revision =
             shared_control_plane_revision(&config.api_keys, &config.policies, generation);
+        // When a signing key is configured, embed a signed envelope. The
+        // envelope's monotonic `revision` is the `generation` counter (which
+        // strictly increases per publish), giving peers replay/downgrade
+        // protection. `not_after_unix` is stamped from the configured TTL.
+        let signature = match signer {
+            Some(signer) => {
+                let now_unix = now_unix_seconds().ok_or_else(|| {
+                    anyhow::anyhow!("system clock unavailable; cannot sign control-plane snapshot")
+                })?;
+                let payload = SignedSnapshotPayload {
+                    version: 1,
+                    api_keys: config.api_keys.clone(),
+                    policies: config.policies.clone(),
+                };
+                Some(
+                    signer
+                        .sign(payload, generation, now_unix)
+                        .map_err(|error| {
+                            anyhow::anyhow!("failed to sign control-plane snapshot: {error}")
+                        })?,
+                )
+            }
+            None => None,
+        };
         let snapshot = SharedFileSnapshot {
             version: 1,
             revision: revision.clone(),
             generation,
+            signature,
             api_keys: config.api_keys.clone(),
             policies: config.policies.clone(),
         };
@@ -252,6 +294,26 @@ pub(crate) struct SharedAppState {
     reload_coordinator: Arc<Mutex<ferrogate_runtime::ReloadCoordinator>>,
     source_path: Option<Arc<PathBuf>>,
     shared_file_control_plane: Option<Arc<SharedFileControlPlane>>,
+    /// Signed-snapshot signing/verification material derived from cluster
+    /// config (#206). Shared across clones; `signer`/`verifier` are `Some` only
+    /// when configured, so a node with neither behaves exactly as pre-#206.
+    snapshot_crypto: Arc<SnapshotCrypto>,
+    /// Replay floor for signed-snapshot verification: the `revision`
+    /// (generation) of the last snapshot this node verified and activated. A
+    /// candidate must strictly exceed it. Shared across clones.
+    ///
+    /// LIMITATION (tracked under #206's durable-channel scope): this floor is
+    /// in-memory only and resets to 0 on process restart / for a fresh node. In
+    /// the file-backed model there is no trusted durable store to persist it to
+    /// (that mode exists precisely for deployments without a shared database).
+    /// So steady-state replay/downgrade is blocked, but an attacker with WRITE
+    /// access to the shared-state file can, immediately after a restart, replay
+    /// an *authentically signed older* snapshot whose `not_after_unix` has not
+    /// yet passed — a rollback bounded by `cluster.snapshot_max_age_secs`
+    /// (default 1h) and never arbitrary forged content. Closing this fully
+    /// requires the durable, signed, monotonic sync channel + authorized-
+    /// rollback semantics that are the remaining infra-side scope of #206.
+    snapshot_active_revision: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +348,23 @@ impl SharedAppState {
             .ok()
             .flatten()
             .map(Arc::new);
+        // Build signed-snapshot crypto from cluster config. Gate on
+        // `cluster.enabled` to match `Config::validate` exactly (which skips
+        // cluster validation when disabled), so a config that validates always
+        // constructs; the crypto is only ever used behind a live
+        // `shared_file_control_plane`, which itself requires `enabled`. Fail
+        // closed by surfacing any builder error rather than silently running
+        // unsigned.
+        let snapshot_crypto = if config.cluster.enabled {
+            build_snapshot_crypto(&config.cluster).map_err(|error| {
+                anyhow::anyhow!("invalid snapshot signing configuration: {error}")
+            })?
+        } else {
+            SnapshotCrypto {
+                signer: None,
+                verifier: None,
+            }
+        };
         Ok(Self {
             inner: Arc::new(RwLock::new(AppState::try_new(config)?)),
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
@@ -293,6 +372,8 @@ impl SharedAppState {
             ))),
             source_path: source_path.map(Arc::new),
             shared_file_control_plane,
+            snapshot_crypto: Arc::new(snapshot_crypto),
+            snapshot_active_revision: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -683,7 +764,9 @@ impl SharedAppState {
             }
         };
         let Some(snapshot) = snapshot else {
-            let revision = match control_plane.publish_from_config(&active.config) {
+            let revision = match control_plane
+                .publish_from_config(&active.config, self.snapshot_crypto.signer.as_ref())
+            {
                 Ok(revision) => revision,
                 Err(error) => {
                     let message = error.to_string();
@@ -698,23 +781,72 @@ impl SharedAppState {
             self.update_cluster_sync_revision(snapshot.revision);
             return Ok(None);
         }
+        // #206: when verification is enabled, the loaded snapshot MUST carry a
+        // valid signature (from a trusted key, matching identity, strictly
+        // newer revision, unexpired) before activation. A rejected snapshot
+        // leaves the running config (last known good) untouched: we neither
+        // activate nor advance the replay floor, so a later valid publish still
+        // supersedes it. Activation uses the cryptographically authenticated
+        // payload, NEVER the unauthenticated outer snapshot fields (which an
+        // attacker with file access could tamper independently of the
+        // signature).
+        let verified = if let Some(verifier) = &self.snapshot_crypto.verifier {
+            let Some(envelope) = &snapshot.signature else {
+                self.mark_cluster_sync_error(
+                    "file cluster state rejected: missing signature while verification is enabled"
+                        .to_string(),
+                );
+                return Ok(None);
+            };
+            let Some(now_unix) = now_unix_seconds() else {
+                self.mark_cluster_sync_error(
+                    "file cluster state verification skipped: system clock unavailable".to_string(),
+                );
+                return Ok(None);
+            };
+            let floor = self.snapshot_active_revision.load(Ordering::Acquire);
+            match verifier.verify(envelope, floor, now_unix) {
+                Ok(verified) => Some(verified),
+                Err(reason) => {
+                    self.mark_cluster_sync_error(format!(
+                        "file cluster state rejected by signature verification: {reason}"
+                    ));
+                    return Ok(None);
+                }
+            }
+        } else {
+            None
+        };
         let mut candidate = (*active.config).clone();
-        candidate.api_keys = snapshot.api_keys;
-        candidate.policies = snapshot.policies;
+        match &verified {
+            Some(verified) => {
+                candidate.api_keys = verified.payload.api_keys.clone();
+                candidate.policies = verified.payload.policies.clone();
+            }
+            None => {
+                candidate.api_keys = snapshot.api_keys;
+                candidate.policies = snapshot.policies;
+            }
+        }
         if let Err(error) = candidate.validate() {
             let message = error.to_string();
             self.mark_cluster_sync_error(message);
             return Err(error);
         }
-        Ok(Some(self.reload_process_local_with_revision(
-            candidate,
-            Some(snapshot.revision),
-        )))
+        let result = self.reload_process_local_with_revision(candidate, Some(snapshot.revision));
+        if result.committed {
+            if let Some(verified) = &verified {
+                self.snapshot_active_revision
+                    .store(verified.revision, Ordering::Release);
+            }
+        }
+        Ok(Some(result))
     }
 
     fn publish_shared_control_plane(&self, config: &Config) -> anyhow::Result<String> {
         if let Some(control_plane) = &self.shared_file_control_plane {
-            let revision = control_plane.publish_from_config(config)?;
+            let revision =
+                control_plane.publish_from_config(config, self.snapshot_crypto.signer.as_ref())?;
             self.update_cluster_sync_revision(revision.clone());
             return Ok(revision);
         }

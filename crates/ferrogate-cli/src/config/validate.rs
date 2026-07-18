@@ -973,6 +973,11 @@ impl Config {
                 }
             }
         }
+        // Signed control-plane snapshots (#206): validate the signing/verifying
+        // key material + identity through the SAME builder the runtime uses, so
+        // a config that validates is guaranteed to construct at startup.
+        super::signed_snapshot::build_snapshot_crypto(&self.cluster)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
     }
 

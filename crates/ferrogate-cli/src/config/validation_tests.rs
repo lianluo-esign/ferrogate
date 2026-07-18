@@ -3013,6 +3013,7 @@ fn accepts_enabled_local_cluster_identity_config() {
             counter_timeout_millis: 500,
             heartbeat_interval_secs: 10,
             config_poll_interval_secs: 5,
+            ..ClusterConfig::default()
         },
         ..Config::default()
     };
@@ -3124,6 +3125,78 @@ fn rejects_invalid_enabled_cluster_config() {
     };
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field cluster.heartbeat_interval_secs"));
+}
+
+// Signed control-plane snapshot key/identity validation (#206). Validation runs
+// the SAME builder the runtime uses, so a config that validates is guaranteed
+// to construct.
+#[test]
+fn rejects_snapshot_signing_key_without_key_id() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            snapshot_signing_key: Some("c2lnbmluZy1zZWVkLTMyLWJ5dGVzLWFhYWFhYWFh".into()),
+            snapshot_tenant_id: Some("tenant-a".into()),
+            snapshot_deployment_id: Some("deploy-a".into()),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("cluster.snapshot_signing_key_id"), "{error}");
+}
+
+#[test]
+fn rejects_snapshot_signing_without_identity() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            snapshot_signing_key: Some("c2lnbmluZy1zZWVkLTMyLWJ5dGVzLWFhYWFhYWFh".into()),
+            snapshot_signing_key_id: Some("k1".into()),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("cluster.snapshot_tenant_id"), "{error}");
+}
+
+#[test]
+fn rejects_snapshot_trusted_key_with_malformed_base64() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            snapshot_trusted_keys: vec![ClusterSnapshotKey {
+                key_id: "k1".into(),
+                public_key: "not valid base64!!!".into(),
+            }],
+            snapshot_tenant_id: Some("tenant-a".into()),
+            snapshot_deployment_id: Some("deploy-a".into()),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("must be valid base64"), "{error}");
+}
+
+#[test]
+fn accepts_valid_snapshot_signing_config() {
+    use base64::Engine as _;
+    // Any 32 bytes is a valid ed25519 signing seed; encode exactly 32 bytes.
+    let seed_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            snapshot_signing_key: Some(seed_b64),
+            snapshot_signing_key_id: Some("k1".into()),
+            snapshot_tenant_id: Some("tenant-a".into()),
+            snapshot_deployment_id: Some("deploy-a".into()),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().expect("valid snapshot signing config");
 }
 
 #[test]
