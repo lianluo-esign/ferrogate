@@ -179,10 +179,21 @@ impl PostgresControlPlaneStore {
             "list usage metadata rollups",
             self.async_pool.statement_timeout(),
         );
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#238) so this
+        // read resolves `usage_metadata_rollups` in the same schema the settlement
+        // transaction writes to (`increment_usage_metadata_rollups`), not the
+        // connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
         let base = "SELECT id, period_month, organization_id, metadata_key, metadata_value, \
              prompt_tokens, completion_tokens, total_tokens, cost_usd, request_count, \
              error_count, updated_at_unix \
@@ -191,16 +202,17 @@ impl PostgresControlPlaneStore {
         let rows = match organization_id {
             Some(organization_id) => {
                 let sql = format!("{base} AND organization_id = $2{order}");
-                client
+                transaction
                     .query(sql.as_str(), &[&metadata_key, &organization_id])
                     .await
             }
             None => {
                 let sql = format!("{base}{order}");
-                client.query(sql.as_str(), &[&metadata_key]).await
+                transaction.query(sql.as_str(), &[&metadata_key]).await
             }
         }
         .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(usage_metadata_rollup_from_row).collect())
     }
 }
