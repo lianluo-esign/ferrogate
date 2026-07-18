@@ -16,6 +16,7 @@ mod external_actions;
 mod handler_runtime;
 mod handlers;
 mod lifecycle;
+mod local_process_backend;
 mod management;
 mod state;
 

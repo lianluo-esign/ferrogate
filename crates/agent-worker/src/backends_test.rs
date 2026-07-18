@@ -32,7 +32,7 @@ fn backend_registry_reports_firecracker_ready_only_from_configured_bundle() {
     // Firecracker is the implemented backend and leads the registry; the
     // other kinds are registered behind the same contract so the gateway
     // can see the full replaceable set.
-    assert_eq!(backends.len(), 4);
+    assert_eq!(backends.len(), 5);
     assert_eq!(backends[0].backend_name, "firecracker");
     assert_eq!(backends[0].kind, "firecracker_micro_vm");
     assert_eq!(backends[0].host_lifecycle_owner, "agent-worker");
@@ -85,6 +85,7 @@ fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplem
     let _env_lock = lock_firecracker_env();
     clear_firecracker_env();
     env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
+    env::remove_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND");
 
     let backends = isolation_backends();
 
@@ -106,6 +107,7 @@ fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplem
             "kata_containers",
             "gvisor",
             "rootless_docker",
+            "local_process",
         ]
     );
 
@@ -139,6 +141,16 @@ fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplem
         .readiness_reason
         .as_deref()
         .is_some_and(|reason| reason.contains("not enabled")));
+
+    let local_process = backends
+        .iter()
+        .find(|backend| backend.kind == "local_process")
+        .expect("local-process backend registered");
+    assert_eq!(local_process.backend_version, "disabled");
+    assert!(local_process
+        .readiness_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("not enabled")));
 }
 
 #[test]
@@ -146,6 +158,7 @@ fn selectable_backends_exclude_unimplemented_and_unconfigured_firecracker() {
     let _env_lock = lock_firecracker_env();
     clear_firecracker_env();
     env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
+    env::remove_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND");
 
     // With no Firecracker bundle configured and Docker not enabled, nothing
     // is selectable: the registry fails closed rather than handing back an

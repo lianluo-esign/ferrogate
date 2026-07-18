@@ -33,6 +33,7 @@ use crate::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
         stream_native_harness_status,
     },
+    local_process_backend::LocalProcessIsolationBackend,
     state::AgentWorkerStateStore,
 };
 
@@ -92,6 +93,9 @@ fn provision(
         IsolationBackendKind::FirecrackerMicroVm => {}
         IsolationBackendKind::RootlessDocker => {
             return provision_docker(state, envelope, &selected);
+        }
+        IsolationBackendKind::LocalProcess => {
+            return provision_local_process(state, envelope, &selected);
         }
         _ => {
             return Err(ManagedWorkerError::management_protocol_error(
@@ -185,7 +189,7 @@ fn provision(
 // are identical regardless of which backend serviced the session — that is the
 // replaceability #82 requires.
 
-fn docker_prepare_request(
+fn isolation_prepare_request(
     envelope: &AgentWorkerManagementEnvelope,
     session_id: &str,
     run_id: &str,
@@ -246,7 +250,7 @@ fn provision_docker(
 
     let mut backend = DockerIsolationBackend::new(&envelope.worker_id, &selected.backend_version);
     let prepared = backend
-        .prepare(docker_prepare_request(envelope, &session_id, &run_id))
+        .prepare(isolation_prepare_request(envelope, &session_id, &run_id))
         .map_err(|error| {
             docker_lifecycle_error(
                 AgentWorkerManagementErrorCode::ProvisionFailed,
@@ -473,6 +477,326 @@ fn cleanup_docker(
     Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
 
+// ---- Local-process (Linux namespace) isolation backend lifecycle ----
+//
+// Same replaceable-contract shape as the Docker tier: every operation drives
+// the worker-owned LocalProcessIsolationBackend through the runtime
+// IsolationBackendLifecycle contract, and the management wire result is
+// identical regardless of which backend serviced the session. Provision fails
+// closed if the host cannot provide the full unprivileged namespace stack.
+
+fn local_process_lifecycle_error(
+    code: AgentWorkerManagementErrorCode,
+    operation: &str,
+    error: ferrogate_runtime::IsolationError,
+) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        code,
+        format!("agent-worker local-process {operation} failed: {error}"),
+    )
+}
+
+fn local_process_missing_backend_error(operation: &str) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        AgentWorkerManagementErrorCode::IncompatibleBackend,
+        format!(
+            "agent-worker local-process {operation} found no provisioned instance for this \
+             session/run"
+        ),
+    )
+}
+
+fn provision_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    selected: &IsolationBackendDescriptor,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    let identity = LifecycleBackendIdentity::from_descriptor(selected);
+
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        let lifecycle = lifecycle_result_for_backend(
+            envelope,
+            ManagedWorkerSessionStatus::Running,
+            "already_running",
+            "local-process isolation backend already provisioned for this session/run",
+            &identity,
+            None,
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
+
+    // Re-probe readiness at provision time. This fails closed when the host
+    // lost (or never had) the unprivileged namespace stack, before anything
+    // is prepared on disk.
+    let readiness =
+        crate::local_process_backend::local_process_backend_readiness().map_err(|reason| {
+            ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::IncompatibleBackend,
+                format!("agent-worker local-process provision refused (fail closed): {reason}"),
+            )
+        })?;
+    let mut backend = LocalProcessIsolationBackend::new(&envelope.worker_id, &readiness);
+    let prepared = backend
+        .prepare(isolation_prepare_request(envelope, &session_id, &run_id))
+        .map_err(|error| {
+            local_process_lifecycle_error(
+                AgentWorkerManagementErrorCode::ProvisionFailed,
+                "provision",
+                error,
+            )
+        })?;
+    let started = backend.start(prepared).map_err(|error| {
+        local_process_lifecycle_error(
+            AgentWorkerManagementErrorCode::ProvisionFailed,
+            "provision",
+            error,
+        )
+    })?;
+    let instance_id = started.instance_id.clone();
+    let containment = backend.containment_summary();
+    state.put_local_process_backend(session_id, run_id, backend);
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Running,
+        "provisioned",
+        &format!(
+            "local-process instance {instance_id} provisioned by agent-worker inside the \
+             unprivileged namespace stack; {containment}"
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn exec_or_attach_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_local_process_backend_mut(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("exec_or_attach"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend.instance_id().map(ToOwned::to_owned);
+    let exec = backend
+        .exec_or_attach(IsolationExecRequest {
+            instance_id: instance_id.clone().unwrap_or_default(),
+            workload_ref: "agent://managed/readiness".to_string(),
+            args: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo agent-worker-local-process-ready".to_string(),
+            ],
+        })
+        .map_err(|error| {
+            local_process_lifecycle_error(
+                AgentWorkerManagementErrorCode::Cancelled,
+                "exec_or_attach",
+                error,
+            )
+        })?;
+    let succeeded = exec.exit_code == Some(0);
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        if succeeded {
+            ManagedWorkerSessionStatus::Running
+        } else {
+            ManagedWorkerSessionStatus::Failed
+        },
+        if succeeded { "executed" } else { "exec_failed" },
+        &format!(
+            "local-process instance {} exec by agent-worker; exit_code={:?}; output={}",
+            instance_id.as_deref().unwrap_or("unknown"),
+            exec.exit_code,
+            exec.message
+        ),
+        &identity,
+        instance_id,
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn stream_status_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_local_process_backend_mut(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("stream_status"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let running = backend.is_running();
+    let instance_id = backend.instance_id().map(ToOwned::to_owned);
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        if running {
+            ManagedWorkerSessionStatus::Running
+        } else {
+            ManagedWorkerSessionStatus::Failed
+        },
+        if running { "running" } else { "exited" },
+        &format!(
+            "local-process instance {} status checked by agent-worker; running={running}",
+            instance_id.as_deref().unwrap_or("unknown")
+        ),
+        &identity,
+        instance_id,
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn collect_artifacts_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_local_process_backend_mut(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("collect_artifacts"))?;
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let collected = backend.collect_artifacts(&instance_id).map_err(|error| {
+        local_process_lifecycle_error(
+            AgentWorkerManagementErrorCode::CleanupFailed,
+            "collect_artifacts",
+            error,
+        )
+    })?;
+    let artifacts = collected
+        .artifacts
+        .into_iter()
+        .map(|artifact| AgentWorkerFrameworkArtifactResult {
+            artifact_id: artifact.id,
+            name: artifact.path,
+            media_type: artifact
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            byte_len: 0,
+        })
+        .collect();
+    let _ = envelope;
+    Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
+        artifacts,
+        events: Vec::new(),
+    }))
+}
+
+fn stop_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_local_process_backend_mut(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("stop"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let report = backend.stop(&instance_id, "stopped").map_err(|error| {
+        local_process_lifecycle_error(AgentWorkerManagementErrorCode::Cancelled, "stop", error)
+    })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Cancelled,
+        "stopped",
+        &format!(
+            "local-process instance {} stopped by agent-worker; outcome={}",
+            instance_id, report.evidence.outcome
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn snapshot_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_local_process_backend_mut(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("snapshot_or_checkpoint"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let snapshot = backend
+        .snapshot_or_checkpoint(&instance_id)
+        .map_err(|error| {
+            local_process_lifecycle_error(
+                AgentWorkerManagementErrorCode::ProvisionFailed,
+                "snapshot_or_checkpoint",
+                error,
+            )
+        })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Running,
+        "checkpointed",
+        &format!(
+            "local-process instance {} checkpointed by agent-worker via workspace copy; \
+             checkpoint_id={}",
+            instance_id,
+            snapshot.checkpoint_id.as_deref().unwrap_or("unknown")
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn cleanup_local_process(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let mut backend = state
+        .remove_local_process_backend(session_id, run_id)
+        .ok_or_else(|| local_process_missing_backend_error("cleanup"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let cleanup = backend.cleanup(&instance_id).map_err(|error| {
+        local_process_lifecycle_error(
+            AgentWorkerManagementErrorCode::CleanupFailed,
+            "cleanup",
+            error,
+        )
+    })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::CleanedUp,
+        "cleaned_up",
+        &format!(
+            "local-process instance {} cleaned up by agent-worker; outcome={}",
+            instance_id, cleanup.evidence.outcome
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FirecrackerLifecycleResources {
     provision_timeout_millis: u64,
@@ -560,6 +884,12 @@ fn exec_or_attach(
     }
     if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
         return exec_or_attach_docker(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return exec_or_attach_local_process(state, envelope, &session_id, &run_id);
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
@@ -683,6 +1013,12 @@ fn stream_status(
         )?;
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return stream_status_local_process(state, envelope, &session_id, &run_id);
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
         let lifecycle = lifecycle_result_with_instance(
@@ -716,6 +1052,12 @@ fn collect_artifacts(
     if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
         return collect_artifacts_docker(state, envelope, &session_id, &run_id);
     }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return collect_artifacts_local_process(state, envelope, &session_id, &run_id);
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         return Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
             artifacts: existing.artifact_results(),
@@ -740,6 +1082,12 @@ fn stop(
     let run_id = lifecycle_run_id(envelope)?;
     if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
         return stop_docker(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return stop_local_process(state, envelope, &session_id, &run_id);
     }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
@@ -776,6 +1124,12 @@ fn snapshot_or_checkpoint(
     let run_id = lifecycle_run_id(envelope)?;
     if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
         return snapshot_docker(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return snapshot_local_process(state, envelope, &session_id, &run_id);
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
@@ -829,6 +1183,12 @@ fn cleanup(
     let run_id = lifecycle_run_id(envelope)?;
     if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
         return cleanup_docker(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_local_process_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return cleanup_local_process(state, envelope, &session_id, &run_id);
     }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();

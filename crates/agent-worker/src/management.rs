@@ -903,3 +903,7 @@ fn lifecycle_smoke_envelope(
 #[cfg(test)]
 #[path = "management_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "isolation_adversarial_test.rs"]
+mod isolation_adversarial_tests;

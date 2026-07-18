@@ -100,6 +100,7 @@ pub(crate) fn isolation_backend_kind_wire(kind: &IsolationBackendKind) -> &'stat
         IsolationBackendKind::KataContainers => "kata_containers",
         IsolationBackendKind::Gvisor => "gvisor",
         IsolationBackendKind::RootlessDocker => "rootless_docker",
+        IsolationBackendKind::LocalProcess => "local_process",
     }
 }
 
@@ -112,7 +113,50 @@ fn registered_isolation_backends() -> Vec<RegisteredIsolationBackend> {
         unimplemented_registered_backend("kata-containers", IsolationBackendKind::KataContainers),
         unimplemented_registered_backend("gvisor", IsolationBackendKind::Gvisor),
         docker_registered_backend(),
+        local_process_registered_backend(),
     ]
+}
+
+/// The local-process (Linux namespace) backend is a third real host
+/// implementation for daemon-less, unprivileged hosts. Readiness is probed
+/// with real `unshare` namespace invocations; if the host cannot provide the
+/// full namespace stack it fails closed like any other backend. It is ranked
+/// last by the runtime selection contract, so it never outranks a real
+/// hypervisor or container backend.
+fn local_process_registered_backend() -> RegisteredIsolationBackend {
+    if !crate::local_process_backend::local_process_backend_enabled() {
+        return RegisteredIsolationBackend {
+            descriptor: crate::local_process_backend::local_process_backend_descriptor("disabled"),
+            implementation: IsolationBackendImplementation::HostImplemented,
+            ready: false,
+            readiness_reason: Some(
+                "local-process backend is not enabled; set \
+                 AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND=1 to allow the namespaced \
+                 local-process tier"
+                    .to_string(),
+            ),
+        };
+    }
+    match crate::local_process_backend::local_process_backend_readiness() {
+        Ok(readiness) => RegisteredIsolationBackend {
+            descriptor: crate::local_process_backend::local_process_backend_descriptor(
+                &readiness.version,
+            ),
+            implementation: IsolationBackendImplementation::HostImplemented,
+            ready: true,
+            readiness_reason: Some(format!(
+                "unprivileged namespace stack available ({}); {}",
+                readiness.namespaces.join(","),
+                readiness.version
+            )),
+        },
+        Err(reason) => RegisteredIsolationBackend {
+            descriptor: crate::local_process_backend::local_process_backend_descriptor("unknown"),
+            implementation: IsolationBackendImplementation::HostImplemented,
+            ready: false,
+            readiness_reason: Some(reason),
+        },
+    }
 }
 
 /// The Docker backend is a second real host implementation. Readiness is probed

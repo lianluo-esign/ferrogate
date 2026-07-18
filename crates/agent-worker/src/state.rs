@@ -21,7 +21,7 @@ use ferrogate_runtime::{
 
 use crate::{
     backends::FirecrackerMicroVm, docker_backend::DockerIsolationBackend,
-    handler_runtime::HandlerRunState,
+    handler_runtime::HandlerRunState, local_process_backend::LocalProcessIsolationBackend,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +125,25 @@ pub(crate) trait AgentWorkerStateStore {
         run_id: &str,
     ) -> Option<DockerIsolationBackend>;
 
+    fn get_local_process_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut LocalProcessIsolationBackend>;
+
+    fn put_local_process_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: LocalProcessIsolationBackend,
+    );
+
+    fn remove_local_process_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<LocalProcessIsolationBackend>;
+
     #[cfg(test)]
     fn lifecycle_events(&self) -> Vec<StoredLifecycleEvent>;
 }
@@ -136,6 +155,7 @@ pub(crate) struct InMemoryAgentWorkerStateStore {
     handler_runs: HashMap<String, HandlerRunState>,
     firecracker_vms: HashMap<String, FirecrackerMicroVm>,
     docker_backends: HashMap<String, DockerIsolationBackend>,
+    local_process_backends: HashMap<String, LocalProcessIsolationBackend>,
 }
 
 impl InMemoryAgentWorkerStateStore {
@@ -285,6 +305,34 @@ impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
         run_id: &str,
     ) -> Option<DockerIsolationBackend> {
         self.docker_backends
+            .remove(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn get_local_process_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut LocalProcessIsolationBackend> {
+        self.local_process_backends
+            .get_mut(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn put_local_process_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: LocalProcessIsolationBackend,
+    ) {
+        self.local_process_backends
+            .insert(Self::microvm_key(&session_id, &run_id), backend);
+    }
+
+    fn remove_local_process_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<LocalProcessIsolationBackend> {
+        self.local_process_backends
             .remove(&Self::microvm_key(session_id, run_id))
     }
 

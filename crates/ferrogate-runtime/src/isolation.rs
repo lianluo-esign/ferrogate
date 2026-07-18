@@ -21,6 +21,10 @@ pub enum IsolationBackendKind {
     KataContainers,
     Gvisor,
     RootlessDocker,
+    /// Namespaced local host process (unshare user/mount/pid/net + rlimits).
+    /// Weakest sanctioned tier: sandbox/CI substitute where no daemon or
+    /// hypervisor is available. Always ranked last for selection.
+    LocalProcess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +249,7 @@ fn isolation_preference_rank(kind: &IsolationBackendKind) -> u8 {
         IsolationBackendKind::KataContainers => 1,
         IsolationBackendKind::Gvisor => 2,
         IsolationBackendKind::RootlessDocker => 3,
+        IsolationBackendKind::LocalProcess => 4,
     }
 }
 
