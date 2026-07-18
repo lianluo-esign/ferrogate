@@ -183,7 +183,7 @@ pub(crate) fn self_hosted_identity_expiry(server_clock_unix_millis: u64) -> u64 
 fn authorize_governed_capability<A>(
     authorizer: &A,
     session: &FrameworkAdapterSession,
-    action: &ManagedCliAction,
+    action: &ManagedExternalAction,
     high_risk: bool,
 ) -> Result<CapabilityAuthorizationDecision, FrameworkAdapterError>
 where
@@ -195,7 +195,7 @@ where
         Some(authorizer),
         ExternalActionGateRequest {
             session: managed_probe,
-            action: ManagedExternalAction::Cli(action.clone()),
+            action: action.clone(),
             high_risk,
         },
     )?;
@@ -266,40 +266,65 @@ struct LocalProcessWorkloadOutcome {
     containment_summary: String,
 }
 
-/// Run a governed CLI workload under the given worker mode.
+/// The result of running one governed workload's side effect, independent of the
+/// capability family. `run_governed_workload` pairs this with the recorded
+/// gateway decision to build the family-agnostic `GovernedWorkloadExecution`
+/// evidence.
+pub(crate) struct GovernedWorkloadOutcome {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output: String,
+    pub(crate) backend_name: String,
+    pub(crate) containment_summary: String,
+}
+
+/// Run ONE governed workload of ANY capability family under the given worker
+/// mode. This is the family-agnostic core of the report-only-vs-enforce
+/// distinction established for CLI in #242 and extended to the remaining
+/// governed families in #245.
 ///
 /// - `Managed` (cloud): ENFORCE. A non-`Allowed` gateway decision returns
-///   `CapabilityDenied` and the workload never runs.
+///   `CapabilityDenied` and `execute_workload` is NEVER invoked (the side effect
+///   never runs).
 /// - `SelfHosted`: REPORT-ONLY. The gateway decision is recorded but never
-///   enforced; the workload runs through the local-process backend regardless,
-///   and a capability cloud would block becomes allowed-but-recorded.
-pub(crate) fn run_governed_cli_workload<A>(
+///   enforced; `execute_workload` runs regardless, and a capability cloud would
+///   block becomes allowed-but-recorded.
+///
+/// The gateway decision is always computed against a MANAGED probe session (see
+/// `authorize_governed_capability`), so the self-hosted report faithfully states
+/// what cloud WOULD have decided. The workload side effect is provided by the
+/// caller (`execute_workload`) so each family runs through its own execution
+/// path (local-process backend for CLI, the in-process governed handler for the
+/// other families) while sharing this one enforcement boundary.
+pub(crate) fn run_governed_workload<A, F>(
     mode: FrameworkAdapterMode,
     session: &FrameworkAdapterSession,
     authorizer: &A,
-    action: ManagedCliAction,
+    action: ManagedExternalAction,
     high_risk: bool,
     server_clock_unix_millis: u64,
+    execute_workload: F,
 ) -> Result<GovernedWorkloadExecution, FrameworkAdapterError>
 where
     A: GatewayExternalActionAuthorizer + ?Sized,
+    F: FnOnce() -> Result<GovernedWorkloadOutcome, FrameworkAdapterError>,
 {
     let decision = authorize_governed_capability(authorizer, session, &action, high_risk)?;
-    let target = format!("cli:{}", action.command);
+    let capability_action = action.capability_action().as_str();
+    let target = action.target();
     match mode {
         FrameworkAdapterMode::Managed => {
             // Cloud enforces: a non-allow decision blocks before any host work.
             if decision != CapabilityAuthorizationDecision::Allowed {
                 return Err(FrameworkAdapterError::CapabilityDenied(format!(
-                    "cloud (managed) worker blocks capability action=cli target={target} \
-                     decision={}: enforcement_boundary={CLOUD_ENFORCEMENT_BOUNDARY}",
+                    "cloud (managed) worker blocks capability action={capability_action} \
+                     target={target} decision={}: enforcement_boundary={CLOUD_ENFORCEMENT_BOUNDARY}",
                     decision_label(decision)
                 )));
             }
-            let workload = run_workload_through_local_process(session, &action)?;
+            let workload = execute_workload()?;
             Ok(GovernedWorkloadExecution {
                 mode,
-                capability_action: "cli",
+                capability_action,
                 target,
                 disposition: GovernedCapabilityDisposition::Enforced { decision },
                 enforcement_boundary: CLOUD_ENFORCEMENT_BOUNDARY,
@@ -317,10 +342,10 @@ where
         FrameworkAdapterMode::SelfHosted => {
             // Self-hosted observes and reports: the workload runs regardless of
             // the decision; the decision is telemetry only.
-            let workload = run_workload_through_local_process(session, &action)?;
+            let workload = execute_workload()?;
             Ok(GovernedWorkloadExecution {
                 mode,
-                capability_action: "cli",
+                capability_action,
                 target,
                 disposition: GovernedCapabilityDisposition::ReportOnly {
                     recorded_decision: decision,
@@ -337,6 +362,41 @@ where
             })
         }
     }
+}
+
+/// Run a governed CLI workload through the worker-owned local-process isolation
+/// backend under the given worker mode (the #242 first slice). Thin wrapper over
+/// the family-agnostic `run_governed_workload` core.
+pub(crate) fn run_governed_cli_workload<A>(
+    mode: FrameworkAdapterMode,
+    session: &FrameworkAdapterSession,
+    authorizer: &A,
+    action: ManagedCliAction,
+    high_risk: bool,
+    server_clock_unix_millis: u64,
+) -> Result<GovernedWorkloadExecution, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let workload_session = session.clone();
+    let workload_action = action.clone();
+    run_governed_workload(
+        mode,
+        session,
+        authorizer,
+        ManagedExternalAction::Cli(action),
+        high_risk,
+        server_clock_unix_millis,
+        move || {
+            let outcome = run_workload_through_local_process(&workload_session, &workload_action)?;
+            Ok(GovernedWorkloadOutcome {
+                exit_code: outcome.exit_code,
+                output: outcome.output,
+                backend_name: outcome.backend_name,
+                containment_summary: outcome.containment_summary,
+            })
+        },
+    )
 }
 
 /// Deterministic session identity for the self-hosted report-only smoke.

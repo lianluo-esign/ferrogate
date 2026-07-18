@@ -49,10 +49,11 @@ fn self_hosted_worker_type_is_allowed_on_the_diagnostic_command() {
 }
 
 #[test]
-fn self_hosted_worker_type_runs_report_only_on_the_covered_first_slice() {
+fn self_hosted_worker_type_runs_report_only_on_the_covered_commands() {
     // The management-serving path and the dedicated governed execution
-    // entrypoint are the first slice covered under self-hosted (issue #242):
-    // they run real report-only execution and must NOT fail closed.
+    // entrypoint are the first slice covered under self-hosted (#242); #245
+    // extends real report-only execution to the decoupled governed families.
+    // All of these run real report-only execution and must NOT fail closed.
     let covered = [
         Command::SelfHostedGovernedExecutionSmoke {
             now_unix_millis: Some(1_000),
@@ -62,6 +63,13 @@ fn self_hosted_worker_type_runs_report_only_on_the_covered_first_slice() {
             shared_secret: "s".to_string(),
             now_unix_millis: None,
         },
+        // #245 decoupled governed families.
+        Command::GovernedToolExecutionSmoke,
+        Command::GovernedMcpToolExecutionSmoke,
+        Command::GovernedSkillExecutionSmoke,
+        Command::GovernedMemoryExecutionSmoke,
+        Command::GovernedSecretExecutionSmoke,
+        Command::GovernedBrowserExecutionSmoke,
     ];
     for command in covered {
         assert_eq!(
@@ -76,12 +84,16 @@ fn self_hosted_worker_type_runs_report_only_on_the_covered_first_slice() {
 
 #[test]
 fn self_hosted_worker_type_is_rejected_on_uncovered_execution_subcommands() {
-    // Governed smokes not yet wired for report-only self-hosted execution stay
-    // fail-closed rather than silently running as cloud. The message must be
-    // accurate and reference the tracking issue (#242).
+    // Families not yet wired for report-only self-hosted execution stay
+    // fail-closed rather than silently running as cloud. CLI/filesystem are
+    // canonical-target-fingerprint bound; network-egress/REST do live loopback
+    // I/O; the external-action authorization smokes are authorization-only. The
+    // message must be accurate and reference the tracking issue (#245).
     for command in [
-        Command::GovernedToolExecutionSmoke,
         Command::GovernedCliExecutionSmoke,
+        Command::GovernedFilesystemExecutionSmoke,
+        Command::GovernedNetworkEgressExecutionSmoke,
+        Command::GovernedRestExecutionSmoke,
         Command::ExternalActionSmoke,
     ] {
         assert_eq!(
@@ -91,6 +103,6 @@ fn self_hosted_worker_type_is_rejected_on_uncovered_execution_subcommands() {
         let error = reject_unsupported_self_hosted_execution(WorkerType::SelfHosted, &command)
             .expect_err("self-hosted must be rejected for uncovered execution subcommands");
         assert!(error.to_string().contains("--worker-type self-hosted"));
-        assert!(error.to_string().contains("issue #242"));
+        assert!(error.to_string().contains("TODO(#245)"));
     }
 }

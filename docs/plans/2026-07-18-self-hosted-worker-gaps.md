@@ -53,6 +53,29 @@ enforced (regression).
   remaining `governed-*-execution-smoke` families, the external-action smokes,
   and the Firecracker/guest-handler execution paths.
 
+**Status (second slice landed, #245):**
+- The report-only-vs-enforce distinction was factored into a family-agnostic
+  core, `run_governed_workload` (`crates/agent-worker/src/self_hosted_execution.rs`);
+  `run_governed_cli_workload` is now a thin wrapper over it.
+- Extended real report-only self-hosted execution to the decoupled governed
+  external-action families — **tool, MCP tool, skill, memory, secret, browser** —
+  via `run_governed_family_report_only`
+  (`crates/agent-worker/src/external_actions.rs`), reusing the same
+  `run_authorized_*_action` handlers the enforced cloud path uses. Each moved out
+  of the fail-closed guard; per-family report-only-vs-cloud-block regression
+  tests in `external_actions_self_hosted_family_test.rs`.
+- Still fail-closed (accurate per-command message, TODO(#245)):
+  - **CLI** (`governed-cli-*`) and **filesystem**: their authorized execution is
+    bound to the ALLOW decision's canonical-target fingerprint, so a denied
+    capability cannot route through them. CLI report-only-on-deny is already
+    delivered by the #242 `self-hosted-governed-execution-smoke` (local-process).
+  - **network-egress / REST**: real loopback outbound I/O whose one-shot server
+    only accepts when the workload runs; deferred to keep the report-only unit
+    suite deterministic.
+  - the external-action authorization/transport smokes, the Unix
+    target-execution smoke, and the **Firecracker / guest-handler** paths
+    (separate isolation backend; KVM-gated).
+
 ## Gap 2 (P1, needs design) — production mTLS transport not implemented
 `production_mtls_transport_implemented: false`; the
 `x-ferrogate-transport-security` header is a contract marker only — no cert

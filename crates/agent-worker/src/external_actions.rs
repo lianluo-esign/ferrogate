@@ -45,6 +45,10 @@ use ferrogate_runtime::{
     NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
+use crate::self_hosted_execution::{
+    run_governed_workload, GovernedWorkloadExecution, GovernedWorkloadOutcome,
+};
+
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const EXTERNAL_ACTION_UNIX_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -738,6 +742,9 @@ pub(crate) fn governed_tool_execution_smoke_command(mode: FrameworkAdapterMode) 
         tool_name: "native.echo".to_string(),
         arguments_policy: "smoke_literal:ferrogate governed tool smoke".to_string(),
     };
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::Tool(action));
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
@@ -765,6 +772,9 @@ pub(crate) fn governed_mcp_tool_execution_smoke_command(mode: FrameworkAdapterMo
         arguments_policy: "smoke_literal:ferrogate governed mcp smoke".to_string(),
         arguments: serde_json::json!({"message": "ferrogate governed mcp smoke"}),
     };
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::McpTool(action));
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
@@ -790,6 +800,9 @@ pub(crate) fn governed_skill_execution_smoke_command(mode: FrameworkAdapterMode)
         skill_id: "builtin.skill.echo".to_string(),
         declared_capabilities: vec!["tools".to_string(), "memory.read".to_string()],
     };
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::Skill(action));
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Skill]),
@@ -811,6 +824,15 @@ pub(crate) fn governed_skill_execution_smoke_command(mode: FrameworkAdapterMode)
 }
 
 pub(crate) fn governed_memory_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::Memory(
+            ManagedMemoryAction {
+                access: ManagedMemoryAccess::Write,
+                namespace: "session".to_string(),
+                key: "summary".to_string(),
+            },
+        ));
+    }
     let mut store = BTreeMap::new();
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
@@ -866,6 +888,9 @@ pub(crate) fn governed_secret_execution_smoke_command(mode: FrameworkAdapterMode
         secret_id: "vault/openai-api-key".to_string(),
         purpose: "provider_call".to_string(),
     };
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::Secret(action));
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Secret]),
@@ -924,6 +949,9 @@ pub(crate) fn governed_browser_execution_smoke_command(mode: FrameworkAdapterMod
         url: "about:blank".to_string(),
         timeout_millis: 2_000,
     };
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_family_report_only_smoke(ManagedExternalAction::Browser(action));
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Browser]),
@@ -3871,6 +3899,138 @@ fn validate_managed_worker_session(
     Ok(())
 }
 
+/// Report-only self-hosted execution for the governed external-action families
+/// (#245, extending the #242 CLI first slice).
+///
+/// Under self-hosted the workload ALWAYS runs and the gateway decision cloud
+/// would have made is recorded as report-only telemetry; under cloud a
+/// non-`Allowed` decision blocks the workload before it runs. Both anchor on the
+/// same managed-probe capability decision via `run_governed_workload`.
+///
+/// Only the families whose authorized execution is decoupled from the ALLOW
+/// decision's canonical-target fingerprint are routed here: tool, MCP tool,
+/// skill, browser, memory, and secret. CLI/filesystem stay on their dedicated
+/// paths (CLI report-only is the #242 local-process slice); network-egress/REST
+/// (real loopback I/O) and the Firecracker/handler families remain fail-closed
+/// (TODO(#245)).
+pub(crate) fn run_governed_family_report_only<A>(
+    mode: FrameworkAdapterMode,
+    session: &FrameworkAdapterSession,
+    authorizer: &A,
+    action: ManagedExternalAction,
+    high_risk: bool,
+    server_clock_unix_millis: u64,
+) -> Result<GovernedWorkloadExecution, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let workload_action = action.clone();
+    run_governed_workload(
+        mode,
+        session,
+        authorizer,
+        action,
+        high_risk,
+        server_clock_unix_millis,
+        move || run_authorized_family_workload(&workload_action),
+    )
+}
+
+/// Run the in-process governed workload for a decoupled external-action family.
+/// This is the side effect `run_governed_workload` runs once the enforce-vs-report
+/// decision has been made; it reuses the same `run_authorized_*_action` handlers
+/// the enforced cloud path uses.
+fn run_authorized_family_workload(
+    action: &ManagedExternalAction,
+) -> Result<GovernedWorkloadOutcome, FrameworkAdapterError> {
+    let (output, backend_name) = match action {
+        ManagedExternalAction::Tool(action) => (
+            run_authorized_tool_action(action)?.output_excerpt,
+            "governed-tool-handler",
+        ),
+        ManagedExternalAction::McpTool(action) => (
+            run_authorized_mcp_tool_action(action)?.output_excerpt,
+            "governed-mcp-tool-handler",
+        ),
+        ManagedExternalAction::Skill(action) => (
+            run_authorized_skill_action(action)?.output_excerpt,
+            "governed-skill-handler",
+        ),
+        ManagedExternalAction::Browser(action) => (
+            run_authorized_browser_action(action)?.page_state,
+            "governed-browser-handler",
+        ),
+        ManagedExternalAction::Memory(action) => {
+            let mut store = BTreeMap::new();
+            let execution = run_authorized_memory_action(action, &mut store)?;
+            (execution.value_excerpt, "governed-memory-handler")
+        }
+        ManagedExternalAction::Secret(action) => {
+            let secrets = BTreeMap::from([(
+                action.secret_id.clone(),
+                "ferrogate governed secret report-only smoke".to_string(),
+            )]);
+            let execution = run_authorized_secret_action(action, &secrets)?;
+            (
+                format!("secret_len={}", execution.secret_len),
+                "governed-secret-handler",
+            )
+        }
+        ManagedExternalAction::Cli(_) | ManagedExternalAction::Filesystem(_) => {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "cli/filesystem report-only self-hosted execution is not routed through the \
+                 in-process governed family workload: their authorized execution is bound to the \
+                 ALLOW decision's canonical-target fingerprint. CLI report-only is delivered by \
+                 the #242 self-hosted-governed-execution-smoke (local-process backend); filesystem \
+                 remains fail-closed (TODO(#245))."
+                    .to_string(),
+            ));
+        }
+        ManagedExternalAction::NetworkEgress(_) | ManagedExternalAction::Rest(_) => {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "network-egress/REST report-only self-hosted execution performs real loopback \
+                 outbound I/O and is not routed through the in-process governed family workload; \
+                 it remains fail-closed (TODO(#245))."
+                    .to_string(),
+            ));
+        }
+    };
+    Ok(GovernedWorkloadOutcome {
+        exit_code: Some(0),
+        output,
+        backend_name: backend_name.to_string(),
+        containment_summary:
+            "gateway-governed in-process handler workload (report-only under self-hosted)"
+                .to_string(),
+    })
+}
+
+/// Print report-only self-hosted evidence for a governed family smoke, mirroring
+/// the #242 `self-hosted-governed-execution-smoke`: a DENY policy (cloud would
+/// block) that still runs the workload and records it as report-only.
+fn self_hosted_family_report_only_smoke(action: ManagedExternalAction) -> Result<()> {
+    let authorizer = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::new(),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let execution = run_governed_family_report_only(
+        FrameworkAdapterMode::SelfHosted,
+        &smoke_session(FrameworkAdapterMode::SelfHosted),
+        &authorizer,
+        action,
+        false,
+        crate::management::current_unix_millis(),
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&execution.evidence_json())?
+    );
+    Ok(())
+}
+
 fn require_non_empty(field: &str, value: &str) -> Result<(), FrameworkAdapterError> {
     if value.trim().is_empty() {
         return Err(FrameworkAdapterError::InvalidRequest(format!(
@@ -5931,6 +6091,10 @@ mod tests {
         .canonical_json()
     }
 }
+
+#[cfg(test)]
+#[path = "external_actions_self_hosted_family_test.rs"]
+mod self_hosted_family_test;
 
 #[cfg(test)]
 #[path = "external_actions_worker_type_test.rs"]

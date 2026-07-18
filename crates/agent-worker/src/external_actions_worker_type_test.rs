@@ -27,16 +27,14 @@ fn smoke_session_uses_the_self_hosted_mode_it_is_given() {
 }
 
 #[test]
-fn governed_tool_execution_smoke_command_fails_closed_for_self_hosted_mode() {
-    // Proves the mode argument actually reaches the command end-to-end
-    // (main.rs -> governed_tool_execution_smoke_command -> smoke_session ->
-    // the gate), not just the standalone smoke_session() unit above. Nothing
-    // in this build implements report-only, non-enforced execution yet, so
-    // self-hosted must be rejected here rather than silently running as
-    // managed (issue #148) or panicking on an unreachable code path.
-    let error = governed_tool_execution_smoke_command(FrameworkAdapterMode::SelfHosted)
-        .expect_err("self-hosted governed tool smoke command must fail closed");
-    assert!(error
-        .to_string()
-        .contains("only enforces managed worker sessions"));
+fn governed_tool_execution_smoke_command_runs_report_only_for_self_hosted_mode() {
+    // Proves the mode argument reaches the command end-to-end (main.rs ->
+    // governed_tool_execution_smoke_command). #242 first wired report-only
+    // self-hosted execution; #245 extends it to the decoupled governed families
+    // including tool execution: self-hosted now runs the workload report-only
+    // (recording, not enforcing, the gateway decision) instead of failing
+    // closed. The per-family report-only/enforce contract is asserted in
+    // external_actions_self_hosted_family_test.rs.
+    governed_tool_execution_smoke_command(FrameworkAdapterMode::SelfHosted)
+        .expect("self-hosted governed tool smoke command must run report-only");
 }

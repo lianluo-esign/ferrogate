@@ -322,20 +322,40 @@ enum SelfHostedCommandSupport {
 
 /// Which self-hosted execution surface a command is on.
 ///
-/// Covered (first slice, issue #242): the `worker-type` diagnostic, the
-/// management-serving path (`ServeManagementUnix`/`ServeManagementHttp`/
-/// `AcceptManagementJson`), and the dedicated
-/// `SelfHostedGovernedExecutionSmoke` governed execution entrypoint. Everything
-/// else remains fail-closed until wired in a later slice.
+/// Covered (real report-only execution):
+/// - #242 first slice: the `worker-type` diagnostic, the management-serving path
+///   (`ServeManagementUnix`/`ServeManagementHttp`/`AcceptManagementJson`), and
+///   the dedicated `SelfHostedGovernedExecutionSmoke` (local-process backend).
+/// - #245: the decoupled governed external-action families — tool, MCP tool,
+///   skill, memory, secret, and browser — run report-only through the shared
+///   `run_governed_workload` engine (in-process governed handler).
+///
+/// Still fail-closed (accurate per-command message, TODO(#245)):
+/// - CLI (`GovernedCli*`) and `GovernedFilesystemExecutionSmoke`: their
+///   authorized execution is bound to the ALLOW decision's canonical-target
+///   fingerprint, so a denied capability cannot route through them. CLI
+///   report-only-on-deny is already delivered by the #242 dedicated smoke.
+/// - `GovernedNetworkEgressExecutionSmoke`/`GovernedRestExecutionSmoke`: real
+///   loopback outbound I/O; deferred to keep the report-only suite deterministic.
+/// - The external-action authorization/transport smokes, the Unix
+///   target-execution smoke, and the Firecracker/guest-handler paths.
 fn self_hosted_command_support(command: &Command) -> SelfHostedCommandSupport {
     match command {
         Command::WorkerType => SelfHostedCommandSupport::Diagnostic,
         Command::SelfHostedGovernedExecutionSmoke { .. }
         | Command::ServeManagementUnix { .. }
         | Command::ServeManagementHttp { .. }
-        | Command::AcceptManagementJson { .. } => SelfHostedCommandSupport::ReportOnly,
-        // TODO(#242): extend report-only coverage to the remaining governed
-        // execution smokes and Firecracker/handler paths. Until then they stay
+        | Command::AcceptManagementJson { .. }
+        // #245: decoupled governed external-action families run report-only.
+        | Command::GovernedToolExecutionSmoke
+        | Command::GovernedMcpToolExecutionSmoke
+        | Command::GovernedSkillExecutionSmoke
+        | Command::GovernedMemoryExecutionSmoke
+        | Command::GovernedSecretExecutionSmoke
+        | Command::GovernedBrowserExecutionSmoke => SelfHostedCommandSupport::ReportOnly,
+        // TODO(#245): CLI/filesystem (canonical-target fingerprint bound),
+        // network-egress/REST (live loopback I/O), the external-action
+        // authorization/transport smokes, and the Firecracker/handler paths stay
         // fail-closed rather than silently running as cloud.
         _ => SelfHostedCommandSupport::FailClosed,
     }
@@ -354,10 +374,15 @@ fn reject_unsupported_self_hosted_execution(
         bail!(
             "--worker-type self-hosted is not yet implemented for `{command:?}`: this build \
              wires report-only self-hosted execution for the management-serving path \
-             (serve-management-unix/http, accept-management-json) and the \
-             self-hosted-governed-execution-smoke entrypoint, but not this subcommand yet. Use \
-             --worker-type cloud (the default) for it, or run a covered command under \
-             --worker-type self-hosted (see issue #242)."
+             (serve-management-unix/http, accept-management-json), the \
+             self-hosted-governed-execution-smoke entrypoint (#242), and the decoupled governed \
+             families tool/mcp-tool/skill/memory/secret/browser (#245), but not this subcommand \
+             yet. CLI/filesystem execution is bound to the allow-decision canonical-target \
+             fingerprint (CLI report-only is covered by self-hosted-governed-execution-smoke); \
+             network-egress/REST perform real loopback I/O; the external-action \
+             authorization/transport smokes and the Firecracker/handler paths are still pending \
+             (TODO(#245)). Use --worker-type cloud (the default) for it, or run a covered command \
+             under --worker-type self-hosted."
         );
     }
     Ok(())
