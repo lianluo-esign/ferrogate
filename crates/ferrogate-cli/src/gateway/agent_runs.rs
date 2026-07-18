@@ -249,6 +249,25 @@ impl FerroGateway {
             upstream: None,
             tenant: auth.tenant_context(),
         };
+        // Ownership guard (round-9): run_id is fully client-controlled and
+        // record_agent_run upserts by id (overwriting tenant/status/run_json).
+        // Without this a caller could clobber another tenant's canonical run row
+        // by posting its (non-secret, often predictable) run_id -- re-attributing
+        // the tenant and destroying the victim's record. Reject if a run with
+        // this id already belongs to a different organization, the same
+        // tenant-isolation boundary the read path enforces (issue #185).
+        if let Some(existing) = state.agent_run_record(&run_id) {
+            if existing.tenant.organization_id != auth.tenant_context().organization_id {
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "agent_run_id_conflict",
+                    "an agent run with this id already exists for another tenant",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
         let started_at_unix = now_unix_seconds();
         let provider_name = agent_provider_name(&state.config.agent_runtime).to_string();
         state.record_agent_run(StoredAgentRun {

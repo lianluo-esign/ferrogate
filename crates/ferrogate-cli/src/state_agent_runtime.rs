@@ -1279,6 +1279,13 @@ impl AppState {
         }
     }
 
+    /// Looks up an existing agent-run record by id, for the create-path
+    /// ownership guard (a client-controlled run_id must not overwrite another
+    /// tenant's run). Sync, bridged to the async pool like `record_agent_run`.
+    pub(crate) fn agent_run_record(&self, id: &str) -> Option<StoredAgentRun> {
+        crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
+    }
+
     pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
         if let Err(error) =
             crate::gateway::block_on_sync_bridge(self.repositories.append_agent_run_event(event))
@@ -1590,6 +1597,35 @@ mod tests {
             .build()
             .expect("test runtime")
             .block_on(future)
+    }
+
+    #[test]
+    fn agent_run_record_returns_the_owning_tenant_for_the_ownership_guard() {
+        // The create-path ownership guard rejects overwriting a run owned by a
+        // different organization; this locks in that agent_run_record surfaces
+        // the stored run's tenant so that comparison is possible.
+        let state = AppState::new(Config::default());
+        let run = |id: &str, org: &str| ferrogate_storage::StoredAgentRun {
+            id: id.to_string(),
+            request_id: format!("req-{id}"),
+            trace_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some(org.to_string()),
+                ..Default::default()
+            },
+            status: "running".into(),
+            provider: "managed.native-harness".into(),
+            turns_executed: 0,
+            output_recorded: false,
+            started_at_unix: Some(1),
+            completed_at_unix: None,
+        };
+        state.record_agent_run(run("run-a", "tenant-a"));
+
+        let found = state.agent_run_record("run-a").expect("run must be found");
+        assert_eq!(found.tenant.organization_id.as_deref(), Some("tenant-a"));
+        // A different tenant's id is not conjured up.
+        assert!(state.agent_run_record("run-nonexistent").is_none());
     }
 
     #[test]
