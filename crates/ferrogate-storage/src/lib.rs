@@ -6570,7 +6570,19 @@ impl PostgresControlPlaneStore {
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239 follow-up)
+        // as the FIRST statement inside this multi-statement transaction so
+        // `self_hosted_run_dispatches` and `self_hosted_run_dispatch_capabilities`
+        // resolve in the same schema the reader (`self_hosted_run_dispatches`)
+        // uses, not the connection default (`public` on stock Supabase roles). A
+        // bare transaction here wrote dispatches to a schema the reader never saw.
         let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
         transaction
             .execute(
                 "INSERT INTO self_hosted_run_dispatches \

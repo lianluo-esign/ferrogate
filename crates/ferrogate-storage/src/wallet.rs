@@ -145,7 +145,19 @@ impl PostgresControlPlaneStore {
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239 follow-up)
+        // as the FIRST statement inside this multi-statement settlement
+        // transaction so `wallet_settlements` and `wallets` resolve in the same
+        // schema every other wallet accessor (get/upsert/adjust/list) uses, not
+        // the connection default (`public` on stock Supabase roles). A bare
+        // transaction here split durable wallet balances across schemas.
         let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
         let inserted = transaction
             .execute(
                 "INSERT INTO wallet_settlements \

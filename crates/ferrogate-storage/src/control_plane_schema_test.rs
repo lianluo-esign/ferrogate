@@ -12,8 +12,8 @@
 
 use crate::{
     PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories, StoredAgentRun,
-    StoredAuditEvent, StoredPermission, StoredSelfHostedWorkerRegistration, StoredWallet,
-    POSTGRES_SCHEMA_SQL,
+    StoredAuditEvent, StoredPermission, StoredSelfHostedRunDispatch,
+    StoredSelfHostedWorkerRegistration, StoredWallet, POSTGRES_SCHEMA_SQL,
 };
 use ferrogate_core::TenantContext;
 
@@ -461,6 +461,219 @@ fn live_self_hosted_worker_registration_writes_to_configured_schema_not_public()
         &format!(
             "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
              DELETE FROM public.self_hosted_worker_registrations WHERE id = '{id}';"
+        ),
+    );
+}
+
+/// #239 follow-up (wallets): the MULTI-statement `settle_wallet_balance` path
+/// -- distinct from the already-covered single-statement `upsert_wallet` -- must
+/// also land its `wallet_settlements` row (and `wallets` UPDATE) in the
+/// configured schema, not `public`. This method opened a bare transaction with
+/// no `SET LOCAL search_path`, so on a non-default schema the durable settlement
+/// ledger split from every other wallet accessor.
+#[test]
+fn live_wallet_settlement_writes_to_configured_schema_not_public() {
+    let Some(dsn) = dsn_or_skip("live_wallet_settlement_writes_to_configured_schema_not_public")
+    else {
+        return;
+    };
+    let schema = format!("ferrogate_cp_wsettle_test_{}", std::process::id());
+    let tenant_id = format!("tenant-cp-wsettle-{}", std::process::id());
+    let settlement_id = format!("settle-cp-wsettle-{}", std::process::id());
+
+    // Shadow both wallet tables in `public` WITHOUT FKs -- they only need to
+    // catch a misrouted settlement insert / balance update.
+    run_sql(
+        &dsn,
+        &format!(
+            "CREATE TABLE IF NOT EXISTS public.wallets ( \
+                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, \
+                 balance_credits BIGINT NOT NULL DEFAULT 0, \
+                 auto_recharge_threshold_credits BIGINT, \
+                 auto_recharge_amount_credits BIGINT, \
+                 dunning BOOLEAN NOT NULL DEFAULT FALSE, \
+                 created_at_unix BIGINT NOT NULL DEFAULT 0, \
+                 updated_at_unix BIGINT NOT NULL DEFAULT 0); \
+             CREATE TABLE IF NOT EXISTS public.wallet_settlements ( \
+                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, \
+                 delta_credits BIGINT NOT NULL, balance_after_credits BIGINT, \
+                 created_at_unix BIGINT NOT NULL DEFAULT 0); \
+             DELETE FROM public.wallet_settlements WHERE id = '{settlement_id}'; \
+             DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
+        ),
+    );
+
+    let repositories = open_repositories(&dsn, &schema);
+    // Seed the owning tenant + wallet in the configured schema (the settlement
+    // UPDATEs an existing wallet row).
+    run_sql(
+        &dsn,
+        &format!(
+            "INSERT INTO \"{schema}\".tenants (id, name, slug, status) \
+             VALUES ('{tenant_id}', 'cp-wsettle', '{tenant_id}', 'active') \
+             ON CONFLICT (id) DO NOTHING;"
+        ),
+    );
+    block_on(repositories.upsert_wallet(StoredWallet {
+        id: tenant_id.clone(),
+        tenant_id: tenant_id.clone(),
+        balance_credits: 1_000,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 1_700_000_000,
+        updated_at_unix: 1_700_000_000,
+    }))
+    .expect("seed wallet must not error");
+
+    block_on(repositories.settle_wallet_balance(&settlement_id, &tenant_id, -250, 1_700_000_100))
+        .expect("settle wallet balance must not error");
+    drop(repositories);
+
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".wallet_settlements \
+                 WHERE id = '{settlement_id}'"
+            )
+        ),
+        1,
+        "the wallet settlement must be persisted in the configured schema",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM public.wallet_settlements WHERE id = '{settlement_id}'"
+            )
+        ),
+        0,
+        "the wallet settlement must NOT be misrouted to the public schema (#239 follow-up)",
+    );
+    // The debit must have landed on the configured-schema wallet row.
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".wallets \
+                 WHERE tenant_id = '{tenant_id}' AND balance_credits = 750"
+            )
+        ),
+        1,
+        "the debit must apply to the configured-schema wallet balance",
+    );
+
+    run_sql(
+        &dsn,
+        &format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
+             DELETE FROM public.wallet_settlements WHERE id = '{settlement_id}'; \
+             DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
+        ),
+    );
+}
+
+/// #239 follow-up (self-hosted dispatches): the MULTI-statement
+/// `upsert_self_hosted_run_dispatch` writer -- distinct from the already-covered
+/// worker-registration path -- must land its dispatch + capability rows in the
+/// configured schema, not `public`. It opened a bare transaction with no
+/// `SET LOCAL search_path` while its reader (`self_hosted_run_dispatches`) was
+/// pinned, guaranteeing a read/write schema split on a non-default schema.
+#[test]
+fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
+    let Some(dsn) =
+        dsn_or_skip("live_self_hosted_run_dispatch_writes_to_configured_schema_not_public")
+    else {
+        return;
+    };
+    let schema = format!("ferrogate_cp_dispatch_test_{}", std::process::id());
+    let dispatch_id = format!("dispatch-cp-239-{}", std::process::id());
+
+    // Shadow both dispatch tables in `public` WITHOUT FKs -- they only need to
+    // catch a misrouted insert.
+    run_sql(
+        &dsn,
+        &format!(
+            "CREATE TABLE IF NOT EXISTS public.self_hosted_run_dispatches ( \
+                 dispatch_id TEXT PRIMARY KEY, action TEXT NOT NULL, tenant TEXT, \
+                 workspace_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, \
+                 framework_adapter TEXT NOT NULL, workload_ref TEXT NOT NULL, \
+                 queued_at_unix BIGINT NOT NULL, assigned_worker_id TEXT, lease_id TEXT, \
+                 lease_expires_at_unix BIGINT, attempt BIGINT NOT NULL DEFAULT 0, \
+                 acknowledged_status TEXT, acknowledged_at_unix BIGINT); \
+             CREATE TABLE IF NOT EXISTS public.self_hosted_run_dispatch_capabilities ( \
+                 dispatch_id TEXT NOT NULL, capability TEXT NOT NULL, \
+                 PRIMARY KEY (dispatch_id, capability)); \
+             DELETE FROM public.self_hosted_run_dispatch_capabilities WHERE dispatch_id = '{dispatch_id}'; \
+             DELETE FROM public.self_hosted_run_dispatches WHERE dispatch_id = '{dispatch_id}';"
+        ),
+    );
+
+    let repositories = open_repositories(&dsn, &schema);
+    block_on(
+        repositories.upsert_self_hosted_run_dispatch(StoredSelfHostedRunDispatch {
+            dispatch_id: dispatch_id.clone(),
+            action: "start".into(),
+            tenant_id: String::new(),
+            workspace_id: "workspace-cp-239".into(),
+            session_id: "session-cp-239".into(),
+            run_id: "run-cp-239".into(),
+            framework_adapter: "langgraph".into(),
+            required_capabilities: vec!["gpu".into(), "linux".into()],
+            workload_ref: "oci://cp-239".into(),
+            queued_at_unix: Some(1_700_000_000),
+            assigned_worker_id: None,
+            lease_id: None,
+            lease_expires_at_unix: None,
+            attempt: 0,
+            acknowledged_status: None,
+            acknowledged_at_unix: None,
+        }),
+    )
+    .expect("upsert self-hosted run dispatch must not error");
+    drop(repositories);
+
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".self_hosted_run_dispatches \
+                 WHERE dispatch_id = '{dispatch_id}'"
+            )
+        ),
+        1,
+        "the dispatch must be persisted in the configured schema",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".self_hosted_run_dispatch_capabilities \
+                 WHERE dispatch_id = '{dispatch_id}'"
+            )
+        ),
+        2,
+        "the dispatch capabilities must be persisted in the configured schema",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM public.self_hosted_run_dispatches \
+                 WHERE dispatch_id = '{dispatch_id}'"
+            )
+        ),
+        0,
+        "the dispatch must NOT be misrouted to the public schema (#239 follow-up)",
+    );
+
+    run_sql(
+        &dsn,
+        &format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
+             DELETE FROM public.self_hosted_run_dispatch_capabilities WHERE dispatch_id = '{dispatch_id}'; \
+             DELETE FROM public.self_hosted_run_dispatches WHERE dispatch_id = '{dispatch_id}';"
         ),
     );
 }
