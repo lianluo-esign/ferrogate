@@ -1266,6 +1266,12 @@ pub(crate) struct AppState {
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     guardrail_policies: Arc<Vec<GuardrailPolicyRuntime>>,
+    /// Stable fingerprint of the full guardrail policy set (static config rules
+    /// plus active durable revisions), recomputed on every config reload /
+    /// policy activation. Mixed into `ai_response_cache_key` so a tightened
+    /// guardrail policy immediately misses cache entries stored under the old
+    /// policy instead of serving pre-redaction bodies until TTL expiry (#233).
+    guardrail_policy_fingerprint: u64,
     guardrail_evidence_permits: Arc<Semaphore>,
     guardrail_evidence_hmac_key: Option<Arc<[u8]>>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
@@ -4025,6 +4031,18 @@ impl AppState {
                 .then_with(|| left.revision.policy_id.cmp(&right.revision.policy_id))
                 .then_with(|| left.revision.revision.cmp(&right.revision.revision))
         });
+        // #233: fingerprint the full serialized policy set (content, not just
+        // ids/revision counters — static config rules keep the same revision
+        // number when edited) so the AI response cache key changes whenever any
+        // guardrail policy changes.
+        let guardrail_policy_fingerprint = {
+            let mut bytes = Vec::new();
+            for policy in &guardrail_policies {
+                bytes.extend_from_slice(&serde_json::to_vec(&policy.revision)?);
+                bytes.push(0);
+            }
+            fnv1a64(&bytes)
+        };
         let provider_circuit_config = provider_circuit_config(&config);
         let provider_circuits = if provider_circuit_config.is_some() {
             config
@@ -4131,6 +4149,7 @@ impl AppState {
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             guardrail_policies: Arc::new(guardrail_policies),
+            guardrail_policy_fingerprint,
             guardrail_evidence_permits: Arc::new(Semaphore::new(GUARDRAIL_EVIDENCE_MAX_IN_FLIGHT)),
             guardrail_evidence_hmac_key: env::var("FERROGATE_GUARDRAIL_EVIDENCE_HMAC_KEY")
                 .ok()

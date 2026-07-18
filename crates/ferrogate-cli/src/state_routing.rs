@@ -197,6 +197,10 @@ impl AppState {
             provider_model: &'a str,
             stream: bool,
             request_body: &'a serde_json::Value,
+            /// #233: any guardrail-policy change (e.g. a tightened
+            /// Response-stage redaction rule) rotates this fingerprint, so
+            /// entries cached under the old policy can no longer be served.
+            guardrail_policy_fingerprint: u64,
         }
 
         let bytes = serde_json::to_vec(&CacheKeyInput {
@@ -211,6 +215,7 @@ impl AppState {
             provider_model,
             stream: false,
             request_body: body,
+            guardrail_policy_fingerprint: self.guardrail_policy_fingerprint,
         })
         .expect("AI cache key serialization should not fail");
         AiResponseCacheKey::new(format!("ai-cache:{:016x}", fnv1a64(&bytes)))

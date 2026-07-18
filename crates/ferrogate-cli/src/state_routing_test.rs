@@ -910,3 +910,65 @@ fn record_provider_latency(
         completed_at_unix: Some(completed_at_unix),
     });
 }
+
+/// #233: the AI response cache key must rotate whenever the guardrail policy
+/// set changes, so a tightened Response-stage rule immediately misses entries
+/// cached under the older (looser) policy instead of serving pre-redaction
+/// bodies until TTL expiry.
+#[test]
+fn ai_response_cache_key_rotates_when_guardrail_policy_changes() {
+    fn guardrail_rule(toml: &str) -> GuardrailRule {
+        toml::from_str(toml).expect("test guardrail rule must parse")
+    }
+    let cache_key = |state: &AppState| {
+        state
+            .ai_response_cache_key(
+                "openai.chat.completions",
+                &ferrogate_core::TenantContext::default(),
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &serde_json::json!({
+                    "model": "fast-chat",
+                    "messages": [{"role": "user", "content": "hello"}],
+                }),
+            )
+            .as_str()
+            .to_string()
+    };
+
+    let baseline = AppState::new(Config::default());
+    let baseline_again = AppState::new(Config::default());
+    let tightened = AppState::new(Config {
+        guardrails: vec![guardrail_rule(
+            r#"
+id = "redact-secret"
+name = "Redact leaked secret"
+stage = "response"
+keywords = ["ferro-secret-9922"]
+effect = "redact"
+"#,
+        )],
+        ..Config::default()
+    });
+    let tightened_further = AppState::new(Config {
+        guardrails: vec![guardrail_rule(
+            r#"
+id = "redact-secret"
+name = "Redact leaked secret"
+stage = "response"
+keywords = ["ferro-secret-9922", "ferro-secret-9923"]
+effect = "redact"
+"#,
+        )],
+        ..Config::default()
+    });
+
+    // Stable across identical policy sets: reload without a policy change must
+    // keep hitting existing cache entries.
+    assert_eq!(cache_key(&baseline), cache_key(&baseline_again));
+    // Any policy change (add a rule, or edit an existing rule in place without
+    // changing its id) must rotate the key.
+    assert_ne!(cache_key(&baseline), cache_key(&tightened));
+    assert_ne!(cache_key(&tightened), cache_key(&tightened_further));
+}

@@ -1368,6 +1368,152 @@ cache_enabled = true
     assert!(!provider_requests[0].contains("client-secret"));
 }
 
+/// #233: a response cached BEFORE a Response-stage guardrail redaction rule is
+/// added must not keep serving the pre-redaction body on cache hits after the
+/// policy is tightened. The guardrail-policy fingerprint is part of the cache
+/// key, so the tightened policy misses the stale entry, re-fetches from the
+/// provider, and serves the redacted body.
+#[test]
+fn tightened_response_guardrail_policy_invalidates_cached_pre_redaction_body() {
+    let gateway_addr = free_addr();
+    // Two provider calls expected: the initial miss, and the post-tighten miss
+    // (the stale pre-redaction cache entry must NOT satisfy the second call).
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        2,
+        r#"{"id":"chatcmpl_leak","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"the access code is ferro-secret-9922"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    let base_config = format!(
+        r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+mode = "exact_match"
+ttl_secs = 300
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+cache_enabled = true
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    );
+    std::fs::write(&config, &base_config).unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let body = r#"{"model":"fast-chat","messages":[{"role":"user","content":"what is the access code"}],"temperature":0}"#;
+    let request = |addr: &str| {
+        http_request(
+            addr,
+            "POST",
+            "/v1/chat/completions",
+            &[
+                "Authorization: Bearer client-secret",
+                "Content-Type: application/json",
+            ],
+            body,
+        )
+    };
+
+    // Cache the response under the loose policy (no guardrails): the secret is
+    // served raw and stored raw.
+    let first = request(&gateway_addr);
+    assert!(first.contains("200 OK"), "{first}");
+    assert!(first.contains("ferro-secret-9922"), "{first}");
+
+    // Prove the entry is actually served from cache pre-tightening.
+    let cached_hit = request(&gateway_addr);
+    assert!(cached_hit.contains("200 OK"), "{cached_hit}");
+    assert!(cached_hit.contains("ferro-secret-9922"), "{cached_hit}");
+
+    // Tighten the policy: add a Response-stage redaction rule that matches the
+    // already-cached content, and reload.
+    let tightened_config = format!(
+        r#"{base_config}
+[[guardrails]]
+id = "redact-access-code"
+name = "Redact leaked access code"
+stage = "response"
+keywords = ["ferro-secret-9922"]
+effect = "redact"
+code = "guardrail_redacted"
+message = "response redacted by guardrail"
+enabled = true
+"#
+    );
+    std::fs::write(&config, &tightened_config).unwrap();
+    let reload = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/reload",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "config_toml": tightened_config,
+            "filename": "ferrogate.toml"
+        })
+        .to_string(),
+    );
+    assert!(reload.contains("200 OK"), "{reload}");
+    assert!(reload.contains("\"committed\":true"), "{reload}");
+
+    // The identical request must NOT serve the stale pre-redaction cache entry:
+    // the rotated guardrail-policy fingerprint misses it, the provider is hit
+    // again, and the tightened Response-stage rule redacts the new body.
+    let after_tighten = request(&gateway_addr);
+    assert!(after_tighten.contains("200 OK"), "{after_tighten}");
+    assert!(
+        !after_tighten.contains("ferro-secret-9922"),
+        "pre-redaction body leaked from the response cache after the guardrail \
+         policy was tightened: {after_tighten}"
+    );
+
+    // And the redacted body is what got re-cached: a further hit stays redacted.
+    let redacted_hit = request(&gateway_addr);
+    assert!(redacted_hit.contains("200 OK"), "{redacted_hit}");
+    assert!(
+        !redacted_hit.contains("ferro-secret-9922"),
+        "{redacted_hit}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    // Exactly two provider round-trips: pre-tighten miss + post-tighten miss.
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+}
+
 #[test]
 fn gateway_config_profile_header_controls_cache_and_records_evidence() {
     let gateway_addr = free_addr();
