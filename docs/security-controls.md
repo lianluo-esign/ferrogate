@@ -128,6 +128,12 @@ addresses so a hostname cannot rebind to a private target. An operator must
 set `provider_allow_private_network: true` for a deliberately configured
 private detector endpoint. Detector timeouts cannot exceed 30 seconds.
 
+To investigate a blocked or failed request end to end (who / why / target /
+action / cost), use `GET /admin/v1/investigations?request_id=...` — see the
+operator guide [`docs/guardrails/investigation-view.md`](guardrails/investigation-view.md)
+for a copy-paste example, the response field map, and the RBAC needed to read
+investigation evidence.
+
 ## Supply-Chain Security
 
 Every change is gated by `scripts/security-check.sh`: `cargo fmt --check`,

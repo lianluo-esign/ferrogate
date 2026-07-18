@@ -136,3 +136,25 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
         assert!(!encoded.contains(forbidden));
     }
 }
+
+#[test]
+fn investigation_cost_normalizes_negative_zero_to_positive_zero() {
+    // Rust's `Sum` for f64 folds from `-0.0`, so an empty billing-events
+    // list (a pre-provider guardrail block) sums to negative zero.
+    let empty_sum: f64 = Vec::<f64>::new().into_iter().sum();
+    assert!(
+        empty_sum.is_sign_negative(),
+        "precondition: empty f64 sum is -0.0"
+    );
+
+    let normalized = normalize_investigation_cost(empty_sum);
+    assert!(
+        normalized.is_sign_positive() && normalized == 0.0,
+        "negative zero must normalize to positive zero"
+    );
+    // The whole point: the serialized JSON reads `0.0`, never `-0.0`.
+    assert_eq!(serde_json::to_string(&normalized).unwrap(), "0.0");
+
+    // A real cost is passed through unchanged.
+    assert_eq!(normalize_investigation_cost(0.0375), 0.0375);
+}

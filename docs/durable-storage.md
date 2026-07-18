@@ -62,24 +62,21 @@ providers; migrate legacy configs to `storage.provider: supabase`.
 Use a Supabase direct or session-pooler DSN through an environment variable so
 passwords never appear in the config file:
 
-```yaml
-storage:
-  provider: supabase
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-  supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
-  postgres_pool_size: 4
-  postgres_pool_acquire_timeout_millis: 1000
-  postgres_tls_mode: verify_full
-  postgres_tls_ca_cert_path: "/etc/ferrogate/supabase-ca.pem"
-  postgres_connect_timeout_secs: 5
-  postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
-  postgres_search_path:
-    - public
-  migration_mode: auto
+```toml
+[storage]
+provider = "supabase"
+required = true
+provider_order = ["supabase", "postgres"]
+supabase_dsn_env = "FERROGATE_SUPABASE_DSN"
+postgres_pool_size = 4
+postgres_pool_acquire_timeout_millis = 1000
+postgres_tls_mode = "verify_full"
+postgres_tls_ca_cert_path = "/etc/ferrogate/supabase-ca.pem"
+postgres_connect_timeout_secs = 5
+postgres_statement_timeout_millis = 30000
+postgres_schema = "ferrogate_control"
+postgres_search_path = ["public"]
+migration_mode = "auto"
 ```
 
 Runtime behavior:
@@ -266,31 +263,26 @@ is available.
 
 Replace legacy remote libSQL config:
 
-```yaml
-storage:
-  provider: turso_libsql
-  required: true
-  provider_order:
-    - supabase
-    - turso_libsql
-    - postgres
-  libsql_url: "libsql://your-database.aws-ap-northeast-1.turso.io"
-  libsql_auth_token_env: "FERROGATE_LIBSQL_AUTH_TOKEN"
-  migration_mode: auto
+```toml
+[storage]
+provider = "turso_libsql"
+required = true
+provider_order = ["supabase", "turso_libsql", "postgres"]
+libsql_url = "libsql://your-database.aws-ap-northeast-1.turso.io"
+libsql_auth_token_env = "FERROGATE_LIBSQL_AUTH_TOKEN"
+migration_mode = "auto"
 ```
 
 with Supabase-backed durable storage:
 
-```yaml
-storage:
-  provider: supabase
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-  supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
-  postgres_tls_mode: verify_full
-  migration_mode: auto
+```toml
+[storage]
+provider = "supabase"
+required = true
+provider_order = ["supabase", "postgres"]
+supabase_dsn_env = "FERROGATE_SUPABASE_DSN"
+postgres_tls_mode = "verify_full"
+migration_mode = "auto"
 ```
 
 Legacy runtime behavior remains documented only to support migration planning:
@@ -307,24 +299,21 @@ new deployments.
 Use a PostgreSQL DSN through an environment variable so passwords do not appear
 in the config file:
 
-```yaml
-storage:
-  provider: postgres
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-  postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
-  postgres_pool_size: 4
-  postgres_pool_acquire_timeout_millis: 1000
-  postgres_tls_mode: verify_full
-  postgres_tls_ca_cert_path: "/etc/ferrogate/postgres-ca.pem"
-  postgres_connect_timeout_secs: 5
-  postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
-  postgres_search_path:
-    - public
-  migration_mode: auto
+```toml
+[storage]
+provider = "postgres"
+required = true
+provider_order = ["supabase", "postgres"]
+postgres_dsn_env = "FERROGATE_POSTGRES_DSN"
+postgres_pool_size = 4
+postgres_pool_acquire_timeout_millis = 1000
+postgres_tls_mode = "verify_full"
+postgres_tls_ca_cert_path = "/etc/ferrogate/postgres-ca.pem"
+postgres_connect_timeout_secs = 5
+postgres_statement_timeout_millis = 30000
+postgres_schema = "ferrogate_control"
+postgres_search_path = ["public"]
+migration_mode = "auto"
 ```
 
 For local development, a DSN can use keyword/value format:
@@ -374,15 +363,13 @@ staging database before running the Supabase migration path below.
 Older compatibility tests used the same `turso_libsql` provider with `file://`
 URLs:
 
-```yaml
-storage:
-  provider: turso_libsql
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-  libsql_url: "file:///tmp/ferrogate-control-plane.db"
-  migration_mode: auto
+```toml
+[storage]
+provider = "turso_libsql"
+required = true
+provider_order = ["supabase", "postgres"]
+libsql_url = "file:///tmp/ferrogate-control-plane.db"
+migration_mode = "auto"
 ```
 
 `file://` used the libSQL client local database path and did not require an auth

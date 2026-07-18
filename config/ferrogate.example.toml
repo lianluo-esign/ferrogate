@@ -199,6 +199,25 @@ models = ["mcp_tool:github-search"]
 providers = ["mcp:github"]
 message = "MCP search is blocked for this caller"
 
+# Content-safety guardrail (issue #236 worked example). This is a minimal,
+# deterministic keyword-deny rule evaluated in-process (no external detector):
+#   - stage   = "request"  -> checked on the inbound prompt, before the provider
+#                             call ("response" instead scans the model output).
+#   - effect  = "deny"      -> a match returns HTTP 403 `guardrail_denied` and
+#                             blocks the request ("redact" instead masks the
+#                             matched span and lets the request continue).
+#   - keywords = [...]       -> case-insensitive substring match; use `regex`
+#                             for patterns or `max_input_bytes` for a length cap.
+# `id` and `name` are required; everything else has a default. Field names are
+# NOT typo-checked by `ferrogate validate`, so copy them exactly (see
+# docs/guardrails/investigation-view.md).
+[[guardrails]]
+id = "no-exfil-keyword"
+name = "Block EXFILTRATE keyword"
+stage = "request"
+effect = "deny"
+keywords = ["EXFILTRATE"]
+
 # Optional cluster-safe counters for multi-node deployments.
 # Keep the default local counter backend for single-node development.
 # [cluster]

@@ -485,6 +485,7 @@ git diff --check
 - Auth service contract: [`docs/auth-service-contract.md`](docs/auth-service-contract.md)
 - Performance testing: [`docs/performance-testing.md`](docs/performance-testing.md)
 - Security controls: [`docs/security-controls.md`](docs/security-controls.md)
+- Guardrail investigation view (who/why/target/action/cost for a blocked request): [`docs/guardrails/investigation-view.md`](docs/guardrails/investigation-view.md)
 - Supply-chain verification (SBOM, cosign signing, provenance): [`docs/security/supply-chain.md`](docs/security/supply-chain.md)
 - Agent sandbox security model: [`docs/security/agent-sandbox-model.md`](docs/security/agent-sandbox-model.md)
 - SOC 2 audit scoping: [`docs/soc2-audit-scoping.md`](docs/soc2-audit-scoping.md)

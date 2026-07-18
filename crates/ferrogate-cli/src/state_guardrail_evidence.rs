@@ -119,10 +119,12 @@ impl AppState {
             .or_else(|| requests.first().map(|log| log.tenant.clone()))
             .or_else(|| audit_events.first().map(|event| event.tenant.clone()))
             .or_else(|| billing_events.first().map(|event| event.tenant.clone()));
-        let total_cost_usd = billing_events
-            .iter()
-            .filter_map(|event| event.cost_usd)
-            .sum();
+        let total_cost_usd = normalize_investigation_cost(
+            billing_events
+                .iter()
+                .filter_map(|event| event.cost_usd)
+                .sum(),
+        );
         let final_outcome = investigation_final_outcome(&requests, &guardrail_evaluations);
         let requests = requests
             .into_iter()
@@ -383,6 +385,17 @@ fn sanitize_investigation_billing(event: BillingEvent) -> InvestigationBillingEv
         wallet_delta_credits: event.wallet_delta_credits,
         wallet_balance_after_credits: event.wallet_balance_after_credits,
     }
+}
+
+/// Normalize the investigation cost total so a zero-cost blocked request
+/// serializes as `0.0`, never IEEE-754 negative zero (`-0.0`). Rust's
+/// `Sum` for `f64` folds from `-0.0`, so summing an empty (or all-zero)
+/// `billing_events` list yields `-0.0`, which `serde_json` renders as
+/// `-0.0` -- cosmetically confusing in the `total_cost_usd` field of a
+/// pre-provider guardrail block (issue #236). Adding `+ 0.0` maps `-0.0`
+/// to `+0.0` while leaving every other value untouched.
+fn normalize_investigation_cost(total: f64) -> f64 {
+    total + 0.0
 }
 
 #[cfg(test)]
