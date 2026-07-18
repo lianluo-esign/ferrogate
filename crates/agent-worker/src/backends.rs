@@ -2934,6 +2934,17 @@ fn serial_boot_markers(serial: &str) -> Vec<&'static str> {
     }
     if serial.contains("VFS: Mounted root ") {
         markers.push("rootfs_mounted");
+        // #227: prove the guest kernel honored `root=/dev/vda ro` — the kernel
+        // annotates the mount line "readonly" (older kernels: "read-only") when
+        // the root device is mounted read-only. Line-scoped so an unrelated
+        // "readonly" elsewhere in the log cannot spoof this evidence.
+        let read_only_root = serial.lines().any(|line| {
+            line.contains("VFS: Mounted root ")
+                && (line.contains("readonly") || line.contains("read-only"))
+        });
+        if read_only_root {
+            markers.push("rootfs_mounted_readonly");
+        }
     }
     if serial.contains(" as init process") {
         markers.push("init_started");

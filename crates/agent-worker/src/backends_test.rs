@@ -855,6 +855,37 @@ fn serial_boot_markers_require_real_guest_boot_evidence() {
     ]));
 }
 
+#[test]
+fn serial_boot_markers_flag_read_only_rootfs_when_kernel_honors_ro() {
+    // #227: with `root=/dev/vda ro` the guest kernel annotates the mount line
+    // "readonly" — that is the real-host evidence the boot-validation harness
+    // asserts to prove the read-only rootfs policy was honored end to end.
+    let read_only = serial_boot_markers(
+        "[    0.000000] Linux version 6.1.174\n\
+             [    0.000000] Hypervisor detected: KVM\n\
+             [    0.673622] VFS: Mounted root (ext4 filesystem) readonly on device 254:0.\n\
+             [    0.676346] Run /sbin/init as init process\n\
+             [    0.692980] systemd[1]: systemd 255.4 running in system mode\n",
+    );
+    assert!(read_only.contains(&"rootfs_mounted"));
+    assert!(read_only.contains(&"rootfs_mounted_readonly"));
+
+    // A read-write root mount (policy relaxed / regression) must NOT flag the
+    // read-only marker.
+    let read_write = serial_boot_markers(
+        "[    0.673622] VFS: Mounted root (ext4 filesystem) on device 254:0.\n",
+    );
+    assert!(read_write.contains(&"rootfs_mounted"));
+    assert!(!read_write.contains(&"rootfs_mounted_readonly"));
+
+    // An unrelated "readonly" elsewhere in the log must not spoof the marker.
+    let spoof = serial_boot_markers(
+        "[    0.100000] some subsystem is readonly\n\
+             [    0.673622] VFS: Mounted root (ext4 filesystem) on device 254:0.\n",
+    );
+    assert!(!spoof.contains(&"rootfs_mounted_readonly"));
+}
+
 fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {
     std::fs::write(
             path,
