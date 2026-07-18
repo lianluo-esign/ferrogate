@@ -1031,10 +1031,27 @@ impl FerroGateway {
                             let record_bodies =
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
                             let record_stream_usage = async |stream_body: Option<&[u8]>| {
+                                // Responses streaming normalizes the provider stream to the
+                                // OpenAI/Responses shape (top-level `usage.{prompt_tokens,
+                                // completion_tokens,total_tokens}`) BEFORE this billing closure
+                                // sees it. Parsing that with the ORIGIN provider's native
+                                // extractor (Anthropic `usage.input_tokens`, Gemini
+                                // `usageMetadata`) finds nothing, so billing silently fell back
+                                // to the 512-token estimate -- letting a tenant stream unbounded
+                                // real tokens billed as ~512 (token-budget / TPM / prepaid-wallet
+                                // bypass). Extract from the normalized OpenAI shape for Responses;
+                                // chat-completions streams the raw native SSE, so keep the native
+                                // extractor.
+                                let usage_provider_kind: &str = if endpoint == AiEndpoint::Responses
+                                {
+                                    "openai"
+                                } else {
+                                    provider.kind.as_str()
+                                };
                                 let reported_usage = stream_body.and_then(|body| {
                                     extract_last_provider_stream_usage(body, |payload| {
                                         state
-                                            .extract_provider_usage(&provider.kind, payload)
+                                            .extract_provider_usage(usage_provider_kind, payload)
                                             .ok()
                                             .flatten()
                                     })
@@ -3433,6 +3450,46 @@ mod tests {
     use super::*;
     use crate::config::{ApiKey, Config, GatewayConfigProfile, Model, Provider};
     use std::time::Duration;
+
+    // Round-12 audit regression: a streaming /v1/responses request to a
+    // non-OpenAI provider is normalized to the OpenAI/Responses shape before
+    // billing. Billing must read usage from THAT shape (via the OpenAI
+    // extractor) -- reading it with the origin provider's native extractor
+    // finds nothing and falls back to the 512-token estimate, letting a tenant
+    // stream unbounded real tokens billed as ~512 (budget/TPM/wallet bypass).
+    #[test]
+    fn streaming_responses_usage_reads_the_normalized_openai_shape_not_native() {
+        use ferrogate_providers::ProviderAdapter;
+        // A normalized `response.completed` event exactly as
+        // ResponsesStreamNormalizer::finish_stream emits it: OpenAI-shaped usage
+        // at the top level, regardless of the origin provider (here Anthropic).
+        let normalized = concat!(
+            "event: response.completed\n",
+            "data: {\"request_id\":\"r\",\"content_type\":\"application/json\",",
+            "\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":90000,\"total_tokens\":91000}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .as_bytes();
+
+        // OLD behavior: the Anthropic native extractor (usage.input_tokens) finds
+        // nothing on the normalized body -> None -> 512 estimate (the bug).
+        let anthropic = ferrogate_providers::AnthropicAdapter;
+        assert!(
+            extract_last_provider_stream_usage(normalized, |payload| anthropic
+                .extract_usage(payload))
+            .is_none(),
+            "native extractor must NOT find usage in the normalized body (this is the bug path)",
+        );
+
+        // FIXED behavior (endpoint == Responses -> "openai"): real usage extracted.
+        let openai = ferrogate_providers::OpenAiCompatibleAdapter;
+        let usage =
+            extract_last_provider_stream_usage(normalized, |payload| openai.extract_usage(payload))
+                .expect("normalized usage must be extractable via the OpenAI shape");
+        assert_eq!(usage.prompt_tokens, Some(1000));
+        assert_eq!(usage.completion_tokens, Some(90000));
+        assert_eq!(usage.total_tokens, Some(91000));
+    }
 
     #[test]
     fn estimates_prompt_and_requested_completion_tokens() {
