@@ -10185,12 +10185,20 @@ fn reload_from_admin_payload(
     state: &crate::state::SharedAppState,
 ) -> anyhow::Result<crate::state::RuntimeReloadResult> {
     if payload.source.as_deref() == Some("file") {
+        // Re-reading the on-disk file: the caller did NOT re-specify the
+        // config, so reconcile the durable control-plane snapshot on top to
+        // avoid silently RESURRECTING api-keys revoked via the durable admin
+        // API (or dropping durable-only resources). See #80.
         return state.reload_from_source_path();
     }
-    // Reconcile the durable control-plane snapshot into the inline
-    // (toml/yaml/caddyfile) candidate so the reload cannot resurrect
-    // durably-revoked api-keys -- matching the source=file path.
-    state.reload_from_candidate_config(config_from_admin_payload(payload, state)?)
+    // Inline (toml/yaml/caddyfile) payload: the caller is explicitly supplying
+    // the complete desired control-plane config, so it is authoritative -- it
+    // MUST be able to introduce new api-keys/tenants/policies. Reconciling the
+    // durable snapshot here would wholesale-discard the operator's new
+    // resources (the snapshot's `config.api_keys = snapshot.api_keys` replace),
+    // so we apply the supplied config directly. Any key the payload re-lists is
+    // added by the caller's explicit choice, not silently resurrected.
+    Ok(state.reload_process_local(config_from_admin_payload(payload, state)?))
 }
 
 fn admin_audit_event_draft(

@@ -616,21 +616,6 @@ impl SharedAppState {
         Ok(self.reload_process_local(candidate))
     }
 
-    /// Reload from an externally-supplied candidate config (e.g. the admin
-    /// config-reload payload's inline toml/yaml/caddyfile), reconciling the
-    /// durable control-plane snapshot FIRST so the reload cannot resurrect
-    /// api-keys revoked via the durable admin API (or drop durable-only
-    /// resources) -- the same reconciliation `reload_from_source_path` and the
-    /// CRUD reload paths apply.
-    pub(crate) fn reload_from_candidate_config(
-        &self,
-        mut candidate: Config,
-    ) -> anyhow::Result<RuntimeReloadResult> {
-        self.current()
-            .apply_control_plane_snapshot_to_config(&mut candidate)?;
-        Ok(self.reload_process_local(candidate))
-    }
-
     pub(crate) fn reload_plan_for_candidate(&self, candidate: &Config) -> RuntimeReloadPlan {
         let active = self.current();
         reload_plan_for_configs(&active.config, candidate)
