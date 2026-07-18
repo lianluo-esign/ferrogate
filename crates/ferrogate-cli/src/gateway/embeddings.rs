@@ -1093,22 +1093,42 @@ fn set_canonical_provider_header(request: &mut ProviderHttpRequest, name: &str, 
 }
 
 /// Embeddings requests have no completion side and no `max_tokens`/`n`
-/// fields, so the estimate is just a char-count heuristic over the `input`
-/// field (mirrors chat.rs's `estimate_prompt_tokens`, issue #207).
+/// fields, so the estimate is a heuristic over the `input` field (mirrors
+/// chat.rs's `estimate_prompt_tokens`, issue #207). Handles BOTH the text
+/// shapes (string / array-of-strings, char/4) and the pre-tokenized shapes
+/// OpenAI accepts -- a flat integer array of token ids, or an array of such
+/// arrays for a batch -- which a char-only count estimated at 0, letting a
+/// caller bypass the token-budget / TPM / prepaid-wallet gates entirely.
 fn estimate_embeddings_usage(body: &serde_json::Value) -> BillingTokenUsage {
-    let chars = embeddings_input_character_count(body.get("input")) as u64;
-    let prompt_tokens = chars.saturating_add(3) / 4;
+    let prompt_tokens = estimate_embeddings_input_tokens(body.get("input"));
     BillingTokenUsage::new(prompt_tokens, 0, prompt_tokens)
 }
 
-fn embeddings_input_character_count(input: Option<&serde_json::Value>) -> usize {
+fn estimate_embeddings_input_tokens(input: Option<&serde_json::Value>) -> u64 {
+    let tokens = match input {
+        Some(value @ (serde_json::Value::String(_) | serde_json::Value::Array(_))) => {
+            embeddings_element_tokens(value)
+        }
+        _ => 0,
+    };
+    // Floor a present, non-empty input to at least one token so a tiny or odd
+    // input still engages the pre-dispatch gates (mirrors the chat path's
+    // non-zero floor), while an explicitly-empty input stays 0.
     match input {
-        Some(serde_json::Value::String(text)) => text.chars().count(),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(|text| text.chars().count())
-            .sum(),
+        Some(serde_json::Value::String(text)) if !text.is_empty() => tokens.max(1),
+        Some(serde_json::Value::Array(items)) if !items.is_empty() => tokens.max(1),
+        _ => tokens,
+    }
+}
+
+/// Token estimate for one `input` element: text contributes chars/4 tokens; a
+/// pre-tokenized id (a JSON number) is one token; an array is summed
+/// element-wise (a batch of strings, or a single/batch pre-tokenized input).
+fn embeddings_element_tokens(element: &serde_json::Value) -> u64 {
+    match element {
+        serde_json::Value::String(text) => (text.chars().count() as u64).saturating_add(3) / 4,
+        serde_json::Value::Number(_) => 1,
+        serde_json::Value::Array(items) => items.iter().map(embeddings_element_tokens).sum(),
         _ => 0,
     }
 }

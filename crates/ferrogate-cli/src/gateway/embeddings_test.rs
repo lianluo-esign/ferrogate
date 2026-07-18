@@ -35,14 +35,27 @@ fn estimates_prompt_tokens_across_a_batch_input() {
 }
 
 #[test]
-fn missing_or_non_text_input_estimates_zero_tokens() {
-    assert_eq!(embeddings_input_character_count(None), 0);
+fn pre_tokenized_integer_input_estimates_non_zero_tokens() {
+    // A flat token-id array (one input) and a batch of token-id arrays must
+    // estimate to a realistic non-zero token count so the token-budget / TPM /
+    // prepaid-wallet gates engage -- the char-only count silently returned 0,
+    // a single-request free-inference / budget & wallet-overdraft bypass.
+    let flat = serde_json::json!({"model": "fast-embed", "input": [1, 2, 3, 4, 5]});
+    assert_eq!(estimate_embeddings_usage(&flat).prompt_tokens, 5);
+
+    let batch = serde_json::json!({"model": "fast-embed", "input": [[1, 2, 3], [4, 5]]});
+    assert_eq!(estimate_embeddings_usage(&batch).prompt_tokens, 5);
+}
+
+#[test]
+fn missing_or_empty_input_estimates_zero_tokens() {
+    assert_eq!(estimate_embeddings_input_tokens(None), 0);
     assert_eq!(
-        embeddings_input_character_count(Some(&serde_json::json!(42))),
+        estimate_embeddings_input_tokens(Some(&serde_json::json!([]))),
         0
     );
     assert_eq!(
-        embeddings_input_character_count(Some(&serde_json::json!([1, 2, 3]))),
+        estimate_embeddings_input_tokens(Some(&serde_json::json!(""))),
         0
     );
 }
