@@ -3633,6 +3633,13 @@ impl PostgresControlPlaneStore {
             .await
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
+        // Release the pooled connection BEFORE the idempotent-conflict reload
+        // below. `get_billing_ledger_entry` acquires its own connection from the
+        // same pool; holding this one across that nested acquire self-deadlocks a
+        // single-connection pool (`pool_size = 1`) until the acquire deadline
+        // trips (`OperationDeadlineExceeded`), which is exactly what the live
+        // idempotent-retry round-trip hit (#248).
+        drop(client);
         if inserted > 0 {
             return Ok(true);
         }
@@ -4119,6 +4126,13 @@ impl PostgresControlPlaneStore {
             // commit its tenant-context upsert before exact replay is established.
             transaction.rollback().await.map_err(postgres_error)?;
         }
+        // Release the pooled connection BEFORE the conflict-reload below.
+        // `billing_event_settlement_matches` acquires its own connection from the
+        // same pool; holding this one across that nested acquire self-deadlocks a
+        // single-connection pool (`pool_size = 1`) until the acquire deadline
+        // trips (`OperationDeadlineExceeded`), which is exactly what the live
+        // idempotent-retry round-trip hit (#248).
+        drop(client);
         if inserted == 1 {
             return Ok(true);
         }
@@ -7684,6 +7698,31 @@ fn ledger_storage_error(error: StorageError) -> ferrogate_billing::BillingError 
 /// `ferrogate-cli`'s `gateway::block_on_sync_bridge` and `ferrogate-auth`'s
 /// copy: reuse a surrounding multi-thread runtime via `block_in_place`, else
 /// spin a scoped `current_thread` runtime.
+/// Process-wide runtime that drives every synchronous storage bridge call.
+///
+/// It MUST be long-lived: `tokio-postgres` spawns each pooled connection's
+/// driver task onto whatever runtime was current when the connection was
+/// created. Building a throwaway current-thread runtime per bridge call (the
+/// previous design) abandoned those driver tasks the instant the per-call
+/// runtime was dropped, leaving dead connections in the shared `deadpool` pool.
+/// A later acquire on a fresh runtime would then pick a dead connection whose
+/// recycle probe never resolves (its driver is gone), stalling until the
+/// pool-acquire deadline (`OperationDeadlineExceeded`). That is exactly what
+/// broke the multi-call export path -- `export_migration_snapshot` bridges ~30
+/// reads across runtime boundaries -- against a real Postgres/Supabase (#248).
+/// A single shared multi-thread runtime keeps every connection driver alive for
+/// the whole process, so pooled connections stay usable across bridge calls.
+fn sync_bridge_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("storage sync-bridge runtime should build")
+    })
+}
+
 fn block_on_sync_bridge<T>(future: impl std::future::Future<Output = T> + Send) -> T
 where
     T: Send,
@@ -7693,15 +7732,15 @@ where
             return tokio::task::block_in_place(|| handle.block_on(future));
         }
     }
+    // No ambient multi-thread runtime: drive the future on the process-wide
+    // shared runtime. Run it from a dedicated scoped thread so that (a) an
+    // ambient current-thread runtime does not panic with "cannot start a runtime
+    // from within a runtime", and (b) pooled connection drivers persist on the
+    // shared runtime's worker threads instead of being abandoned when a per-call
+    // runtime is dropped (#248).
     std::thread::scope(|scope| {
         scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("sync-bridge runtime should build")
-                    .block_on(future)
-            })
+            .spawn(|| sync_bridge_runtime().block_on(future))
             .join()
             .expect("sync-bridge runtime thread should not panic")
     })
@@ -10750,53 +10789,52 @@ impl RuntimeStorageRepositories {
                 block_on_sync_bridge(control_plane.documents())?
             }
         };
-        // Same sync CLI migration tool as `import_migration_snapshot` below --
-        // no tokio runtime anywhere in its call chain, so bridge the one
-        // now-async call (`list_api_key_records`) with a dedicated
-        // current-thread runtime rather than making this export function
-        // (and its sync CLI caller) async.
-        let bridge_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                StorageError::Runtime(format!(
-                    "failed to build migration-export async bridge runtime: {error}"
-                ))
-            })?;
+        // Sync CLI migration tool with no tokio runtime in its call chain. Every
+        // async read is bridged through `block_on_sync_bridge`, which drives them
+        // all on ONE process-wide shared runtime -- so the pooled Postgres
+        // connection stays alive across all ~30 reads instead of being abandoned
+        // at a per-call runtime boundary (the export-path stall fixed in #248).
         Ok(StorageMigrationSnapshot {
             control_plane,
             guardrail_policy_revisions: self.list_guardrail_policy_revisions(None)?,
             guardrail_policy_bindings: self.list_guardrail_policy_bindings()?,
-            api_key_records: bridge_runtime.block_on(self.list_api_key_records())?,
+            api_key_records: block_on_sync_bridge(self.list_api_key_records())?,
             tool_approvals: self.control_plane_tool_approval_documents()?,
-            billing_events: bridge_runtime.block_on(self.billing_events()),
-            usage_aggregates: bridge_runtime.block_on(self.usage_aggregates()),
-            request_logs: bridge_runtime.block_on(self.request_logs()),
-            audit_events: bridge_runtime.block_on(self.audit_events()),
-            agent_runs: bridge_runtime.block_on(self.agent_runs()),
-            agent_run_events: bridge_runtime.block_on(self.agent_run_events()),
-            managed_worker_templates: bridge_runtime.block_on(self.managed_worker_templates()),
-            agent_worker_instances: bridge_runtime.block_on(self.agent_worker_instances()),
-            managed_worker_sessions: bridge_runtime.block_on(self.managed_worker_sessions()),
-            managed_worker_lifecycle_events: bridge_runtime
-                .block_on(self.managed_worker_lifecycle_events()),
-            managed_worker_isolation_selections: bridge_runtime
-                .block_on(self.managed_worker_isolation_selections()),
-            managed_worker_isolation_policies: bridge_runtime
-                .block_on(self.managed_worker_isolation_policies()),
-            managed_worker_isolation_evidence: bridge_runtime
-                .block_on(self.managed_worker_isolation_evidence()),
-            self_hosted_worker_registrations: bridge_runtime
-                .block_on(self.self_hosted_worker_registrations()),
-            self_hosted_worker_heartbeats: bridge_runtime
-                .block_on(self.self_hosted_worker_heartbeats()),
-            self_hosted_worker_telemetry_events: bridge_runtime
-                .block_on(self.self_hosted_worker_telemetry_events()),
-            self_hosted_worker_artifacts: bridge_runtime
-                .block_on(self.self_hosted_worker_artifacts()),
-            self_hosted_worker_checkpoints: bridge_runtime
-                .block_on(self.self_hosted_worker_checkpoints()),
-            self_hosted_run_dispatches: bridge_runtime.block_on(self.self_hosted_run_dispatches()),
+            billing_events: block_on_sync_bridge(self.billing_events()),
+            usage_aggregates: block_on_sync_bridge(self.usage_aggregates()),
+            request_logs: block_on_sync_bridge(self.request_logs()),
+            audit_events: block_on_sync_bridge(self.audit_events()),
+            agent_runs: block_on_sync_bridge(self.agent_runs()),
+            agent_run_events: block_on_sync_bridge(self.agent_run_events()),
+            managed_worker_templates: block_on_sync_bridge(self.managed_worker_templates()),
+            agent_worker_instances: block_on_sync_bridge(self.agent_worker_instances()),
+            managed_worker_sessions: block_on_sync_bridge(self.managed_worker_sessions()),
+            managed_worker_lifecycle_events: block_on_sync_bridge(
+                self.managed_worker_lifecycle_events(),
+            ),
+            managed_worker_isolation_selections: block_on_sync_bridge(
+                self.managed_worker_isolation_selections(),
+            ),
+            managed_worker_isolation_policies: block_on_sync_bridge(
+                self.managed_worker_isolation_policies(),
+            ),
+            managed_worker_isolation_evidence: block_on_sync_bridge(
+                self.managed_worker_isolation_evidence(),
+            ),
+            self_hosted_worker_registrations: block_on_sync_bridge(
+                self.self_hosted_worker_registrations(),
+            ),
+            self_hosted_worker_heartbeats: block_on_sync_bridge(
+                self.self_hosted_worker_heartbeats(),
+            ),
+            self_hosted_worker_telemetry_events: block_on_sync_bridge(
+                self.self_hosted_worker_telemetry_events(),
+            ),
+            self_hosted_worker_artifacts: block_on_sync_bridge(self.self_hosted_worker_artifacts()),
+            self_hosted_worker_checkpoints: block_on_sync_bridge(
+                self.self_hosted_worker_checkpoints(),
+            ),
+            self_hosted_run_dispatches: block_on_sync_bridge(self.self_hosted_run_dispatches()),
         })
     }
 
@@ -10805,18 +10843,13 @@ impl RuntimeStorageRepositories {
         snapshot: StorageMigrationSnapshot,
     ) -> Result<(), StorageError> {
         // One-shot CLI migration tool (`ferrogate storage migrate-to-supabase`),
-        // called from a plain sync `main()` with no tokio runtime anywhere in
-        // its call chain -- a dedicated current-thread runtime bridges the one
-        // now-async call (`append_billing_event`) rather than making this
-        // whole batch-import function (and its sync CLI caller) async.
-        let bridge_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                StorageError::Runtime(format!(
-                    "failed to build migration-import async bridge runtime: {error}"
-                ))
-            })?;
+        // called from a plain sync `main()` with no tokio runtime in its call
+        // chain. Every async write is bridged through `block_on_sync_bridge`,
+        // which drives them all on ONE process-wide shared runtime -- keeping the
+        // pooled Postgres connection alive across the whole import instead of
+        // abandoning it at a per-call runtime boundary (matching the export path,
+        // and mixing cleanly with the `block_on_sync_bridge` control-plane and
+        // guardrail writes below rather than straddling two runtimes) (#248).
         self.replace_control_plane(snapshot.control_plane)?;
         for revision in snapshot.guardrail_policy_revisions {
             match self.insert_guardrail_policy_revision(revision) {
@@ -10832,67 +10865,67 @@ impl RuntimeStorageRepositories {
             self.restore_guardrail_policy_binding(&policy_id, expected_generation, Some(binding))?;
         }
         for api_key in snapshot.api_key_records {
-            bridge_runtime.block_on(self.upsert_api_key_record(api_key))?;
+            block_on_sync_bridge(self.upsert_api_key_record(api_key))?;
         }
         for (id, document_json) in snapshot.tool_approvals {
             self.upsert_control_plane_tool_approval(id, document_json)?;
         }
         for event in snapshot.billing_events {
-            bridge_runtime.block_on(self.append_billing_event(event))?;
+            block_on_sync_bridge(self.append_billing_event(event))?;
         }
         for aggregate in snapshot.usage_aggregates {
-            bridge_runtime.block_on(self.replace_usage_aggregate(aggregate))?;
+            block_on_sync_bridge(self.replace_usage_aggregate(aggregate))?;
         }
         for log in snapshot.request_logs {
-            bridge_runtime.block_on(self.append_request_log(log));
+            block_on_sync_bridge(self.append_request_log(log));
         }
         for event in snapshot.audit_events {
-            bridge_runtime.block_on(self.append_audit_event(event));
+            block_on_sync_bridge(self.append_audit_event(event));
         }
         for run in snapshot.agent_runs {
-            bridge_runtime.block_on(self.upsert_agent_run(run))?;
+            block_on_sync_bridge(self.upsert_agent_run(run))?;
         }
         for event in snapshot.agent_run_events {
-            bridge_runtime.block_on(self.append_agent_run_event(event))?;
+            block_on_sync_bridge(self.append_agent_run_event(event))?;
         }
         for template in snapshot.managed_worker_templates {
-            bridge_runtime.block_on(self.upsert_managed_worker_template(template))?;
+            block_on_sync_bridge(self.upsert_managed_worker_template(template))?;
         }
         for instance in snapshot.agent_worker_instances {
-            bridge_runtime.block_on(self.upsert_agent_worker_instance(instance))?;
+            block_on_sync_bridge(self.upsert_agent_worker_instance(instance))?;
         }
         for session in snapshot.managed_worker_sessions {
-            bridge_runtime.block_on(self.upsert_managed_worker_session(session))?;
+            block_on_sync_bridge(self.upsert_managed_worker_session(session))?;
         }
         for event in snapshot.managed_worker_lifecycle_events {
-            bridge_runtime.block_on(self.append_managed_worker_lifecycle_event(event))?;
+            block_on_sync_bridge(self.append_managed_worker_lifecycle_event(event))?;
         }
         for selection in snapshot.managed_worker_isolation_selections {
-            bridge_runtime.block_on(self.upsert_managed_worker_isolation_selection(selection))?;
+            block_on_sync_bridge(self.upsert_managed_worker_isolation_selection(selection))?;
         }
         for policy in snapshot.managed_worker_isolation_policies {
-            bridge_runtime.block_on(self.upsert_managed_worker_isolation_policy(policy))?;
+            block_on_sync_bridge(self.upsert_managed_worker_isolation_policy(policy))?;
         }
         for evidence in snapshot.managed_worker_isolation_evidence {
-            bridge_runtime.block_on(self.upsert_managed_worker_isolation_evidence(evidence))?;
+            block_on_sync_bridge(self.upsert_managed_worker_isolation_evidence(evidence))?;
         }
         for registration in snapshot.self_hosted_worker_registrations {
-            bridge_runtime.block_on(self.upsert_self_hosted_worker_registration(registration))?;
+            block_on_sync_bridge(self.upsert_self_hosted_worker_registration(registration))?;
         }
         for heartbeat in snapshot.self_hosted_worker_heartbeats {
-            bridge_runtime.block_on(self.append_self_hosted_worker_heartbeat(heartbeat))?;
+            block_on_sync_bridge(self.append_self_hosted_worker_heartbeat(heartbeat))?;
         }
         for event in snapshot.self_hosted_worker_telemetry_events {
-            bridge_runtime.block_on(self.append_self_hosted_worker_telemetry_event(event))?;
+            block_on_sync_bridge(self.append_self_hosted_worker_telemetry_event(event))?;
         }
         for artifact in snapshot.self_hosted_worker_artifacts {
-            bridge_runtime.block_on(self.upsert_self_hosted_worker_artifact(artifact))?;
+            block_on_sync_bridge(self.upsert_self_hosted_worker_artifact(artifact))?;
         }
         for checkpoint in snapshot.self_hosted_worker_checkpoints {
-            bridge_runtime.block_on(self.upsert_self_hosted_worker_checkpoint(checkpoint))?;
+            block_on_sync_bridge(self.upsert_self_hosted_worker_checkpoint(checkpoint))?;
         }
         for dispatch in snapshot.self_hosted_run_dispatches {
-            bridge_runtime.block_on(self.upsert_self_hosted_run_dispatch(dispatch))?;
+            block_on_sync_bridge(self.upsert_self_hosted_run_dispatch(dispatch))?;
         }
         Ok(())
     }

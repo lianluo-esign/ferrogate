@@ -26,6 +26,16 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let expired_self_hosted_worker_id = RefCell::new(String::new());
     let self_hosted_lease_id = RefCell::new(String::new());
     let self_hosted_event_cursor = RefCell::new(String::new());
+    // The symmetric-AEAD transport secret is now provisioned server-side and is
+    // independent of the public `identity_fingerprint` (a security fix: the
+    // fingerprint is returned to admin readers and carried in cleartext frames).
+    // It is returned exactly once in the registration/rotation response, so the
+    // worker operator (this harness) must capture it and use it as the bearer
+    // secret + AEAD key on every subsequent poll/ack/heartbeat/telemetry call.
+    // `token_id` stays the public fingerprint; `token_secret` is this captured
+    // value (#248).
+    let self_hosted_worker_secret = RefCell::new(String::new());
+    let expired_self_hosted_worker_secret = RefCell::new(String::new());
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ok");
@@ -378,6 +388,15 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 .context("self-hosted worker id should be present")?;
             assert!(worker_id.starts_with("self-hosted-worker-"));
             self_hosted_worker_id.replace(worker_id.to_string());
+            let transport_token_secret = body["transport_token_secret"]
+                .as_str()
+                .context("registration must return the provisioned transport_token_secret")?;
+            assert!(!transport_token_secret.is_empty());
+            assert_ne!(
+                transport_token_secret, "sha256:test-worker",
+                "the provisioned transport secret must NOT be the public fingerprint"
+            );
+            self_hosted_worker_secret.replace(transport_token_secret.to_string());
             assert_eq!(body["worker"]["workspace_id"], "workspace-1");
             assert_eq!(body["worker"]["worker_name"], "customer-worker-a");
             assert_eq!(body["worker"]["status"], "registered");
@@ -420,6 +439,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 .as_str()
                 .context("expired self-hosted worker id should be present")?;
             expired_self_hosted_worker_id.replace(worker_id.to_string());
+            let transport_token_secret = body["transport_token_secret"]
+                .as_str()
+                .context("registration must return the provisioned transport_token_secret")?;
+            expired_self_hosted_worker_secret.replace(transport_token_secret.to_string());
             assert_eq!(body["worker"]["identity_expires_at_unix"], 999_u64);
             Ok(())
         },
@@ -431,6 +454,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_poll_body(
             &expired_self_hosted_worker_id.borrow(),
             "sha256:test-worker",
+            &expired_self_hosted_worker_secret.borrow(),
         ),
         401,
         |body| {
@@ -445,7 +469,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/self-hosted-workers/runs/poll",
         &[JSON_CONTENT],
-        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:test-worker"),
+        &self_hosted_worker_poll_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            &self_hosted_worker_secret.borrow(),
+        ),
         401,
         |body| {
             assert_eq!(
@@ -459,7 +487,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/self-hosted-workers/runs/poll",
         &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
-        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:wrong-worker"),
+        &self_hosted_worker_poll_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            "sha256:wrong-worker",
+        ),
         401,
         |body| {
             assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
@@ -475,6 +507,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             "workspace-1",
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker",
+            &self_hosted_worker_secret.borrow(),
         ),
         401,
         |body| {
@@ -517,6 +550,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_poll_body_with_protocol(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker",
+            &self_hosted_worker_secret.borrow(),
             0,
         ),
         400,
@@ -531,6 +565,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let tampered_encrypted_poll_body = tampered_encrypted_self_hosted_worker_poll_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker",
+        &self_hosted_worker_secret.borrow(),
         31,
     )?;
     case.expect_json(
@@ -553,6 +588,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_poll_body = encrypted_self_hosted_worker_poll_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker",
+        &self_hosted_worker_secret.borrow(),
         32,
     )?;
     case.expect_json(
@@ -562,7 +598,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_poll_body,
         200,
         |body| {
-            let body = decrypted_self_hosted_transport_response(body, "sha256:test-worker")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_run_lease");
             assert_eq!(
                 body["dispatch_id"],
@@ -585,6 +624,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_ack_body = encrypted_self_hosted_worker_ack_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker",
+        &self_hosted_worker_secret.borrow(),
         &self_hosted_lease_id.borrow(),
         33,
     )?;
@@ -625,6 +665,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             "workspace-other",
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker",
+            &self_hosted_worker_secret.borrow(),
             &self_hosted_lease_id.borrow(),
         ),
         401,
@@ -640,7 +681,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_ack_body,
         200,
         |body| {
-            let body = decrypted_self_hosted_transport_response(body, "sha256:test-worker")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_run_ack");
             assert_eq!(
                 body["dispatch_id"],
@@ -703,6 +747,14 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["previous_identity_fingerprint"], "sha256:test-worker");
             assert_eq!(body["previous_identity_expires_at_unix"], 9999999999_u64);
             assert!(body["rotated_at_unix"].as_u64().is_some());
+            // Rotation issues a fresh transport secret; capture it so every
+            // post-rotation transport call keys off the new secret (#248).
+            let transport_token_secret = body["transport_token_secret"]
+                .as_str()
+                .context("rotation must return the freshly-issued transport_token_secret")?;
+            assert!(!transport_token_secret.is_empty());
+            assert_ne!(transport_token_secret, *self_hosted_worker_secret.borrow());
+            self_hosted_worker_secret.replace(transport_token_secret.to_string());
             Ok(())
         },
     )?;
@@ -726,6 +778,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_heartbeat_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker",
+            &self_hosted_worker_secret.borrow(),
             "online",
             124,
         ),
@@ -742,6 +795,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_heartbeat_body_with_payload(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "online",
             125,
             "{not-json",
@@ -761,9 +815,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_heartbeat_body = encrypted_self_hosted_transport_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker-rotated",
+        &self_hosted_worker_secret.borrow(),
         &self_hosted_worker_heartbeat_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "online",
             125,
         ),
@@ -776,8 +832,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_heartbeat_body,
         201,
         |body| {
-            let body =
-                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_worker_heartbeat");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["status"], "online");
@@ -858,6 +916,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_event_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "unknown",
             449,
         ),
@@ -877,6 +936,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_event_body_with_payload(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "lifecycle",
             450,
             "{not-json",
@@ -893,9 +953,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_event_body = encrypted_self_hosted_transport_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker-rotated",
+        &self_hosted_worker_secret.borrow(),
         &self_hosted_worker_event_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "lifecycle",
             450,
         ),
@@ -908,8 +970,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_event_body,
         201,
         |body| {
-            let body =
-                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_worker_event");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["telemetry_event_count"], 1);
@@ -1087,6 +1151,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_artifact_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "artifact-transport-too-large",
             "transport-oversized.bin",
             16_777_217,
@@ -1108,6 +1173,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_artifact_body_with_payload(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "artifact-transport-invalid-json",
             "transport-invalid-json.log",
             64,
@@ -1126,9 +1192,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_artifact_body = encrypted_self_hosted_transport_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker-rotated",
+        &self_hosted_worker_secret.borrow(),
         &self_hosted_worker_artifact_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "artifact-transport",
             "transport.log",
             64,
@@ -1143,8 +1211,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_artifact_body,
         201,
         |body| {
-            let body =
-                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_worker_artifact");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["artifact_count"], 1);
@@ -1251,6 +1321,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_checkpoint_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "checkpoint-transport-too-large",
             "transport-oversized-state",
             16_777_217,
@@ -1275,6 +1346,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_checkpoint_body_with_payload(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "checkpoint-transport-invalid-json",
             "transport-invalid-json-state",
             192,
@@ -1296,9 +1368,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let encrypted_checkpoint_body = encrypted_self_hosted_transport_body(
         &self_hosted_worker_id.borrow(),
         "sha256:test-worker-rotated",
+        &self_hosted_worker_secret.borrow(),
         &self_hosted_worker_checkpoint_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
+            &self_hosted_worker_secret.borrow(),
             "checkpoint-transport",
             "transport-resume-state",
             192,
@@ -1313,8 +1387,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_checkpoint_body,
         201,
         |body| {
-            let body =
-                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
+            let body = decrypted_self_hosted_transport_response(
+                body,
+                &self_hosted_worker_secret.borrow(),
+            )?;
             assert_eq!(body["object"], "self_hosted_worker_checkpoint");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["checkpoint_count"], 1);
@@ -2096,32 +2172,36 @@ pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {
     Ok(())
 }
 
-fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
-    self_hosted_worker_poll_body_with_protocol(worker_id, token_secret, 1)
+fn self_hosted_worker_poll_body(worker_id: &str, token_id: &str, token_secret: &str) -> String {
+    self_hosted_worker_poll_body_with_protocol(worker_id, token_id, token_secret, 1)
 }
 
 fn encrypted_self_hosted_worker_poll_body(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     nonce_byte: u8,
 ) -> Result<String> {
     encrypted_self_hosted_transport_body(
         worker_id,
+        token_id,
         token_secret,
-        &self_hosted_worker_poll_body(worker_id, token_secret),
+        &self_hosted_worker_poll_body(worker_id, token_id, token_secret),
         nonce_byte,
     )
 }
 
 fn tampered_encrypted_self_hosted_worker_poll_body(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     nonce_byte: u8,
 ) -> Result<String> {
     let mut frame = encrypted_self_hosted_transport_frame(
         worker_id,
+        token_id,
         token_secret,
-        &self_hosted_worker_poll_body(worker_id, token_secret),
+        &self_hosted_worker_poll_body(worker_id, token_id, token_secret),
         nonce_byte,
     )?;
     frame.protocol_version = frame.protocol_version.saturating_add(1);
@@ -2130,6 +2210,7 @@ fn tampered_encrypted_self_hosted_worker_poll_body(
 
 fn self_hosted_worker_poll_body_with_protocol(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     protocol_version: u32,
 ) -> String {
@@ -2137,6 +2218,7 @@ fn self_hosted_worker_poll_body_with_protocol(
         "org_demo",
         "workspace-1",
         worker_id,
+        token_id,
         token_secret,
         protocol_version,
     )
@@ -2146,12 +2228,14 @@ fn self_hosted_worker_poll_body_for_scope(
     tenant_id: &str,
     workspace_id: &str,
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
 ) -> String {
     self_hosted_worker_poll_body_for_scope_with_protocol(
         tenant_id,
         workspace_id,
         worker_id,
+        token_id,
         token_secret,
         1,
     )
@@ -2161,6 +2245,7 @@ fn self_hosted_worker_poll_body_for_scope_with_protocol(
     tenant_id: &str,
     workspace_id: &str,
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     protocol_version: u32,
 ) -> String {
@@ -2171,7 +2256,7 @@ fn self_hosted_worker_poll_body_for_scope_with_protocol(
             "tenant_id": "{tenant_id}",
             "workspace_id": "{workspace_id}",
             "worker_id": "{worker_id}",
-            "token_id": "sha256:test-worker",
+            "token_id": "{token_id}",
             "token_secret": "{token_secret}"
           }},
           "supported_capabilities": ["shell", "mcp"],
@@ -2181,11 +2266,17 @@ fn self_hosted_worker_poll_body_for_scope_with_protocol(
     )
 }
 
-fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &str) -> String {
+fn self_hosted_worker_ack_body(
+    worker_id: &str,
+    token_id: &str,
+    token_secret: &str,
+    lease_id: &str,
+) -> String {
     self_hosted_worker_ack_body_for_scope(
         "org_demo",
         "workspace-1",
         worker_id,
+        token_id,
         token_secret,
         lease_id,
     )
@@ -2193,31 +2284,40 @@ fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &s
 
 fn encrypted_self_hosted_worker_ack_body(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     lease_id: &str,
     nonce_byte: u8,
 ) -> Result<String> {
     encrypted_self_hosted_transport_body(
         worker_id,
+        token_id,
         token_secret,
-        &self_hosted_worker_ack_body(worker_id, token_secret, lease_id),
+        &self_hosted_worker_ack_body(worker_id, token_id, token_secret, lease_id),
         nonce_byte,
     )
 }
 
 fn encrypted_self_hosted_transport_body(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     plaintext_json: &str,
     nonce_byte: u8,
 ) -> Result<String> {
-    let frame =
-        encrypted_self_hosted_transport_frame(worker_id, token_secret, plaintext_json, nonce_byte)?;
+    let frame = encrypted_self_hosted_transport_frame(
+        worker_id,
+        token_id,
+        token_secret,
+        plaintext_json,
+        nonce_byte,
+    )?;
     serde_json::to_string(&frame).context("serialize self-hosted encrypted transport frame")
 }
 
 fn encrypted_self_hosted_transport_frame(
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     plaintext_json: &str,
     nonce_byte: u8,
@@ -2226,7 +2326,7 @@ fn encrypted_self_hosted_transport_frame(
         tenant_id: "org_demo".to_string(),
         workspace_id: "workspace-1".to_string(),
         worker_id: worker_id.to_string(),
-        token_id: token_secret.to_string(),
+        token_id: token_id.to_string(),
         token_secret: token_secret.to_string(),
         observed_at_unix: None,
     };
@@ -2256,6 +2356,7 @@ fn self_hosted_worker_ack_body_for_scope(
     tenant_id: &str,
     workspace_id: &str,
     worker_id: &str,
+    token_id: &str,
     token_secret: &str,
     lease_id: &str,
 ) -> String {
@@ -2266,7 +2367,7 @@ fn self_hosted_worker_ack_body_for_scope(
             "tenant_id": "{tenant_id}",
             "workspace_id": "{workspace_id}",
             "worker_id": "{worker_id}",
-            "token_id": "sha256:test-worker",
+            "token_id": "{token_id}",
             "token_secret": "{token_secret}"
           }},
           "dispatch_id": "self-hosted-dispatch-{worker_id}",
@@ -2282,12 +2383,14 @@ fn self_hosted_worker_ack_body_for_scope(
 fn self_hosted_worker_heartbeat_body(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     status: &str,
     reported_at_unix: u64,
 ) -> String {
     self_hosted_worker_heartbeat_body_with_payload(
         worker_id,
         identity_fingerprint,
+        token_secret,
         status,
         reported_at_unix,
         r#"{"load":0.24}"#,
@@ -2297,6 +2400,7 @@ fn self_hosted_worker_heartbeat_body(
 fn self_hosted_worker_heartbeat_body_with_payload(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     status: &str,
     reported_at_unix: u64,
     heartbeat_json: &str,
@@ -2308,7 +2412,7 @@ fn self_hosted_worker_heartbeat_body_with_payload(
             "workspace_id": "workspace-1",
             "worker_id": "{worker_id}",
             "token_id": "{identity_fingerprint}",
-            "token_secret": "{identity_fingerprint}"
+            "token_secret": "{token_secret}"
           }},
           "status": "{status}",
           "reported_at_unix": {reported_at_unix},
@@ -2320,12 +2424,14 @@ fn self_hosted_worker_heartbeat_body_with_payload(
 fn self_hosted_worker_event_body(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     kind: &str,
     occurred_at_unix: u64,
 ) -> String {
     self_hosted_worker_event_body_with_payload(
         worker_id,
         identity_fingerprint,
+        token_secret,
         kind,
         occurred_at_unix,
         r#"{"state":"running"}"#,
@@ -2335,6 +2441,7 @@ fn self_hosted_worker_event_body(
 fn self_hosted_worker_event_body_with_payload(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     kind: &str,
     occurred_at_unix: u64,
     event_json: &str,
@@ -2346,7 +2453,7 @@ fn self_hosted_worker_event_body_with_payload(
             "workspace_id": "workspace-1",
             "worker_id": "{worker_id}",
             "token_id": "{identity_fingerprint}",
-            "token_secret": "{identity_fingerprint}"
+            "token_secret": "{token_secret}"
           }},
           "session_id": "session-transport",
           "run_id": "run-transport",
@@ -2360,6 +2467,7 @@ fn self_hosted_worker_event_body_with_payload(
 fn self_hosted_worker_artifact_body(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     artifact_id: &str,
     artifact_name: &str,
     size_bytes: u64,
@@ -2368,6 +2476,7 @@ fn self_hosted_worker_artifact_body(
     self_hosted_worker_artifact_body_with_payload(
         worker_id,
         identity_fingerprint,
+        token_secret,
         artifact_id,
         artifact_name,
         size_bytes,
@@ -2376,9 +2485,11 @@ fn self_hosted_worker_artifact_body(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn self_hosted_worker_artifact_body_with_payload(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     artifact_id: &str,
     artifact_name: &str,
     size_bytes: u64,
@@ -2392,7 +2503,7 @@ fn self_hosted_worker_artifact_body_with_payload(
             "workspace_id": "workspace-1",
             "worker_id": "{worker_id}",
             "token_id": "{identity_fingerprint}",
-            "token_secret": "{identity_fingerprint}"
+            "token_secret": "{token_secret}"
           }},
           "artifact_id": "{artifact_id}",
           "session_id": "session-transport",
@@ -2409,6 +2520,7 @@ fn self_hosted_worker_artifact_body_with_payload(
 fn self_hosted_worker_checkpoint_body(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     checkpoint_id: &str,
     checkpoint_name: &str,
     size_bytes: u64,
@@ -2417,6 +2529,7 @@ fn self_hosted_worker_checkpoint_body(
     self_hosted_worker_checkpoint_body_with_payload(
         worker_id,
         identity_fingerprint,
+        token_secret,
         checkpoint_id,
         checkpoint_name,
         size_bytes,
@@ -2425,9 +2538,11 @@ fn self_hosted_worker_checkpoint_body(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn self_hosted_worker_checkpoint_body_with_payload(
     worker_id: &str,
     identity_fingerprint: &str,
+    token_secret: &str,
     checkpoint_id: &str,
     checkpoint_name: &str,
     size_bytes: u64,
@@ -2441,7 +2556,7 @@ fn self_hosted_worker_checkpoint_body_with_payload(
             "workspace_id": "workspace-1",
             "worker_id": "{worker_id}",
             "token_id": "{identity_fingerprint}",
-            "token_secret": "{identity_fingerprint}"
+            "token_secret": "{token_secret}"
           }},
           "checkpoint_id": "{checkpoint_id}",
           "session_id": "session-transport",
