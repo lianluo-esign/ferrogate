@@ -1995,6 +1995,26 @@ impl Config {
                     "field guardrails[{index}].max_input_bytes: max input length guardrails apply to request stage only"
                 );
             }
+            let is_semantic_provider = matches!(
+                guardrail.provider,
+                super::GuardrailProviderKind::Presidio
+                    | super::GuardrailProviderKind::LlmGuardPromptInjection
+            );
+            if guardrail.provider != super::GuardrailProviderKind::Presidio
+                && (guardrail.provider_language.is_some() || guardrail.provider_entities.is_some())
+            {
+                bail!(
+                    "field guardrails[{index}].provider_language/provider_entities: only valid when provider is presidio"
+                );
+            }
+            if !is_semantic_provider
+                && (guardrail.provider_score_threshold_percent.is_some()
+                    || guardrail.provider_fingerprint_secret_ref.is_some())
+            {
+                bail!(
+                    "field guardrails[{index}].provider_score_threshold_percent/provider_fingerprint_secret_ref: only valid when provider is presidio or llm_guard_prompt_injection"
+                );
+            }
             match guardrail.provider {
                 super::GuardrailProviderKind::None => {
                     if guardrail.provider_endpoint.is_some() {
@@ -2068,6 +2088,98 @@ impl Config {
                     if guardrail.provider_runtime.provider_max_retries > 1 {
                         bail!(
                             "field guardrails[{index}].provider_max_retries: must be zero or one"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_payload_bytes == 0 {
+                        bail!(
+                            "field guardrails[{index}].provider_max_payload_bytes: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_response_bytes == 0 {
+                        bail!(
+                            "field guardrails[{index}].provider_max_response_bytes: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_on_error
+                        == super::GuardrailProviderErrorMode::FallbackDetector
+                        && guardrail.keywords.is_empty()
+                        && guardrail.regex.is_empty()
+                        && guardrail.max_input_bytes.is_none()
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_on_error: fallback_detector requires a keyword, regex, or max_input_bytes fallback"
+                        );
+                    }
+                }
+                super::GuardrailProviderKind::Presidio
+                | super::GuardrailProviderKind::LlmGuardPromptInjection => {
+                    let endpoint = guardrail.provider_endpoint.as_deref().unwrap_or_default();
+                    if endpoint.trim().is_empty() {
+                        bail!(
+                            "field guardrails[{index}].provider_endpoint: required when provider is presidio or llm_guard_prompt_injection"
+                        );
+                    }
+                    let endpoint = reqwest::Url::parse(endpoint).map_err(|_| {
+                        anyhow::anyhow!("field guardrails[{index}].provider_endpoint: invalid URL")
+                    })?;
+                    ferrogate_guardrails::validate_custom_http_endpoint(
+                        &endpoint,
+                        guardrail.provider_runtime.provider_allow_private_network,
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "field guardrails[{index}].provider_endpoint: {}",
+                            error.safe_message()
+                        )
+                    })?;
+                    if let Some(secret_ref) =
+                        guardrail.provider_runtime.provider_secret_ref.as_deref()
+                    {
+                        ferrogate_secrets::SecretRef::parse(secret_ref).map_err(|error| {
+                            anyhow::anyhow!(
+                                "field guardrails[{index}].provider_secret_ref: {error}"
+                            )
+                        })?;
+                    }
+                    let fingerprint_ref = guardrail
+                        .provider_fingerprint_secret_ref
+                        .as_deref()
+                        .unwrap_or_default();
+                    if fingerprint_ref.trim().is_empty() {
+                        bail!(
+                            "field guardrails[{index}].provider_fingerprint_secret_ref: required when provider is presidio or llm_guard_prompt_injection"
+                        );
+                    }
+                    ferrogate_secrets::SecretRef::parse(fingerprint_ref).map_err(|error| {
+                        anyhow::anyhow!(
+                            "field guardrails[{index}].provider_fingerprint_secret_ref: {error}"
+                        )
+                    })?;
+                    if guardrail
+                        .provider_score_threshold_percent
+                        .is_some_and(|threshold| threshold > 100)
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_score_threshold_percent: must be between 0 and 100"
+                        );
+                    }
+                    if guardrail
+                        .provider_language
+                        .as_deref()
+                        .is_some_and(|language| language.trim().is_empty())
+                    {
+                        bail!("field guardrails[{index}].provider_language: cannot be empty");
+                    }
+                    if guardrail
+                        .provider_entities
+                        .as_ref()
+                        .is_some_and(|entities| {
+                            entities.is_empty()
+                                || entities.iter().any(|entity| entity.trim().is_empty())
+                        })
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_entities: entries must be non-empty"
                         );
                     }
                     if guardrail.provider_runtime.provider_max_payload_bytes == 0 {

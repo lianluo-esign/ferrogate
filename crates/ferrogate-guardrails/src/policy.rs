@@ -302,6 +302,55 @@ pub enum DetectorDefinition {
         #[serde(default)]
         secret_ref: Option<String>,
     },
+    /// Self-hosted Microsoft Presidio analyzer (`POST /analyze`), the native
+    /// DLP/PII integration (#201). Content is processed inside the operator's
+    /// own network boundary (customer VPC); no vendor credential exists —
+    /// `secret_ref` is an OPTIONAL bearer token for a fronting reverse proxy.
+    Presidio {
+        endpoint: String,
+        #[serde(default = "default_presidio_language")]
+        language: String,
+        /// Minimum recognizer score to act on, percent (0-100).
+        #[serde(default = "default_semantic_score_threshold_percent")]
+        score_threshold_percent: u8,
+        /// Optional entity allow-list; `None` runs every loaded recognizer.
+        #[serde(default)]
+        entities: Option<Vec<String>>,
+        #[serde(default = "default_detector_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_detector_max_payload_bytes")]
+        max_payload_bytes: usize,
+        #[serde(default = "default_detector_max_response_bytes")]
+        max_response_bytes: usize,
+        #[serde(default)]
+        allow_private_network: bool,
+        #[serde(default)]
+        secret_ref: Option<String>,
+        /// Required: span evidence is fingerprinted with this key.
+        fingerprint_secret_ref: String,
+    },
+    /// Self-hosted ProtectAI LLM-Guard API prompt-injection scanner
+    /// (`POST /analyze/prompt`), the native prompt-injection integration
+    /// (#201). Detect-only (the scanner returns no spans); customer-VPC
+    /// residency; `secret_ref` is an optional bearer token.
+    LlmGuardPromptInjection {
+        endpoint: String,
+        /// Risk score at or above which a hit is recorded, percent (0-100).
+        #[serde(default = "default_semantic_score_threshold_percent")]
+        score_threshold_percent: u8,
+        #[serde(default = "default_detector_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_detector_max_payload_bytes")]
+        max_payload_bytes: usize,
+        #[serde(default = "default_detector_max_response_bytes")]
+        max_response_bytes: usize,
+        #[serde(default)]
+        allow_private_network: bool,
+        #[serde(default)]
+        secret_ref: Option<String>,
+        /// Required: the flagged-content fingerprint is keyed with this.
+        fingerprint_secret_ref: String,
+    },
 }
 
 impl DetectorDefinition {
@@ -415,6 +464,66 @@ impl DetectorDefinition {
                         "custom_http detector secret_ref cannot be empty",
                     ));
                 }
+            }
+            Self::Presidio {
+                endpoint,
+                language,
+                score_threshold_percent,
+                entities,
+                timeout_ms,
+                max_payload_bytes,
+                max_response_bytes,
+                allow_private_network,
+                secret_ref,
+                fingerprint_secret_ref,
+            } => {
+                let endpoint = Url::parse(endpoint)
+                    .map_err(|_| invalid_policy("presidio detector endpoint is invalid"))?;
+                validate_custom_http_endpoint(&endpoint, *allow_private_network)?;
+                validate_semantic_adapter_limits(
+                    "presidio",
+                    *score_threshold_percent,
+                    *timeout_ms,
+                    *max_payload_bytes,
+                    *max_response_bytes,
+                    secret_ref.as_deref(),
+                    fingerprint_secret_ref,
+                )?;
+                if language.trim().is_empty() {
+                    return Err(invalid_policy("presidio detector language cannot be empty"));
+                }
+                if entities.as_ref().is_some_and(|entities| {
+                    entities.is_empty()
+                        || entities.iter().any(|entity| entity.trim().is_empty())
+                        || entities.iter().collect::<HashSet<_>>().len() != entities.len()
+                }) {
+                    return Err(invalid_policy(
+                        "presidio detector entities must be non-empty and unique when set",
+                    ));
+                }
+            }
+            Self::LlmGuardPromptInjection {
+                endpoint,
+                score_threshold_percent,
+                timeout_ms,
+                max_payload_bytes,
+                max_response_bytes,
+                allow_private_network,
+                secret_ref,
+                fingerprint_secret_ref,
+            } => {
+                let endpoint = Url::parse(endpoint)
+                    .map_err(|_| invalid_policy("llm_guard detector endpoint is invalid"))?;
+                validate_custom_http_endpoint(&endpoint, *allow_private_network)?;
+                validate_semantic_adapter_limits(
+                    "llm_guard_prompt_injection",
+                    *score_threshold_percent,
+                    *timeout_ms,
+                    *max_payload_bytes,
+                    *max_response_bytes,
+                    secret_ref.as_deref(),
+                    fingerprint_secret_ref,
+                )?;
             }
         }
         Ok(())
@@ -776,6 +885,46 @@ const fn default_true() -> bool {
 
 const fn default_policy_deadline_ms() -> u64 {
     2_000
+}
+
+fn validate_semantic_adapter_limits(
+    kind: &str,
+    score_threshold_percent: u8,
+    timeout_ms: u64,
+    max_payload_bytes: usize,
+    max_response_bytes: usize,
+    secret_ref: Option<&str>,
+    fingerprint_secret_ref: &str,
+) -> Result<(), DetectorError> {
+    if score_threshold_percent > 100
+        || timeout_ms == 0
+        || timeout_ms > MAX_DETECTOR_TIMEOUT.as_millis() as u64
+        || max_payload_bytes == 0
+        || max_response_bytes == 0
+    {
+        return Err(invalid_policy(format!(
+            "{kind} detector limits are invalid or exceed the runtime ceiling"
+        )));
+    }
+    if secret_ref.is_some_and(str::is_empty) {
+        return Err(invalid_policy(format!(
+            "{kind} detector secret_ref cannot be empty"
+        )));
+    }
+    if fingerprint_secret_ref.trim().is_empty() {
+        return Err(invalid_policy(format!(
+            "{kind} detector requires fingerprint_secret_ref for keyed evidence"
+        )));
+    }
+    Ok(())
+}
+
+fn default_presidio_language() -> String {
+    "en".to_string()
+}
+
+const fn default_semantic_score_threshold_percent() -> u8 {
+    50
 }
 
 const fn default_detector_timeout_ms() -> u64 {

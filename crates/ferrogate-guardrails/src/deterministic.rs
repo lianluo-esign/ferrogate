@@ -886,7 +886,7 @@ fn add_context_finding(
     }
 }
 
-fn is_mutable_text_segment(segment: &ContentSegment) -> bool {
+pub(crate) fn is_mutable_text_segment(segment: &ContentSegment) -> bool {
     matches!(
         segment.source,
         ContentSource::System

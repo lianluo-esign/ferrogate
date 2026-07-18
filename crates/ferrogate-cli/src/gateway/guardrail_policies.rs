@@ -714,7 +714,9 @@ fn dry_run_check(check: &ferrogate_guardrails::CheckBinding, text: &str) -> Guar
         };
     }
     let result = match &check.detector {
-        DetectorDefinition::CustomHttp { .. } => "not_executed",
+        DetectorDefinition::CustomHttp { .. }
+        | DetectorDefinition::Presidio { .. }
+        | DetectorDefinition::LlmGuardPromptInjection { .. } => "not_executed",
         DetectorDefinition::Local {
             keywords,
             regex,
@@ -754,6 +756,8 @@ fn detector_kind(detector: &DetectorDefinition) -> &'static str {
     match detector {
         DetectorDefinition::Local { .. } => "local",
         DetectorDefinition::CustomHttp { .. } => "custom_http",
+        DetectorDefinition::Presidio { .. } => "presidio",
+        DetectorDefinition::LlmGuardPromptInjection { .. } => "llm_guard_prompt_injection",
     }
 }
 
@@ -815,6 +819,11 @@ fn detector_references_host_secret(detector: &DetectorDefinition) -> bool {
             fingerprint_secret_ref: Some(_),
             ..
         }
+        // The native adapters ALWAYS dereference a host secret: their
+        // fingerprint_secret_ref is mandatory (and secret_ref is optional on
+        // top), so tenant-scoped authors can never register them.
+        | DetectorDefinition::Presidio { .. }
+        | DetectorDefinition::LlmGuardPromptInjection { .. }
     )
 }
 

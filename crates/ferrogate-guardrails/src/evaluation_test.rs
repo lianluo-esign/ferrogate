@@ -65,26 +65,30 @@ fn secret_detector_scores_realistic_precision_and_recall_on_reference_corpus() {
     let detector = aws_secret_detector();
     let metrics = runtime().block_on(run_detector_evaluation(&detector, &corpus));
 
-    assert_eq!(metrics.corpus_version, "reference/1");
-    assert_eq!(metrics.total, 5);
-    // Catches the secret (TP), misses the injection (FN), flags no benign (FP=0).
+    assert_eq!(metrics.corpus_version, "reference/2");
+    assert_eq!(metrics.total, 8);
+    // Catches the secret (TP), misses every injection (FN), flags no benign.
     assert_eq!(metrics.true_positives, 1);
-    assert_eq!(metrics.false_negatives, 1);
+    assert_eq!(metrics.false_negatives, 3);
     assert_eq!(metrics.false_positives, 0);
-    assert_eq!(metrics.true_negatives, 3);
+    assert_eq!(metrics.true_negatives, 4);
     assert_eq!(metrics.errors, 0);
     assert!(
         (metrics.precision - 1.0).abs() < 1e-9,
         "{}",
         metrics.precision
     );
-    assert!((metrics.recall - 0.5).abs() < 1e-9, "{}", metrics.recall);
-    // F1 = 2*1*0.5/(1+0.5) = 0.666...
-    assert!((metrics.f1 - (2.0 / 3.0)).abs() < 1e-9, "{}", metrics.f1);
-    // The missed case is named for triage; no benign case is a false alarm.
+    assert!((metrics.recall - 0.25).abs() < 1e-9, "{}", metrics.recall);
+    // F1 = 2*1*0.25/(1+0.25) = 0.4
+    assert!((metrics.f1 - 0.4).abs() < 1e-9, "{}", metrics.f1);
+    // The missed cases are named for triage; no benign case is a false alarm.
     assert_eq!(
         metrics.false_negative_cases,
-        vec!["prompt-injection-override"]
+        vec![
+            "prompt-injection-override",
+            "prompt-injection-exfiltration",
+            "prompt-injection-roleplay"
+        ]
     );
     assert!(metrics.false_positive_cases.is_empty());
     // The latency distribution is populated and ordered.
@@ -106,7 +110,15 @@ fn always_pass_detector_has_zero_recall_and_lists_every_missed_malicious_case() 
     assert_eq!(metrics.precision, 0.0); // no positive predictions -> guarded to 0
     let mut missed = metrics.false_negative_cases.clone();
     missed.sort();
-    assert_eq!(missed, vec!["prompt-injection-override", "secret-aws-key"]);
+    assert_eq!(
+        missed,
+        vec![
+            "prompt-injection-exfiltration",
+            "prompt-injection-override",
+            "prompt-injection-roleplay",
+            "secret-aws-key"
+        ]
+    );
 }
 
 #[test]
@@ -116,16 +128,16 @@ fn always_fail_detector_has_full_recall_and_lists_every_benign_false_positive() 
         MockAdapter::new(mock_descriptor()).with_default(MockResponse::result(fail_result()));
     let metrics = runtime().block_on(run_detector_evaluation(&detector, &corpus));
 
-    // Flags everything: catches both malicious (recall 1.0) but false-alarms on
-    // all three benign cases.
-    assert_eq!(metrics.true_positives, 2);
+    // Flags everything: catches all malicious (recall 1.0) but false-alarms on
+    // all four benign cases.
+    assert_eq!(metrics.true_positives, 4);
     assert_eq!(metrics.false_negatives, 0);
-    assert_eq!(metrics.false_positives, 3);
+    assert_eq!(metrics.false_positives, 4);
     assert_eq!(metrics.true_negatives, 0);
     assert!((metrics.recall - 1.0).abs() < 1e-9);
-    // precision = 2 / (2 + 3) = 0.4
+    // precision = 4 / (4 + 4) = 0.5
     assert!(
-        (metrics.precision - 0.4).abs() < 1e-9,
+        (metrics.precision - 0.5).abs() < 1e-9,
         "{}",
         metrics.precision
     );
@@ -136,6 +148,7 @@ fn always_fail_detector_has_full_recall_and_lists_every_benign_false_positive() 
         vec![
             "benign-code-question",
             "benign-greeting",
+            "benign-mentions-ignore",
             "benign-mentions-key-word"
         ]
     );

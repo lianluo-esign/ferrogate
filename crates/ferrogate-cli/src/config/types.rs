@@ -870,6 +870,19 @@ pub(crate) struct GuardrailRule {
     pub(crate) provider: GuardrailProviderKind,
     #[serde(default)]
     pub(crate) provider_endpoint: Option<String>,
+    /// Presidio only: language hint sent with every analyze request.
+    #[serde(default)]
+    pub(crate) provider_language: Option<String>,
+    /// Presidio / LLM-Guard only: minimum score to act on, percent (0-100).
+    #[serde(default)]
+    pub(crate) provider_score_threshold_percent: Option<u8>,
+    /// Presidio only: optional recognizer entity allow-list.
+    #[serde(default)]
+    pub(crate) provider_entities: Option<Vec<String>>,
+    /// Presidio / LLM-Guard: required secret reference used to key evidence
+    /// fingerprints (HMAC over the flagged content).
+    #[serde(default)]
+    pub(crate) provider_fingerprint_secret_ref: Option<String>,
     #[serde(default = "default_guardrail_provider_timeout_ms")]
     pub(crate) provider_timeout_ms: u64,
     #[serde(flatten)]
@@ -933,14 +946,27 @@ pub(crate) enum GuardrailProviderErrorMode {
 
 /// Selects how a [`GuardrailRule`] decides whether text matches: in-process
 /// keyword/regex/length checks (`None`, the default) or delegation to an
-/// external detector reachable over HTTP (`CustomHttp`) — e.g. a dedicated
-/// PII/jailbreak/toxicity classifier that can't be expressed as a regex.
+/// external detector reachable over HTTP — a generic `CustomHttp` endpoint,
+/// or one of the native self-hosted semantic adapters (#201): `Presidio`
+/// (Microsoft Presidio analyzer, DLP/PII with span redaction) and
+/// `LlmGuardPromptInjection` (ProtectAI LLM-Guard prompt scanner,
+/// detect-only). The native adapters require
+/// `provider_fingerprint_secret_ref` for keyed evidence.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GuardrailProviderKind {
     #[default]
     None,
     CustomHttp,
+    Presidio,
+    LlmGuardPromptInjection,
+}
+
+impl GuardrailProviderKind {
+    /// True for every kind that dispatches to an external HTTP detector.
+    pub(crate) fn is_external(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]

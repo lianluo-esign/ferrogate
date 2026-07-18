@@ -5502,15 +5502,27 @@ fn compile_static_guardrail_policy(rule: &GuardrailRule) -> anyhow::Result<Polic
     );
     let has_local =
         !rule.keywords.is_empty() || !rule.regex.is_empty() || rule.max_input_bytes.is_some();
+    let require_endpoint = |kind: &str| {
+        rule.provider_endpoint.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "guardrail {} {kind} provider is missing provider_endpoint",
+                rule.id
+            )
+        })
+    };
+    let require_fingerprint_ref = |kind: &str| {
+        rule.provider_fingerprint_secret_ref.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "guardrail {} {kind} provider is missing provider_fingerprint_secret_ref",
+                rule.id
+            )
+        })
+    };
+    let score_threshold_percent = rule.provider_score_threshold_percent.unwrap_or(50);
     let detector = match rule.provider {
         GuardrailProviderKind::None => local.clone(),
         GuardrailProviderKind::CustomHttp => DetectorDefinition::CustomHttp {
-            endpoint: rule.provider_endpoint.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "guardrail {} custom_http provider is missing provider_endpoint",
-                    rule.id
-                )
-            })?,
+            endpoint: require_endpoint("custom_http")?,
             timeout_ms: rule.provider_timeout_ms,
             max_concurrency: rule.provider_runtime.provider_max_concurrency,
             circuit_failure_threshold: rule.provider_runtime.provider_circuit_failure_threshold,
@@ -5521,8 +5533,35 @@ fn compile_static_guardrail_policy(rule: &GuardrailRule) -> anyhow::Result<Polic
             allow_private_network: rule.provider_runtime.provider_allow_private_network,
             secret_ref: rule.provider_runtime.provider_secret_ref.clone(),
         },
+        GuardrailProviderKind::Presidio => DetectorDefinition::Presidio {
+            endpoint: require_endpoint("presidio")?,
+            language: rule
+                .provider_language
+                .clone()
+                .unwrap_or_else(|| "en".to_string()),
+            score_threshold_percent,
+            entities: rule.provider_entities.clone(),
+            timeout_ms: rule.provider_timeout_ms,
+            max_payload_bytes: rule.provider_runtime.provider_max_payload_bytes,
+            max_response_bytes: rule.provider_runtime.provider_max_response_bytes,
+            allow_private_network: rule.provider_runtime.provider_allow_private_network,
+            secret_ref: rule.provider_runtime.provider_secret_ref.clone(),
+            fingerprint_secret_ref: require_fingerprint_ref("presidio")?,
+        },
+        GuardrailProviderKind::LlmGuardPromptInjection => {
+            DetectorDefinition::LlmGuardPromptInjection {
+                endpoint: require_endpoint("llm_guard_prompt_injection")?,
+                score_threshold_percent,
+                timeout_ms: rule.provider_timeout_ms,
+                max_payload_bytes: rule.provider_runtime.provider_max_payload_bytes,
+                max_response_bytes: rule.provider_runtime.provider_max_response_bytes,
+                allow_private_network: rule.provider_runtime.provider_allow_private_network,
+                secret_ref: rule.provider_runtime.provider_secret_ref.clone(),
+                fingerprint_secret_ref: require_fingerprint_ref("llm_guard_prompt_injection")?,
+            }
+        }
     };
-    let fallback_detector = (rule.provider == GuardrailProviderKind::CustomHttp
+    let fallback_detector = (rule.provider.is_external()
         && rule.provider_runtime.provider_on_error == GuardrailProviderErrorMode::FallbackDetector
         && has_local)
         .then_some(local);
@@ -5684,6 +5723,10 @@ fn guardrail_detector_evidence_metadata(
     let detector_id = match definition {
         DetectorDefinition::Local { .. } => "ferrogate.local".to_string(),
         DetectorDefinition::CustomHttp { .. } => "custom_http".to_string(),
+        DetectorDefinition::Presidio { .. } => "presidio".to_string(),
+        DetectorDefinition::LlmGuardPromptInjection { .. } => {
+            "llm_guard_prompt_injection".to_string()
+        }
     };
     let serialized = serde_json::to_vec(definition)?;
     let digest = Sha256::digest(serialized);
@@ -5743,23 +5786,8 @@ fn build_guardrail_detector(
         })?;
         return Ok(Arc::new(detector));
     }
-    let DetectorDefinition::CustomHttp {
-        endpoint,
-        timeout_ms,
-        max_concurrency,
-        circuit_failure_threshold,
-        circuit_cooldown_ms,
-        max_retries,
-        max_payload_bytes,
-        max_response_bytes,
-        allow_private_network,
-        secret_ref,
-    } = definition
-    else {
-        unreachable!("local detector returned above")
-    };
-    let bearer_token = match secret_ref.as_deref() {
-        Some(secret_ref) => Some(DetectorSecret::new(
+    let resolve_secret = |secret_ref: &str| -> anyhow::Result<DetectorSecret> {
+        Ok(DetectorSecret::new(
             secret_registry
                 .resolve(secret_ref)
                 .map_err(|error| {
@@ -5770,30 +5798,109 @@ fn build_guardrail_detector(
                 .ok_or_else(|| {
                     anyhow::anyhow!("secret for guardrail {policy_id}/{check_id} resolved no value")
                 })?,
-        )),
-        None => None,
+        ))
     };
-    let detector = CustomHttpDetector::new(CustomHttpDetectorConfig {
-        id: format!("{policy_id}/{check_id}"),
-        endpoint: endpoint.clone(),
-        timeout: Duration::from_millis(*timeout_ms),
-        max_concurrency: *max_concurrency,
-        circuit_failure_threshold: *circuit_failure_threshold,
-        circuit_cooldown: Duration::from_millis(*circuit_cooldown_ms),
-        max_retries: *max_retries,
-        max_payload_bytes: *max_payload_bytes,
-        max_response_bytes: *max_response_bytes,
-        allow_private_network: *allow_private_network,
-        supported_sources: sources.to_vec(),
-        bearer_token,
-    })
-    .map_err(|error| {
+    let init_error = |error: ferrogate_guardrails::DetectorError| {
         anyhow::anyhow!(
             "failed to initialize guardrail {policy_id}/{check_id}: {}",
             error.safe_message()
         )
-    })?;
-    Ok(Arc::new(detector))
+    };
+    match definition {
+        DetectorDefinition::Local { .. } => unreachable!("local detector returned above"),
+        DetectorDefinition::CustomHttp {
+            endpoint,
+            timeout_ms,
+            max_concurrency,
+            circuit_failure_threshold,
+            circuit_cooldown_ms,
+            max_retries,
+            max_payload_bytes,
+            max_response_bytes,
+            allow_private_network,
+            secret_ref,
+        } => {
+            let bearer_token = secret_ref.as_deref().map(resolve_secret).transpose()?;
+            let detector = CustomHttpDetector::new(CustomHttpDetectorConfig {
+                id: format!("{policy_id}/{check_id}"),
+                endpoint: endpoint.clone(),
+                timeout: Duration::from_millis(*timeout_ms),
+                max_concurrency: *max_concurrency,
+                circuit_failure_threshold: *circuit_failure_threshold,
+                circuit_cooldown: Duration::from_millis(*circuit_cooldown_ms),
+                max_retries: *max_retries,
+                max_payload_bytes: *max_payload_bytes,
+                max_response_bytes: *max_response_bytes,
+                allow_private_network: *allow_private_network,
+                supported_sources: sources.to_vec(),
+                bearer_token,
+            })
+            .map_err(init_error)?;
+            Ok(Arc::new(detector))
+        }
+        DetectorDefinition::Presidio {
+            endpoint,
+            language,
+            score_threshold_percent,
+            entities,
+            timeout_ms,
+            max_payload_bytes,
+            max_response_bytes,
+            allow_private_network,
+            secret_ref,
+            fingerprint_secret_ref,
+        } => {
+            let bearer_token = secret_ref.as_deref().map(resolve_secret).transpose()?;
+            let fingerprint_key = resolve_secret(fingerprint_secret_ref)?;
+            let detector = ferrogate_guardrails::PresidioDetector::new(
+                ferrogate_guardrails::PresidioDetectorConfig {
+                    id: format!("{policy_id}/{check_id}"),
+                    endpoint: endpoint.clone(),
+                    language: language.clone(),
+                    score_threshold_percent: *score_threshold_percent,
+                    entities: entities.clone(),
+                    timeout: Duration::from_millis(*timeout_ms),
+                    max_payload_bytes: *max_payload_bytes,
+                    max_response_bytes: *max_response_bytes,
+                    allow_private_network: *allow_private_network,
+                    supported_sources: sources.to_vec(),
+                    bearer_token,
+                    fingerprint_key,
+                },
+            )
+            .map_err(init_error)?;
+            Ok(Arc::new(detector))
+        }
+        DetectorDefinition::LlmGuardPromptInjection {
+            endpoint,
+            score_threshold_percent,
+            timeout_ms,
+            max_payload_bytes,
+            max_response_bytes,
+            allow_private_network,
+            secret_ref,
+            fingerprint_secret_ref,
+        } => {
+            let bearer_token = secret_ref.as_deref().map(resolve_secret).transpose()?;
+            let fingerprint_key = resolve_secret(fingerprint_secret_ref)?;
+            let detector = ferrogate_guardrails::LlmGuardPromptInjectionDetector::new(
+                ferrogate_guardrails::LlmGuardPromptInjectionConfig {
+                    id: format!("{policy_id}/{check_id}"),
+                    endpoint: endpoint.clone(),
+                    score_threshold_percent: *score_threshold_percent,
+                    timeout: Duration::from_millis(*timeout_ms),
+                    max_payload_bytes: *max_payload_bytes,
+                    max_response_bytes: *max_response_bytes,
+                    allow_private_network: *allow_private_network,
+                    supported_sources: sources.to_vec(),
+                    bearer_token,
+                    fingerprint_key,
+                },
+            )
+            .map_err(init_error)?;
+            Ok(Arc::new(detector))
+        }
+    }
 }
 
 /// Resolves every configured `Provider.secret_ref` once (issue #163),

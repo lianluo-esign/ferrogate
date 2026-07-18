@@ -37,6 +37,8 @@ mod envelope;
 pub use envelope::*;
 mod deterministic;
 pub use deterministic::*;
+mod adapters;
+pub use adapters::*;
 
 const CONTRACT_VERSION: u32 = 1;
 pub const MAX_DETECTOR_TIMEOUT: Duration = Duration::from_secs(30);
@@ -872,7 +874,7 @@ fn validate_config(config: &CustomHttpDetectorConfig) -> Result<(), DetectorErro
     Ok(())
 }
 
-fn ensure_rustls_crypto_provider() {
+pub(crate) fn ensure_rustls_crypto_provider() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         // The gateway binary may already have selected ring. Installing the
@@ -913,7 +915,7 @@ pub fn validate_custom_http_endpoint(
     Ok(())
 }
 
-fn classify_reqwest_error(error: &reqwest::Error) -> DetectorError {
+pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> DetectorError {
     if error.is_timeout() {
         DetectorError::new(
             DetectorErrorKind::Timeout,
@@ -932,7 +934,7 @@ fn classify_reqwest_error(error: &reqwest::Error) -> DetectorError {
     }
 }
 
-fn status_error(status: StatusCode) -> DetectorError {
+pub(crate) fn status_error(status: StatusCode) -> DetectorError {
     let (kind, message) = match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
             DetectorErrorKind::Unauthorized,
@@ -955,8 +957,8 @@ fn status_error(status: StatusCode) -> DetectorError {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct GuardrailDnsResolver {
-    allow_private_network: bool,
+pub(crate) struct GuardrailDnsResolver {
+    pub(crate) allow_private_network: bool,
 }
 
 impl Resolve for GuardrailDnsResolver {
@@ -1041,6 +1043,8 @@ pub mod conformance;
 #[cfg(any(test, feature = "conformance"))]
 pub mod evaluation;
 
+#[cfg(test)]
+mod adapters_test;
 #[cfg(test)]
 mod conformance_test;
 #[cfg(test)]
