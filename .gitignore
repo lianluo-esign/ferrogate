@@ -28,3 +28,4 @@ ferrogate-wiki/wiki-site/quartz/.quartz-cache/
 ferrogate-wiki/wiki-site/.quartz-cache/
 ferrogate-wiki/wiki-site/.cache/
 ferrogate-wiki/wiki-site/tsconfig.tsbuildinfo
+scripts/release-dryrun/__pycache__/
