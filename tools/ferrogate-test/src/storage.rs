@@ -1257,10 +1257,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 32",
+         FROM {}.storage_schema_migrations WHERE version = 36",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "32:032_guardrail_policy_binding_generation" {
+    if migration_version.trim() != "36:036_control_plane_replay_floors" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1891,10 +1891,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 32);
+                assert_eq!(body["storage"]["schema"]["version"], 36);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "032_guardrail_policy_binding_generation"
+                    "036_control_plane_replay_floors"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
