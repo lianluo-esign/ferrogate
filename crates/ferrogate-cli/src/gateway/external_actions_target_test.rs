@@ -275,24 +275,24 @@ fn unix_authorizer_detects_parent_swap_while_waiting_to_accept() {
     let socket = secure_parent.join("authorizer.sock");
     let original_parent = root.path().join("private-original");
     let shared = shared_state_with_mcp_grant("socket-accept-swap-policy");
-    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
-    let server_socket = socket.clone();
-    let server = std::thread::spawn(move || {
-        serve_gateway_external_action_authorizer_unix_with_hooks(
-            &server_socket,
-            GatewayExternalActionAuthorizerService::new(shared),
-            Some(1),
-            || {},
-            || bound_tx.send(()).unwrap(),
-        )
-    });
-    bound_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .unwrap();
-
-    std::fs::rename(&secure_parent, &original_parent).unwrap();
-    std::os::unix::fs::symlink(&outside, &secure_parent).unwrap();
-    let error = server.join().unwrap().unwrap_err();
+    // Perform the swap inside the bound hook: it runs on the server thread
+    // after the socket is bound and verified but before the accept loop, so
+    // the first accept-loop revalidation deterministically observes the
+    // completed swap (no race against a concurrently running verify pass).
+    let swap_secure_parent = secure_parent.clone();
+    let swap_original_parent = original_parent.clone();
+    let swap_outside = outside.clone();
+    let error = serve_gateway_external_action_authorizer_unix_with_hooks(
+        &socket,
+        GatewayExternalActionAuthorizerService::new(shared),
+        Some(1),
+        || {},
+        move || {
+            std::fs::rename(&swap_secure_parent, &swap_original_parent).unwrap();
+            std::os::unix::fs::symlink(&swap_outside, &swap_secure_parent).unwrap();
+        },
+    )
+    .unwrap_err();
 
     assert!(
         error.to_string().contains("changed after validation"),
