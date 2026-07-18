@@ -313,6 +313,92 @@ fn tenant_scoped_admin_key_cannot_self_credit_its_own_wallet() {
     gateway.wait().unwrap();
 }
 
+/// A tenant-scoped admin key must not move its OWN tenant onto a different
+/// (higher) plan: a plan change self-grants paid-tier entitlements + multiplied
+/// quotas, so it is a platform-operator action. The tenant may still edit its
+/// own account's cosmetic fields.
+#[test]
+fn tenant_scoped_admin_key_cannot_change_its_own_plan_or_status() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+
+    // The operator provisions a higher-tier plan.
+    let plan = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &ADMIN,
+        r#"{"id":"enterprise","name":"Enterprise","slug":"enterprise","default_rpm_limit":600,"default_tpm_limit":100000}"#,
+    );
+    assert!(
+        plan.contains("HTTP/1.1 200") || plan.contains("HTTP/1.1 201"),
+        "operator plan create should succeed: {plan}"
+    );
+
+    // Tenant A tries to move its own account onto the enterprise plan: denied.
+    let self_upgrade = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-iso-a",
+        &TENANT_A,
+        r#"{"plan_id":"enterprise"}"#,
+    );
+    assert!(
+        status_line(&self_upgrade).contains("403"),
+        "tenant must not self-upgrade its plan: {self_upgrade}"
+    );
+    assert!(self_upgrade.contains("platform_operator_required"));
+
+    // Tenant A un-suspending / changing its own status: denied too.
+    let self_status = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-iso-a",
+        &TENANT_A,
+        r#"{"status":"enterprise-override"}"#,
+    );
+    assert!(
+        status_line(&self_status).contains("403"),
+        "tenant must not change its own account status: {self_status}"
+    );
+
+    // But a cosmetic self-edit (name) is still allowed for the tenant.
+    let self_rename = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-iso-a",
+        &TENANT_A,
+        r#"{"name":"Tenant A Renamed"}"#,
+    );
+    assert!(
+        self_rename.contains("HTTP/1.1 200"),
+        "tenant may still edit its own account name: {self_rename}"
+    );
+
+    // The platform operator retains the ability to change the plan.
+    let operator_upgrade = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-iso-a",
+        &ADMIN,
+        r#"{"plan_id":"enterprise"}"#,
+    );
+    assert!(
+        operator_upgrade.contains("HTTP/1.1 200"),
+        "the operator must retain plan assignment: {operator_upgrade}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 /// The same class of gap, across the other admin surfaces fixed alongside
 /// wallets: tenant-accounts, projects, virtual-keys, and quota-policies.
 #[test]

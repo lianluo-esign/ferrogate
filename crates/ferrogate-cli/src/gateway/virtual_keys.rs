@@ -365,6 +365,36 @@ impl FerroGateway {
                         .await;
                     }
                 }
+                // A tenant-scoped admin key (organization_id == its own tenant --
+                // the shape every admin-console login provisions) may edit its
+                // own account's name/slug, but must NOT change its plan or
+                // status. A plan change self-grants paid-tier entitlements +
+                // multiplied rpm/tpm/budget/storage quotas, and a status change
+                // could un-suspend the tenant -- both are platform-operator
+                // actions (matching plans/rbac/wallet mutations, which all call
+                // require_platform_operator). Without this a tenant reads a
+                // higher plan id via GET /admin/v1/plans and PATCHes itself onto
+                // it with no operator approval or billing.
+                if auth.organization_id.is_some() {
+                    let changes_plan = payload
+                        .plan_id
+                        .as_deref()
+                        .is_some_and(|plan_id| plan_id != existing.plan_id);
+                    let changes_status = payload
+                        .status
+                        .as_deref()
+                        .is_some_and(|status| status != existing.status);
+                    if changes_plan || changes_status {
+                        return write_json_error(
+                            session,
+                            StatusCode::FORBIDDEN,
+                            "platform_operator_required",
+                            "changing a tenant's plan or status requires a platform-operator key",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
                 let account = StoredTenantAccount {
                     id: id.to_string(),
                     name: payload.name.unwrap_or(existing.name),
