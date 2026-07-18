@@ -43,14 +43,17 @@ impl QuotaScopeSelector {
 
     /// The rate-limit / budget counter-window key for this binding scope.
     ///
-    /// A `Key`-scoped winner returns the raw `api_key_id` unchanged, so the
-    /// common case (a per-key limit binds) stays byte-for-byte identical to
-    /// the pre-fix per-key counter -- no counter reset, no merged keys. Every
-    /// broader scope returns a `"{kind}:{id}"` key that all keys under that
-    /// scope derive identically, so they share one window.
+    /// EVERY scope (including `Key`) is `"{kind}:{id}"`-namespaced. A `Key`
+    /// winner is `"key:{api_key_id}"` -- previously it returned the RAW,
+    /// tenant-controllable `api_key_id`, which shares the counter namespace with
+    /// the broader `"tenant:/project:/workspace:{id}"` keys: a tenant could mint
+    /// a virtual key whose id is `"tenant:<victim>"` and collide its per-key
+    /// window with another tenant's aggregate window, poisoning the victim's
+    /// RPM/TPM counter (cross-tenant DoS). The `"key:"` prefix makes a per-key
+    /// counter structurally unable to equal any broader-scope key.
     pub fn counter_key(&self, api_key_id: &str) -> String {
         match self.kind {
-            QuotaScopeKind::Key => api_key_id.to_string(),
+            QuotaScopeKind::Key => format!("{}:{}", QuotaScopeKind::Key.as_str(), api_key_id),
             QuotaScopeKind::Tenant | QuotaScopeKind::Project | QuotaScopeKind::Workspace => {
                 format!("{}:{}", self.kind.as_str(), self.id)
             }
@@ -637,16 +640,25 @@ mod tests {
     }
 
     #[test]
-    fn counter_key_is_raw_for_the_key_scope_and_prefixed_for_broader_scopes() {
+    fn counter_key_is_namespaced_for_every_scope_including_key() {
         let key = QuotaScopeSelector::new(QuotaScopeKind::Key, "k1");
-        // Byte-for-byte per-key: the raw api key id, no prefix.
-        assert_eq!(key.counter_key("vk-abc"), "vk-abc");
+        // Per-key windows are "key:"-prefixed so they cannot collide with a
+        // broader-scope key even when the api key id is attacker-chosen.
+        assert_eq!(key.counter_key("vk-abc"), "key:vk-abc");
         let workspace = QuotaScopeSelector::new(QuotaScopeKind::Workspace, "w1");
         assert_eq!(workspace.counter_key("vk-abc"), "workspace:w1");
         let tenant = QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1");
         assert_eq!(tenant.counter_key("vk-abc"), "tenant:t1");
         let project = QuotaScopeSelector::new(QuotaScopeKind::Project, "p1");
         assert_eq!(project.counter_key("vk-abc"), "project:p1");
+        // A per-key counter can never equal a broader-scope counter: a virtual
+        // key whose id is "tenant:victim" hashes to "key:tenant:victim", not
+        // "tenant:victim".
+        assert_eq!(key.counter_key("tenant:victim"), "key:tenant:victim");
+        assert_ne!(
+            key.counter_key("tenant:victim"),
+            tenant.counter_key("anything"),
+        );
     }
 
     #[test]

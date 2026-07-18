@@ -440,6 +440,71 @@ fn workspace_scoped_rpm_limit_is_shared_across_two_keys_under_the_workspace() {
 }
 
 #[test]
+fn broader_scope_rpm_cap_binds_even_when_a_key_sets_its_own_equal_limit() {
+    use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+    // Round-12 audit: previously a broader-scope aggregate cap only bound when
+    // STRICTLY tighter than the key's own request_limit_per_minute, so a tenant
+    // could set every key's own limit EQUAL to (or below) an operator's
+    // workspace/tenant cap and have each key counted per-key -> N keys = N x the
+    // cap. Now the per-key limit AND the aggregate are enforced as separate
+    // windows, so the aggregate still binds across keys.
+    let secret_a = "fg_live_agg_rpm_a_0123456789ab";
+    let secret_b = "fg_live_agg_rpm_b_0123456789ab";
+    let state = AppState::new(Config {
+        api_keys: vec![decoy_yaml_key()],
+        ..Config::default()
+    });
+    // Each key's own rpm limit EQUALS the aggregate cap (the pre-fix bypass).
+    seed_durable_virtual_key(&state, "vk-agg-rpm-a", secret_a, |key| {
+        key.request_limit_per_minute = Some(1);
+    });
+    seed_durable_virtual_key(&state, "vk-agg-rpm-b", secret_b, |key| {
+        key.request_limit_per_minute = Some(1);
+    });
+    block_on(state.upsert_quota_policy(StoredQuotaPolicy {
+        id: "workspace:workspace-1".into(),
+        scope_type: QuotaScopeKind::Workspace,
+        scope_id: "workspace-1".into(),
+        model_allowlist: vec![],
+        rpm_limit: Some(1),
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        alert_threshold_pcts: vec![],
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }))
+    .unwrap();
+
+    // Key A fills the shared workspace slot (and its own).
+    assert!(
+        authenticate(
+            &state,
+            &bearer_headers(secret_a),
+            "chat.completions",
+            "req-a1"
+        )
+        .is_ok(),
+        "first request under the workspace must be admitted"
+    );
+    // Key B still has its OWN per-key slot free, but the workspace aggregate is
+    // exhausted, so it must be throttled -- the N-key bypass is closed.
+    let error = authenticate(
+        &state,
+        &bearer_headers(secret_b),
+        "chat.completions",
+        "req-b1",
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.code, "rate_limit_exceeded",
+        "an aggregate cap must bind across keys even when each key sets its own equal limit"
+    );
+}
+
+#[test]
 fn key_level_rpm_limit_still_throttles_each_key_independently() {
     // Regression guard for the common case: when the binding cap is the key's
     // own request_limit_per_minute (no broader scope cap), the two keys must

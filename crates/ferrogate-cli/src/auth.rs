@@ -111,30 +111,53 @@ impl AuthContext {
         }
     }
 
-    /// The per-minute request (RPM) rate-limit window for this request:
-    /// `(counter_key, limit)`, or `None` when the request has no API key or
-    /// no RPM cap applies.
+    /// The per-minute request (RPM) rate-limit windows to enforce for this
+    /// request. Returns BOTH the key's own `request_limit_per_minute` (TOK-12),
+    /// always on the per-key counter, AND the resolved quota `rpm_limit` on its
+    /// (possibly broader tenant/project/workspace) scope counter -- each as its
+    /// own window, all of which the caller must satisfy. Empty when there is no
+    /// API key or no RPM cap applies.
     ///
-    /// The limit is the tighter of the key's own `request_limit_per_minute`
-    /// (TOK-12) and the resolved quota `rpm_limit` -- unchanged. The counter
-    /// key is derived from the *winning* scope: a broader scope's cap
-    /// (tenant/project/workspace) is keyed on that scope so it aggregates
-    /// across every key under it, but the key's own limit stays byte-for-byte
-    /// per-key. The quota scope only binds when its rpm is *strictly* tighter
-    /// than the key's own limit (or the key sets none); on a tie the key's own
-    /// per-key limit is (co-)binding, so per-key counting is preserved.
-    pub(crate) fn request_window(&self) -> Option<(String, u64)> {
-        let api_key_id = self.api_key_id.as_deref()?;
-        let key_limit = self.request_limit_per_minute;
-        let quota_limit = self.effective_quota.rpm_limit;
-        let limit = min_opt_u64(key_limit, quota_limit)?;
-        let quota_binds_strictly =
-            quota_limit.is_some_and(|quota| key_limit.is_none_or(|key| quota < key));
-        let counter_key = match &self.effective_quota.rpm_limit_scope {
-            Some(scope) if quota_binds_strictly => scope.counter_key(api_key_id),
-            _ => api_key_id.to_string(),
+    /// Enforcing both (rather than collapsing to a single `min` counter) closes
+    /// an aggregate-cap bypass: previously the broader scope only bound when its
+    /// rpm was *strictly* tighter than the key's own limit, so a tenant could
+    /// set every key's own limit to (or below) an operator's tenant/project/
+    /// workspace cap and have each key counted per-key -- N keys => N x the
+    /// aggregate cap. When the quota is itself Key-scoped, the two windows dedup
+    /// onto one counter at the tighter limit, preserving per-key counting.
+    pub(crate) fn request_windows(&self) -> Vec<(String, u64)> {
+        let Some(api_key_id) = self.api_key_id.as_deref() else {
+            return Vec::new();
         };
-        Some((counter_key, limit))
+        // Matches QuotaScopeSelector::counter_key's Key branch exactly (same
+        // `as_str` namespace), so the per-key window shares a counter with a
+        // Key-scoped quota and can never collide with a broader-scope key.
+        let per_key_counter = format!(
+            "{}:{}",
+            ferrogate_storage::QuotaScopeKind::Key.as_str(),
+            api_key_id
+        );
+        let mut windows: Vec<(String, u64)> = Vec::new();
+        let mut add = |counter_key: String, limit: u64| match windows
+            .iter_mut()
+            .find(|(key, _)| *key == counter_key)
+        {
+            Some(existing) => existing.1 = existing.1.min(limit),
+            None => windows.push((counter_key, limit)),
+        };
+        if let Some(key_limit) = self.request_limit_per_minute {
+            add(per_key_counter.clone(), key_limit);
+        }
+        if let Some(quota_limit) = self.effective_quota.rpm_limit {
+            let counter_key = self
+                .effective_quota
+                .rpm_limit_scope
+                .as_ref()
+                .map(|scope| scope.counter_key(api_key_id))
+                .unwrap_or_else(|| per_key_counter.clone());
+            add(counter_key, quota_limit);
+        }
+        windows
     }
 
     /// The tokens-per-minute (TPM) rate-limit window for this request:
@@ -602,19 +625,10 @@ fn finalize_auth(
             });
         }
     }
-    if let Some((counter_key, limit)) = auth.request_window() {
+    for (counter_key, limit) in auth.request_windows() {
         require_request_budget(state, &counter_key, limit, request_id)?;
     }
     Ok(auth)
-}
-
-fn min_opt_u64(existing: Option<u64>, next: Option<u64>) -> Option<u64> {
-    match (existing, next) {
-        (Some(existing), Some(next)) => Some(existing.min(next)),
-        (Some(existing), None) => Some(existing),
-        (None, Some(next)) => Some(next),
-        (None, None) => None,
-    }
 }
 
 fn require_request_budget(
