@@ -2871,7 +2871,7 @@ fn execute_beneath_authorized_root(
     relative: &Path,
     authorized: Option<&AuthorizedFilesystemIdentity>,
 ) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
-    use std::{os::fd::AsRawFd, os::unix::fs::MetadataExt};
+    use std::{os::fd::AsRawFd, os::unix::fs::MetadataExt, os::unix::process::CommandExt};
 
     use rustix::fs::{open, openat2, Mode, OFlags, ResolveFlags};
 
@@ -2942,7 +2942,12 @@ fn execute_beneath_authorized_root(
     }
     let target_file = immutable_executable_snapshot(target_file, expected_content_fingerprint)?;
     let mut command = Command::new(format!("/proc/self/fd/{}", target_file.as_raw_fd()));
+    // Preserve the authorized target path as argv[0]: multi-call binaries
+    // (busybox, uutils coreutils) dispatch on the program name and would
+    // otherwise observe the opaque fd number. The executed bytes remain the
+    // sealed snapshot behind the fd.
     command
+        .arg0(root.join(relative))
         .current_dir(format!("/proc/self/fd/{}", root_file.as_raw_fd()))
         .env_clear()
         .stdin(Stdio::null())
@@ -3338,6 +3343,11 @@ fn join_remaining_reader(reader: &mut Option<thread::JoinHandle<io::Result<Bound
 
 struct AuthorizedCliObjects {
     executable: std::fs::File,
+    /// Authorized executable path, preserved as `argv[0]` so multi-call
+    /// binaries that dispatch on the program name (busybox, uutils
+    /// coreutils) behave identically to a direct invocation. The executed
+    /// bytes remain the sealed `/proc/self/fd/N` snapshot.
+    executable_path: PathBuf,
     cwd: std::fs::File,
 }
 
@@ -3345,9 +3355,11 @@ impl AuthorizedCliObjects {
     #[cfg(target_os = "linux")]
     fn command(&self, action: &ManagedCliAction) -> Command {
         use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
 
         let mut command = Command::new(format!("/proc/self/fd/{}", self.executable.as_raw_fd()));
         command
+            .arg0(&self.executable_path)
             .args(&action.args)
             .current_dir(format!("/proc/self/fd/{}", self.cwd.as_raw_fd()));
         command
@@ -3396,6 +3408,7 @@ fn open_authorized_cli_objects(
             "CLI authorization returned the wrong canonical target kind".to_string(),
         ));
     };
+    let executable_path = PathBuf::from(&executable);
     let executable = open(
         &executable,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -3437,7 +3450,11 @@ fn open_authorized_cli_objects(
             "authorized CLI cwd identity changed before execution".to_string(),
         ));
     }
-    Ok(AuthorizedCliObjects { executable, cwd })
+    Ok(AuthorizedCliObjects {
+        executable,
+        executable_path,
+        cwd,
+    })
 }
 
 #[cfg(target_os = "linux")]

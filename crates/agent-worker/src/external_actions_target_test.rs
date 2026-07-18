@@ -716,7 +716,9 @@ fn cli_snapshot_rejects_in_place_mutation_between_authorization_and_copy() {
 #[test]
 fn sealed_cli_snapshot_executes_authorized_bytes_after_source_mutation() {
     let workspace = tempfile::tempdir().unwrap();
-    let executable = workspace.path().join("allowed-command");
+    // Keep the utility's real basename: argv[0] is preserved through the
+    // sealed exec, and multi-call coreutils (uutils) dispatch on it.
+    let executable = workspace.path().join("echo");
     copy_elf("/bin/echo", &executable);
     let action = ManagedCliAction {
         command: executable.display().to_string(),
@@ -736,6 +738,35 @@ fn sealed_cli_snapshot_executes_authorized_bytes_after_source_mutation() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "authorized\n");
+}
+
+#[test]
+fn sealed_cli_exec_preserves_original_program_name_as_argv0() {
+    let workspace = tempfile::tempdir().unwrap();
+    // /bin/sh ($0 in -c mode reflects argv[0]) copied under a custom name:
+    // the child must observe the authorized path, not /proc/self/fd/N.
+    let executable = workspace.path().join("argv0-probe");
+    copy_elf("/bin/sh", &executable);
+    let action = ManagedCliAction {
+        command: executable.display().to_string(),
+        args: vec!["-c".into(), "printf %s \"$0\"".into()],
+        working_dir: workspace.path().display().to_string(),
+        env_policy: "empty".into(),
+        timeout_millis: 1_000,
+        stdout_limit_bytes: 1_024,
+        stderr_limit_bytes: 1_024,
+        artifact_capture: false,
+    };
+    let decision = cli_target_decision(workspace.path(), &action);
+    let snapshot = open_authorized_cli_objects(&decision).unwrap();
+
+    let output = snapshot.command(&action).env_clear().output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        executable.display().to_string()
+    );
 }
 
 #[test]
@@ -774,7 +805,9 @@ fn bound_cli_cwd_fd_survives_path_replacement_after_binding() {
     let cwd = root.path().join("cwd");
     let moved = root.path().join("cwd-authorized");
     std::fs::create_dir(&cwd).unwrap();
-    let executable = root.path().join("allowed-command");
+    // Keep the utility's real basename: argv[0] is preserved through the
+    // sealed exec, and multi-call coreutils (uutils) dispatch on it.
+    let executable = root.path().join("touch");
     copy_elf("/usr/bin/touch", &executable);
     let action = ManagedCliAction {
         command: executable.display().to_string(),
