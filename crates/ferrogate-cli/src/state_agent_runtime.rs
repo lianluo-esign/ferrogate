@@ -788,9 +788,26 @@ impl AppState {
                 "self-hosted worker {worker_id} was not found"
             ))
         })?;
+        // Cross-worker overwrite guard (#228, #82-class): artifact `id` is a
+        // GLOBAL namespace (id TEXT PRIMARY KEY) and the write is
+        // ON CONFLICT (id) DO UPDATE, so without this a worker could clobber and
+        // re-attribute another worker's (another tenant's) artifact by reusing
+        // its id. Reject when the existing row belongs to a different worker.
+        let artifact_id = request.artifact_id.trim().to_string();
+        if let Some(existing) =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_artifacts())
+                .into_iter()
+                .find(|artifact| artifact.id == artifact_id)
+        {
+            if existing.worker_id != registration.id {
+                return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
+                    "artifact {artifact_id} already exists for a different worker"
+                )));
+            }
+        }
         let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
         let stored_artifact = StoredSelfHostedWorkerArtifact {
-            id: request.artifact_id.trim().to_string(),
+            id: artifact_id,
             worker_id: registration.id.clone(),
             tenant: registration.tenant,
             workspace_id: registration.workspace_id,
@@ -852,9 +869,26 @@ impl AppState {
                 "self-hosted worker {worker_id} was not found"
             ))
         })?;
+        // Cross-worker overwrite guard (#228, #82-class): checkpoint `id` is a
+        // GLOBAL namespace (id TEXT PRIMARY KEY) and the write is
+        // ON CONFLICT (id) DO UPDATE. Reject a checkpoint id already owned by a
+        // different worker so one tenant cannot destroy/re-attribute another
+        // tenant's resume checkpoint.
+        let checkpoint_id = request.checkpoint_id.trim().to_string();
+        if let Some(existing) =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_checkpoints())
+                .into_iter()
+                .find(|checkpoint| checkpoint.id == checkpoint_id)
+        {
+            if existing.worker_id != registration.id {
+                return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
+                    "checkpoint {checkpoint_id} already exists for a different worker"
+                )));
+            }
+        }
         let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
         let stored_checkpoint = StoredSelfHostedWorkerCheckpoint {
-            id: request.checkpoint_id.trim().to_string(),
+            id: checkpoint_id,
             worker_id: registration.id.clone(),
             tenant: registration.tenant,
             workspace_id: registration.workspace_id,
@@ -1710,6 +1744,96 @@ mod tests {
         assert_eq!(
             state.workflow_run_last_successful_node_id("wf", 1, "shared-run-id", Some("tenant-b")),
             None,
+        );
+    }
+
+    #[test]
+    fn self_hosted_worker_cannot_overwrite_another_workers_checkpoint_or_artifact() {
+        // #228 (round-11): checkpoint/artifact ids share a GLOBAL namespace, so a
+        // worker reusing another worker's id must be rejected, not allowed to
+        // clobber and re-attribute another tenant's row.
+        let state = AppState::new(Config::default());
+        let register = |org: &str, name: &str| {
+            state
+                .register_self_hosted_worker(
+                    crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                        tenant: ferrogate_core::TenantContext {
+                            organization_id: Some(org.to_string()),
+                            ..Default::default()
+                        },
+                        workspace_id: format!("ws-{org}"),
+                        worker_name: name.to_string(),
+                        identity_fingerprint: format!("sha256:{name}"),
+                        identity_expires_at_unix: Some(4_000_000_000),
+                        orchestration_enabled: false,
+                        capability_envelope_json: None,
+                    },
+                )
+                .expect("registration accepted")
+                .0
+        };
+        let worker_a = register("org-a", "worker-a");
+        let worker_b = register("org-b", "worker-b");
+
+        let checkpoint_req = |id: &str| crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+            checkpoint_id: id.to_string(),
+            session_id: "session".into(),
+            run_id: "run".into(),
+            checkpoint_name: "resume".into(),
+            size_bytes: 1,
+            created_at_unix: Some(1),
+            checkpoint_json: None,
+        };
+        // Worker A records a checkpoint.
+        state
+            .record_self_hosted_worker_checkpoint(&worker_a.id, checkpoint_req("resume-state"))
+            .expect("worker A records its checkpoint");
+        // Worker B (different tenant) reusing the SAME checkpoint id is rejected.
+        let denied = state
+            .record_self_hosted_worker_checkpoint(&worker_b.id, checkpoint_req("resume-state"));
+        assert!(
+            matches!(denied, Err(SelfHostedWorkerRecordError::InvalidRequest(_))),
+            "cross-worker checkpoint id reuse must be rejected, got {denied:?}",
+        );
+        // Worker A's checkpoint is intact and still owned by A.
+        let checkpoints = block_on(state.repositories.self_hosted_worker_checkpoints());
+        let stored = checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.id == "resume-state")
+            .expect("A's checkpoint survives");
+        assert_eq!(stored.worker_id, worker_a.id);
+
+        // Same protection for artifacts.
+        let artifact_req = |id: &str| crate::responses::AdminSelfHostedWorkerArtifactRequest {
+            artifact_id: id.to_string(),
+            session_id: "session".into(),
+            run_id: "run".into(),
+            artifact_name: "out".into(),
+            content_type: None,
+            size_bytes: 1,
+            created_at_unix: Some(1),
+            artifact_json: None,
+        };
+        state
+            .record_self_hosted_worker_artifact(&worker_a.id, artifact_req("build-output"))
+            .expect("worker A records its artifact");
+        let denied_artifact =
+            state.record_self_hosted_worker_artifact(&worker_b.id, artifact_req("build-output"));
+        assert!(
+            matches!(
+                denied_artifact,
+                Err(SelfHostedWorkerRecordError::InvalidRequest(_))
+            ),
+            "cross-worker artifact id reuse must be rejected, got {denied_artifact:?}",
+        );
+        let artifacts = block_on(state.repositories.self_hosted_worker_artifacts());
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.id == "build-output")
+                .expect("A's artifact survives")
+                .worker_id,
+            worker_a.id,
         );
     }
 
