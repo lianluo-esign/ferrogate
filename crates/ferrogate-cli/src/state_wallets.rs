@@ -544,6 +544,7 @@ impl AppState {
         };
         let period_month = self.current_period_month();
         let timeout = Duration::from_secs(self.config.billing_alerts.webhook_timeout_secs);
+        let signing_secret = self.config.billing_alerts.webhook_signing_secret.clone();
         let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
             (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
             (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
@@ -558,6 +559,7 @@ impl AppState {
                 &period_month,
                 &webhook_url,
                 timeout,
+                signing_secret.as_deref(),
             )
             .await;
         }
@@ -570,6 +572,7 @@ impl AppState {
         period_month: &str,
         webhook_url: &str,
         timeout: Duration,
+        signing_secret: Option<&str>,
     ) {
         let policy = match self
             .repositories
@@ -645,9 +648,12 @@ impl AppState {
                 budget_usd,
                 fired_at_unix,
             );
-            if let Err(error) =
-                crate::budget_alerts::dispatch_budget_alert_webhook(webhook_url, timeout, &payload)
-            {
+            if let Err(error) = crate::budget_alerts::dispatch_budget_alert_webhook(
+                webhook_url,
+                timeout,
+                signing_secret,
+                &payload,
+            ) {
                 warn!(
                     scope_type = %scope_type.as_str(),
                     scope_id = %scope_id,
@@ -851,6 +857,7 @@ mod tests {
             billing_alerts: crate::config::BillingAlertsConfig {
                 webhook_url: Some(webhook_url),
                 webhook_timeout_secs: 5,
+                ..Default::default()
             },
             ..Config::default()
         });
@@ -945,6 +952,7 @@ mod tests {
             billing_alerts: crate::config::BillingAlertsConfig {
                 webhook_url: Some(webhook_url),
                 webhook_timeout_secs: 5,
+                ..Default::default()
             },
             ..Config::default()
         });

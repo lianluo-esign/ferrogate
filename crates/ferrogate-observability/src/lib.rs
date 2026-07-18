@@ -804,6 +804,11 @@ pub struct OtlpHttpRequest {
     pub url: String,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// Extra request headers `(name, value)` emitted after the standard
+    /// Host/Connection/Content-Type/Content-Length headers. Lets callers carry
+    /// e.g. an HMAC signature + timestamp so a webhook receiver can authenticate
+    /// the payload (issue #228). Values must not contain CR/LF.
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -916,6 +921,7 @@ fn build_otlp_request(
         url: format!("{}{}", endpoint.trim_end_matches('/'), path),
         content_type: "application/json",
         body: serde_json::to_vec(&body).expect("OTLP JSON serialization should not fail"),
+        headers: Vec::new(),
     })
 }
 

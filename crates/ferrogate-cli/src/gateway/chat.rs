@@ -3050,9 +3050,12 @@ fn enforce_ai_workflow_policy(
             ),
         });
     }
-    if let Some(message) =
-        state.workflow_edge_transition_error(workflow, request.agent_run_id, node_id)
-    {
+    if let Some(message) = state.workflow_edge_transition_error(
+        workflow,
+        request.agent_run_id,
+        node_id,
+        request.auth.organization_id.as_deref(),
+    ) {
         return Err(AiWorkflowRejection {
             status: StatusCode::FORBIDDEN,
             code: "workflow_edge_not_allowed",
@@ -3088,9 +3091,12 @@ fn enforce_ai_workflow_policy(
         }
     }
     if let Some(timeout_millis) = workflow.timeout_millis {
-        if let Some(started_at_unix) =
-            state.workflow_run_started_at(&workflow.id, workflow.version, request.agent_run_id)
-        {
+        if let Some(started_at_unix) = state.workflow_run_started_at(
+            &workflow.id,
+            workflow.version,
+            request.agent_run_id,
+            request.auth.organization_id.as_deref(),
+        ) {
             let elapsed_millis = request
                 .now_unix
                 .saturating_sub(started_at_unix)

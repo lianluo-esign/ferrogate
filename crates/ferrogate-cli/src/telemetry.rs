@@ -1245,13 +1245,22 @@ fn send_otlp_http_request<S: Read + Write>(
 ) -> AnyResult<()> {
     write!(
         stream,
-        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
         request.method,
         target.path_query,
         target.authority,
         request.content_type,
         request.body.len()
     )?;
+    for (name, value) in &request.headers {
+        // Header values are producer-controlled (HMAC hex + numeric timestamp);
+        // guard against CR/LF request-splitting regardless.
+        if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+            bail!("refusing to send OTLP/webhook request header with embedded CR/LF");
+        }
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "\r\n")?;
     stream.write_all(&request.body)?;
     stream.flush()?;
 
@@ -1279,6 +1288,7 @@ fn dispatch_ndjson_request<T: Serialize>(
         url: endpoint.to_string(),
         content_type: "application/x-ndjson",
         body,
+        headers: Vec::new(),
     };
     dispatch_otlp_request(&request, timeout)
 }

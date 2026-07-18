@@ -32,7 +32,13 @@ impl AppState {
         workflow_id: &str,
         workflow_version: u32,
         agent_run_id: &str,
+        organization_id: Option<&str>,
     ) -> Option<u64> {
+        // Tenant scope (#185/#228): `agent_run_id` is client-supplied and not
+        // tenant-namespaced, so the gating readers MUST also match the caller's
+        // organization_id -- otherwise one tenant referencing another tenant's
+        // agent_run_id would compute its run-gating from the other tenant's
+        // logs. `None` (platform operator) matches operator-owned records only.
         let request_timestamps = self
             .request_logs()
             .into_iter()
@@ -40,6 +46,7 @@ impl AppState {
                 log.workflow_id.as_deref() == Some(workflow_id)
                     && log.workflow_version == Some(workflow_version)
                     && log.agent_run_id.as_deref() == Some(agent_run_id)
+                    && log.tenant.organization_id.as_deref() == organization_id
             })
             .flat_map(|log| [log.started_at_unix, log.completed_at_unix]);
         let audit_timestamps = self
@@ -49,6 +56,7 @@ impl AppState {
                 event.workflow_id.as_deref() == Some(workflow_id)
                     && event.workflow_version == Some(workflow_version)
                     && event.agent_run_id.as_deref() == Some(agent_run_id)
+                    && event.tenant.organization_id.as_deref() == organization_id
             })
             .map(|event| event.occurred_at_unix);
         let billing_timestamps = self
@@ -58,6 +66,7 @@ impl AppState {
                 event.workflow_id.as_deref() == Some(workflow_id)
                     && event.workflow_version == Some(workflow_version)
                     && event.agent_run_id.as_deref() == Some(agent_run_id)
+                    && event.tenant.organization_id.as_deref() == organization_id
             })
             .map(|event| event.occurred_at_unix);
 
@@ -73,12 +82,17 @@ impl AppState {
         workflow_id: &str,
         workflow_version: u32,
         agent_run_id: &str,
+        organization_id: Option<&str>,
     ) -> Option<String> {
+        // Tenant scope (#185/#228): match the caller's organization_id so a
+        // client-supplied `agent_run_id` cannot pull another tenant's node
+        // history into this tenant's edge-transition gate.
         let mut latest: Option<(u64, String)> = None;
         for log in self.request_logs() {
             if log.workflow_id.as_deref() != Some(workflow_id)
                 || log.workflow_version != Some(workflow_version)
                 || log.agent_run_id.as_deref() != Some(agent_run_id)
+                || log.tenant.organization_id.as_deref() != organization_id
                 || log.status_code >= 400
             {
                 continue;
@@ -92,6 +106,7 @@ impl AppState {
             if event.workflow_id.as_deref() != Some(workflow_id)
                 || event.workflow_version != Some(workflow_version)
                 || event.agent_run_id.as_deref() != Some(agent_run_id)
+                || event.tenant.organization_id.as_deref() != organization_id
                 || event.outcome != "success"
             {
                 continue;
@@ -108,6 +123,7 @@ impl AppState {
             if event.workflow_id.as_deref() != Some(workflow_id)
                 || event.workflow_version != Some(workflow_version)
                 || event.agent_run_id.as_deref() != Some(agent_run_id)
+                || event.tenant.organization_id.as_deref() != organization_id
                 || event.status_code >= 400
             {
                 continue;
@@ -128,13 +144,17 @@ impl AppState {
         workflow: &AgentWorkflowPolicy,
         agent_run_id: &str,
         node_id: &str,
+        organization_id: Option<&str>,
     ) -> Option<String> {
         if workflow.edges.is_empty() {
             return None;
         }
-        if let Some(previous_node_id) =
-            self.workflow_run_last_successful_node_id(&workflow.id, workflow.version, agent_run_id)
-        {
+        if let Some(previous_node_id) = self.workflow_run_last_successful_node_id(
+            &workflow.id,
+            workflow.version,
+            agent_run_id,
+            organization_id,
+        ) {
             if previous_node_id == node_id
                 || workflow
                     .edges
@@ -1626,6 +1646,71 @@ mod tests {
         assert_eq!(found.tenant.organization_id.as_deref(), Some("tenant-a"));
         // A different tenant's id is not conjured up.
         assert!(state.agent_run_record("run-nonexistent").is_none());
+    }
+
+    #[test]
+    fn workflow_gating_readers_are_scoped_to_the_callers_tenant() {
+        // #228: agent_run_id is client-supplied and not tenant-namespaced. A
+        // request log recorded for tenant-a's run must NOT feed tenant-b's
+        // (or an operator's) run-gating just because tenant-b reuses the id.
+        let state = AppState::new(Config::default());
+        let log = |org: &str, node: &str, ts: u64| StoredRequestLog {
+            request_id: format!("req-{org}-{node}"),
+            trace_id: None,
+            agent_run_id: Some("shared-run-id".into()),
+            workflow_id: Some("wf".into()),
+            workflow_version: Some(1),
+            workflow_node_id: Some(node.into()),
+            cluster_id: None,
+            node_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some(org.to_string()),
+                ..Default::default()
+            },
+            route: None,
+            provider: None,
+            logical_model: None,
+            provider_model: None,
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            cache_status: None,
+            started_at_unix: Some(ts),
+            completed_at_unix: Some(ts),
+        };
+        state.record_request_log(log("tenant-a", "start", 100));
+
+        // tenant-a sees its own run start; tenant-b (same agent_run_id) does not,
+        // and neither does a platform operator (org None).
+        assert_eq!(
+            state.workflow_run_started_at("wf", 1, "shared-run-id", Some("tenant-a")),
+            Some(100),
+        );
+        assert_eq!(
+            state.workflow_run_started_at("wf", 1, "shared-run-id", Some("tenant-b")),
+            None,
+            "tenant-b must not read tenant-a's run timestamps via a shared agent_run_id",
+        );
+        assert_eq!(
+            state.workflow_run_started_at("wf", 1, "shared-run-id", None),
+            None,
+            "an operator must not inherit a tenant's run start",
+        );
+
+        // Same isolation for the last-successful-node gate.
+        assert_eq!(
+            state.workflow_run_last_successful_node_id("wf", 1, "shared-run-id", Some("tenant-a")),
+            Some("start".into()),
+        );
+        assert_eq!(
+            state.workflow_run_last_successful_node_id("wf", 1, "shared-run-id", Some("tenant-b")),
+            None,
+        );
     }
 
     #[test]

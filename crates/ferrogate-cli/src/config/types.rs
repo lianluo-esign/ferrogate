@@ -1130,6 +1130,14 @@ pub(crate) struct BillingAlertsConfig {
     pub(crate) webhook_url: Option<String>,
     #[serde(default = "default_billing_alerts_webhook_timeout_secs")]
     pub(crate) webhook_timeout_secs: u64,
+    /// HMAC-SHA256 secret for signing budget-alert webhooks (issue #228). When
+    /// set, each delivery carries `X-FerroGate-Timestamp` and
+    /// `X-FerroGate-Signature: sha256=<hex of HMAC(secret, "<timestamp>.<body>")>`
+    /// so a receiver can authenticate the alert and reject replays; `None`
+    /// leaves alerts unsigned (legacy). Prefer an env placeholder so the secret
+    /// is not stored in plaintext config.
+    #[serde(default)]
+    pub(crate) webhook_signing_secret: Option<String>,
 }
 
 fn default_billing_alerts_webhook_timeout_secs() -> u64 {
@@ -1141,6 +1149,7 @@ impl Default for BillingAlertsConfig {
         Self {
             webhook_url: None,
             webhook_timeout_secs: default_billing_alerts_webhook_timeout_secs(),
+            webhook_signing_secret: None,
         }
     }
 }
