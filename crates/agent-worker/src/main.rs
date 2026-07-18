@@ -115,6 +115,26 @@ enum Command {
         #[arg(long)]
         now_unix_millis: Option<u64>,
     },
+    /// Run a self-hosted report-only governed workload by BOOTING a Firecracker
+    /// microVM through the governed backend (KVM-validated, #227). Only
+    /// meaningful under `--worker-type self-hosted`: a capability cloud would
+    /// BLOCK is recorded as report-only and the microVM boots anyway (issue
+    /// #247). Fails closed if the KVM/firecracker prerequisites are unavailable.
+    SelfHostedFirecrackerExecutionSmoke {
+        /// Maximum time to wait for API readiness and guest serial boot evidence.
+        #[arg(long, default_value_t = 15_000)]
+        timeout_millis: u64,
+        /// vCPU count for the report-only smoke microVM.
+        #[arg(long, default_value_t = 1)]
+        vcpu_count: u8,
+        /// Guest memory in MiB for the report-only smoke microVM.
+        #[arg(long, default_value_t = 256)]
+        mem_size_mib: u32,
+        /// Server-clock override (unix millis) for deterministic identity
+        /// expiry stamping in contract tests.
+        #[arg(long)]
+        now_unix_millis: Option<u64>,
+    },
     /// Run a local management protocol smoke test without starting Firecracker.
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
@@ -329,16 +349,19 @@ enum SelfHostedCommandSupport {
 /// - #245: the decoupled governed external-action families — tool, MCP tool,
 ///   skill, memory, secret, and browser — run report-only through the shared
 ///   `run_governed_workload` engine (in-process governed handler).
+/// - #247: `GovernedNetworkEgressExecutionSmoke`/`GovernedRestExecutionSmoke`
+///   run report-only against a live loopback endpoint (real I/O, decision
+///   recorded), and `SelfHostedFirecrackerExecutionSmoke` boots a microVM
+///   report-only through the governed Firecracker backend.
 ///
-/// Still fail-closed (accurate per-command message, TODO(#245)):
+/// Still fail-closed (accurate per-command message):
 /// - CLI (`GovernedCli*`) and `GovernedFilesystemExecutionSmoke`: their
 ///   authorized execution is bound to the ALLOW decision's canonical-target
 ///   fingerprint, so a denied capability cannot route through them. CLI
 ///   report-only-on-deny is already delivered by the #242 dedicated smoke.
-/// - `GovernedNetworkEgressExecutionSmoke`/`GovernedRestExecutionSmoke`: real
-///   loopback outbound I/O; deferred to keep the report-only suite deterministic.
-/// - The external-action authorization/transport smokes, the Unix
-///   target-execution smoke, and the Firecracker/guest-handler paths.
+/// - The external-action authorization/transport smokes and the Unix
+///   target-execution smoke: authorization/transport probes, not workload
+///   execution.
 fn self_hosted_command_support(command: &Command) -> SelfHostedCommandSupport {
     match command {
         Command::WorkerType => SelfHostedCommandSupport::Diagnostic,
@@ -352,11 +375,19 @@ fn self_hosted_command_support(command: &Command) -> SelfHostedCommandSupport {
         | Command::GovernedSkillExecutionSmoke
         | Command::GovernedMemoryExecutionSmoke
         | Command::GovernedSecretExecutionSmoke
-        | Command::GovernedBrowserExecutionSmoke => SelfHostedCommandSupport::ReportOnly,
-        // TODO(#245): CLI/filesystem (canonical-target fingerprint bound),
-        // network-egress/REST (live loopback I/O), the external-action
-        // authorization/transport smokes, and the Firecracker/handler paths stay
-        // fail-closed rather than silently running as cloud.
+        | Command::GovernedBrowserExecutionSmoke
+        // #247: network-egress + REST run report-only against a live loopback
+        // endpoint (real I/O, decision recorded); the Firecracker report-only
+        // path boots a microVM through the governed backend.
+        | Command::GovernedNetworkEgressExecutionSmoke
+        | Command::GovernedRestExecutionSmoke
+        | Command::SelfHostedFirecrackerExecutionSmoke { .. } => {
+            SelfHostedCommandSupport::ReportOnly
+        }
+        // TODO(#247): CLI/filesystem (canonical-target fingerprint bound), the
+        // external-action authorization/transport smokes, and the remaining
+        // Firecracker guest-handler probe paths stay fail-closed rather than
+        // silently running as cloud.
         _ => SelfHostedCommandSupport::FailClosed,
     }
 }
@@ -374,15 +405,15 @@ fn reject_unsupported_self_hosted_execution(
         bail!(
             "--worker-type self-hosted is not yet implemented for `{command:?}`: this build \
              wires report-only self-hosted execution for the management-serving path \
-             (serve-management-unix/http, accept-management-json), the \
-             self-hosted-governed-execution-smoke entrypoint (#242), and the decoupled governed \
-             families tool/mcp-tool/skill/memory/secret/browser (#245), but not this subcommand \
-             yet. CLI/filesystem execution is bound to the allow-decision canonical-target \
-             fingerprint (CLI report-only is covered by self-hosted-governed-execution-smoke); \
-             network-egress/REST perform real loopback I/O; the external-action \
-             authorization/transport smokes and the Firecracker/handler paths are still pending \
-             (TODO(#245)). Use --worker-type cloud (the default) for it, or run a covered command \
-             under --worker-type self-hosted."
+             (serve-management-unix/http, accept-management-json) and the \
+             self-hosted-governed-execution-smoke entrypoint (#242), the decoupled governed \
+             families tool/mcp-tool/skill/memory/secret/browser (#245), and network-egress/REST \
+             plus the self-hosted-firecracker-execution-smoke microVM boot (#247), but not this \
+             subcommand yet. CLI/filesystem execution is bound to the allow-decision \
+             canonical-target fingerprint (CLI report-only is covered by \
+             self-hosted-governed-execution-smoke); the external-action authorization/transport \
+             smokes are authorization probes, not workload execution. Use --worker-type cloud \
+             (the default) for it, or run a covered command under --worker-type self-hosted."
         );
     }
     Ok(())
@@ -411,6 +442,17 @@ fn main() -> Result<()> {
                 now_unix_millis.unwrap_or_else(management::current_unix_millis),
             )
         }
+        Command::SelfHostedFirecrackerExecutionSmoke {
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+            now_unix_millis,
+        } => self_hosted_execution::self_hosted_firecracker_execution_smoke_command(
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+            now_unix_millis.unwrap_or_else(management::current_unix_millis),
+        ),
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),

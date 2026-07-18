@@ -399,6 +399,141 @@ where
     )
 }
 
+/// Boot parameters for a Firecracker report-only workload (#247).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FirecrackerBootParameters {
+    pub(crate) timeout_millis: u64,
+    pub(crate) vcpu_count: u8,
+    pub(crate) mem_size_mib: u32,
+}
+
+/// Run one governed workload by BOOTING a Firecracker microVM through the
+/// worker-owned governed backend (KVM-validated, #227), mirroring the #242
+/// local-process wiring but for the Firecracker isolation backend (#247).
+///
+/// - `Managed` (cloud): ENFORCE. A non-`Allowed` gateway decision blocks BEFORE
+///   any microVM is provisioned — no KVM/firecracker host work happens.
+/// - `SelfHosted`: REPORT-ONLY. The gateway decision is recorded but never
+///   enforced; the microVM boots through the governed path regardless and the
+///   boot evidence becomes the workload output. Fails closed (does NOT pretend
+///   to boot) if the KVM/firecracker prerequisites are unavailable.
+pub(crate) fn run_governed_firecracker_workload<A>(
+    mode: FrameworkAdapterMode,
+    session: &FrameworkAdapterSession,
+    authorizer: &A,
+    action: ManagedCliAction,
+    high_risk: bool,
+    server_clock_unix_millis: u64,
+    boot: FirecrackerBootParameters,
+) -> Result<GovernedWorkloadExecution, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    run_governed_workload(
+        mode,
+        session,
+        authorizer,
+        ManagedExternalAction::Cli(action),
+        high_risk,
+        server_clock_unix_millis,
+        move || run_workload_through_firecracker(boot),
+    )
+}
+
+/// Boot a real Firecracker microVM through the governed provision path and turn
+/// its boot evidence into a family-agnostic workload outcome. Fails closed with
+/// an honest message when the host/KVM/firecracker prerequisites are missing.
+fn run_workload_through_firecracker(
+    boot: FirecrackerBootParameters,
+) -> Result<GovernedWorkloadOutcome, FrameworkAdapterError> {
+    let mut microvm = crate::backends::firecracker_microvm_provision(
+        boot.timeout_millis,
+        boot.vcpu_count,
+        boot.mem_size_mib,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::InvalidRequest(format!(
+            "self-hosted report-only execution refused (fail closed): firecracker microVM boot \
+             failed: {}",
+            error.summary()
+        ))
+    })?;
+    let instance_id = microvm.instance_id.clone();
+    let boot_markers = microvm.evidence.marker_summary();
+    let stop = microvm.stop();
+    Ok(GovernedWorkloadOutcome {
+        exit_code: Some(0),
+        output: format!(
+            "firecracker microvm booted instance_id={instance_id} \
+             serial_boot_markers=[{boot_markers}]"
+        ),
+        backend_name: "firecracker".to_string(),
+        containment_summary: format!(
+            "firecracker microVM (per-VM read-only rootfs + writable workspace; report-only under \
+             self-hosted); {}",
+            stop.summary()
+        ),
+    })
+}
+
+/// `agent-worker self-hosted-firecracker-execution-smoke --worker-type self-hosted`.
+///
+/// Boots a microVM through the governed Firecracker backend under a capability
+/// policy that DENIES the action. Under self-hosted report-only policy the
+/// microVM still boots and the denied capability is recorded, not blocked — the
+/// Firecracker analog of the #242 local-process `self-hosted-governed-execution-smoke`.
+pub(crate) fn self_hosted_firecracker_execution_smoke_command(
+    timeout_millis: u64,
+    vcpu_count: u8,
+    mem_size_mib: u32,
+    server_clock_unix_millis: u64,
+) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+
+    use ferrogate_runtime::{CapabilityPolicy, ClassOnlyPolicyMode, SimpleCapabilityAuthorizer};
+
+    use crate::external_actions::RuntimeGatewayExternalActionAuthorizer;
+
+    // A policy that allows NOTHING: cloud would DENY this action.
+    let authorizer = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::new(),
+            class_only_policy_mode: ClassOnlyPolicyMode::LegacyClassWide,
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let action = ManagedCliAction {
+        command: "/bin/true".to_string(),
+        args: Vec::new(),
+        working_dir: "/".to_string(),
+        env_policy: "deny_all".to_string(),
+        timeout_millis: 2_000,
+        stdout_limit_bytes: 4096,
+        stderr_limit_bytes: 4096,
+        artifact_capture: false,
+    };
+    let mut session = self_hosted_smoke_session();
+    session.isolation_backend = "firecracker".to_string();
+    let execution = run_governed_firecracker_workload(
+        FrameworkAdapterMode::SelfHosted,
+        &session,
+        &authorizer,
+        action,
+        false,
+        server_clock_unix_millis,
+        FirecrackerBootParameters {
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+        },
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&execution.evidence_json())?
+    );
+    Ok(())
+}
+
 /// Deterministic session identity for the self-hosted report-only smoke.
 fn self_hosted_smoke_session() -> FrameworkAdapterSession {
     FrameworkAdapterSession {

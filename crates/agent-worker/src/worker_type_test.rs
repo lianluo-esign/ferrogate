@@ -70,6 +70,16 @@ fn self_hosted_worker_type_runs_report_only_on_the_covered_commands() {
         Command::GovernedMemoryExecutionSmoke,
         Command::GovernedSecretExecutionSmoke,
         Command::GovernedBrowserExecutionSmoke,
+        // #247: network-egress/REST (report-only against a live loopback
+        // endpoint) and the Firecracker report-only microVM boot.
+        Command::GovernedNetworkEgressExecutionSmoke,
+        Command::GovernedRestExecutionSmoke,
+        Command::SelfHostedFirecrackerExecutionSmoke {
+            timeout_millis: 15_000,
+            vcpu_count: 1,
+            mem_size_mib: 256,
+            now_unix_millis: Some(1_000),
+        },
     ];
     for command in covered {
         assert_eq!(
@@ -86,15 +96,14 @@ fn self_hosted_worker_type_runs_report_only_on_the_covered_commands() {
 fn self_hosted_worker_type_is_rejected_on_uncovered_execution_subcommands() {
     // Families not yet wired for report-only self-hosted execution stay
     // fail-closed rather than silently running as cloud. CLI/filesystem are
-    // canonical-target-fingerprint bound; network-egress/REST do live loopback
-    // I/O; the external-action authorization smokes are authorization-only. The
-    // message must be accurate and reference the tracking issue (#245).
+    // canonical-target-fingerprint bound; the external-action
+    // authorization/transport smokes are authorization-only probes, not workload
+    // execution. The message must be accurate and reference the tracking issue.
     for command in [
         Command::GovernedCliExecutionSmoke,
         Command::GovernedFilesystemExecutionSmoke,
-        Command::GovernedNetworkEgressExecutionSmoke,
-        Command::GovernedRestExecutionSmoke,
         Command::ExternalActionSmoke,
+        Command::ExternalActionUnixTransportSmoke,
     ] {
         assert_eq!(
             self_hosted_command_support(&command),
@@ -103,6 +112,6 @@ fn self_hosted_worker_type_is_rejected_on_uncovered_execution_subcommands() {
         let error = reject_unsupported_self_hosted_execution(WorkerType::SelfHosted, &command)
             .expect_err("self-hosted must be rejected for uncovered execution subcommands");
         assert!(error.to_string().contains("--worker-type self-hosted"));
-        assert!(error.to_string().contains("TODO(#245)"));
+        assert!(error.to_string().contains("#247"));
     }
 }

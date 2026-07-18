@@ -95,7 +95,14 @@ fn assert_self_hosted_report_only(action: ManagedExternalAction, expected_backen
         1_000,
     )
     .expect("self-hosted report-only execution must never block");
+    assert_report_only_contract(&execution, expected_backend);
+}
 
+/// Assert one already-executed self-hosted run carries the full report-only
+/// customer-owned-host contract. Split from `assert_self_hosted_report_only` so
+/// the network/REST tests (which stand up a live loopback listener and run the
+/// workload themselves to observe the real I/O) reuse the same assertions.
+fn assert_report_only_contract(execution: &GovernedWorkloadExecution, expected_backend: &str) {
     // The capability cloud would BLOCK ran anyway and was only recorded.
     assert!(execution.report_only());
     assert!(execution.cloud_would_block());
@@ -227,4 +234,131 @@ fn cli_and_filesystem_are_not_routed_through_the_in_process_family_workload() {
     )
     .expect_err("cli must not route through the in-process family workload");
     assert!(error.to_string().contains("canonical-target fingerprint"));
+}
+
+// ---------------------------------------------------------------------------
+// #247: network-egress + REST report-only vs cloud enforcement.
+//
+// These families perform real loopback outbound I/O. The self-hosted assertion
+// stands up a controlled loopback listener (deterministic, like the existing
+// adversarial/perf harnesses), runs the report-only workload against it, and
+// proves BOTH that the I/O happened AND the denied decision was recorded with
+// the full customer-owned-host contract. The cloud assertion uses a
+// nonblocking listener and proves the enforce path blocks the same denied
+// capability BEFORE any connection is made (no I/O).
+// ---------------------------------------------------------------------------
+
+fn network_egress_action(port: u16) -> ManagedExternalAction {
+    ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: "tcp".to_string(),
+        resolved_ips: vec!["127.0.0.1".to_string()],
+    })
+}
+
+fn rest_action(endpoint: std::net::SocketAddr) -> ManagedExternalAction {
+    ManagedExternalAction::Rest(ManagedRestAction {
+        method: "GET".to_string(),
+        url: format!("http://{endpoint}/governed-rest-smoke"),
+        headers_policy: "deny_credentials".to_string(),
+        body_policy: "empty_body".to_string(),
+        timeout_millis: 2_000,
+        retry_limit: 0,
+        resolved_ips: vec!["127.0.0.1".to_string()],
+        redirect_chain: Vec::new(),
+    })
+}
+
+/// Assert the cloud (managed) run of `action` blocked the denied capability
+/// before making any connection to `blocked_listener` (no I/O).
+fn assert_cloud_blocks_without_io(action: ManagedExternalAction, blocked_listener: &TcpListener) {
+    let error = run_governed_family_report_only(
+        FrameworkAdapterMode::Managed,
+        &smoke_session(FrameworkAdapterMode::Managed),
+        &denying_authorizer(),
+        action,
+        false,
+        1_000,
+    )
+    .expect_err("cloud must enforce and block a denied network/REST capability");
+    let message = error.to_string();
+    assert!(
+        message.contains("blocks capability"),
+        "cloud block message missing: {message}"
+    );
+    assert!(
+        message.contains(CLOUD_ENFORCEMENT_BOUNDARY),
+        "cloud block message missing boundary: {message}"
+    );
+    // No connection ever reached the listener: cloud blocked before any I/O.
+    assert!(
+        matches!(
+            blocked_listener.accept(),
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "cloud enforce path performed loopback I/O on a denied capability"
+    );
+}
+
+#[test]
+fn self_hosted_network_egress_runs_report_only_while_cloud_blocks() {
+    // (i) self-hosted: the egress really happens against a live listener and the
+    // denied decision is recorded report-only.
+    let server = spawn_one_shot_network_egress_smoke_server();
+    let execution = run_governed_family_report_only(
+        FrameworkAdapterMode::SelfHosted,
+        &smoke_session(FrameworkAdapterMode::SelfHosted),
+        &denying_authorizer(),
+        network_egress_action(server.endpoint.port()),
+        false,
+        1_000,
+    )
+    .expect("self-hosted network egress report-only must never block");
+    let received_payload = server.join().expect("network egress server thread");
+
+    assert_eq!(
+        received_payload, "ferrogate governed network smoke\n",
+        "self-hosted report-only egress did not perform the real loopback I/O"
+    );
+    assert_report_only_contract(&execution, "governed-network-egress-handler");
+
+    // (ii) cloud: the same denied capability blocks with NO I/O.
+    let blocked_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    blocked_listener
+        .set_nonblocking(true)
+        .expect("set cloud-block listener nonblocking");
+    let blocked_port = blocked_listener.local_addr().unwrap().port();
+    assert_cloud_blocks_without_io(network_egress_action(blocked_port), &blocked_listener);
+}
+
+#[test]
+fn self_hosted_rest_runs_report_only_while_cloud_blocks() {
+    // (i) self-hosted: the REST request is really served by a live loopback HTTP
+    // listener and the denied decision is recorded report-only.
+    let server = spawn_one_shot_rest_smoke_server();
+    let execution = run_governed_family_report_only(
+        FrameworkAdapterMode::SelfHosted,
+        &smoke_session(FrameworkAdapterMode::SelfHosted),
+        &denying_authorizer(),
+        rest_action(server.endpoint),
+        false,
+        1_000,
+    )
+    .expect("self-hosted REST report-only must never block");
+    let served_request = server.join().expect("rest server thread");
+
+    assert!(
+        served_request.contains("GET /governed-rest-smoke"),
+        "self-hosted report-only REST did not perform the real loopback request: {served_request}"
+    );
+    assert_report_only_contract(&execution, "governed-rest-handler");
+
+    // (ii) cloud: the same denied capability blocks with NO I/O.
+    let blocked_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    blocked_listener
+        .set_nonblocking(true)
+        .expect("set cloud-block listener nonblocking");
+    let blocked_endpoint = blocked_listener.local_addr().unwrap();
+    assert_cloud_blocks_without_io(rest_action(blocked_endpoint), &blocked_listener);
 }

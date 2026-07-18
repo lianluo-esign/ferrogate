@@ -185,6 +185,41 @@ fn cloud_allows_and_runs_an_allowed_capability() {
 }
 
 #[test]
+fn cloud_enforces_and_blocks_a_denied_firecracker_workload_before_any_boot() {
+    let _env_lock = lock_firecracker_env();
+    // Cloud enforcement blocks on the denied capability BEFORE the microVM is
+    // provisioned, so no KVM/firecracker host work happens. This asserts the
+    // enforce side of the #247 Firecracker report-only path WITHOUT needing KVM:
+    // the block occurs before `firecracker_microvm_provision` is ever called.
+    let error = run_governed_firecracker_workload(
+        FrameworkAdapterMode::Managed,
+        &self_hosted_smoke_session(),
+        &denying_authorizer(),
+        workload_action(),
+        false,
+        1_000,
+        FirecrackerBootParameters {
+            timeout_millis: 15_000,
+            vcpu_count: 1,
+            mem_size_mib: 256,
+        },
+    )
+    .expect_err("cloud must enforce and block a denied firecracker capability");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("blocks capability"),
+        "cloud block message missing: {message}"
+    );
+    assert!(message.contains("ferrogate_managed_runtime"), "{message}");
+    // The block happened before any boot: no firecracker/KVM fail-closed text.
+    assert!(
+        !message.contains("firecracker microVM boot failed"),
+        "cloud enforce path attempted a microVM boot: {message}"
+    );
+}
+
+#[test]
 fn report_only_exec_marker_carries_the_customer_owned_host_contract() {
     let marker = self_hosted_report_only_exec_marker("cli", "agent://managed/readiness", 2_000);
     assert!(

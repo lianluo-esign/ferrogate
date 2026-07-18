@@ -922,6 +922,17 @@ pub(crate) fn governed_network_egress_execution_smoke_command(
         protocol: "tcp".to_string(),
         resolved_ips: vec!["127.0.0.1".to_string()],
     };
+    // #247: self-hosted runs report-only against the SAME live loopback listener.
+    // The egress I/O still happens (the listener receives the payload) and the
+    // denied gateway decision is recorded, never enforced. The workload runs
+    // FIRST (it performs the connect), then the server thread is joined.
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_network_or_rest_report_only_smoke(
+            ManagedExternalAction::NetworkEgress(action),
+            "received_payload",
+            move || server.join(),
+        );
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
@@ -984,6 +995,16 @@ pub(crate) fn governed_rest_execution_smoke_command(mode: FrameworkAdapterMode) 
         resolved_ips: vec!["127.0.0.1".to_string()],
         redirect_chain: Vec::new(),
     };
+    // #247: self-hosted runs report-only against the SAME live loopback HTTP
+    // listener. The request is really sent (the server serves it) and the denied
+    // gateway decision is recorded, never enforced. Workload runs FIRST.
+    if mode == FrameworkAdapterMode::SelfHosted {
+        return self_hosted_network_or_rest_report_only_smoke(
+            ManagedExternalAction::Rest(action),
+            "served_request",
+            move || server.join(),
+        );
+    }
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Rest]),
@@ -3907,12 +3928,13 @@ fn validate_managed_worker_session(
 /// non-`Allowed` decision blocks the workload before it runs. Both anchor on the
 /// same managed-probe capability decision via `run_governed_workload`.
 ///
-/// Only the families whose authorized execution is decoupled from the ALLOW
-/// decision's canonical-target fingerprint are routed here: tool, MCP tool,
-/// skill, browser, memory, and secret. CLI/filesystem stay on their dedicated
-/// paths (CLI report-only is the #242 local-process slice); network-egress/REST
-/// (real loopback I/O) and the Firecracker/handler families remain fail-closed
-/// (TODO(#245)).
+/// Routed here: tool, MCP tool, skill, browser, memory, and secret (decoupled
+/// from the ALLOW decision's canonical-target fingerprint), plus network-egress
+/// and REST (#247 — real loopback outbound I/O against the pinned loopback
+/// endpoint the action carries; the report-only path performs the I/O and
+/// records the decision, cloud blocks before any I/O). CLI/filesystem stay on
+/// their dedicated paths (CLI report-only is the #242 local-process slice;
+/// filesystem remains fail-closed).
 pub(crate) fn run_governed_family_report_only<A>(
     mode: FrameworkAdapterMode,
     session: &FrameworkAdapterSession,
@@ -3976,6 +3998,27 @@ fn run_authorized_family_workload(
                 "governed-secret-handler",
             )
         }
+        // #247: network-egress + REST perform real loopback outbound I/O. Under
+        // self-hosted report-only the I/O still happens (against the pinned
+        // loopback endpoint the action carries); under cloud the enforce path
+        // blocks before this side effect ever runs, so no I/O occurs.
+        ManagedExternalAction::NetworkEgress(action) => {
+            let execution = run_authorized_network_egress_action(action)?;
+            (
+                format!("bytes_written={}", execution.bytes_written),
+                "governed-network-egress-handler",
+            )
+        }
+        ManagedExternalAction::Rest(action) => {
+            let execution = run_authorized_rest_action(action)?;
+            (
+                format!(
+                    "status_code={} response_excerpt={}",
+                    execution.status_code, execution.response_excerpt
+                ),
+                "governed-rest-handler",
+            )
+        }
         ManagedExternalAction::Cli(_) | ManagedExternalAction::Filesystem(_) => {
             return Err(FrameworkAdapterError::InvalidRequest(
                 "cli/filesystem report-only self-hosted execution is not routed through the \
@@ -3983,14 +4026,6 @@ fn run_authorized_family_workload(
                  ALLOW decision's canonical-target fingerprint. CLI report-only is delivered by \
                  the #242 self-hosted-governed-execution-smoke (local-process backend); filesystem \
                  remains fail-closed (TODO(#245))."
-                    .to_string(),
-            ));
-        }
-        ManagedExternalAction::NetworkEgress(_) | ManagedExternalAction::Rest(_) => {
-            return Err(FrameworkAdapterError::InvalidRequest(
-                "network-egress/REST report-only self-hosted execution performs real loopback \
-                 outbound I/O and is not routed through the in-process governed family workload; \
-                 it remains fail-closed (TODO(#245))."
                     .to_string(),
             ));
         }
@@ -4009,13 +4044,7 @@ fn run_authorized_family_workload(
 /// the #242 `self-hosted-governed-execution-smoke`: a DENY policy (cloud would
 /// block) that still runs the workload and records it as report-only.
 fn self_hosted_family_report_only_smoke(action: ManagedExternalAction) -> Result<()> {
-    let authorizer = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
-        CapabilityPolicy {
-            allowed_actions: BTreeSet::new(),
-            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
-            ..CapabilityPolicy::default()
-        },
-    ));
+    let authorizer = deny_all_report_only_authorizer();
     let execution = run_governed_family_report_only(
         FrameworkAdapterMode::SelfHosted,
         &smoke_session(FrameworkAdapterMode::SelfHosted),
@@ -4028,6 +4057,47 @@ fn self_hosted_family_report_only_smoke(action: ManagedExternalAction) -> Result
         "{}",
         serde_json::to_string_pretty(&execution.evidence_json())?
     );
+    Ok(())
+}
+
+/// A DENY-everything authorizer: cloud would block, self-hosted records
+/// report-only. Shared by the family report-only smokes (#245/#247).
+fn deny_all_report_only_authorizer(
+) -> RuntimeGatewayExternalActionAuthorizer<SimpleCapabilityAuthorizer> {
+    RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+        allowed_actions: BTreeSet::new(),
+        class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+        ..CapabilityPolicy::default()
+    }))
+}
+
+/// Report-only self-hosted smoke for the network-egress/REST families (#247).
+///
+/// These families perform real loopback outbound I/O, so the workload MUST run
+/// before the one-shot loopback server thread is joined (the server blocks on
+/// `accept()` until the workload connects). Unlike the in-process families, the
+/// server is stood up by the caller and joined here after the report-only run.
+fn self_hosted_network_or_rest_report_only_smoke(
+    action: ManagedExternalAction,
+    served_label: &str,
+    join_server: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let authorizer = deny_all_report_only_authorizer();
+    let execution = run_governed_family_report_only(
+        FrameworkAdapterMode::SelfHosted,
+        &smoke_session(FrameworkAdapterMode::SelfHosted),
+        &authorizer,
+        action,
+        false,
+        crate::management::current_unix_millis(),
+    )?;
+    // The workload has now performed the loopback I/O; the server has a payload.
+    let served = join_server()?;
+    let output = serde_json::json!({
+        "evidence": execution.evidence_json(),
+        served_label: served,
+    });
+    println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 
