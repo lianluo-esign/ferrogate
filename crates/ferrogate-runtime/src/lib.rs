@@ -93,13 +93,15 @@ pub use managed_worker::{
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{
-    generate_transport_token_secret, InMemorySelfHostedRunQueue, InMemorySelfHostedWorkerTransport,
-    RegisteredSelfHostedWorker, SelfHostedArtifactUpload, SelfHostedArtifactUploadRequest,
-    SelfHostedCheckpointFetchRequest, SelfHostedCheckpointReference, SelfHostedRunAck,
-    SelfHostedRunAckRequest, SelfHostedRunAckStatus, SelfHostedRunAction, SelfHostedRunDispatch,
-    SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedRunQueueRecord,
-    SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor, SelfHostedTelemetryKind,
-    SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel, SelfHostedWorkerEncryptedPayload,
+    generate_transport_token_secret, production_mtls_transport_implemented,
+    InMemorySelfHostedRunQueue, InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker,
+    SelfHostedArtifactUpload, SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
+    SelfHostedCheckpointReference, SelfHostedRunAck, SelfHostedRunAckRequest,
+    SelfHostedRunAckStatus, SelfHostedRunAction, SelfHostedRunDispatch, SelfHostedRunLease,
+    SelfHostedRunPollRequest, SelfHostedRunQueueRecord, SelfHostedTelemetryEvent,
+    SelfHostedTelemetryIngestor, SelfHostedTelemetryKind, SelfHostedTelemetryRequest,
+    SelfHostedTelemetryTrustLevel, SelfHostedTransportAdmissionError, SelfHostedTransportChannel,
+    SelfHostedTransportPolicy, SelfHostedTransportPosture, SelfHostedWorkerEncryptedPayload,
     SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerHttpTransportClient,
     SelfHostedWorkerHttpTransportSecurity, SelfHostedWorkerIdentity, SelfHostedWorkerRegistration,
     SelfHostedWorkerRegistry, SelfHostedWorkerTransport, SelfHostedWorkerTransportFrame,

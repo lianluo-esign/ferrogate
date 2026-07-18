@@ -8,7 +8,8 @@ use crate::dashboard::ADMIN_DASHBOARD_HTML;
 use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
 use ferrogate_runtime::{
-    SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError,
+    SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedTransportAdmissionError,
+    SelfHostedTransportChannel, SelfHostedTransportPolicy, SelfHostedWorkerError,
     SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
 use ferrogate_storage::StoredPlan;
@@ -85,6 +86,13 @@ const MCP_ORIGINAL_BEARER_HEADER: &str = "x-ferrogate-mcp-bearer";
 const SELF_HOSTED_TRANSPORT_SECURITY_HEADER: &str = "x-ferrogate-transport-security";
 const SELF_HOSTED_TRANSPORT_SECURITY_MTLS: &str = "mutual_tls";
 const SELF_HOSTED_TRANSPORT_SECURITY_SYMMETRIC_AEAD: &str = "symmetric_aead";
+/// Enables the production transport posture: when set to a truthy value, the
+/// self-hosted worker ingress requires a verified mutual-TLS channel and rejects
+/// the marker/AEAD downgrade paths. Verified-mTLS admission is not implemented
+/// yet (see docs/security/self-hosted-mtls-transport.md), so enabling this fails
+/// closed for every currently shippable channel -- by design.
+const SELF_HOSTED_REQUIRE_PRODUCTION_MTLS_ENV: &str =
+    "FERROGATE_SELF_HOSTED_REQUIRE_PRODUCTION_MTLS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolExecuteBackend {
@@ -4817,6 +4825,14 @@ impl FerroGateway {
             )
             .await;
         };
+        // Downgrade protection: when the production posture is required, reject
+        // the marker/AEAD paths before dispatching. Verified-mTLS admission is
+        // not implemented yet (documented Phase 2), so this fails closed.
+        if let Err(error) =
+            self_hosted_transport_policy().admit(transport_security.observed_channel())
+        {
+            return write_self_hosted_transport_policy_error(session, ctx, error).await;
+        }
         match path {
             "/v1/self-hosted-workers/heartbeat" => {
                 self.handle_self_hosted_worker_heartbeat(session, ctx, transport_security)
@@ -5375,7 +5391,8 @@ impl FerroGateway {
                                     ferrogate_runtime::SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                                 lease_ack_implemented: true,
                                 inbound_customer_host_required: false,
-                                production_mtls_transport_implemented: false,
+                                production_mtls_transport_implemented:
+                                    ferrogate_runtime::production_mtls_transport_implemented(),
                                 actions: vec![
                                     "start_run",
                                     "cancel_run",
@@ -10010,6 +10027,21 @@ enum SelfHostedTransportSecurity {
     SymmetricAead,
 }
 
+impl SelfHostedTransportSecurity {
+    /// Map the wire-selected transport security to the observed transport
+    /// channel the security policy reasons about. Note the `mutual_tls` header
+    /// is only a *claim*: this build does not validate a client certificate or a
+    /// real TLS handshake, so it maps to an unverified marker.
+    fn observed_channel(self) -> SelfHostedTransportChannel {
+        match self {
+            SelfHostedTransportSecurity::MutualTls => {
+                SelfHostedTransportChannel::UnverifiedMutualTlsMarker
+            }
+            SelfHostedTransportSecurity::SymmetricAead => SelfHostedTransportChannel::SymmetricAead,
+        }
+    }
+}
+
 fn self_hosted_transport_security_header(
     headers: &http::HeaderMap,
 ) -> Option<SelfHostedTransportSecurity> {
@@ -10023,6 +10055,29 @@ fn self_hosted_transport_security_header(
             }
             _ => None,
         })
+}
+
+/// Parse the `require_production_mtls` flag from an optional configuration
+/// value. Split out from process-env reading so the parsing is deterministically
+/// unit-testable. Accepts the usual truthy spellings; anything else (including
+/// absent) is treated as `false` (pre-production marker posture).
+fn parse_require_production_mtls(value: Option<&str>) -> bool {
+    matches!(
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// Resolve the active self-hosted transport-security policy from configuration.
+fn self_hosted_transport_policy() -> SelfHostedTransportPolicy {
+    let require_production_mtls = parse_require_production_mtls(
+        std::env::var(SELF_HOSTED_REQUIRE_PRODUCTION_MTLS_ENV)
+            .ok()
+            .as_deref(),
+    );
+    SelfHostedTransportPolicy::from_require_production_mtls(require_production_mtls)
 }
 
 async fn read_self_hosted_transport_body<T>(
@@ -10151,6 +10206,24 @@ where
             write_json_response(session, status, &frame, &ctx.request_id).await
         }
     }
+}
+
+async fn write_self_hosted_transport_policy_error(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    error: SelfHostedTransportAdmissionError,
+) -> PingoraResult<()> {
+    let (status, code) = match &error {
+        SelfHostedTransportAdmissionError::DowngradeRejected(_) => (
+            StatusCode::FORBIDDEN,
+            "self_hosted_worker_transport_downgrade_rejected",
+        ),
+        SelfHostedTransportAdmissionError::ProductionMtlsNotImplemented(_) => (
+            StatusCode::NOT_IMPLEMENTED,
+            "self_hosted_worker_production_mtls_not_implemented",
+        ),
+    };
+    write_json_error(session, status, code, error.to_string(), &ctx.request_id).await
 }
 
 async fn write_self_hosted_worker_transport_error(
@@ -10299,4 +10372,52 @@ fn tool_audit_event_draft_for_target(
         event.message = format!("skill_package={skill} {}", event.message);
     }
     event
+}
+
+#[cfg(test)]
+mod self_hosted_transport_policy_tests {
+    use super::*;
+
+    #[test]
+    fn parses_truthy_require_production_mtls_values() {
+        for value in ["1", "true", "TRUE", " yes ", "on", "On"] {
+            assert!(
+                parse_require_production_mtls(Some(value)),
+                "expected {value:?} to enable production mTLS"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_falsey_or_absent_require_production_mtls_values() {
+        for value in [None, Some(""), Some("0"), Some("false"), Some("nope")] {
+            assert!(
+                !parse_require_production_mtls(value),
+                "expected {value:?} to leave the marker posture"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_transport_security_to_observed_channel() {
+        assert_eq!(
+            SelfHostedTransportSecurity::MutualTls.observed_channel(),
+            SelfHostedTransportChannel::UnverifiedMutualTlsMarker
+        );
+        assert_eq!(
+            SelfHostedTransportSecurity::SymmetricAead.observed_channel(),
+            SelfHostedTransportChannel::SymmetricAead
+        );
+    }
+
+    #[test]
+    fn production_policy_rejects_marker_and_aead_channels() {
+        let policy = SelfHostedTransportPolicy::from_require_production_mtls(true);
+        assert!(policy
+            .admit(SelfHostedTransportSecurity::SymmetricAead.observed_channel())
+            .is_err());
+        assert!(policy
+            .admit(SelfHostedTransportSecurity::MutualTls.observed_channel())
+            .is_err());
+    }
 }

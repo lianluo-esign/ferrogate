@@ -1008,6 +1008,16 @@ local gateway HTTP path.
 This is still not the production mTLS listener. The current header is a
 contract marker for local wire-shape tests; it does not validate certificates,
 issue transport tokens, rotate secrets, or prove encrypted channel enforcement.
+The full design (threat model, CA/cert model, transport-token issuance +
+rotation, downgrade/replay protection, and the phased plan) is in
+`docs/security/self-hosted-mtls-transport.md`. Phase 1 of that design has
+landed: a server-side transport-security policy
+(`FERROGATE_SELF_HOSTED_REQUIRE_PRODUCTION_MTLS`) rejects the marker/AEAD
+downgrade paths when production mTLS is required — `symmetric_aead` as a
+downgrade (`403`) and the unverified `mutual_tls` marker as not-implemented
+(`501`). Verified-mTLS admission (the certificate-validating listener and
+transport-token lifecycle) remains the reviewed Phase 2 work;
+`production_mtls_transport_implemented` stays `false` until it lands.
 
 ### Required Worker Capabilities
 

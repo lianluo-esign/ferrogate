@@ -343,6 +343,171 @@ impl SelfHostedWorkerHttpTransportSecurity {
     }
 }
 
+/// Whether verified production mutual-TLS admission (client-certificate
+/// validation + proof of an encrypted, mutually authenticated channel) is
+/// implemented in this build.
+///
+/// This is the single source of truth for the `production_mtls_transport_implemented`
+/// contract flag surfaced by the admin runtime listing. It is deliberately a
+/// `const fn` returning `false`: the design in
+/// `docs/security/self-hosted-mtls-transport.md` defers the PKI/mTLS listener to
+/// a reviewed Phase 2. Do NOT flip this to `true` without landing verified-mTLS
+/// channel validation and its conformance tests.
+pub const fn production_mtls_transport_implemented() -> bool {
+    false
+}
+
+/// Transport security posture for the self-hosted worker ingress.
+///
+/// See `docs/security/self-hosted-mtls-transport.md` for the full threat model
+/// and rationale. The posture governs whether the marker/AEAD transport paths
+/// are admitted (pre-production) or rejected as downgrades (production).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelfHostedTransportPosture {
+    /// Pre-production contract posture (default). The gateway accepts both the
+    /// application-layer AEAD frame path and the (unverified) `mutual_tls`
+    /// marker path. The `mutual_tls` marker here is a claim only -- it is NOT
+    /// proof of a verified mTLS channel.
+    #[default]
+    MarkerContract,
+    /// Production posture: a verified mutual-TLS channel is required, and the
+    /// AEAD / unverified-marker downgrade paths are rejected. Verified-mTLS
+    /// admission itself is NOT yet implemented (see the design doc), so enabling
+    /// this posture fails closed for every currently shippable channel. This is
+    /// the honest security boundary: better to reject than to accept an
+    /// unverifiable claim as production-grade.
+    RequireProductionMtls,
+}
+
+/// The transport channel the gateway actually observed for an inbound request.
+///
+/// There is deliberately no `VerifiedMutualTls` variant yet: proving a mutually
+/// authenticated, encrypted channel requires the PKI/mTLS listener that Phase 2
+/// of the design introduces. Until then the gateway can only observe a *claimed*
+/// marker header or an application-layer AEAD frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfHostedTransportChannel {
+    /// `x-ferrogate-transport-security: mutual_tls` -- a claim only. The gateway
+    /// has not validated a client certificate or a real TLS handshake for this
+    /// request.
+    UnverifiedMutualTlsMarker,
+    /// `x-ferrogate-transport-security: symmetric_aead` -- application-layer
+    /// AEAD over an otherwise unauthenticated transport channel.
+    SymmetricAead,
+}
+
+/// Why a request was refused by the transport-security policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfHostedTransportAdmissionError {
+    /// A weaker, non-production channel was presented while production mTLS is
+    /// required. This is an active downgrade and is rejected.
+    DowngradeRejected(String),
+    /// The request claims mutual TLS, but verified-mTLS admission (certificate
+    /// validation + channel-encryption proof) is not implemented in this build.
+    /// Honest not-implemented boundary; see the Phase 2 design.
+    ProductionMtlsNotImplemented(String),
+}
+
+impl fmt::Display for SelfHostedTransportAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DowngradeRejected(message) => {
+                write!(
+                    formatter,
+                    "self-hosted worker transport downgrade rejected: {message}"
+                )
+            }
+            Self::ProductionMtlsNotImplemented(message) => {
+                write!(
+                    formatter,
+                    "self-hosted worker production mTLS not implemented: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for SelfHostedTransportAdmissionError {}
+
+/// Policy that decides whether an observed transport channel may be admitted.
+///
+/// The policy is a pure, infra-free decision function so it can be unit tested
+/// without any PKI, TLS listener, or network. The gateway constructs it from a
+/// configuration flag (`require_production_mtls`) and consults it before
+/// dispatching a self-hosted worker transport request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelfHostedTransportPolicy {
+    posture: SelfHostedTransportPosture,
+}
+
+impl SelfHostedTransportPolicy {
+    /// Construct a policy for an explicit posture.
+    pub const fn new(posture: SelfHostedTransportPosture) -> Self {
+        Self { posture }
+    }
+
+    /// Construct a policy from the `require_production_mtls` configuration flag.
+    pub const fn from_require_production_mtls(require_production_mtls: bool) -> Self {
+        let posture = if require_production_mtls {
+            SelfHostedTransportPosture::RequireProductionMtls
+        } else {
+            SelfHostedTransportPosture::MarkerContract
+        };
+        Self::new(posture)
+    }
+
+    pub const fn posture(&self) -> SelfHostedTransportPosture {
+        self.posture
+    }
+
+    /// Whether this policy requires a verified production mTLS channel.
+    pub const fn requires_production_mtls(&self) -> bool {
+        matches!(
+            self.posture,
+            SelfHostedTransportPosture::RequireProductionMtls
+        )
+    }
+
+    /// Decide whether an observed transport channel may be admitted.
+    ///
+    /// Under `MarkerContract` both channels are admitted (preserving the
+    /// pre-production contract behaviour). Under `RequireProductionMtls`:
+    ///
+    /// * `SymmetricAead` is an explicit downgrade and is rejected.
+    /// * `UnverifiedMutualTlsMarker` is a *claim* of mutual TLS the gateway
+    ///   cannot yet verify; it is rejected as not-implemented rather than
+    ///   silently trusted.
+    ///
+    /// Consequently, enabling production mode fails closed for every channel
+    /// this build can produce -- by design, until Phase 2 lands verified-mTLS
+    /// admission.
+    pub fn admit(
+        &self,
+        channel: SelfHostedTransportChannel,
+    ) -> Result<(), SelfHostedTransportAdmissionError> {
+        match self.posture {
+            SelfHostedTransportPosture::MarkerContract => Ok(()),
+            SelfHostedTransportPosture::RequireProductionMtls => match channel {
+                SelfHostedTransportChannel::SymmetricAead => {
+                    Err(SelfHostedTransportAdmissionError::DowngradeRejected(
+                        "symmetric_aead transport is a downgrade path; production mode requires a \
+                         verified mutual-TLS channel for self-hosted worker transport"
+                            .to_string(),
+                    ))
+                }
+                SelfHostedTransportChannel::UnverifiedMutualTlsMarker => Err(
+                    SelfHostedTransportAdmissionError::ProductionMtlsNotImplemented(
+                        "the mutual_tls header is an unverified marker; verified mTLS channel \
+                         admission (certificate validation + encrypted-channel proof) is not \
+                         implemented in this build"
+                            .to_string(),
+                    ),
+                ),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedWorkerTransportFrame {
     pub protocol_version: u32,
@@ -1645,6 +1810,74 @@ mod tests {
         net::{TcpListener, TcpStream},
         thread,
     };
+
+    #[test]
+    fn default_transport_policy_admits_both_marker_paths() {
+        let policy = SelfHostedTransportPolicy::default();
+        assert_eq!(policy.posture(), SelfHostedTransportPosture::MarkerContract);
+        assert!(!policy.requires_production_mtls());
+        assert_eq!(
+            policy.admit(SelfHostedTransportChannel::SymmetricAead),
+            Ok(())
+        );
+        assert_eq!(
+            policy.admit(SelfHostedTransportChannel::UnverifiedMutualTlsMarker),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn marker_contract_policy_admits_both_marker_paths() {
+        let policy = SelfHostedTransportPolicy::from_require_production_mtls(false);
+        assert_eq!(policy.posture(), SelfHostedTransportPosture::MarkerContract);
+        assert_eq!(
+            policy.admit(SelfHostedTransportChannel::SymmetricAead),
+            Ok(())
+        );
+        assert_eq!(
+            policy.admit(SelfHostedTransportChannel::UnverifiedMutualTlsMarker),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn production_policy_rejects_symmetric_aead_as_downgrade() {
+        let policy = SelfHostedTransportPolicy::from_require_production_mtls(true);
+        assert_eq!(
+            policy.posture(),
+            SelfHostedTransportPosture::RequireProductionMtls
+        );
+        assert!(policy.requires_production_mtls());
+        let error = policy
+            .admit(SelfHostedTransportChannel::SymmetricAead)
+            .expect_err("symmetric_aead must be rejected in production mode");
+        assert!(matches!(
+            error,
+            SelfHostedTransportAdmissionError::DowngradeRejected(_)
+        ));
+        assert!(error.to_string().contains("downgrade"));
+    }
+
+    #[test]
+    fn production_policy_rejects_unverified_mtls_marker_as_not_implemented() {
+        let policy =
+            SelfHostedTransportPolicy::new(SelfHostedTransportPosture::RequireProductionMtls);
+        let error = policy
+            .admit(SelfHostedTransportChannel::UnverifiedMutualTlsMarker)
+            .expect_err("unverified mutual_tls marker must not be trusted in production mode");
+        assert!(matches!(
+            error,
+            SelfHostedTransportAdmissionError::ProductionMtlsNotImplemented(_)
+        ));
+        assert!(error.to_string().contains("not implemented"));
+    }
+
+    #[test]
+    fn production_mtls_transport_is_not_yet_implemented() {
+        // Honest boundary: verified mTLS admission is deferred to the reviewed
+        // Phase 2 PKI work. This must stay false until that lands.
+        assert!(!production_mtls_transport_implemented());
+    }
 
     #[test]
     fn registers_worker_and_normalizes_capabilities() {
