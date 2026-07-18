@@ -7,66 +7,14 @@
 // `append_billing_event` lands in the CONFIGURED `postgres_schema`, not the
 // connection-default `public` schema, mirroring the #237 replay-floor test.
 
+use crate::schema_routing_test_support::{
+    block_on, query_i64, run_sql, serialize_db_test, unique_schema, SchemaGuard,
+};
 use crate::{
     PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories, POSTGRES_SCHEMA_SQL,
 };
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
-
-/// Run a batch of setup/teardown SQL against the test DSN over a throwaway
-/// connection (helper for the DSN-gated schema-routing test below).
-fn run_sql(dsn: &str, sql: &str) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            client
-                .batch_execute(sql)
-                .await
-                .expect("execute test setup/teardown sql");
-            drop(client);
-            let _ = driver.await;
-        });
-}
-
-/// Read a single `BIGINT` column from the test DSN, or `None` when no row
-/// matches. Used to prove which physical schema the rollup row landed in.
-fn query_i64(dsn: &str, sql: &str) -> Option<i64> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let row = client
-                .query_opt(sql, &[])
-                .await
-                .expect("query the usage-metadata-rollup probe row");
-            drop(client);
-            let _ = driver.await;
-            row.map(|row| row.get::<_, i64>(0))
-        })
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
-}
 
 /// #238: with a non-default `postgres_schema`, the billing/metering settlement
 /// transaction must write `usage_metadata_rollups` (and every other metering /
@@ -86,13 +34,23 @@ fn live_usage_metadata_rollup_writes_to_configured_schema_not_public() {
         return;
     };
 
-    // A unique, non-default control schema so the assertion is meaningful and the
-    // test never collides with a real deployment schema or a parallel run.
-    let schema = format!("ferrogate_usage_metadata_test_{}", std::process::id());
+    // Serialize the DB-touching body against the sibling schema-routing tests so
+    // the parallel run never opens a connection storm against the shared pooler.
+    let _db = serialize_db_test();
+
+    // A globally-unique, non-default control schema so the assertion is
+    // meaningful and the test never collides with a real deployment schema or a
+    // sibling test's schema.
+    let schema = unique_schema("ferrogate_usage_metadata_test");
     // Unique metadata key so the `public`-schema negative assertion is
     // unambiguous even if a stale row from another run/table lingers.
-    let metadata_key = format!("customer_id_238_{}", std::process::id());
+    let metadata_key = format!("customer_id_238_{schema}");
     let metadata_value = "acme-238";
+    // Drop the unique schema + the test's `public` shadow row on scope exit,
+    // even if an assertion below panics.
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.usage_metadata_rollups WHERE metadata_key = '{metadata_key}';"
+    ));
 
     // Provision the FULL control-plane schema in the configured schema (so the
     // settlement transaction's metering/usage/tenant tables all exist there),
@@ -125,12 +83,14 @@ fn live_usage_metadata_rollup_writes_to_configured_schema_not_public() {
 
     let config = PostgresStorageConfig {
         dsn: dsn.clone(),
-        pool_size: 2,
-        pool_acquire_timeout_millis: 5_000,
+        // See `control_plane_schema_test::open_repositories`: generous timeouts +
+        // a single connection keep the group hermetic on the shared live DB (#241).
+        pool_size: 1,
+        pool_acquire_timeout_millis: 30_000,
         tls_mode: PostgresTlsMode::Disable,
         tls_ca_cert_path: None,
-        connect_timeout_secs: 5,
-        statement_timeout_millis: 5_000,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
         // Non-default schema, no `public` fallback in the search path: a
         // regression to bare (non-search-path) settlement queries would resolve
         // against the connection-default `public` schema and fail the assertions.
@@ -207,11 +167,5 @@ fn live_usage_metadata_rollup_writes_to_configured_schema_not_public() {
         "the usage-metadata rollup must NOT be misrouted to the public schema (#238)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.usage_metadata_rollups WHERE metadata_key = '{metadata_key}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }

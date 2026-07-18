@@ -13577,6 +13577,10 @@ mod postgres_error_test;
 mod guardrail_policy_test;
 
 #[cfg(test)]
+#[path = "schema_routing_test_support.rs"]
+mod schema_routing_test_support;
+
+#[cfg(test)]
 #[path = "replay_floor_test.rs"]
 mod replay_floor_test;
 

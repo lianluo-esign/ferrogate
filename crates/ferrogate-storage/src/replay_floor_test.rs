@@ -105,52 +105,9 @@ fn replay_floor_composite_keys_do_not_collide_on_crafted_ids() {
     );
 }
 
-/// Run a batch of setup/teardown SQL against the test DSN over a throwaway
-/// connection (helper for the DSN-gated schema-routing test below).
-fn run_sql(dsn: &str, sql: &str) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            client
-                .batch_execute(sql)
-                .await
-                .expect("execute test setup/teardown sql");
-            drop(client);
-            let _ = driver.await;
-        });
-}
-
-/// Read a single `BIGINT` column from the test DSN, or `None` when no row
-/// matches. Used to prove which physical schema the replay floor landed in.
-fn query_i64(dsn: &str, sql: &str) -> Option<i64> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let row = client
-                .query_opt(sql, &[])
-                .await
-                .expect("query the replay-floor probe row");
-            drop(client);
-            let _ = driver.await;
-            row.map(|row| row.get::<_, i64>(0))
-        })
-}
+use crate::schema_routing_test_support::{
+    query_i64, run_sql, serialize_db_test, unique_schema, SchemaGuard,
+};
 
 /// #237: with a non-default `postgres_schema`, the durable replay floor must be
 /// written to (and read from) the CONFIGURED schema, not the connection-default
@@ -168,11 +125,21 @@ fn live_replay_floor_writes_to_configured_schema_not_public() {
         return;
     };
 
-    // A unique, non-default control schema so the assertion is meaningful and the
-    // test never collides with a real deployment schema.
-    let schema = format!("ferrogate_replay_floor_test_{}", std::process::id());
+    // Serialize the DB-touching body against the sibling schema-routing tests so
+    // the parallel run never opens a connection storm against the shared pooler.
+    let _db = serialize_db_test();
+
+    // A globally-unique, non-default control schema so the assertion is
+    // meaningful and the test never collides with a real deployment schema or a
+    // sibling test's schema.
+    let schema = unique_schema("ferrogate_replay_floor_test");
     let tenant = "tenant-237";
     let deployment = "deploy-237";
+    // Drop the unique schema + the test's `public` shadow row on scope exit,
+    // even if an assertion below panics.
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.control_plane_replay_floors WHERE tenant_id = '{tenant}';"
+    ));
 
     // Provision the replay-floor table in BOTH the configured schema and
     // `public`, exactly like the live project where the table's presence in both
@@ -197,12 +164,14 @@ fn live_replay_floor_writes_to_configured_schema_not_public() {
 
     let config = PostgresStorageConfig {
         dsn: dsn.clone(),
-        pool_size: 2,
-        pool_acquire_timeout_millis: 5_000,
+        // See `control_plane_schema_test::open_repositories`: generous timeouts +
+        // a single connection keep the group hermetic on the shared live DB (#241).
+        pool_size: 1,
+        pool_acquire_timeout_millis: 30_000,
         tls_mode: PostgresTlsMode::Disable,
         tls_ca_cert_path: None,
-        connect_timeout_secs: 5,
-        statement_timeout_millis: 5_000,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
         // Non-default schema, no `public` fallback in the search path: a
         // regression to bare (non-search-path) queries would resolve against the
         // connection-default `public` schema and fail both assertions below.
@@ -250,8 +219,5 @@ fn live_replay_floor_writes_to_configured_schema_not_public() {
         "the replay floor must NOT be misrouted to the public schema (#237)",
     );
 
-    run_sql(
-        &dsn,
-        &format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;"),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }

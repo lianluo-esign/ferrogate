@@ -10,67 +10,15 @@
 // fixed for the replay floor and usage-metadata rollups. All are gated on
 // `FERROGATE_TEST_POSTGRES_DSN` and skip cleanly when it is unset.
 
+use crate::schema_routing_test_support::{
+    block_on, count_rows, run_sql, serialize_db_test, unique_schema, SchemaGuard,
+};
 use crate::{
     PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories, StoredAgentRun,
     StoredAuditEvent, StoredPermission, StoredSelfHostedRunDispatch,
     StoredSelfHostedWorkerRegistration, StoredWallet, POSTGRES_SCHEMA_SQL,
 };
 use ferrogate_core::TenantContext;
-
-/// Run a batch of setup/teardown SQL against the test DSN over a throwaway
-/// connection.
-fn run_sql(dsn: &str, sql: &str) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            client
-                .batch_execute(sql)
-                .await
-                .expect("execute test setup/teardown sql");
-            drop(client);
-            let _ = driver.await;
-        });
-}
-
-/// Count rows matching `sql` (a `SELECT COUNT(*)::BIGINT ...`) against the test
-/// DSN. Used to prove which physical schema a control-plane row landed in.
-fn count_rows(dsn: &str, sql: &str) -> i64 {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(async {
-            let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-                .await
-                .expect("connect to the test postgres");
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let row = client
-                .query_one(sql, &[])
-                .await
-                .expect("count the control-plane probe rows");
-            drop(client);
-            let _ = driver.await;
-            row.get::<_, i64>(0)
-        })
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
-}
 
 /// Provision the FULL control-plane schema inside a fresh, unique, non-default
 /// schema and open a Postgres-backed repository set pinned to it (no `public`
@@ -90,12 +38,18 @@ fn open_repositories(dsn: &str, schema: &str) -> RuntimeStorageRepositories {
 
     let config = PostgresStorageConfig {
         dsn: dsn.to_string(),
-        pool_size: 2,
-        pool_acquire_timeout_millis: 5_000,
+        // One connection is enough for these single-op probes and keeps the
+        // group's footprint on the shared live database minimal.
+        pool_size: 1,
+        // Generous timeouts: the operation deadline is bounded by
+        // `statement_timeout_millis`, so a slow first-connection handshake to the
+        // remote test database must not trip a tight 5s pool-acquisition deadline
+        // (the source of the group-only flakes in #241).
+        pool_acquire_timeout_millis: 30_000,
         tls_mode: PostgresTlsMode::Disable,
         tls_ca_cert_path: None,
-        connect_timeout_secs: 5,
-        statement_timeout_millis: 5_000,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
         schema: Some(schema.to_string()),
         search_path: Vec::new(),
     };
@@ -121,9 +75,12 @@ fn live_rbac_permission_writes_to_configured_schema_not_public() {
     else {
         return;
     };
-    let schema = format!("ferrogate_cp_rbac_test_{}", std::process::id());
-    let id = format!("perm-cp-239-{}", std::process::id());
-    let key = format!("cp.239.permission.{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_rbac_test");
+    let id = format!("perm-{schema}");
+    let key = format!("cp.239.permission.{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema)
+        .also(format!("DELETE FROM public.permissions WHERE id = '{id}';"));
 
     // Shadow the table in `public` (masking scenario: table present in both).
     run_sql(
@@ -167,13 +124,7 @@ fn live_rbac_permission_writes_to_configured_schema_not_public() {
         "the permission must NOT be misrouted to the public schema (#239)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.permissions WHERE id = '{id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 (wallets): a wallet upsert must land in the configured schema.
@@ -182,8 +133,12 @@ fn live_wallet_writes_to_configured_schema_not_public() {
     let Some(dsn) = dsn_or_skip("live_wallet_writes_to_configured_schema_not_public") else {
         return;
     };
-    let schema = format!("ferrogate_cp_wallet_test_{}", std::process::id());
-    let tenant_id = format!("tenant-cp-239-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_wallet_test");
+    let tenant_id = format!("tenant-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
+    ));
 
     // The wallet write requires its owning tenant (FK). `public.wallets` is
     // shadowed WITHOUT the FK -- it only needs to catch a misrouted insert.
@@ -244,13 +199,7 @@ fn live_wallet_writes_to_configured_schema_not_public() {
         "the wallet must NOT be misrouted to the public schema (#239)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 (agent runs): an agent-run upsert must land in the configured schema.
@@ -259,8 +208,11 @@ fn live_agent_run_writes_to_configured_schema_not_public() {
     let Some(dsn) = dsn_or_skip("live_agent_run_writes_to_configured_schema_not_public") else {
         return;
     };
-    let schema = format!("ferrogate_cp_agent_run_test_{}", std::process::id());
-    let id = format!("run-cp-239-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_agent_run_test");
+    let id = format!("run-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema)
+        .also(format!("DELETE FROM public.agent_runs WHERE id = '{id}';"));
 
     run_sql(
         &dsn,
@@ -306,13 +258,7 @@ fn live_agent_run_writes_to_configured_schema_not_public() {
         "the agent run must NOT be misrouted to the public schema (#239)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.agent_runs WHERE id = '{id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 (audit logs): an audit-event append must land in the configured schema.
@@ -321,8 +267,12 @@ fn live_audit_event_writes_to_configured_schema_not_public() {
     let Some(dsn) = dsn_or_skip("live_audit_event_writes_to_configured_schema_not_public") else {
         return;
     };
-    let schema = format!("ferrogate_cp_audit_test_{}", std::process::id());
-    let id = format!("audit-cp-239-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_audit_test");
+    let id = format!("audit-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.audit_events WHERE id = '{id}';"
+    ));
 
     run_sql(
         &dsn,
@@ -375,13 +325,7 @@ fn live_audit_event_writes_to_configured_schema_not_public() {
         "the audit event must NOT be misrouted to the public schema (#239)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.audit_events WHERE id = '{id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 (self-hosted workers): a worker registration upsert must land in the
@@ -393,8 +337,12 @@ fn live_self_hosted_worker_registration_writes_to_configured_schema_not_public()
     else {
         return;
     };
-    let schema = format!("ferrogate_cp_worker_test_{}", std::process::id());
-    let id = format!("worker-cp-239-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_worker_test");
+    let id = format!("worker-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.self_hosted_worker_registrations WHERE id = '{id}';"
+    ));
 
     run_sql(
         &dsn,
@@ -456,13 +404,7 @@ fn live_self_hosted_worker_registration_writes_to_configured_schema_not_public()
         "the worker registration must NOT be misrouted to the public schema (#239)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.self_hosted_worker_registrations WHERE id = '{id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 follow-up (wallets): the MULTI-statement `settle_wallet_balance` path
@@ -477,9 +419,14 @@ fn live_wallet_settlement_writes_to_configured_schema_not_public() {
     else {
         return;
     };
-    let schema = format!("ferrogate_cp_wsettle_test_{}", std::process::id());
-    let tenant_id = format!("tenant-cp-wsettle-{}", std::process::id());
-    let settlement_id = format!("settle-cp-wsettle-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_wsettle_test");
+    let tenant_id = format!("tenant-{schema}");
+    let settlement_id = format!("settle-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.wallet_settlements WHERE id = '{settlement_id}'; \
+         DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
+    ));
 
     // Shadow both wallet tables in `public` WITHOUT FKs -- they only need to
     // catch a misrouted settlement insert / balance update.
@@ -564,14 +511,7 @@ fn live_wallet_settlement_writes_to_configured_schema_not_public() {
         "the debit must apply to the configured-schema wallet balance",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.wallet_settlements WHERE id = '{settlement_id}'; \
-             DELETE FROM public.wallets WHERE tenant_id = '{tenant_id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
 
 /// #239 follow-up (self-hosted dispatches): the MULTI-statement
@@ -587,8 +527,13 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
     else {
         return;
     };
-    let schema = format!("ferrogate_cp_dispatch_test_{}", std::process::id());
-    let dispatch_id = format!("dispatch-cp-239-{}", std::process::id());
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_dispatch_test");
+    let dispatch_id = format!("dispatch-{schema}");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.self_hosted_run_dispatch_capabilities WHERE dispatch_id = '{dispatch_id}'; \
+         DELETE FROM public.self_hosted_run_dispatches WHERE dispatch_id = '{dispatch_id}';"
+    ));
 
     // Shadow both dispatch tables in `public` WITHOUT FKs -- they only need to
     // catch a misrouted insert.
@@ -668,12 +613,5 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
         "the dispatch must NOT be misrouted to the public schema (#239 follow-up)",
     );
 
-    run_sql(
-        &dsn,
-        &format!(
-            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; \
-             DELETE FROM public.self_hosted_run_dispatch_capabilities WHERE dispatch_id = '{dispatch_id}'; \
-             DELETE FROM public.self_hosted_run_dispatches WHERE dispatch_id = '{dispatch_id}';"
-        ),
-    );
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
