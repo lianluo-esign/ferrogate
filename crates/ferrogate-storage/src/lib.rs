@@ -1529,11 +1529,24 @@ impl PostgresControlPlaneStore {
         deployment_id: &str,
     ) -> Result<Option<u64>, StorageError> {
         let operation = self.guardrail_policy_operation("get snapshot replay floor");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Run inside a transaction that pins `search_path` to the configured
+        // `postgres_schema`, exactly like the mcp-identity control-plane path.
+        // A bare query would resolve `control_plane_replay_floors` against the
+        // connection's default schema (`public` on stock Supabase roles), so the
+        // durable #206 replay floor could silently split from the rest of the
+        // control plane when `postgres_schema` is non-default (#237).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_opt(
                 "SELECT last_accepted_revision FROM control_plane_replay_floors \
                  WHERE tenant_id = $1 AND deployment_id = $2",
@@ -1541,6 +1554,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(row.map(|row| {
             let value: i64 = row.get(0);
             u64::try_from(value).unwrap_or(0)
@@ -1563,11 +1577,21 @@ impl PostgresControlPlaneStore {
             ))
         })?;
         let operation = self.guardrail_policy_operation("advance snapshot replay floor");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Pin `search_path` to the configured `postgres_schema` for the upsert so
+        // the persisted replay floor lands in the same schema as the rest of the
+        // control plane, not the connection default (#237).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_one(
                 "INSERT INTO control_plane_replay_floors \
                  (tenant_id, deployment_id, last_accepted_revision, updated_at_unix) \
@@ -1586,6 +1610,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         let value: i64 = row.get(0);
         Ok(u64::try_from(value).unwrap_or(0))
     }
