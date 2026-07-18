@@ -449,9 +449,7 @@ impl AppState {
         )
         .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         self.rebuild_self_hosted_worker_dispatch_runtime()?;
-        self.self_hosted_worker_records()
-            .into_iter()
-            .find(|record| record.id == id)
+        self.self_hosted_worker_record(&id)
             .map(|worker| (worker, transport_token_secret))
             .ok_or_else(|| {
                 SelfHostedWorkerRecordError::Storage(
@@ -468,10 +466,8 @@ impl AppState {
     {
         validate_self_hosted_rotate_request(&request)?;
         let mut registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| registration.id == worker_id)
         .ok_or_else(|| {
             SelfHostedWorkerRecordError::NotFound(format!(
                 "self-hosted worker {worker_id} was not found"
@@ -616,12 +612,10 @@ impl AppState {
         token_id: &str,
     ) -> Result<String, SelfHostedWorkerError> {
         let registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| {
-            registration.id == worker_id
-                && registration.workspace_id == workspace_id
+        .filter(|registration| {
+            registration.workspace_id == workspace_id
                 && self_hosted_tenant_id(&registration.tenant) == tenant_id
         })
         .ok_or_else(|| {
@@ -656,10 +650,8 @@ impl AppState {
     > {
         validate_self_hosted_heartbeat_request(&request)?;
         let mut registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| registration.id == worker_id)
         .ok_or_else(|| {
             SelfHostedWorkerRecordError::NotFound(format!(
                 "self-hosted worker {worker_id} was not found"
@@ -717,10 +709,8 @@ impl AppState {
     > {
         validate_self_hosted_telemetry_event_request(&request)?;
         let registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| registration.id == worker_id)
         .ok_or_else(|| {
             SelfHostedWorkerRecordError::NotFound(format!(
                 "self-hosted worker {worker_id} was not found"
@@ -779,10 +769,8 @@ impl AppState {
     > {
         validate_self_hosted_artifact_request(&request)?;
         let registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| registration.id == worker_id)
         .ok_or_else(|| {
             SelfHostedWorkerRecordError::NotFound(format!(
                 "self-hosted worker {worker_id} was not found"
@@ -794,11 +782,9 @@ impl AppState {
         // re-attribute another worker's (another tenant's) artifact by reusing
         // its id. Reject when the existing row belongs to a different worker.
         let artifact_id = request.artifact_id.trim().to_string();
-        if let Some(existing) =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_artifacts())
-                .into_iter()
-                .find(|artifact| artifact.id == artifact_id)
-        {
+        if let Some(existing) = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_artifact(&artifact_id),
+        ) {
             if existing.worker_id != registration.id {
                 return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
                     "artifact {artifact_id} already exists for a different worker"
@@ -860,10 +846,8 @@ impl AppState {
     > {
         validate_self_hosted_checkpoint_request(&request)?;
         let registration = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
+            self.repositories.self_hosted_worker_registration(worker_id),
         )
-        .into_iter()
-        .find(|registration| registration.id == worker_id)
         .ok_or_else(|| {
             SelfHostedWorkerRecordError::NotFound(format!(
                 "self-hosted worker {worker_id} was not found"
@@ -875,11 +859,10 @@ impl AppState {
         // different worker so one tenant cannot destroy/re-attribute another
         // tenant's resume checkpoint.
         let checkpoint_id = request.checkpoint_id.trim().to_string();
-        if let Some(existing) =
-            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_checkpoints())
-                .into_iter()
-                .find(|checkpoint| checkpoint.id == checkpoint_id)
-        {
+        if let Some(existing) = crate::gateway::block_on_sync_bridge(
+            self.repositories
+                .self_hosted_worker_checkpoint(&checkpoint_id),
+        ) {
             if existing.worker_id != registration.id {
                 return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
                     "checkpoint {checkpoint_id} already exists for a different worker"
@@ -926,13 +909,30 @@ impl AppState {
         Ok((worker, checkpoint))
     }
 
+    /// Single-worker record (issue #231). This is the hot path — every
+    /// worker heartbeat/telemetry/artifact/checkpoint write re-reads the
+    /// record — so the `worker_id` filter is pushed into the repository
+    /// (SQL on the durable path) instead of loading five whole tables and
+    /// filtering here.
     pub(crate) fn self_hosted_worker_record(
         &self,
         id: &str,
     ) -> Option<crate::responses::AdminSelfHostedWorkerRecord> {
-        self.self_hosted_worker_records()
-            .into_iter()
-            .find(|record| record.id == id)
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registration(id),
+        )?;
+        let latest_heartbeat = crate::gateway::block_on_sync_bridge(
+            self.repositories.latest_self_hosted_worker_heartbeat(id),
+        );
+        let stats = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_activity_stats(id),
+        );
+        Some(self_hosted_worker_record_from_parts(
+            registration,
+            latest_heartbeat,
+            stats,
+            now_unix_seconds(),
+        ))
     }
 
     pub(crate) fn self_hosted_worker_event_stream(
@@ -940,20 +940,15 @@ impl AppState {
         worker_id: &str,
         query: SelfHostedWorkerEventStreamQuery,
     ) -> Option<crate::responses::AdminSelfHostedWorkerEventStream> {
-        let worker_exists = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_registrations(),
-        )
-        .iter()
-        .any(|registration| registration.id == worker_id);
-        if !worker_exists {
-            return None;
-        }
+        // Worker-id filters pushed into the repository (SQL on the durable
+        // path) instead of listing whole tables (issue #231).
+        crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registration(worker_id),
+        )?;
         let mut events = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_telemetry_events(),
-        )
-        .into_iter()
-        .filter(|event| event.worker_id == worker_id)
-        .collect::<Vec<_>>();
+            self.repositories
+                .self_hosted_worker_telemetry_events_for_worker(worker_id),
+        );
         events.sort_by(|left, right| {
             left.occurred_at_unix
                 .cmp(&right.occurred_at_unix)
@@ -1007,6 +1002,10 @@ impl AppState {
         )
     }
 
+    /// Bulk (admin list) variant. Still loads the evidence stores wholesale,
+    /// but as of issue #231 every one of them is retention-bounded on both
+    /// backends; the per-worker hot path uses
+    /// [`Self::self_hosted_worker_record`] instead.
     fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
         let heartbeats =
             crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_worker_heartbeats());
@@ -1023,59 +1022,41 @@ impl AppState {
             .into_iter()
             .map(|registration| {
                 let latest_heartbeat = latest_self_hosted_heartbeat(&heartbeats, &registration.id);
-                let worker_telemetry = telemetry_events
-                    .iter()
-                    .filter(|event| event.worker_id == registration.id)
-                    .collect::<Vec<_>>();
-                let worker_artifacts = artifacts
-                    .iter()
-                    .filter(|artifact| artifact.worker_id == registration.id)
-                    .collect::<Vec<_>>();
-                let worker_checkpoints = checkpoints
-                    .iter()
-                    .filter(|checkpoint| checkpoint.worker_id == registration.id)
-                    .collect::<Vec<_>>();
-                let (stale, stale_after_unix) =
-                    self_hosted_worker_stale_state(registration.last_seen_at_unix, now_unix);
-                crate::responses::AdminSelfHostedWorkerRecord {
-                    id: registration.id,
-                    tenant: registration.tenant,
-                    workspace_id: registration.workspace_id,
-                    worker_name: registration.worker_name,
-                    status: registration.status,
-                    identity_fingerprint: registration.identity_fingerprint,
-                    identity_expires_at_unix: registration.identity_expires_at_unix,
-                    orchestration_enabled: registration.orchestration_enabled,
-                    registered_at_unix: registration.registered_at_unix,
-                    last_seen_at_unix: registration.last_seen_at_unix,
-                    trust_level: registration.trust_level,
-                    stale,
-                    stale_after_unix,
-                    stale_threshold_secs: SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS,
-                    latest_heartbeat: latest_heartbeat.map(|heartbeat| {
-                        crate::responses::AdminSelfHostedWorkerHeartbeat {
-                            id: heartbeat.id,
-                            status: heartbeat.status,
-                            reported_at_unix: heartbeat.reported_at_unix,
-                            observed_at_unix: heartbeat.observed_at_unix,
-                        }
-                    }),
-                    telemetry_event_count: worker_telemetry.len(),
-                    artifact_count: worker_artifacts.len(),
-                    checkpoint_count: worker_checkpoints.len(),
-                    latest_event_at_unix: worker_telemetry
+                let stats = ferrogate_storage::StoredSelfHostedWorkerActivityStats {
+                    telemetry_event_count: telemetry_events
                         .iter()
+                        .filter(|event| event.worker_id == registration.id)
+                        .count(),
+                    artifact_count: artifacts
+                        .iter()
+                        .filter(|artifact| artifact.worker_id == registration.id)
+                        .count(),
+                    checkpoint_count: checkpoints
+                        .iter()
+                        .filter(|checkpoint| checkpoint.worker_id == registration.id)
+                        .count(),
+                    latest_event_at_unix: telemetry_events
+                        .iter()
+                        .filter(|event| event.worker_id == registration.id)
                         .filter_map(|event| event.occurred_at_unix)
                         .max(),
-                    latest_artifact_at_unix: worker_artifacts
+                    latest_artifact_at_unix: artifacts
                         .iter()
+                        .filter(|artifact| artifact.worker_id == registration.id)
                         .filter_map(|artifact| artifact.created_at_unix)
                         .max(),
-                    latest_checkpoint_at_unix: worker_checkpoints
+                    latest_checkpoint_at_unix: checkpoints
                         .iter()
+                        .filter(|checkpoint| checkpoint.worker_id == registration.id)
                         .filter_map(|checkpoint| checkpoint.created_at_unix)
                         .max(),
-                }
+                };
+                self_hosted_worker_record_from_parts(
+                    registration,
+                    latest_heartbeat,
+                    stats,
+                    now_unix,
+                )
             })
             .collect()
     }
@@ -1094,11 +1075,19 @@ impl AppState {
         if run_id.trim().is_empty() {
             return None;
         }
+        // run_id filter + LIMIT are pushed into the repository (SQL on the
+        // durable path, issue #231); the repository keeps the NEWEST
+        // `SELF_HOSTED_RUN_TIMELINE_EVENT_LIMIT` events so an over-long run
+        // still reports its latest lifecycle state. The tenant-scope filter
+        // stays here (applied to the already-bounded slice).
         let mut events = crate::gateway::block_on_sync_bridge(
-            self.repositories.self_hosted_worker_telemetry_events(),
+            self.repositories
+                .self_hosted_worker_telemetry_events_for_run(
+                    run_id,
+                    SELF_HOSTED_RUN_TIMELINE_EVENT_LIMIT,
+                ),
         )
         .into_iter()
-        .filter(|event| event.run_id.as_deref() == Some(run_id))
         .filter(|event| {
             tenant_scope
                 .is_none_or(|tenant_id| event.tenant.organization_id.as_deref() == Some(tenant_id))
@@ -1184,17 +1173,22 @@ impl AppState {
         // that tenant.
         let run = crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
             .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, &filter));
-        let agent_events =
-            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events())
-                .into_iter()
-                .filter(|event| event.run_id == id)
-                .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
-                .collect::<Vec<_>>();
-        let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
-            .into_iter()
-            .filter(|log| log.agent_run_id.as_deref() == Some(id))
-            .filter(|log| agent_run_matches_filter(&log.request_id, &log.tenant, &filter))
-            .collect::<Vec<_>>();
+        // run_id filters pushed into the repository (SQL on the durable
+        // path, issue #231) instead of loading whole tables; the per-record
+        // tenant/request filter still applies to the filtered slices.
+        let run_ids = [id.to_string()];
+        let agent_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.agent_run_events_for_runs(&run_ids),
+        )
+        .into_iter()
+        .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
+        .collect::<Vec<_>>();
+        let requests = crate::gateway::block_on_sync_bridge(
+            self.repositories.request_logs_for_agent_runs(&run_ids),
+        )
+        .into_iter()
+        .filter(|log| agent_run_matches_filter(&log.request_id, &log.tenant, &filter))
+        .collect::<Vec<_>>();
         let billing_events = self
             .metering_events
             .list()
@@ -1202,11 +1196,12 @@ impl AppState {
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
-        let audit_events = crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
-            .into_iter()
-            .filter(|event| event.agent_run_id.as_deref() == Some(id))
-            .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
-            .collect::<Vec<_>>();
+        let audit_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.audit_events_for_agent_runs(&run_ids),
+        )
+        .into_iter()
+        .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
+        .collect::<Vec<_>>();
         if run.is_none()
             && agent_events.is_empty()
             && requests.is_empty()
@@ -1236,30 +1231,36 @@ impl AppState {
     }
 
     fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
-        let runs = crate::gateway::block_on_sync_bridge(self.repositories.agent_runs());
-        let agent_events =
-            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_events());
-        let requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs());
+        // Issue #231: enumerate candidate run ids with a filtered + LIMITed
+        // repository query (SQL on the durable path) instead of loading four
+        // whole tables, then batch-fetch only those runs' records. The scan
+        // is bounded to the AGENT_RUN_SUMMARY_SCAN_LIMIT most recently seen
+        // runs. Billing events live in-process (metering store), so their
+        // run ids are unioned in here.
         let billing_events = self.metering_events.list();
-        let audit_events = crate::gateway::block_on_sync_bridge(self.repositories.audit_events());
-        let mut run_ids = runs
-            .iter()
-            .map(|run| run.id.clone())
-            .chain(agent_events.iter().map(|event| event.run_id.clone()))
-            .chain(requests.iter().filter_map(|log| log.agent_run_id.clone()))
-            .chain(
-                billing_events
-                    .iter()
-                    .filter_map(|event| event.agent_run_id.clone()),
-            )
-            .chain(
-                audit_events
-                    .iter()
-                    .filter_map(|event| event.agent_run_id.clone()),
-            )
-            .collect::<Vec<_>>();
+        let mut run_ids =
+            crate::gateway::block_on_sync_bridge(self.repositories.agent_run_summary_seed_ids(
+                filter.request_id.as_deref(),
+                AGENT_RUN_SUMMARY_SCAN_LIMIT,
+            ));
+        run_ids.extend(
+            billing_events
+                .iter()
+                .filter_map(|event| event.agent_run_id.clone()),
+        );
         run_ids.sort();
         run_ids.dedup();
+        let runs =
+            crate::gateway::block_on_sync_bridge(self.repositories.agent_runs_by_ids(&run_ids));
+        let agent_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.agent_run_events_for_runs(&run_ids),
+        );
+        let requests = crate::gateway::block_on_sync_bridge(
+            self.repositories.request_logs_for_agent_runs(&run_ids),
+        );
+        let audit_events = crate::gateway::block_on_sync_bridge(
+            self.repositories.audit_events_for_agent_runs(&run_ids),
+        );
         run_ids
             .into_iter()
             .filter_map(|id| {
@@ -1638,6 +1639,60 @@ impl AppState {
                     && (event.target == target || event.target.starts_with(&target_prefix))
             })
             .collect()
+    }
+}
+
+/// Upper bound on telemetry events returned for one run's admin timeline
+/// (issue #231). The repository keeps the NEWEST window so a flooded run
+/// still reports its latest lifecycle state; both backends push the run_id
+/// filter + LIMIT into the store (SQL on the durable path).
+pub(crate) const SELF_HOSTED_RUN_TIMELINE_EVENT_LIMIT: usize = 1_000;
+
+/// Upper bound on distinct agent-run ids considered per admin summary read
+/// (issue #231): the most recently seen runs win. Replaces enumerating run
+/// ids by loading four whole tables into memory.
+pub(crate) const AGENT_RUN_SUMMARY_SCAN_LIMIT: usize = 1_000;
+
+/// Shared assembly of the admin worker record from its already-filtered
+/// parts (issue #231): used by both the single-worker hot path (repository
+/// pushes the worker_id filter into SQL) and the bulk admin list.
+fn self_hosted_worker_record_from_parts(
+    registration: StoredSelfHostedWorkerRegistration,
+    latest_heartbeat: Option<StoredSelfHostedWorkerHeartbeat>,
+    stats: ferrogate_storage::StoredSelfHostedWorkerActivityStats,
+    now_unix: Option<u64>,
+) -> crate::responses::AdminSelfHostedWorkerRecord {
+    let (stale, stale_after_unix) =
+        self_hosted_worker_stale_state(registration.last_seen_at_unix, now_unix);
+    crate::responses::AdminSelfHostedWorkerRecord {
+        id: registration.id,
+        tenant: registration.tenant,
+        workspace_id: registration.workspace_id,
+        worker_name: registration.worker_name,
+        status: registration.status,
+        identity_fingerprint: registration.identity_fingerprint,
+        identity_expires_at_unix: registration.identity_expires_at_unix,
+        orchestration_enabled: registration.orchestration_enabled,
+        registered_at_unix: registration.registered_at_unix,
+        last_seen_at_unix: registration.last_seen_at_unix,
+        trust_level: registration.trust_level,
+        stale,
+        stale_after_unix,
+        stale_threshold_secs: SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS,
+        latest_heartbeat: latest_heartbeat.map(|heartbeat| {
+            crate::responses::AdminSelfHostedWorkerHeartbeat {
+                id: heartbeat.id,
+                status: heartbeat.status,
+                reported_at_unix: heartbeat.reported_at_unix,
+                observed_at_unix: heartbeat.observed_at_unix,
+            }
+        }),
+        telemetry_event_count: stats.telemetry_event_count,
+        artifact_count: stats.artifact_count,
+        checkpoint_count: stats.checkpoint_count,
+        latest_event_at_unix: stats.latest_event_at_unix,
+        latest_artifact_at_unix: stats.latest_artifact_at_unix,
+        latest_checkpoint_at_unix: stats.latest_checkpoint_at_unix,
     }
 }
 

@@ -31,12 +31,13 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_admin_refresh_tenant_scope_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 34);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "034_admin_refresh_token_tenant_scope");
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 35);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "035_agent_run_audit_index");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (34, '034_admin_refresh_token_tenant_scope')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (35, '035_agent_run_audit_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));

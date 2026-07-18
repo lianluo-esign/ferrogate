@@ -11,9 +11,9 @@
 //! append-only views only for local Admin API compatibility and tests.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -494,8 +494,19 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 34;
-const POSTGRES_SCHEMA_NAME: &str = "034_admin_refresh_token_tenant_scope";
+
+/// Global in-memory cap for `agent_run_events`, as a multiple of the per-run
+/// cap (issue #231). Generous so eviction pressure on runs other than the
+/// one being appended to only builds up across MANY distinct runs.
+const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
+
+/// Durable (Postgres) retention pruning runs opportunistically on write,
+/// every Nth write per table (issue #231). Between prunes a scope can
+/// overshoot its retention bound by at most this many rows, which keeps the
+/// hot ingest path from paying an indexed OFFSET scan on every single write.
+const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
+const POSTGRES_SCHEMA_VERSION: u64 = 35;
+const POSTGRES_SCHEMA_NAME: &str = "035_agent_run_audit_index";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1052,6 +1063,19 @@ pub struct StoredSelfHostedWorkerCheckpoint {
     pub trust_level: String,
     pub created_at_unix: Option<u64>,
     pub checkpoint_json: String,
+}
+
+/// Per-worker activity aggregates for the admin worker record (issue #231):
+/// computed with worker-filtered queries instead of loading the telemetry /
+/// artifact / checkpoint tables wholesale.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredSelfHostedWorkerActivityStats {
+    pub telemetry_event_count: usize,
+    pub artifact_count: usize,
+    pub checkpoint_count: usize,
+    pub latest_event_at_unix: Option<u64>,
+    pub latest_artifact_at_unix: Option<u64>,
+    pub latest_checkpoint_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3692,6 +3716,215 @@ impl PostgresControlPlaneStore {
         Ok(events)
     }
 
+    /// Agent runs restricted to `run_ids` (issue #231): pushes the id filter
+    /// into SQL instead of loading the whole table and filtering in memory.
+    async fn agent_runs_by_ids(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAgentRun>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self.agent_run_operation("list agent runs by ids");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT run_json::text \
+                 FROM agent_runs \
+                 WHERE id = ANY($1) \
+                 ORDER BY started_at_unix ASC, id ASC",
+                &[&run_ids],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut runs = Vec::with_capacity(rows.len());
+        for row in rows {
+            runs.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(runs)
+    }
+
+    /// Agent-run events restricted to `run_ids` (issue #231).
+    async fn agent_run_events_for_runs(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self.agent_run_operation("list agent run events for runs");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT event_json::text \
+                 FROM agent_run_events \
+                 WHERE run_id = ANY($1) \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[&run_ids],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            events.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(events)
+    }
+
+    /// Request logs attributed to any of the given agent runs (issue #231).
+    async fn request_logs_for_agent_runs(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredRequestLog>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self.observability_operation("request logs for agent runs");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT request_json::text \
+                 FROM request_logs \
+                 WHERE agent_run_id = ANY($1) \
+                 ORDER BY started_at_unix ASC, request_id ASC",
+                &[&run_ids],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut logs = Vec::with_capacity(rows.len());
+        for row in rows {
+            logs.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(logs)
+    }
+
+    /// Audit events attributed to any of the given agent runs (issue #231).
+    async fn audit_events_for_agent_runs(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAuditEvent>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self.observability_operation("audit events for agent runs");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT audit_json::text \
+                 FROM audit_events \
+                 WHERE agent_run_id = ANY($1) \
+                 ORDER BY occurred_at_unix ASC, id ASC",
+                &[&run_ids],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            events.push(deserialize_storage_document(
+                row.get::<_, String>(0).as_str(),
+            )?);
+        }
+        Ok(events)
+    }
+
+    /// Distinct agent-run ids known to the durable store, most recently seen
+    /// first, LIMITed in SQL (issue #231). Replaces loading four whole
+    /// tables into memory just to enumerate run ids for the admin summary
+    /// list. `request_id` narrows the candidate set where the column exists;
+    /// exact per-record filter semantics stay with the caller.
+    async fn agent_run_summary_seed_ids(
+        &self,
+        request_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        let limit = saturating_i64(limit as u64);
+        let operation = self.agent_run_operation("agent run summary seed ids");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT run_id FROM ( \
+                     SELECT id AS run_id, \
+                            coalesce(completed_at_unix, started_at_unix, 0) AS seen_at \
+                     FROM agent_runs \
+                     WHERE ($1::text IS NULL OR request_id = $1) \
+                   UNION ALL \
+                     SELECT run_id, occurred_at_unix FROM agent_run_events \
+                     WHERE ($1::text IS NULL OR request_id = $1) \
+                   UNION ALL \
+                     SELECT agent_run_id, coalesce(completed_at_unix, started_at_unix, 0) \
+                     FROM request_logs \
+                     WHERE agent_run_id IS NOT NULL \
+                       AND ($1::text IS NULL OR request_id = $1) \
+                   UNION ALL \
+                     SELECT agent_run_id, occurred_at_unix FROM audit_events \
+                     WHERE agent_run_id IS NOT NULL \
+                       AND ($1::text IS NULL OR request_id = $1) \
+                 ) seeds \
+                 GROUP BY run_id \
+                 ORDER BY max(seen_at) DESC, run_id ASC \
+                 LIMIT $2",
+                &[&request_id, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    }
+
+    /// Durable retention for `agent_run_events` (issue #231): keeps the
+    /// newest `retain` events PER RUN, so one run's flood can only ever
+    /// truncate that same run's own timeline on the durable path too.
+    /// `retain == 0` disables pruning.
+    async fn prune_agent_run_events(
+        &self,
+        run_id: &str,
+        retain: usize,
+    ) -> Result<u64, StorageError> {
+        if retain == 0 {
+            return Ok(0);
+        }
+        let offset = saturating_i64(retain as u64);
+        let operation = self.agent_run_operation("prune agent run events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
+                "DELETE FROM agent_run_events WHERE id IN ( \
+                     SELECT id FROM agent_run_events \
+                     WHERE run_id = $1 \
+                     ORDER BY occurred_at_unix DESC, id DESC \
+                     OFFSET $2)",
+                &[&run_id, &offset],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
     fn worker_operation(&self, name: &'static str) -> StorageOperation {
         StorageOperation::new(name, self.async_pool.statement_timeout())
     }
@@ -4565,6 +4798,332 @@ impl PostgresControlPlaneStore {
             .collect())
     }
 
+    /// Single-registration lookup (issue #231): the worker write hot path
+    /// used to list ALL registrations and filter in memory.
+    async fn self_hosted_worker_registration(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerRegistration>, StorageError> {
+        let operation = self.worker_operation("get self hosted worker registration");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
+                    identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
+                    last_seen_at_unix, trust_level, capability_envelope_json::text, token_secret \
+                 FROM self_hosted_worker_registrations \
+                 WHERE id = $1",
+                &[&worker_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(self_hosted_worker_registration_from_row))
+    }
+
+    /// Latest heartbeat for one worker, filtered + LIMITed in SQL (#231).
+    async fn latest_self_hosted_worker_heartbeat(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerHeartbeat>, StorageError> {
+        let operation = self.worker_operation("latest self hosted worker heartbeat");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT id, worker_id, tenant, workspace_id, status, reported_at_unix, \
+                    observed_at_unix, heartbeat_json::text \
+                 FROM self_hosted_worker_heartbeats \
+                 WHERE worker_id = $1 \
+                 ORDER BY reported_at_unix DESC, id DESC \
+                 LIMIT 1",
+                &[&worker_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(self_hosted_worker_heartbeat_from_row))
+    }
+
+    /// Durable per-worker heartbeat retention (issue #231): keeps the newest
+    /// `retain` heartbeats for `worker_id`. `retain == 0` disables pruning.
+    async fn prune_self_hosted_worker_heartbeats(
+        &self,
+        worker_id: &str,
+        retain: usize,
+    ) -> Result<u64, StorageError> {
+        if retain == 0 {
+            return Ok(0);
+        }
+        let offset = saturating_i64(retain as u64);
+        let operation = self.worker_operation("prune self hosted worker heartbeats");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
+                "DELETE FROM self_hosted_worker_heartbeats WHERE id IN ( \
+                     SELECT id FROM self_hosted_worker_heartbeats \
+                     WHERE worker_id = $1 \
+                     ORDER BY reported_at_unix DESC, id DESC \
+                     OFFSET $2)",
+                &[&worker_id, &offset],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
+    /// Telemetry events for one run, newest-`limit` selected in SQL and
+    /// returned in ascending timeline order (issue #231). Keeping the NEWEST
+    /// window (instead of the oldest) preserves the run's latest lifecycle
+    /// state when a run exceeds the limit.
+    async fn self_hosted_worker_telemetry_events_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        let limit = if limit == 0 {
+            i64::MAX
+        } else {
+            saturating_i64(limit as u64)
+        };
+        let operation = self.worker_operation("list self hosted telemetry events for run");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                 FROM self_hosted_worker_telemetry_events \
+                 WHERE run_id = $1 \
+                 ORDER BY occurred_at_unix DESC, ingested_at_unix DESC, id DESC \
+                 LIMIT $2",
+                &[&run_id, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut events: Vec<_> = rows
+            .into_iter()
+            .map(self_hosted_worker_telemetry_event_from_row)
+            .collect();
+        events.reverse();
+        Ok(events)
+    }
+
+    /// Telemetry events for one worker, filtered in SQL (issue #231). The
+    /// result is bounded by the per-worker durable retention prune.
+    async fn self_hosted_worker_telemetry_events_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        let operation = self.worker_operation("list self hosted telemetry events for worker");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let rows = client
+            .query(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                 FROM self_hosted_worker_telemetry_events \
+                 WHERE worker_id = $1 \
+                 ORDER BY occurred_at_unix ASC, ingested_at_unix ASC, id ASC",
+                &[&worker_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(rows
+            .into_iter()
+            .map(self_hosted_worker_telemetry_event_from_row)
+            .collect())
+    }
+
+    /// Durable per-worker telemetry retention (issue #231). `retain == 0`
+    /// disables pruning.
+    async fn prune_self_hosted_worker_telemetry_events(
+        &self,
+        worker_id: &str,
+        retain: usize,
+    ) -> Result<u64, StorageError> {
+        if retain == 0 {
+            return Ok(0);
+        }
+        let offset = saturating_i64(retain as u64);
+        let operation = self.worker_operation("prune self hosted worker telemetry events");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
+                "DELETE FROM self_hosted_worker_telemetry_events WHERE id IN ( \
+                     SELECT id FROM self_hosted_worker_telemetry_events \
+                     WHERE worker_id = $1 \
+                     ORDER BY occurred_at_unix DESC, id DESC \
+                     OFFSET $2)",
+                &[&worker_id, &offset],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
+    /// Single-artifact lookup by id (issue #231): the cross-worker overwrite
+    /// guard (#228) used to list the whole table to find one id.
+    async fn self_hosted_worker_artifact(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerArtifact>, StorageError> {
+        let operation = self.worker_operation("get self hosted worker artifact");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                    artifact_name, content_type, size_bytes, trust_level, created_at_unix, \
+                    artifact_json::text \
+                 FROM self_hosted_worker_artifacts \
+                 WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(self_hosted_worker_artifact_from_row))
+    }
+
+    /// Durable per-worker distinct-artifact retention (issue #231). Keeps
+    /// the newest `retain` artifacts owned by `worker_id`; `retain == 0`
+    /// disables pruning.
+    async fn prune_self_hosted_worker_artifacts(
+        &self,
+        worker_id: &str,
+        retain: usize,
+    ) -> Result<u64, StorageError> {
+        if retain == 0 {
+            return Ok(0);
+        }
+        let offset = saturating_i64(retain as u64);
+        let operation = self.worker_operation("prune self hosted worker artifacts");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
+                "DELETE FROM self_hosted_worker_artifacts WHERE id IN ( \
+                     SELECT id FROM self_hosted_worker_artifacts \
+                     WHERE worker_id = $1 \
+                     ORDER BY created_at_unix DESC, id DESC \
+                     OFFSET $2)",
+                &[&worker_id, &offset],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
+    /// Single-checkpoint lookup by id (issue #231); see the artifact twin.
+    async fn self_hosted_worker_checkpoint(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerCheckpoint>, StorageError> {
+        let operation = self.worker_operation("get self hosted worker checkpoint");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                    checkpoint_name, size_bytes, trust_level, created_at_unix, \
+                    checkpoint_json::text \
+                 FROM self_hosted_worker_checkpoints \
+                 WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(self_hosted_worker_checkpoint_from_row))
+    }
+
+    /// Durable per-worker distinct-checkpoint retention (issue #231).
+    /// `retain == 0` disables pruning.
+    async fn prune_self_hosted_worker_checkpoints(
+        &self,
+        worker_id: &str,
+        retain: usize,
+    ) -> Result<u64, StorageError> {
+        if retain == 0 {
+            return Ok(0);
+        }
+        let offset = saturating_i64(retain as u64);
+        let operation = self.worker_operation("prune self hosted worker checkpoints");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        client
+            .execute(
+                "DELETE FROM self_hosted_worker_checkpoints WHERE id IN ( \
+                     SELECT id FROM self_hosted_worker_checkpoints \
+                     WHERE worker_id = $1 \
+                     ORDER BY created_at_unix DESC, id DESC \
+                     OFFSET $2)",
+                &[&worker_id, &offset],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
+    /// Per-worker activity aggregates computed in SQL (issue #231): the
+    /// worker record used to be assembled by loading FOUR whole tables just
+    /// to count and take maxima for a single worker.
+    async fn self_hosted_worker_activity_stats(
+        &self,
+        worker_id: &str,
+    ) -> Result<StoredSelfHostedWorkerActivityStats, StorageError> {
+        let operation = self.worker_operation("self hosted worker activity stats");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_one(
+                "SELECT \
+                    (SELECT count(*) FROM self_hosted_worker_telemetry_events \
+                     WHERE worker_id = $1), \
+                    (SELECT max(occurred_at_unix) FROM self_hosted_worker_telemetry_events \
+                     WHERE worker_id = $1), \
+                    (SELECT count(*) FROM self_hosted_worker_artifacts \
+                     WHERE worker_id = $1), \
+                    (SELECT max(created_at_unix) FROM self_hosted_worker_artifacts \
+                     WHERE worker_id = $1), \
+                    (SELECT count(*) FROM self_hosted_worker_checkpoints \
+                     WHERE worker_id = $1), \
+                    (SELECT max(created_at_unix) FROM self_hosted_worker_checkpoints \
+                     WHERE worker_id = $1)",
+                &[&worker_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let as_count = |value: i64| usize::try_from(value).unwrap_or_default();
+        let as_unix = |value: Option<i64>| value.and_then(|value| u64::try_from(value).ok());
+        Ok(StoredSelfHostedWorkerActivityStats {
+            telemetry_event_count: as_count(row.get(0)),
+            latest_event_at_unix: as_unix(row.get(1)),
+            artifact_count: as_count(row.get(2)),
+            latest_artifact_at_unix: as_unix(row.get(3)),
+            checkpoint_count: as_count(row.get(4)),
+            latest_checkpoint_at_unix: as_unix(row.get(5)),
+        })
+    }
+
     async fn upsert_self_hosted_run_dispatch(
         &self,
         dispatch: &StoredSelfHostedRunDispatch,
@@ -5229,6 +5788,7 @@ async fn validate_postgres_schema(client: &deadpool_postgres::Object) -> Result<
         "idx_mcp_oauth_credentials_expiry",
         "idx_mcp_oauth_credentials_refresh_lease",
         "idx_audit_events_actor_time",
+        "idx_audit_events_agent_run",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
         "idx_tenant_contexts_api_key",
@@ -7969,6 +8529,235 @@ impl<T: Clone> AppendRepository<T> for InMemoryAppendRepository<T> {
     }
 }
 
+/// Bounded in-memory store for `agent_run_events` (issue #231).
+///
+/// Chosen bound semantics: `agent_run_events` feed admin run timelines, so a
+/// plain FIFO retention cap (the heartbeat/telemetry pattern) would let one
+/// flooding run silently truncate every other -- possibly still ACTIVE --
+/// run's timeline. Instead:
+///
+/// - **Per-run cap** (`per_run_limit`): each run keeps at most its own most
+///   recent `per_run_limit` events; a run can only ever truncate itself.
+/// - **Global cap** (`global_limit`, a generous multiple of the per-run cap):
+///   when the whole store overflows, events are evicted oldest-first from the
+///   LEAST-recently-appended-to run, and never from the run whose event is
+///   currently being appended. An active run's retained window can therefore
+///   only shrink under global pressure from many distinct idle runs -- a
+///   single other run's flood is itself per-run capped and cannot evict it.
+///
+/// A limit of `0` disables the corresponding cap (the migration tooling
+/// constructs repositories with retention `0`, meaning "unbounded").
+#[derive(Debug, Default)]
+pub struct InMemoryAgentRunEventRepository {
+    records: VecDeque<StoredAgentRunEvent>,
+    /// Count of retained events per run id.
+    run_counts: HashMap<String, usize>,
+    /// Run ids ordered by last append (front = least recently appended-to).
+    run_recency: VecDeque<String>,
+    per_run_limit: usize,
+    global_limit: usize,
+}
+
+impl InMemoryAgentRunEventRepository {
+    pub fn new() -> Self {
+        Self::with_limits(0, 0)
+    }
+
+    pub fn with_limits(per_run_limit: usize, global_limit: usize) -> Self {
+        Self {
+            records: VecDeque::new(),
+            run_counts: HashMap::new(),
+            run_recency: VecDeque::new(),
+            per_run_limit,
+            global_limit,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn remove_oldest_event_of_run(&mut self, run_id: &str) {
+        let Some(position) = self.records.iter().position(|event| event.run_id == run_id) else {
+            return;
+        };
+        self.records.remove(position);
+        match self.run_counts.get_mut(run_id) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                self.run_counts.remove(run_id);
+                self.run_recency.retain(|id| id != run_id);
+            }
+        }
+    }
+
+    fn touch_run_recency(&mut self, run_id: &str) {
+        self.run_recency.retain(|id| id != run_id);
+        self.run_recency.push_back(run_id.to_string());
+    }
+}
+
+impl AppendRepository<StoredAgentRunEvent> for InMemoryAgentRunEventRepository {
+    fn append(&mut self, record: StoredAgentRunEvent) {
+        let run_id = record.run_id.clone();
+        self.records.push_back(record);
+        *self.run_counts.entry(run_id.clone()).or_insert(0) += 1;
+        self.touch_run_recency(&run_id);
+        if self.per_run_limit > 0 {
+            while self.run_counts.get(&run_id).copied().unwrap_or_default() > self.per_run_limit {
+                self.remove_oldest_event_of_run(&run_id.clone());
+            }
+        }
+        if self.global_limit > 0 {
+            while self.records.len() > self.global_limit {
+                // Evict from the least-recently-appended-to run that is not
+                // the run currently being appended (see type-level doc).
+                let Some(victim_run) = self
+                    .run_recency
+                    .iter()
+                    .find(|id| id.as_str() != run_id)
+                    .cloned()
+                else {
+                    // Only the appending run remains; the per-run cap (<=
+                    // global cap in practice) is the sole remaining bound.
+                    break;
+                };
+                self.remove_oldest_event_of_run(&victim_run);
+            }
+        }
+    }
+
+    fn list(&self) -> Vec<StoredAgentRunEvent> {
+        self.records.iter().cloned().collect()
+    }
+}
+
+impl AgentRunEventRepository for InMemoryAgentRunEventRepository {}
+
+/// A record that is durably owned by exactly one self-hosted worker.
+pub trait WorkerOwnedRecord {
+    fn owning_worker_id(&self) -> &str;
+}
+
+impl WorkerOwnedRecord for StoredSelfHostedWorkerArtifact {
+    fn owning_worker_id(&self) -> &str {
+        &self.worker_id
+    }
+}
+
+impl WorkerOwnedRecord for StoredSelfHostedWorkerCheckpoint {
+    fn owning_worker_id(&self) -> &str {
+        &self.worker_id
+    }
+}
+
+/// Keyed in-memory store with a per-worker DISTINCT-id cap (issue #231).
+///
+/// The artifact/checkpoint endpoints let an authenticated but customer-hosted
+/// worker create unbounded distinct ids for its own rows, so an uncapped
+/// keyed store is a worker-driven memory-DoS vector. This mirrors the
+/// heartbeat/telemetry `with_retention_limit` pattern but scoped PER WORKER:
+/// when a worker exceeds `per_worker_limit` distinct ids, that worker's
+/// oldest-inserted id is evicted. One worker's flood can never evict another
+/// worker's records. Updating an existing id does not count as a new distinct
+/// id and does not evict. A limit of `0` disables the cap (migration tooling
+/// constructs repositories with retention `0`).
+#[derive(Debug, Default)]
+pub struct InMemoryWorkerScopedRepository<T> {
+    records: HashMap<String, T>,
+    /// Per worker: distinct record ids in insertion order (front = oldest).
+    per_worker_ids: HashMap<String, VecDeque<String>>,
+    per_worker_limit: usize,
+}
+
+impl<T: WorkerOwnedRecord> InMemoryWorkerScopedRepository<T> {
+    pub fn new() -> Self {
+        Self::with_per_worker_limit(0)
+    }
+
+    pub fn with_per_worker_limit(per_worker_limit: usize) -> Self {
+        Self {
+            records: HashMap::new(),
+            per_worker_ids: HashMap::new(),
+            per_worker_limit,
+        }
+    }
+
+    pub fn insert(&mut self, id: impl Into<String>, record: T) {
+        let id = id.into();
+        let worker_id = record.owning_worker_id().to_string();
+        if let Some(existing) = self.records.get(&id) {
+            let previous_worker = existing.owning_worker_id().to_string();
+            if previous_worker != worker_id {
+                // Ownership moves are rejected upstream (#228); handle them
+                // anyway so the per-worker index never dangles.
+                if let Some(ids) = self.per_worker_ids.get_mut(&previous_worker) {
+                    ids.retain(|existing_id| existing_id != &id);
+                    if ids.is_empty() {
+                        self.per_worker_ids.remove(&previous_worker);
+                    }
+                }
+                self.track_new_id_for_worker(&worker_id, &id);
+            }
+            self.records.insert(id, record);
+            return;
+        }
+        self.records.insert(id.clone(), record);
+        self.track_new_id_for_worker(&worker_id, &id);
+    }
+
+    fn track_new_id_for_worker(&mut self, worker_id: &str, id: &str) {
+        let ids = self
+            .per_worker_ids
+            .entry(worker_id.to_string())
+            .or_default();
+        ids.push_back(id.to_string());
+        if self.per_worker_limit > 0 {
+            while ids.len() > self.per_worker_limit {
+                if let Some(evicted) = ids.pop_front() {
+                    self.records.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<T> {
+        let removed = self.records.remove(id)?;
+        let worker_id = removed.owning_worker_id().to_string();
+        if let Some(ids) = self.per_worker_ids.get_mut(&worker_id) {
+            ids.retain(|existing_id| existing_id != id);
+            if ids.is_empty() {
+                self.per_worker_ids.remove(&worker_id);
+            }
+        }
+        Some(removed)
+    }
+}
+
+impl<T: Clone + WorkerOwnedRecord> Repository<T> for InMemoryWorkerScopedRepository<T> {
+    fn get(&self, id: &str) -> Option<T> {
+        self.records.get(id).cloned()
+    }
+
+    fn list(&self) -> Vec<T> {
+        self.records.values().cloned().collect()
+    }
+}
+
+impl SelfHostedWorkerArtifactRepository
+    for InMemoryWorkerScopedRepository<StoredSelfHostedWorkerArtifact>
+{
+}
+
+impl SelfHostedWorkerCheckpointRepository
+    for InMemoryWorkerScopedRepository<StoredSelfHostedWorkerCheckpoint>
+{
+}
+
 impl RequestLogRepository for InMemoryAppendRepository<StoredRequestLog> {}
 
 impl AuditLogRepository for InMemoryAppendRepository<StoredAuditEvent> {}
@@ -8013,7 +8802,7 @@ pub struct RuntimeStorageRepositories {
     guardrail_evaluation_retention_records: Mutex<usize>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
     agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
-    agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
+    agent_run_events: Mutex<InMemoryAgentRunEventRepository>,
     managed_worker_templates: Mutex<InMemoryRepository<StoredManagedWorkerTemplate>>,
     agent_worker_instances: Mutex<InMemoryRepository<StoredAgentWorkerInstance>>,
     managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
@@ -8029,9 +8818,21 @@ pub struct RuntimeStorageRepositories {
     self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
     self_hosted_worker_telemetry_events:
         Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
-    self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
-    self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
+    self_hosted_worker_artifacts:
+        Mutex<InMemoryWorkerScopedRepository<StoredSelfHostedWorkerArtifact>>,
+    self_hosted_worker_checkpoints:
+        Mutex<InMemoryWorkerScopedRepository<StoredSelfHostedWorkerCheckpoint>>,
     self_hosted_run_dispatches: Mutex<InMemoryRepository<StoredSelfHostedRunDispatch>>,
+    /// Per-scope retention applied to the DURABLE (Postgres) worker/agent-run
+    /// stores by opportunistic prune-on-write (issue #231). `0` disables
+    /// durable pruning (the migration tooling constructs repositories with
+    /// retention `0` and must never prune imported rows).
+    durable_worker_retention_records: usize,
+    heartbeat_prune_ticks: AtomicU64,
+    telemetry_prune_ticks: AtomicU64,
+    artifact_prune_ticks: AtomicU64,
+    checkpoint_prune_ticks: AtomicU64,
+    agent_run_event_prune_ticks: AtomicU64,
 }
 
 struct RuntimeStorageRepositorySets {
@@ -8040,7 +8841,7 @@ struct RuntimeStorageRepositorySets {
     guardrail_evidence: Mutex<InMemoryAppendRepository<StoredGuardrailEvidence>>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
     agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
-    agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
+    agent_run_events: Mutex<InMemoryAgentRunEventRepository>,
     managed_worker_templates: Mutex<InMemoryRepository<StoredManagedWorkerTemplate>>,
     agent_worker_instances: Mutex<InMemoryRepository<StoredAgentWorkerInstance>>,
     managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
@@ -8056,8 +8857,10 @@ struct RuntimeStorageRepositorySets {
     self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
     self_hosted_worker_telemetry_events:
         Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
-    self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
-    self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
+    self_hosted_worker_artifacts:
+        Mutex<InMemoryWorkerScopedRepository<StoredSelfHostedWorkerArtifact>>,
+    self_hosted_worker_checkpoints:
+        Mutex<InMemoryWorkerScopedRepository<StoredSelfHostedWorkerCheckpoint>>,
     self_hosted_run_dispatches: Mutex<InMemoryRepository<StoredSelfHostedRunDispatch>>,
 }
 
@@ -8075,7 +8878,17 @@ impl RuntimeStorageRepositorySets {
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            // Bounded (issue #231): agent-run events previously grew without
+            // limit. Per-run cap = the audit retention bound; global cap = a
+            // generous multiple, evicting idle runs' events first so an
+            // ACTIVE run's timeline is never truncated by another run's
+            // flood. See `InMemoryAgentRunEventRepository` for the exact
+            // semantics.
+            agent_run_events: Mutex::new(InMemoryAgentRunEventRepository::with_limits(
+                audit_event_retention_records,
+                audit_event_retention_records
+                    .saturating_mul(AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER),
+            )),
             managed_worker_templates: Mutex::new(InMemoryRepository::new()),
             agent_worker_instances: Mutex::new(InMemoryRepository::new()),
             managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
@@ -8097,8 +8910,20 @@ impl RuntimeStorageRepositorySets {
             self_hosted_worker_telemetry_events: Mutex::new(
                 InMemoryAppendRepository::with_retention_limit(audit_event_retention_records),
             ),
-            self_hosted_worker_artifacts: Mutex::new(InMemoryRepository::new()),
-            self_hosted_worker_checkpoints: Mutex::new(InMemoryRepository::new()),
+            // Bounded (issue #231): a worker can create unbounded DISTINCT
+            // artifact/checkpoint ids for its own rows, so the keyed stores
+            // get a per-worker distinct-id cap with oldest-eviction. See
+            // `InMemoryWorkerScopedRepository` for the exact semantics.
+            self_hosted_worker_artifacts: Mutex::new(
+                InMemoryWorkerScopedRepository::with_per_worker_limit(
+                    audit_event_retention_records,
+                ),
+            ),
+            self_hosted_worker_checkpoints: Mutex::new(
+                InMemoryWorkerScopedRepository::with_per_worker_limit(
+                    audit_event_retention_records,
+                ),
+            ),
             self_hosted_run_dispatches: Mutex::new(InMemoryRepository::new()),
         }
     }
@@ -8138,6 +8963,12 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
             self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
+            durable_worker_retention_records: audit_event_retention_records,
+            heartbeat_prune_ticks: AtomicU64::new(0),
+            telemetry_prune_ticks: AtomicU64::new(0),
+            artifact_prune_ticks: AtomicU64::new(0),
+            checkpoint_prune_ticks: AtomicU64::new(0),
+            agent_run_event_prune_ticks: AtomicU64::new(0),
         }
     }
 
@@ -8220,6 +9051,12 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
             self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
+            durable_worker_retention_records: audit_event_retention_records,
+            heartbeat_prune_ticks: AtomicU64::new(0),
+            telemetry_prune_ticks: AtomicU64::new(0),
+            artifact_prune_ticks: AtomicU64::new(0),
+            checkpoint_prune_ticks: AtomicU64::new(0),
+            agent_run_event_prune_ticks: AtomicU64::new(0),
         })
     }
 
@@ -8294,6 +9131,14 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
             self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
+            // Migration tooling: retention 0 = durable pruning disabled, so a
+            // batch import can never prune rows it just wrote.
+            durable_worker_retention_records: 0,
+            heartbeat_prune_ticks: AtomicU64::new(0),
+            telemetry_prune_ticks: AtomicU64::new(0),
+            artifact_prune_ticks: AtomicU64::new(0),
+            checkpoint_prune_ticks: AtomicU64::new(0),
+            agent_run_event_prune_ticks: AtomicU64::new(0),
         })
     }
 
@@ -9618,6 +10463,14 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Opportunistic durable-prune scheduling (issue #231): due on the first
+    /// write and every `DURABLE_PRUNE_WRITE_INTERVAL`th write per table, and
+    /// only when durable retention is enabled (`> 0`).
+    fn durable_prune_due(&self, ticks: &AtomicU64) -> bool {
+        self.durable_worker_retention_records > 0
+            && ticks.fetch_add(1, Ordering::Relaxed) % DURABLE_PRUNE_WRITE_INTERVAL == 0
+    }
+
     pub fn set_retention_limits(
         &self,
         request_log_retention_records: usize,
@@ -9986,7 +10839,21 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_agent_run_event(&event).await
+                control_plane.append_agent_run_event(&event).await?;
+                if self.durable_prune_due(&self.agent_run_event_prune_ticks) {
+                    // Best-effort retention (issue #231): a prune failure
+                    // must not fail ingestion of the already-written event.
+                    if let Err(error) = control_plane
+                        .prune_agent_run_events(
+                            &event.run_id,
+                            self.durable_worker_retention_records,
+                        )
+                        .await
+                    {
+                        tracing::warn!("agent run event retention prune failed: {error}");
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -10001,6 +10868,181 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.agent_run_events().await.unwrap_or_default()
             }
+        }
+    }
+
+    /// Agent runs restricted to `run_ids` (issue #231): the filter is pushed
+    /// into SQL on the durable path; the in-memory backend implements the
+    /// same filtered semantics.
+    pub async fn agent_runs_by_ids(&self, run_ids: &[String]) -> Vec<StoredAgentRun> {
+        if run_ids.is_empty() {
+            return Vec::new();
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let wanted: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+                self.agent_runs
+                    .lock()
+                    .map(|runs| {
+                        runs.list()
+                            .into_iter()
+                            .filter(|run| wanted.contains(run.id.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .agent_runs_by_ids(run_ids)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Agent-run events restricted to `run_ids` (issue #231).
+    pub async fn agent_run_events_for_runs(&self, run_ids: &[String]) -> Vec<StoredAgentRunEvent> {
+        if run_ids.is_empty() {
+            return Vec::new();
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let wanted: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+                self.agent_run_events
+                    .lock()
+                    .map(|events| {
+                        events
+                            .list()
+                            .into_iter()
+                            .filter(|event| wanted.contains(event.run_id.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .agent_run_events_for_runs(run_ids)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Request logs attributed to any of the given agent runs (issue #231).
+    pub async fn request_logs_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredRequestLog> {
+        if run_ids.is_empty() {
+            return Vec::new();
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let wanted: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+                self.request_logs
+                    .lock()
+                    .map(|logs| {
+                        logs.list()
+                            .into_iter()
+                            .filter(|log| {
+                                log.agent_run_id
+                                    .as_deref()
+                                    .is_some_and(|run_id| wanted.contains(run_id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .request_logs_for_agent_runs(run_ids)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Audit events attributed to any of the given agent runs (issue #231).
+    pub async fn audit_events_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredAuditEvent> {
+        if run_ids.is_empty() {
+            return Vec::new();
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let wanted: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+                self.audit_events
+                    .lock()
+                    .map(|events| {
+                        events
+                            .list()
+                            .into_iter()
+                            .filter(|event| {
+                                event
+                                    .agent_run_id
+                                    .as_deref()
+                                    .is_some_and(|run_id| wanted.contains(run_id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .audit_events_for_agent_runs(run_ids)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Distinct agent-run ids, most recently seen first, bounded by `limit`
+    /// (issue #231). `request_id` narrows candidates; exact per-record
+    /// filtering remains with the caller. Both backends implement the same
+    /// semantics; the durable path evaluates the whole thing in SQL.
+    pub async fn agent_run_summary_seed_ids(
+        &self,
+        request_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let mut last_seen: HashMap<String, u64> = HashMap::new();
+                let mut observe = |run_id: &str, seen_at: Option<u64>| {
+                    let seen_at = seen_at.unwrap_or_default();
+                    let entry = last_seen.entry(run_id.to_string()).or_insert(seen_at);
+                    *entry = (*entry).max(seen_at);
+                };
+                if let Ok(runs) = self.agent_runs.lock() {
+                    for run in runs.list() {
+                        if request_id.is_none_or(|expected| run.request_id == expected) {
+                            observe(&run.id, run.completed_at_unix.or(run.started_at_unix));
+                        }
+                    }
+                }
+                if let Ok(events) = self.agent_run_events.lock() {
+                    for event in events.list() {
+                        if request_id.is_none_or(|expected| event.request_id == expected) {
+                            observe(&event.run_id, event.occurred_at_unix);
+                        }
+                    }
+                }
+                if let Ok(logs) = self.request_logs.lock() {
+                    for log in logs.list() {
+                        if let Some(run_id) = log.agent_run_id.as_deref() {
+                            if request_id.is_none_or(|expected| log.request_id == expected) {
+                                observe(run_id, log.completed_at_unix.or(log.started_at_unix));
+                            }
+                        }
+                    }
+                }
+                if let Ok(events) = self.audit_events.lock() {
+                    for event in events.list() {
+                        if let Some(run_id) = event.agent_run_id.as_deref() {
+                            if request_id.is_none_or(|expected| event.request_id == expected) {
+                                observe(run_id, event.occurred_at_unix);
+                            }
+                        }
+                    }
+                }
+                let mut seeds: Vec<(String, u64)> = last_seen.into_iter().collect();
+                seeds
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                seeds.truncate(limit);
+                seeds.into_iter().map(|(run_id, _)| run_id).collect()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .agent_run_summary_seed_ids(request_id, limit)
+                .await
+                .unwrap_or_default(),
         }
     }
 
@@ -10272,6 +11314,202 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Single-registration lookup (issue #231): worker-id filter pushed into
+    /// SQL on the durable path instead of listing every registration.
+    pub async fn self_hosted_worker_registration(
+        &self,
+        worker_id: &str,
+    ) -> Option<StoredSelfHostedWorkerRegistration> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_registrations
+                .lock()
+                .ok()
+                .and_then(|registrations| registrations.get(worker_id)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_registration(worker_id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Latest heartbeat for one worker (issue #231): `worker_id` filter and
+    /// `LIMIT 1` pushed into SQL on the durable path.
+    pub async fn latest_self_hosted_worker_heartbeat(
+        &self,
+        worker_id: &str,
+    ) -> Option<StoredSelfHostedWorkerHeartbeat> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_heartbeats
+                .lock()
+                .ok()
+                .and_then(|heartbeats| {
+                    heartbeats
+                        .list()
+                        .into_iter()
+                        .filter(|heartbeat| heartbeat.worker_id == worker_id)
+                        .max_by(|left, right| {
+                            left.reported_at_unix
+                                .cmp(&right.reported_at_unix)
+                                .then_with(|| left.id.cmp(&right.id))
+                        })
+                }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .latest_self_hosted_worker_heartbeat(worker_id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Per-worker activity aggregates (issue #231): computed with
+    /// worker-filtered queries on the durable path; the in-memory backend
+    /// computes the same aggregates over its (bounded) stores.
+    pub async fn self_hosted_worker_activity_stats(
+        &self,
+        worker_id: &str,
+    ) -> StoredSelfHostedWorkerActivityStats {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let mut stats = StoredSelfHostedWorkerActivityStats::default();
+                if let Ok(events) = self.self_hosted_worker_telemetry_events.lock() {
+                    for event in events.list() {
+                        if event.worker_id == worker_id {
+                            stats.telemetry_event_count += 1;
+                            stats.latest_event_at_unix =
+                                stats.latest_event_at_unix.max(event.occurred_at_unix);
+                        }
+                    }
+                }
+                if let Ok(artifacts) = self.self_hosted_worker_artifacts.lock() {
+                    for artifact in artifacts.list() {
+                        if artifact.worker_id == worker_id {
+                            stats.artifact_count += 1;
+                            stats.latest_artifact_at_unix =
+                                stats.latest_artifact_at_unix.max(artifact.created_at_unix);
+                        }
+                    }
+                }
+                if let Ok(checkpoints) = self.self_hosted_worker_checkpoints.lock() {
+                    for checkpoint in checkpoints.list() {
+                        if checkpoint.worker_id == worker_id {
+                            stats.checkpoint_count += 1;
+                            stats.latest_checkpoint_at_unix = stats
+                                .latest_checkpoint_at_unix
+                                .max(checkpoint.created_at_unix);
+                        }
+                    }
+                }
+                stats
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_activity_stats(worker_id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Telemetry events for one run in ascending timeline order, keeping the
+    /// NEWEST `limit` events (issue #231) so a flooded run still reports its
+    /// latest lifecycle state. `limit == 0` means unbounded.
+    pub async fn self_hosted_worker_telemetry_events_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let mut events = self
+                    .self_hosted_worker_telemetry_events
+                    .lock()
+                    .map(|events| {
+                        events
+                            .list()
+                            .into_iter()
+                            .filter(|event| event.run_id.as_deref() == Some(run_id))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                events.sort_by(|left, right| {
+                    left.occurred_at_unix
+                        .cmp(&right.occurred_at_unix)
+                        .then_with(|| left.ingested_at_unix.cmp(&right.ingested_at_unix))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if limit > 0 && events.len() > limit {
+                    events.drain(..events.len() - limit);
+                }
+                events
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_telemetry_events_for_run(run_id, limit)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Telemetry events for one worker (issue #231): worker-id filter pushed
+    /// into SQL on the durable path; both backends are retention-bounded.
+    pub async fn self_hosted_worker_telemetry_events_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_telemetry_events
+                .lock()
+                .map(|events| {
+                    events
+                        .list()
+                        .into_iter()
+                        .filter(|event| event.worker_id == worker_id)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_telemetry_events_for_worker(worker_id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Single-artifact lookup by id (issue #231): backs the cross-worker
+    /// overwrite guard (#228) without listing the whole table.
+    pub async fn self_hosted_worker_artifact(
+        &self,
+        id: &str,
+    ) -> Option<StoredSelfHostedWorkerArtifact> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_artifacts
+                .lock()
+                .ok()
+                .and_then(|artifacts| artifacts.get(id)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_artifact(id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Single-checkpoint lookup by id (issue #231); see the artifact twin.
+    pub async fn self_hosted_worker_checkpoint(
+        &self,
+        id: &str,
+    ) -> Option<StoredSelfHostedWorkerCheckpoint> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_checkpoints
+                .lock()
+                .ok()
+                .and_then(|checkpoints| checkpoints.get(id)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_checkpoint(id)
+                .await
+                .unwrap_or_default(),
+        }
+    }
+
     pub async fn append_self_hosted_worker_heartbeat(
         &self,
         heartbeat: StoredSelfHostedWorkerHeartbeat,
@@ -10286,7 +11524,21 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .append_self_hosted_worker_heartbeat(&heartbeat)
-                    .await
+                    .await?;
+                if self.durable_prune_due(&self.heartbeat_prune_ticks) {
+                    // Best-effort retention (issue #231): a prune failure
+                    // must not fail ingestion of the already-written record.
+                    if let Err(error) = control_plane
+                        .prune_self_hosted_worker_heartbeats(
+                            &heartbeat.worker_id,
+                            self.durable_worker_retention_records,
+                        )
+                        .await
+                    {
+                        tracing::warn!("self-hosted heartbeat retention prune failed: {error}");
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -10319,7 +11571,20 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .append_self_hosted_worker_telemetry_event(&event)
-                    .await
+                    .await?;
+                if self.durable_prune_due(&self.telemetry_prune_ticks) {
+                    // Best-effort retention (issue #231); see heartbeat twin.
+                    if let Err(error) = control_plane
+                        .prune_self_hosted_worker_telemetry_events(
+                            &event.worker_id,
+                            self.durable_worker_retention_records,
+                        )
+                        .await
+                    {
+                        tracing::warn!("self-hosted telemetry retention prune failed: {error}");
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -10354,7 +11619,20 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .upsert_self_hosted_worker_artifact(&artifact)
-                    .await
+                    .await?;
+                if self.durable_prune_due(&self.artifact_prune_ticks) {
+                    // Best-effort retention (issue #231); see heartbeat twin.
+                    if let Err(error) = control_plane
+                        .prune_self_hosted_worker_artifacts(
+                            &artifact.worker_id,
+                            self.durable_worker_retention_records,
+                        )
+                        .await
+                    {
+                        tracing::warn!("self-hosted artifact retention prune failed: {error}");
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -10387,7 +11665,20 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .upsert_self_hosted_worker_checkpoint(&checkpoint)
-                    .await
+                    .await?;
+                if self.durable_prune_due(&self.checkpoint_prune_ticks) {
+                    // Best-effort retention (issue #231); see heartbeat twin.
+                    if let Err(error) = control_plane
+                        .prune_self_hosted_worker_checkpoints(
+                            &checkpoint.worker_id,
+                            self.durable_worker_retention_records,
+                        )
+                        .await
+                    {
+                        tracing::warn!("self-hosted checkpoint retention prune failed: {error}");
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -11123,6 +12414,395 @@ mod tests {
             "heartbeat store must be retention-bounded"
         );
         assert_eq!(heartbeats.last().unwrap().id, "heartbeat-49");
+    }
+
+    fn sample_agent_run_event(id: &str, run_id: &str, occurred_at: u64) -> StoredAgentRunEvent {
+        StoredAgentRunEvent {
+            id: id.into(),
+            run_id: run_id.into(),
+            request_id: format!("req-{run_id}"),
+            trace_id: None,
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                ..Default::default()
+            },
+            turn: 0,
+            kind: "tool.execute".into(),
+            target: "cli:bash".into(),
+            outcome: "allowed".into(),
+            tool_call_id: None,
+            message: None,
+            occurred_at_unix: Some(occurred_at),
+        }
+    }
+
+    #[test]
+    fn agent_run_event_repository_per_run_cap_evicts_only_that_runs_oldest() {
+        let mut repository = InMemoryAgentRunEventRepository::with_limits(3, 100);
+        for index in 0..5 {
+            repository.append(sample_agent_run_event(
+                &format!("a-{index}"),
+                "run-a",
+                index,
+            ));
+        }
+        repository.append(sample_agent_run_event("b-0", "run-b", 100));
+        let events = repository.list();
+        let run_a_ids: Vec<&str> = events
+            .iter()
+            .filter(|event| event.run_id == "run-a")
+            .map(|event| event.id.as_str())
+            .collect();
+        assert_eq!(
+            run_a_ids,
+            vec!["a-2", "a-3", "a-4"],
+            "per-run cap keeps the newest events of the flooding run"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.run_id == "run-b")
+                .count(),
+            1,
+            "other runs are untouched by run-a's flood"
+        );
+    }
+
+    #[test]
+    fn agent_run_event_repository_global_cap_never_evicts_the_active_run() {
+        // per-run cap 4, global cap 6: an active run holding its full 4-event
+        // window plus enough idle-run events to overflow the global cap must
+        // see ONLY the idle runs' events evicted (oldest / least recently
+        // appended-to run first).
+        let mut repository = InMemoryAgentRunEventRepository::with_limits(4, 6);
+        for index in 0..3 {
+            repository.append(sample_agent_run_event(
+                &format!("idle1-{index}"),
+                "run-idle-1",
+                index,
+            ));
+        }
+        for index in 0..3 {
+            repository.append(sample_agent_run_event(
+                &format!("idle2-{index}"),
+                "run-idle-2",
+                10 + index,
+            ));
+        }
+        // The active run floods; its own window must stay intact.
+        for index in 0..4 {
+            repository.append(sample_agent_run_event(
+                &format!("active-{index}"),
+                "run-active",
+                20 + index,
+            ));
+        }
+        let events = repository.list();
+        assert!(events.len() <= 6, "global cap enforced: {}", events.len());
+        let active: Vec<&str> = events
+            .iter()
+            .filter(|event| event.run_id == "run-active")
+            .map(|event| event.id.as_str())
+            .collect();
+        assert_eq!(
+            active,
+            vec!["active-0", "active-1", "active-2", "active-3"],
+            "the appending (active) run's timeline is never truncated by the global cap"
+        );
+        // run-idle-1 was the least recently appended-to run, so it is
+        // evicted before run-idle-2.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.run_id == "run-idle-1")
+                .count(),
+            0,
+            "least-recently-active run's events are evicted first"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.run_id == "run-idle-2")
+                .count(),
+            2,
+            "the more recently active idle run keeps its newest events"
+        );
+        // Eviction within the victim run is oldest-first.
+        assert!(events.iter().all(|event| event.id != "idle2-0"));
+    }
+
+    #[test]
+    fn agent_run_event_repository_zero_limits_disable_caps() {
+        let mut repository = InMemoryAgentRunEventRepository::with_limits(0, 0);
+        for index in 0..100 {
+            repository.append(sample_agent_run_event(
+                &format!("event-{index}"),
+                "run-1",
+                index,
+            ));
+        }
+        assert_eq!(repository.list().len(), 100);
+    }
+
+    fn sample_artifact(
+        id: &str,
+        worker_id: &str,
+        created_at: u64,
+    ) -> StoredSelfHostedWorkerArtifact {
+        StoredSelfHostedWorkerArtifact {
+            id: id.into(),
+            worker_id: worker_id.into(),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                ..Default::default()
+            },
+            workspace_id: "workspace-1".into(),
+            session_id: "session-1".into(),
+            run_id: "run-1".into(),
+            artifact_name: format!("{id}.tar"),
+            content_type: None,
+            size_bytes: 1,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            created_at_unix: Some(created_at),
+            artifact_json: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn worker_scoped_repository_caps_distinct_ids_per_worker_with_oldest_eviction() {
+        let mut repository = InMemoryWorkerScopedRepository::with_per_worker_limit(2);
+        repository.insert("art-1", sample_artifact("art-1", "worker-1", 1));
+        repository.insert("art-2", sample_artifact("art-2", "worker-1", 2));
+        repository.insert("other-1", sample_artifact("other-1", "worker-2", 3));
+        // Updating an EXISTING id is not a new distinct id: no eviction.
+        repository.insert("art-2", sample_artifact("art-2", "worker-1", 20));
+        assert!(repository.get("art-1").is_some());
+        assert_eq!(repository.get("art-2").unwrap().created_at_unix, Some(20));
+        // A third distinct id for worker-1 evicts its oldest distinct id.
+        repository.insert("art-3", sample_artifact("art-3", "worker-1", 4));
+        assert!(
+            repository.get("art-1").is_none(),
+            "oldest distinct id of the flooding worker is evicted"
+        );
+        assert!(repository.get("art-2").is_some());
+        assert!(repository.get("art-3").is_some());
+        assert!(
+            repository.get("other-1").is_some(),
+            "another worker's records are never evicted by worker-1's flood"
+        );
+        assert_eq!(repository.list().len(), 3);
+    }
+
+    #[test]
+    fn worker_scoped_repository_zero_limit_is_unbounded() {
+        let mut repository = InMemoryWorkerScopedRepository::with_per_worker_limit(0);
+        for index in 0..50 {
+            let id = format!("art-{index}");
+            repository.insert(id.clone(), sample_artifact(&id, "worker-1", index));
+        }
+        assert_eq!(repository.list().len(), 50);
+    }
+
+    #[test]
+    fn in_memory_worker_filtered_reads_match_full_load_semantics() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            ..Default::default()
+        };
+        block_on(repositories.upsert_self_hosted_worker_registration(
+            StoredSelfHostedWorkerRegistration {
+                id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_name: "edge".into(),
+                status: "registered".into(),
+                identity_fingerprint: "fp-1".into(),
+                identity_expires_at_unix: None,
+                orchestration_enabled: true,
+                registered_at_unix: Some(1),
+                last_seen_at_unix: None,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                capability_envelope_json: "{}".into(),
+                token_secret: "secret-1".into(),
+            },
+        ))
+        .unwrap();
+        for index in 0..3u64 {
+            block_on(repositories.append_self_hosted_worker_heartbeat(
+                StoredSelfHostedWorkerHeartbeat {
+                    id: format!("heartbeat-{index}"),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    status: "online".into(),
+                    reported_at_unix: Some(index),
+                    observed_at_unix: Some(index),
+                    heartbeat_json: "{}".into(),
+                },
+            ))
+            .unwrap();
+        }
+        for (index, run_id) in [(0u64, "run-1"), (1, "run-1"), (2, "run-2")] {
+            block_on(repositories.append_self_hosted_worker_telemetry_event(
+                StoredSelfHostedWorkerTelemetryEvent {
+                    id: format!("event-{index}"),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    session_id: Some("session-1".into()),
+                    run_id: Some(run_id.into()),
+                    kind: "lifecycle".into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(index),
+                    ingested_at_unix: Some(index),
+                    event_json: "{}".into(),
+                },
+            ))
+            .unwrap();
+        }
+        block_on(
+            repositories
+                .upsert_self_hosted_worker_artifact(sample_artifact("art-1", "worker-1", 7)),
+        )
+        .unwrap();
+        block_on(repositories.upsert_self_hosted_worker_checkpoint(
+            StoredSelfHostedWorkerCheckpoint {
+                id: "ckpt-1".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume".into(),
+                size_bytes: 1,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                created_at_unix: Some(9),
+                checkpoint_json: "{}".into(),
+            },
+        ))
+        .unwrap();
+
+        // Registration lookup.
+        assert_eq!(
+            block_on(repositories.self_hosted_worker_registration("worker-1"))
+                .unwrap()
+                .worker_name,
+            "edge"
+        );
+        assert!(block_on(repositories.self_hosted_worker_registration("missing")).is_none());
+        // Latest heartbeat.
+        assert_eq!(
+            block_on(repositories.latest_self_hosted_worker_heartbeat("worker-1"))
+                .unwrap()
+                .id,
+            "heartbeat-2"
+        );
+        assert!(block_on(repositories.latest_self_hosted_worker_heartbeat("missing")).is_none());
+        // Activity stats.
+        let stats = block_on(repositories.self_hosted_worker_activity_stats("worker-1"));
+        assert_eq!(stats.telemetry_event_count, 3);
+        assert_eq!(stats.artifact_count, 1);
+        assert_eq!(stats.checkpoint_count, 1);
+        assert_eq!(stats.latest_event_at_unix, Some(2));
+        assert_eq!(stats.latest_artifact_at_unix, Some(7));
+        assert_eq!(stats.latest_checkpoint_at_unix, Some(9));
+        assert_eq!(
+            block_on(repositories.self_hosted_worker_activity_stats("missing")),
+            StoredSelfHostedWorkerActivityStats::default()
+        );
+        // Run-filtered telemetry keeps ascending order.
+        let run_events =
+            block_on(repositories.self_hosted_worker_telemetry_events_for_run("run-1", 10));
+        assert_eq!(
+            run_events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-0", "event-1"]
+        );
+        // ... and a smaller limit keeps the NEWEST window.
+        let run_events =
+            block_on(repositories.self_hosted_worker_telemetry_events_for_run("run-1", 1));
+        assert_eq!(
+            run_events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-1"],
+            "the newest events win when a run exceeds the timeline limit"
+        );
+        // Worker-filtered telemetry.
+        assert_eq!(
+            block_on(repositories.self_hosted_worker_telemetry_events_for_worker("worker-1")).len(),
+            3
+        );
+        assert!(
+            block_on(repositories.self_hosted_worker_telemetry_events_for_worker("missing"))
+                .is_empty()
+        );
+        // Keyed lookups.
+        assert!(block_on(repositories.self_hosted_worker_artifact("art-1")).is_some());
+        assert!(block_on(repositories.self_hosted_worker_artifact("missing")).is_none());
+        assert!(block_on(repositories.self_hosted_worker_checkpoint("ckpt-1")).is_some());
+        assert!(block_on(repositories.self_hosted_worker_checkpoint("missing")).is_none());
+    }
+
+    #[test]
+    fn in_memory_agent_run_filtered_reads_and_seed_ids() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            ..Default::default()
+        };
+        for (run_id, started_at) in [("run-1", 10u64), ("run-2", 20), ("run-3", 30)] {
+            block_on(repositories.upsert_agent_run(StoredAgentRun {
+                id: run_id.into(),
+                request_id: format!("req-{run_id}"),
+                trace_id: None,
+                tenant: tenant.clone(),
+                status: "completed".into(),
+                provider: "managed.native-harness".into(),
+                turns_executed: 1,
+                output_recorded: true,
+                started_at_unix: Some(started_at),
+                completed_at_unix: Some(started_at + 1),
+            }))
+            .unwrap();
+        }
+        block_on(
+            repositories.append_agent_run_event(sample_agent_run_event("event-1", "run-1", 12)),
+        )
+        .unwrap();
+        block_on(
+            repositories.append_agent_run_event(sample_agent_run_event("event-2", "run-2", 22)),
+        )
+        .unwrap();
+
+        let run_ids = vec!["run-1".to_string(), "run-3".to_string()];
+        let runs = block_on(repositories.agent_runs_by_ids(&run_ids));
+        let mut fetched: Vec<&str> = runs.iter().map(|run| run.id.as_str()).collect();
+        fetched.sort();
+        assert_eq!(fetched, vec!["run-1", "run-3"]);
+        assert!(block_on(repositories.agent_runs_by_ids(&[])).is_empty());
+
+        let events = block_on(repositories.agent_run_events_for_runs(&run_ids));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "event-1");
+
+        // Seed ids: most recently seen first, LIMITed.
+        let seeds = block_on(repositories.agent_run_summary_seed_ids(None, 10));
+        assert_eq!(seeds, vec!["run-3", "run-2", "run-1"]);
+        let seeds = block_on(repositories.agent_run_summary_seed_ids(None, 2));
+        assert_eq!(
+            seeds,
+            vec!["run-3", "run-2"],
+            "seed scan keeps the most recently seen runs when limited"
+        );
+        let seeds = block_on(repositories.agent_run_summary_seed_ids(Some("req-run-1"), 10));
+        assert_eq!(seeds, vec!["run-1"]);
     }
 
     #[test]

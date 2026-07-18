@@ -598,6 +598,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_request
 CREATE INDEX IF NOT EXISTS idx_audit_events_trace
     ON audit_events(trace_id);
 
+-- Issue #231: agent-run timeline/summary reads filter audit events by
+-- agent_run_id in SQL instead of loading the whole table.
+CREATE INDEX IF NOT EXISTS idx_audit_events_agent_run
+    ON audit_events(agent_run_id)
+    WHERE agent_run_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS billing_metering_events (
     request_id TEXT PRIMARY KEY,
     trace_id TEXT,
@@ -1771,4 +1777,8 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (34, '034_admin_refresh_token_tenant_scope')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (35, '035_agent_run_audit_index')
 ON CONFLICT (version) DO NOTHING;
