@@ -13,6 +13,7 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +22,7 @@ use anyhow::{bail, Result};
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
     AgentWorkerIsolationBackendReport, IsolationBackendCapabilities, IsolationBackendDescriptor,
-    IsolationBackendKind,
+    IsolationBackendKind, IsolationFilesystemPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1953,14 +1954,19 @@ impl FirecrackerMicroVm {
 
     pub(crate) fn stop(&mut self) -> FirecrackerStopReport {
         let process = stop_firecracker_child(&mut self.child);
-        let api_socket_removed = remove_firecracker_host_socket(&self.artifacts.api_socket);
+        let api_socket_removed = remove_firecracker_host_file(&self.artifacts.api_socket);
         let guest_rpc_socket_removed =
-            remove_firecracker_host_socket(&self.artifacts.guest_rpc_socket);
+            remove_firecracker_host_file(&self.artifacts.guest_rpc_socket);
+        // Per-VM writable workspace backing file (#227): reclaim it on
+        // teardown; it is private to this VM's run dir.
+        let workspace_image_removed =
+            remove_firecracker_host_file(&self.artifacts.workspace_image_path());
         FirecrackerStopReport {
             was_running: process.was_running,
             process_outcome: process.outcome,
             api_socket_removed,
             guest_rpc_socket_removed,
+            workspace_image_removed,
         }
     }
 
@@ -2092,11 +2098,14 @@ pub(crate) struct FirecrackerStopReport {
     pub(crate) process_outcome: FirecrackerProcessStopOutcome,
     pub(crate) api_socket_removed: Result<bool, String>,
     pub(crate) guest_rpc_socket_removed: Result<bool, String>,
+    pub(crate) workspace_image_removed: Result<bool, String>,
 }
 
 impl FirecrackerStopReport {
     pub(crate) fn cleanup_succeeded(&self) -> bool {
-        self.api_socket_removed.is_ok() && self.guest_rpc_socket_removed.is_ok()
+        self.api_socket_removed.is_ok()
+            && self.guest_rpc_socket_removed.is_ok()
+            && self.workspace_image_removed.is_ok()
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -2110,8 +2119,13 @@ impl FirecrackerStopReport {
             Ok(false) => "guest_rpc_socket_removed=false".to_string(),
             Err(error) => format!("guest_rpc_socket_remove_error={error}"),
         };
+        let workspace_image = match &self.workspace_image_removed {
+            Ok(true) => "workspace_image_removed=true".to_string(),
+            Ok(false) => "workspace_image_removed=false".to_string(),
+            Err(error) => format!("workspace_image_remove_error={error}"),
+        };
         format!(
-            "was_running={}; process_outcome={}; {api_socket}; {guest_rpc_socket}",
+            "was_running={}; process_outcome={}; {api_socket}; {guest_rpc_socket}; {workspace_image}",
             self.was_running,
             self.process_outcome.as_str()
         )
@@ -2139,13 +2153,18 @@ impl FirecrackerProcessStopOutcome {
 
 impl FirecrackerMicroVmArtifacts {
     fn new() -> Result<Self, std::io::Error> {
+        // Monotonic per-process counter: two microVMs provisioned in the same
+        // millisecond must still get distinct run dirs (each run dir holds the
+        // VM's private writable workspace image — see #227).
+        static RUN_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let run_dir = env::temp_dir().join(format!(
-            "ferrogate-agent-worker-firecracker-microvm-{}-{}",
+            "ferrogate-agent-worker-firecracker-microvm-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis()
+                .as_millis(),
+            RUN_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&run_dir)?;
         Ok(Self {
@@ -2168,6 +2187,12 @@ impl FirecrackerMicroVmArtifacts {
             stdout: Some(self.stdout.display().to_string()),
             stderr: Some(self.stderr.display().to_string()),
         }
+    }
+
+    /// Per-VM writable workspace backing file. Lives inside the VM's private
+    /// run dir, so two microVMs can never share it; removed on teardown.
+    fn workspace_image_path(&self) -> PathBuf {
+        self.run_dir.join("workspace.ext4")
     }
 
     fn snapshot_path(&self) -> PathBuf {
@@ -2475,38 +2500,52 @@ fn configure_and_start_firecracker(
         }),
         deadline,
     )?;
+    // SECURITY / ISOLATION (#227): the shared host rootfs image is now attached
+    // read-only (`is_read_only: true` + `root=/dev/vda ro`) and every microVM
+    // gets its OWN writable workspace drive backed by a file inside the VM's
+    // private run dir, honoring the declared
+    // IsolationFilesystemPolicy { read_only_rootfs: true, writable_workspace:
+    // true } / `read_only_rootfs_with_prepared_workspace`. Concurrent microVMs
+    // no longer share a writable backing file. Remaining (tracked in #227):
+    // guest boot with this drive layout still needs validation on a real
+    // Firecracker host (the guest init may need tuning to mount /dev/vdb as
+    // its workspace / provide a tmpfs overlay for transient rootfs writes).
+    let attachment = plan_firecracker_rootfs_attachment(
+        &bundle.rootfs_image,
+        artifacts,
+        &firecracker_filesystem_policy(),
+    );
+    if let Some(workspace_image) = &attachment.workspace_image {
+        prepare_firecracker_workspace_image(workspace_image).map_err(|error| {
+            FirecrackerBootSmokeError::new(
+                "prepare_workspace_image",
+                format!("{}: {error}", workspace_image.display()),
+            )
+        })?;
+    }
     firecracker_put_json(
         &artifacts.api_socket,
         "/boot-source",
         json!({
             "kernel_image_path": bundle.kernel_image.display().to_string(),
-            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw random.trust_cpu=on",
+            "boot_args": attachment.boot_args,
         }),
         deadline,
     )?;
-    // SECURITY / ISOLATION (tracked): the shared host rootfs image is attached
-    // read-write and booted `root=/dev/vda rw`, which contradicts the declared
-    // IsolationFilesystemPolicy.read_only_rootfs=true. Every microVM boots from
-    // the SAME backing file, so concurrent boots corrupt the ext4 image and
-    // sequential boots carry state across tenants. This is only latent today
-    // because guest workload execution is not wired (the guest RPC start
-    // entrypoint returns not_implemented); it MUST be fixed before tenant
-    // workloads run inside the guest. The correct fix (attach the rootfs
-    // read-only + a per-VM writable workspace/overlay, or give each VM a
-    // per-instance CoW copy) requires a real Firecracker host to validate the
-    // guest boot and is tracked in a dedicated issue -- do NOT wire guest
-    // execution until the rootfs is per-VM isolated.
     firecracker_put_json(
         &artifacts.api_socket,
         "/drives/rootfs",
-        json!({
-            "drive_id": "rootfs",
-            "path_on_host": bundle.rootfs_image.display().to_string(),
-            "is_root_device": true,
-            "is_read_only": false,
-        }),
+        attachment.rootfs_drive,
         deadline,
     )?;
+    if let Some(workspace_drive) = attachment.workspace_drive {
+        firecracker_put_json(
+            &artifacts.api_socket,
+            "/drives/workspace",
+            workspace_drive,
+            deadline,
+        )?;
+    }
     firecracker_put_json(
         &artifacts.api_socket,
         "/vsock",
@@ -2522,6 +2561,103 @@ fn configure_and_start_firecracker(
         deadline,
     )?;
     wait_for_serial_boot_evidence(artifacts, deadline, child)
+}
+
+/// The filesystem policy the Firecracker backend enforces for every microVM.
+///
+/// This is the runtime contract declared as
+/// `read_only_rootfs_with_prepared_workspace` in `firecracker_prepare_plan`:
+/// the shared rootfs image is immutable and each VM gets a private writable
+/// workspace. Mirrors `IsolationFilesystemPolicy::default()` from
+/// ferrogate-runtime so the drive layout and the declared policy cannot drift
+/// apart silently.
+fn firecracker_filesystem_policy() -> IsolationFilesystemPolicy {
+    IsolationFilesystemPolicy::default()
+}
+
+/// Sparse size of the per-VM writable workspace image. Sized conservatively;
+/// real-host validation (#227) may tune this or make it envelope-driven.
+const FIRECRACKER_WORKSPACE_IMAGE_SIZE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Rootfs/workspace drive layout for one microVM, derived from the isolation
+/// filesystem policy.
+///
+/// Chosen design (#227): attach the SHARED host rootfs image read-only and
+/// give each microVM a per-VM writable workspace drive (`/dev/vdb`) backed by
+/// a file inside the VM's private run dir — rather than a per-VM copy of the
+/// whole rootfs. This matches the declared
+/// `read_only_rootfs_with_prepared_workspace` policy, costs O(workspace)
+/// instead of O(rootfs) disk per VM, and guarantees no two VMs ever open the
+/// same backing file writable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FirecrackerRootfsAttachment {
+    /// Kernel boot args; `root=/dev/vda ro` when the policy demands a
+    /// read-only rootfs, `rw` otherwise.
+    boot_args: String,
+    /// Firecracker `/drives/rootfs` body; `is_read_only` mirrors
+    /// `IsolationFilesystemPolicy.read_only_rootfs`.
+    rootfs_drive: serde_json::Value,
+    /// Firecracker `/drives/workspace` body when the policy grants a writable
+    /// workspace.
+    workspace_drive: Option<serde_json::Value>,
+    /// Host path of the per-VM writable workspace backing file (inside the
+    /// VM's private run dir; removed on teardown).
+    workspace_image: Option<PathBuf>,
+}
+
+fn plan_firecracker_rootfs_attachment(
+    rootfs_image: &Path,
+    artifacts: &FirecrackerMicroVmArtifacts,
+    policy: &IsolationFilesystemPolicy,
+) -> FirecrackerRootfsAttachment {
+    let root_mode = if policy.read_only_rootfs { "ro" } else { "rw" };
+    let boot_args = format!(
+        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda {root_mode} random.trust_cpu=on"
+    );
+    let rootfs_drive = json!({
+        "drive_id": "rootfs",
+        "path_on_host": rootfs_image.display().to_string(),
+        "is_root_device": true,
+        "is_read_only": policy.read_only_rootfs,
+    });
+    let workspace_image = policy
+        .writable_workspace
+        .then(|| artifacts.workspace_image_path());
+    let workspace_drive = workspace_image.as_ref().map(|path| {
+        json!({
+            "drive_id": "workspace",
+            "path_on_host": path.display().to_string(),
+            "is_root_device": false,
+            "is_read_only": false,
+        })
+    });
+    FirecrackerRootfsAttachment {
+        boot_args,
+        rootfs_drive,
+        workspace_drive,
+        workspace_image,
+    }
+}
+
+/// Creates the per-VM writable workspace backing file (sparse) and formats it
+/// as ext4 when `mkfs.ext4` is available. The format step is best-effort so
+/// hermetic sandbox tests do not depend on host tooling; a real Firecracker
+/// host (where boot validation for #227 happens) is expected to have
+/// `mkfs.ext4`, and the guest mount will fail loudly there if formatting was
+/// skipped.
+fn prepare_firecracker_workspace_image(path: &Path) -> std::io::Result<()> {
+    let file = File::create(path)?;
+    file.set_len(FIRECRACKER_WORKSPACE_IMAGE_SIZE_BYTES)?;
+    drop(file);
+    let _ = Command::new("mkfs.ext4")
+        .arg("-F")
+        .arg("-q")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    Ok(())
 }
 
 fn firecracker_guest_rpc_vsock_config(
@@ -2831,11 +2967,11 @@ fn stop_firecracker_child(child: &mut Child) -> FirecrackerChildStopReport {
     }
 }
 
-fn remove_firecracker_host_socket(socket_path: &Path) -> Result<bool, String> {
-    match fs::remove_file(socket_path) {
+fn remove_firecracker_host_file(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("{}: {error}", socket_path.display())),
+        Err(error) => Err(format!("{}: {error}", path.display())),
     }
 }
 

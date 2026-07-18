@@ -621,10 +621,135 @@ fn firecracker_host_socket_cleanup_reports_host_resource_failure() {
     let socket_path = temp.path().join("firecracker.sock");
     std::fs::create_dir(&socket_path).unwrap();
 
-    let result = remove_firecracker_host_socket(&socket_path);
+    let result = remove_firecracker_host_file(&socket_path);
 
     assert!(result.is_err());
     assert!(result.unwrap_err().contains(socket_path.to_str().unwrap()));
+}
+
+fn test_microvm_artifacts(run_dir: &Path) -> FirecrackerMicroVmArtifacts {
+    FirecrackerMicroVmArtifacts {
+        run_dir: run_dir.to_path_buf(),
+        api_socket: run_dir.join("firecracker.sock"),
+        guest_rpc_socket: run_dir.join("firecracker-guest-rpc.sock"),
+        firecracker_log: run_dir.join("firecracker.log"),
+        serial_output: run_dir.join("serial.log"),
+        stdout: run_dir.join("firecracker.stdout"),
+        stderr: run_dir.join("firecracker.stderr"),
+    }
+}
+
+#[test]
+fn firecracker_rootfs_attachment_enforces_read_only_rootfs_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let rootfs_image = temp.path().join("rootfs.ext4");
+    let artifacts = test_microvm_artifacts(&temp.path().join("vm-1"));
+
+    // The backend-enforced policy must declare a read-only rootfs with a
+    // writable workspace (`read_only_rootfs_with_prepared_workspace`).
+    let policy = firecracker_filesystem_policy();
+    assert!(policy.read_only_rootfs);
+    assert!(policy.writable_workspace);
+
+    let attachment = plan_firecracker_rootfs_attachment(&rootfs_image, &artifacts, &policy);
+
+    // Rootfs drive honors read_only_rootfs=true.
+    assert_eq!(attachment.rootfs_drive["is_read_only"], true);
+    assert_eq!(attachment.rootfs_drive["is_root_device"], true);
+    assert_eq!(
+        attachment.rootfs_drive["path_on_host"],
+        rootfs_image.display().to_string()
+    );
+    assert!(attachment.boot_args.contains("root=/dev/vda ro"));
+    assert!(!attachment.boot_args.contains("root=/dev/vda rw"));
+
+    // Writable workspace is a per-VM drive inside the VM's private run dir.
+    let workspace_drive = attachment.workspace_drive.expect("workspace drive");
+    assert_eq!(workspace_drive["is_read_only"], false);
+    assert_eq!(workspace_drive["is_root_device"], false);
+    let workspace_path = attachment.workspace_image.expect("workspace image path");
+    assert_eq!(
+        workspace_drive["path_on_host"],
+        workspace_path.display().to_string()
+    );
+    assert!(workspace_path.starts_with(&artifacts.run_dir));
+    assert_ne!(workspace_path, rootfs_image);
+}
+
+#[test]
+fn firecracker_rootfs_attachment_boots_rw_only_when_policy_relaxes_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let rootfs_image = temp.path().join("rootfs.ext4");
+    let artifacts = test_microvm_artifacts(&temp.path().join("vm-1"));
+    let policy = IsolationFilesystemPolicy {
+        read_only_rootfs: false,
+        writable_workspace: false,
+        host_path_mounts: false,
+    };
+
+    let attachment = plan_firecracker_rootfs_attachment(&rootfs_image, &artifacts, &policy);
+
+    assert_eq!(attachment.rootfs_drive["is_read_only"], false);
+    assert!(attachment.boot_args.contains("root=/dev/vda rw"));
+    assert!(attachment.workspace_drive.is_none());
+    assert!(attachment.workspace_image.is_none());
+}
+
+#[test]
+fn concurrent_firecracker_microvms_never_share_writable_backing_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared_rootfs = temp.path().join("shared-rootfs.ext4");
+    let policy = firecracker_filesystem_policy();
+
+    // Provision two run-dir sets back-to-back (same process, same
+    // millisecond is possible) — they must never collide.
+    let first = FirecrackerMicroVmArtifacts::new().unwrap();
+    let second = FirecrackerMicroVmArtifacts::new().unwrap();
+    assert_ne!(first.run_dir, second.run_dir);
+
+    let first_plan = plan_firecracker_rootfs_attachment(&shared_rootfs, &first, &policy);
+    let second_plan = plan_firecracker_rootfs_attachment(&shared_rootfs, &second, &policy);
+
+    let writable_paths = |plan: &FirecrackerRootfsAttachment| -> Vec<String> {
+        [&plan.rootfs_drive]
+            .into_iter()
+            .chain(plan.workspace_drive.as_ref())
+            .filter(|drive| drive["is_read_only"] == false)
+            .map(|drive| drive["path_on_host"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let first_writable = writable_paths(&first_plan);
+    let second_writable = writable_paths(&second_plan);
+
+    // The shared rootfs image is never attached writable, and the only
+    // writable backing files are per-VM and disjoint.
+    let shared_rootfs_path = shared_rootfs.display().to_string();
+    assert!(!first_writable.contains(&shared_rootfs_path));
+    assert!(!second_writable.contains(&shared_rootfs_path));
+    assert!(!first_writable.is_empty());
+    assert!(!second_writable.is_empty());
+    assert!(first_writable
+        .iter()
+        .all(|path| !second_writable.contains(path)));
+
+    std::fs::remove_dir_all(&first.run_dir).unwrap();
+    std::fs::remove_dir_all(&second.run_dir).unwrap();
+}
+
+#[test]
+fn firecracker_stop_removes_per_vm_workspace_image() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_dir = temp.path().join("microvm-run");
+    let mut microvm = test_firecracker_microvm("microvm-workspace", &run_dir).unwrap();
+    let workspace_image = microvm.artifacts.workspace_image_path();
+    prepare_firecracker_workspace_image(&workspace_image).unwrap();
+    assert!(workspace_image.is_file());
+
+    let report = microvm.stop();
+
+    assert_eq!(report.workspace_image_removed, Ok(true));
+    assert!(!workspace_image.exists());
+    assert!(report.cleanup_succeeded());
 }
 
 #[test]
