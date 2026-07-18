@@ -1,0 +1,78 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-18
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Customer-VPC data-plane template for the hybrid deployment (issue #206).
+# This node holds only PUBLIC trust anchors: it verifies the control plane's
+# signed snapshot (signature -> identity -> schema -> strictly-newer revision
+# -> expiry, fail-closed) before activating it, keeps enforcing the
+# last-known-good policy across control-plane outages, and persists the
+# snapshot replay floor to the durable [storage] backend so a restart cannot
+# be used to replay an older signed snapshot.
+#
+# Everything sensitive stays in the VPC: provider keys (env vars below),
+# prompts/responses/tool bodies (direct data-plane <-> provider traffic), and
+# logs/audit/evidence (the [storage] backend below).
+
+listen = "0.0.0.0:8080"
+
+# Durable in-VPC store (customer Postgres/Supabase): request logs, audit
+# events, control-plane documents, and the persisted snapshot replay floor.
+# The DSN is provided via environment -- never written into this file.
+[storage]
+provider = "postgres"
+required = true
+postgres_dsn_env = "FERROGATE_CONTROL_DSN"
+postgres_schema = "ferrogate_control"
+postgres_pool_acquire_timeout_millis = 20000
+postgres_connect_timeout_secs = 30
+
+[cluster]
+enabled = true
+cluster_id = "hybrid-pilot"
+node_id = "customer-vpc-data-plane-a"
+
+# In-VPC copy of the snapshot channel. The data plane only READS this path;
+# refresh it with an outbound-initiated transfer from the control plane (or a
+# shared volume in the single-site layout).
+state_backend = "file"
+file_state_path = "/var/lib/ferrogate/state/cluster-state.json"
+config_poll_interval_secs = 5
+
+# Must match the identity the control plane signs for.
+snapshot_tenant_id = "acme-corp"
+snapshot_deployment_id = "acme-vpc-eu-1"
+
+# --- trust anchors (PUBLIC material) ----------------------------------------
+# base64 (standard) of the raw 32-byte ed25519 public key:
+#   openssl pkey -in snapshot-signing.pem -pubout -outform DER | tail -c 32 | base64
+# During key rotation, list the retiring AND the new key; snapshots select the
+# verification key by key_id.
+[[cluster.snapshot_trusted_keys]]
+key_id = "pilot-2026-07"
+public_key = "REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY"
+
+# Bootstrap admin for day-0 observability (GET /admin/v1/status shows
+# active_revision / last_sync_error / stale). Superseded by the control-plane
+# payload on the first verified activation.
+[[api_keys]]
+id = "vpc-bootstrap-admin"
+name = "VPC bootstrap admin"
+key_env = "FERROGATE_ADMIN_SECRET"
+scopes = ["admin.read"]
+
+# Model providers are reached DIRECTLY from inside the VPC; their credentials
+# exist only here and never appear in any snapshot.
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]

@@ -1,0 +1,303 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-18
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Kubernetes reference for the customer-VPC hybrid split (issue #206).
+# Single-file kit for review/evaluation: in a real hybrid deployment the
+# control-plane resources run in the OPERATOR cluster and the data-plane
+# resources in the CUSTOMER cluster; the shared ReadWriteMany channel volume
+# is then replaced by an outbound-initiated replication of
+# cluster-state.json into the VPC (the data plane only reads it).
+#
+# Config templates are inlined from control-plane.toml / data-plane.toml in
+# this directory -- keep them in sync. The control-plane config ships as a
+# Secret because it embeds the PRIVATE ed25519 snapshot signing key; the
+# data-plane config carries only public trust anchors and is a ConfigMap.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ferrogate-hybrid
+---
+# PRIVATE: contains cluster.snapshot_signing_key. stringData shown with
+# placeholders; create from the filled-in template instead:
+#   kubectl -n ferrogate-hybrid create secret generic ferrogate-control-plane-config \
+#     --from-file=ferrogate.toml=control-plane.toml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ferrogate-control-plane-config
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-control-plane
+type: Opaque
+stringData:
+  ferrogate.toml: |
+    listen = "0.0.0.0:8080"
+
+    [cluster]
+    enabled = true
+    cluster_id = "hybrid-pilot"
+    node_id = "managed-control-plane"
+    state_backend = "file"
+    file_state_path = "/var/lib/ferrogate/state/cluster-state.json"
+    config_poll_interval_secs = 5
+    snapshot_signing_key = "REPLACE_WITH_BASE64_ED25519_SEED"
+    snapshot_signing_key_id = "pilot-2026-07"
+    snapshot_tenant_id = "acme-corp"
+    snapshot_deployment_id = "acme-vpc-eu-1"
+    snapshot_max_age_secs = 3600
+
+    [[api_keys]]
+    id = "control-plane-operator"
+    name = "Control-plane operator"
+    key_env = "FERROGATE_ADMIN_SECRET"
+    scopes = ["admin.read", "admin.write"]
+
+    [[api_keys]]
+    id = "acme-app-1"
+    name = "Acme app key"
+    key_env = "FERROGATE_CLIENT_SECRET"
+    scopes = ["models.read", "chat.completions"]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ferrogate-hybrid-secrets
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-hybrid
+type: Opaque
+stringData:
+  FERROGATE_ADMIN_SECRET: REPLACE_WITH_ADMIN_SECRET
+  FERROGATE_CLIENT_SECRET: REPLACE_WITH_CLIENT_SECRET
+  # Customer Postgres/Supabase DSN: durable in-VPC store for logs, audit,
+  # control-plane documents, and the persisted snapshot replay floor.
+  FERROGATE_CONTROL_DSN: postgresql://REPLACE_ME
+  OPENAI_API_KEY: REPLACE_WITH_PROVIDER_KEY
+---
+# PUBLIC: trust anchors + provider wiring only; safe as a ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ferrogate-data-plane-config
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-data-plane
+data:
+  ferrogate.toml: |
+    listen = "0.0.0.0:8080"
+
+    [storage]
+    provider = "postgres"
+    required = true
+    postgres_dsn_env = "FERROGATE_CONTROL_DSN"
+    postgres_schema = "ferrogate_control"
+    postgres_pool_acquire_timeout_millis = 20000
+    postgres_connect_timeout_secs = 30
+
+    [cluster]
+    enabled = true
+    cluster_id = "hybrid-pilot"
+    node_id = "customer-vpc-data-plane-a"
+    state_backend = "file"
+    file_state_path = "/var/lib/ferrogate/state/cluster-state.json"
+    config_poll_interval_secs = 5
+    snapshot_tenant_id = "acme-corp"
+    snapshot_deployment_id = "acme-vpc-eu-1"
+
+    [[cluster.snapshot_trusted_keys]]
+    key_id = "pilot-2026-07"
+    public_key = "REPLACE_WITH_BASE64_ED25519_PUBLIC_KEY"
+
+    [[api_keys]]
+    id = "vpc-bootstrap-admin"
+    name = "VPC bootstrap admin"
+    key_env = "FERROGATE_ADMIN_SECRET"
+    scopes = ["admin.read"]
+
+    [[providers]]
+    name = "openai"
+    kind = "openai"
+    base_url = "https://api.openai.com/v1"
+    api_key_env = "OPENAI_API_KEY"
+
+    [[models]]
+    name = "fast-chat"
+    provider = "openai"
+    provider_model = "gpt-4o-mini"
+    capabilities = ["chat", "streaming"]
+---
+# Snapshot channel for the single-cluster evaluation layout. RWX so the
+# publisher writes and the data plane reads; swap for outbound-initiated file
+# replication when the planes live in different clusters/networks.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ferrogate-snapshot-channel
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-hybrid
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrogate-control-plane
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrogate-control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrogate-control-plane
+    spec:
+      containers:
+        - name: ferrogate
+          image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/ferrogate/ferrogate.toml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FERROGATE_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-hybrid-secrets
+                  key: FERROGATE_ADMIN_SECRET
+            - name: FERROGATE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-hybrid-secrets
+                  key: FERROGATE_CLIENT_SECRET
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ferrogate/ferrogate.toml
+              subPath: ferrogate.toml
+              readOnly: true
+            - name: snapshot-channel
+              mountPath: /var/lib/ferrogate/state
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          secret:
+            secretName: ferrogate-control-plane-config
+        - name: snapshot-channel
+          persistentVolumeClaim:
+            claimName: ferrogate-snapshot-channel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrogate-data-plane
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-data-plane
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrogate-data-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrogate-data-plane
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ferrogate
+          image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/ferrogate/ferrogate.toml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FERROGATE_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-hybrid-secrets
+                  key: FERROGATE_ADMIN_SECRET
+            - name: FERROGATE_CONTROL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-hybrid-secrets
+                  key: FERROGATE_CONTROL_DSN
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-hybrid-secrets
+                  key: OPENAI_API_KEY
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ferrogate/ferrogate.toml
+              subPath: ferrogate.toml
+              readOnly: true
+            - name: snapshot-channel
+              mountPath: /var/lib/ferrogate/state
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: ferrogate-data-plane-config
+        - name: snapshot-channel
+          persistentVolumeClaim:
+            claimName: ferrogate-snapshot-channel
+---
+# In-VPC service fronting the data plane (AI traffic + status endpoints).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferrogate-data-plane
+  namespace: ferrogate-hybrid
+  labels:
+    app.kubernetes.io/name: ferrogate-data-plane
+spec:
+  selector:
+    app.kubernetes.io/name: ferrogate-data-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

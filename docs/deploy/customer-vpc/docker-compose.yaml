@@ -1,0 +1,64 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-18
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Single-host reference for the customer-VPC hybrid split (issue #206): a
+# signing control plane and a verifying data plane sharing the snapshot
+# channel as a volume. In a real hybrid deployment the two services run in
+# different networks and the channel volume is replaced by an
+# outbound-initiated replication of cluster-state.json into the VPC.
+#
+# Required environment (.env or shell):
+#   FERROGATE_ADMIN_SECRET   operator/bootstrap admin key secret
+#   FERROGATE_CLIENT_SECRET  sample client key secret
+#   FERROGATE_CONTROL_DSN    customer Postgres/Supabase DSN (durable in-VPC
+#                            store: logs, audit, persisted replay floor)
+#   OPENAI_API_KEY           provider credential (stays in the VPC)
+
+services:
+  control-plane:
+    image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+    command: ["run", "--config", "/etc/ferrogate/ferrogate.toml"]
+    environment:
+      FERROGATE_ADMIN_SECRET: ${FERROGATE_ADMIN_SECRET}
+      FERROGATE_CLIENT_SECRET: ${FERROGATE_CLIENT_SECRET}
+    volumes:
+      # control-plane.toml embeds the PRIVATE snapshot signing key: mode 0600,
+      # owned by the operator, never distributed to the data plane.
+      - ./control-plane.toml:/etc/ferrogate/ferrogate.toml:ro
+      - snapshot-channel:/var/lib/ferrogate/state
+    ports:
+      - "8081:8080" # operator Admin API (key issue/revoke publishes snapshots)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  data-plane:
+    image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+    command: ["run", "--config", "/etc/ferrogate/ferrogate.toml"]
+    environment:
+      FERROGATE_ADMIN_SECRET: ${FERROGATE_ADMIN_SECRET}
+      FERROGATE_CONTROL_DSN: ${FERROGATE_CONTROL_DSN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - ./data-plane.toml:/etc/ferrogate/ferrogate.toml:ro
+      # Read-only view of the snapshot channel: the data plane never writes
+      # policy, it only verifies + activates signed snapshots.
+      - snapshot-channel:/var/lib/ferrogate/state:ro
+    ports:
+      - "8080:8080" # AI traffic + /admin/v1/status + /readyz inside the VPC
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  snapshot-channel:

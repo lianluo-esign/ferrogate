@@ -1,0 +1,58 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-18
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Control-plane (publisher) template for the customer-VPC hybrid deployment
+# (issue #206). This node SIGNS every file-backed control-plane snapshot it
+# publishes. It holds the PRIVATE ed25519 signing key, so this file must be
+# deployed as a secret (see k8s.yaml) -- never inside the customer VPC.
+
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "hybrid-pilot"
+node_id = "managed-control-plane"
+
+# The snapshot channel: the signed snapshot is published atomically to this
+# path. Replicate the file into the customer VPC with an outbound-initiated
+# transfer (or a shared volume in the single-site layout).
+state_backend = "file"
+file_state_path = "/var/lib/ferrogate/state/cluster-state.json"
+config_poll_interval_secs = 5
+
+# --- snapshot signing (PRIVATE material) ------------------------------------
+# base64 (standard) of the raw 32-byte ed25519 seed. Generate with:
+#   openssl genpkey -algorithm ed25519 -out snapshot-signing.pem
+#   openssl pkey -in snapshot-signing.pem -outform DER | tail -c 32 | base64
+snapshot_signing_key = "REPLACE_WITH_BASE64_ED25519_SEED"
+snapshot_signing_key_id = "pilot-2026-07"
+# Identity the signature binds to; the data plane must configure the SAME
+# tenant/deployment or it rejects the snapshot (IdentityMismatch).
+snapshot_tenant_id = "acme-corp"
+snapshot_deployment_id = "acme-vpc-eu-1"
+# Snapshot TTL: maximum acceptable policy staleness. A snapshot older than
+# this can never be (re)activated by a data plane.
+snapshot_max_age_secs = 3600
+
+# Operator key used to drive policy through the Admin API. Every committed
+# Admin mutation (key issue/revoke, policy change) publishes a new signed
+# snapshot with a strictly higher revision.
+[[api_keys]]
+id = "control-plane-operator"
+name = "Control-plane operator"
+key_env = "FERROGATE_ADMIN_SECRET"
+scopes = ["admin.read", "admin.write"]
+
+# Client keys and [[policies]] defined here (or created via the Admin API)
+# form the policy payload distributed to the customer-VPC data plane. Prefer
+# key_hash/key_env definitions so the snapshot carries no plaintext client
+# secrets across the boundary:
+#   ferrogate hash-key --secret <client-secret>
+[[api_keys]]
+id = "acme-app-1"
+name = "Acme app key"
+key_env = "FERROGATE_CLIENT_SECRET"
+scopes = ["models.read", "chat.completions"]
