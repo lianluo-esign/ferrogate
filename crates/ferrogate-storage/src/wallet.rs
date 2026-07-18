@@ -210,11 +210,21 @@ impl PostgresControlPlaneStore {
 
     pub(super) async fn upsert_wallet(&self, wallet: &StoredWallet) -> Result<(), StorageError> {
         let operation = self.wallet_operation("upsert wallet");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
             .execute(
                 "INSERT INTO wallets \
                  (id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
@@ -239,6 +249,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
@@ -247,11 +258,21 @@ impl PostgresControlPlaneStore {
         tenant_id: &str,
     ) -> Result<Option<StoredWallet>, StorageError> {
         let operation = self.wallet_operation("get wallet");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_opt(
                 "SELECT id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                  auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix \
@@ -260,16 +281,27 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(row.as_ref().map(wallet_from_row))
     }
 
     pub(super) async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
         let operation = self.wallet_operation("list wallets");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let rows = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
             .query(
                 "SELECT id, tenant_id, balance_credits, auto_recharge_threshold_credits, \
                  auto_recharge_amount_credits, dunning, created_at_unix, updated_at_unix \
@@ -278,6 +310,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(wallet_from_row).collect())
     }
 
@@ -295,11 +328,21 @@ impl PostgresControlPlaneStore {
         now_unix: i64,
     ) -> Result<Option<StoredWallet>, StorageError> {
         let operation = self.wallet_operation("adjust wallet balance");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_opt(
                 "UPDATE wallets SET balance_credits = balance_credits + $1, \
                  updated_at_unix = $2 WHERE tenant_id = $3 \
@@ -309,6 +352,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(row.as_ref().map(wallet_from_row))
     }
 
@@ -319,17 +363,28 @@ impl PostgresControlPlaneStore {
         now_unix: i64,
     ) -> Result<(), StorageError> {
         let operation = self.wallet_operation("set wallet dunning");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
             .execute(
                 "UPDATE wallets SET dunning = $1, updated_at_unix = $2 WHERE tenant_id = $3",
                 &[&dunning, &now_unix, &tenant_id],
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
@@ -338,11 +393,21 @@ impl PostgresControlPlaneStore {
         payment_method: &StoredPaymentMethod,
     ) -> Result<(), StorageError> {
         let operation = self.wallet_operation("upsert payment method");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
             .execute(
                 "INSERT INTO payment_methods \
                  (id, tenant_id, provider, provider_customer_id, provider_payment_method_id, \
@@ -361,6 +426,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
@@ -369,11 +435,21 @@ impl PostgresControlPlaneStore {
         tenant_id: &str,
     ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
         let operation = self.wallet_operation("list payment methods");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let rows = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
             .query(
                 "SELECT id, tenant_id, provider, provider_customer_id, \
                  provider_payment_method_id, is_default, created_at_unix \
@@ -382,6 +458,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(payment_method_from_row).collect())
     }
 
@@ -394,11 +471,21 @@ impl PostgresControlPlaneStore {
         id: &str,
     ) -> Result<Option<StoredPaymentMethod>, StorageError> {
         let operation = self.wallet_operation("get payment method");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_opt(
                 "SELECT id, tenant_id, provider, provider_customer_id, \
                  provider_payment_method_id, is_default, created_at_unix \
@@ -407,19 +494,31 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(row.as_ref().map(payment_method_from_row))
     }
 
     pub(super) async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
         let operation = self.wallet_operation("delete payment method");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let affected = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
             .execute("DELETE FROM payment_methods WHERE id = $1", &[&id])
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(affected > 0)
     }
 }

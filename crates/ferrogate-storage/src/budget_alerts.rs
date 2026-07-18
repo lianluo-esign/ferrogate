@@ -75,11 +75,21 @@ impl PostgresControlPlaneStore {
     ) -> Result<(), StorageError> {
         let threshold_pct = i16::from(notification.threshold_pct);
         let operation = self.budget_alert_operation("record budget alert notification");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
             .execute(
                 "INSERT INTO budget_alert_notifications \
                  (id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) \
@@ -96,6 +106,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
@@ -104,11 +115,21 @@ impl PostgresControlPlaneStore {
         id: &str,
     ) -> Result<bool, StorageError> {
         let operation = self.budget_alert_operation("budget alert already notified");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let row = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
             .query_opt(
                 "SELECT id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix \
                  FROM budget_alert_notifications WHERE id = $1",
@@ -116,6 +137,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         Ok(row.is_some())
     }
 
@@ -126,11 +148,21 @@ impl PostgresControlPlaneStore {
         period_month: &str,
     ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
         let operation = self.budget_alert_operation("list budget alert notifications");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        let rows = client
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
             .query(
                 "SELECT id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix \
                  FROM budget_alert_notifications \
@@ -140,6 +172,7 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
         rows.iter()
             .map(budget_alert_notification_from_row)
             .collect()
