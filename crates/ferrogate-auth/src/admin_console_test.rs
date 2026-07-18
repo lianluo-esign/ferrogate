@@ -832,6 +832,7 @@ fn rbac_authorize_reflects_runtime_bindings_immediately() {
     service.rbac.upsert_role(Role {
         id: "role_runtime".into(),
         name: "Runtime".into(),
+        tenant_id: None,
         permissions: vec![Permission {
             action: "chat.completions".into(),
             resource: "model:fast-chat".into(),
@@ -1800,4 +1801,498 @@ fn sso_second_login_does_not_overwrite_a_role_set_afterward() {
     let second = handle_sso_callback(&console, "code-2", &state_2);
     assert_eq!(second.status, 200);
     assert_eq!(body_json(&second)["tenant"]["role"], "member");
+}
+
+// -- issue #232: tenant-scoped accounts/roles/refresh tokens ---------------
+
+/// Finding #1 (cross-tenant refresh confusion): a refresh token minted for a
+/// session in tenant B must re-issue a session for tenant B -- not for
+/// `memberships.first()`, the user's OLDEST membership (their own tenant A).
+#[test]
+fn refresh_reissues_for_the_tokens_tenant_not_the_first_membership() {
+    let console = console();
+    // The user's oldest membership: owner of their own tenant A.
+    let user = body_json(&register(&console, "multi@acme.test", "correct-horse-60"));
+    let user_id = user["user"]["id"].as_str().unwrap().to_string();
+    let tenant_a = user["tenant"]["id"].as_str().unwrap().to_string();
+    // Later invited into tenant B as a plain member.
+    let owner_b = body_json(&register(&console, "owner-b@acme.test", "correct-horse-61"));
+    let owner_b_token = owner_b["access_token"].as_str().unwrap();
+    let tenant_b = owner_b["tenant"]["id"].as_str().unwrap().to_string();
+    handle_admin_team_invite(
+        &console,
+        owner_b_token,
+        AdminInviteRequest {
+            email: "multi@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+
+    // A session issued for tenant B (as "member")...
+    let (_, refresh_secret) =
+        issue_session(&console, &user_id, "multi@acme.test", &tenant_b, "member").unwrap();
+    let stored = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&hash_virtual_api_key_secret(&refresh_secret)),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.tenant_id.as_deref(), Some(tenant_b.as_str()));
+    assert_eq!(stored.role.as_deref(), Some("member"));
+
+    // ...must refresh back into tenant B as "member", not tenant A as owner.
+    let refreshed = handle_admin_refresh(
+        &console,
+        AdminRefreshRequest {
+            refresh_token: refresh_secret,
+        },
+    );
+    assert_eq!(refreshed.status, 200);
+    let body = body_json(&refreshed);
+    let claims = decode_access_token(&console, body["access_token"].as_str().unwrap()).unwrap();
+    assert_eq!(claims.tenant_id, tenant_b);
+    assert_eq!(claims.role, "member");
+    assert_ne!(claims.tenant_id, tenant_a);
+
+    // The rotated refresh token is stamped for tenant B too.
+    let rotated = block_on_sync_bridge(console.repositories.get_admin_user_refresh_token_by_hash(
+        &hash_virtual_api_key_secret(body["refresh_token"].as_str().unwrap()),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(rotated.tenant_id.as_deref(), Some(tenant_b.as_str()));
+}
+
+/// Finding #1, legacy data: a pre-#232 refresh token row has no stamped
+/// tenant. The secure option is to reject it (forcing one fresh login)
+/// rather than guessing a tenant -- and the attempt still burns the token.
+#[test]
+fn refresh_rejects_a_legacy_token_with_no_stamped_tenant() {
+    let console = console();
+    let user = body_json(&register(&console, "legacy@acme.test", "correct-horse-62"));
+    let user_id = user["user"]["id"].as_str().unwrap().to_string();
+
+    let legacy_secret = "legacy-refresh-secret-000000000000000000000000000000000000000000";
+    let now = now_unix_seconds() as i64;
+    block_on_sync_bridge(console.repositories.upsert_admin_user_refresh_token(
+        StoredAdminUserRefreshToken {
+            id: "rt-legacy-1".into(),
+            user_id: user_id.clone(),
+            token_hash: hash_virtual_api_key_secret(legacy_secret),
+            tenant_id: None,
+            role: None,
+            created_at_unix: now,
+            expires_at_unix: now + 3600,
+            revoked_at_unix: None,
+        },
+    ))
+    .unwrap();
+
+    let refreshed = handle_admin_refresh(
+        &console,
+        AdminRefreshRequest {
+            refresh_token: legacy_secret.into(),
+        },
+    );
+    assert_eq!(refreshed.status, 401);
+    let burned = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&hash_virtual_api_key_secret(legacy_secret)),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(burned.revoked_at_unix.is_some());
+}
+
+/// Finding #1 follow-through: if the membership the token was stamped for
+/// has since been revoked, the refresh must fail rather than fall back to a
+/// different tenant.
+#[test]
+fn refresh_rejects_when_the_stamped_tenant_membership_was_revoked() {
+    let console = console();
+    let user = body_json(&register(&console, "revoked@acme.test", "correct-horse-63"));
+    let user_id = user["user"]["id"].as_str().unwrap().to_string();
+    let owner_b = body_json(&register(
+        &console,
+        "owner-b2@acme.test",
+        "correct-horse-64",
+    ));
+    let owner_b_token = owner_b["access_token"].as_str().unwrap();
+    let tenant_b = owner_b["tenant"]["id"].as_str().unwrap().to_string();
+    handle_admin_team_invite(
+        &console,
+        owner_b_token,
+        AdminInviteRequest {
+            email: "revoked@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    let (_, refresh_secret) =
+        issue_session(&console, &user_id, "revoked@acme.test", &tenant_b, "member").unwrap();
+
+    // Tenant B's owner removes them from the team.
+    let revoke = handle_admin_team_revoke(&console, owner_b_token, &user_id);
+    assert_eq!(revoke.status, 200);
+
+    // The tenant-B session cannot be refreshed -- and must NOT silently
+    // become a tenant-A (owner) session either.
+    let refreshed = handle_admin_refresh(
+        &console,
+        AdminRefreshRequest {
+            refresh_token: refresh_secret,
+        },
+    );
+    assert_eq!(refreshed.status, 401);
+}
+
+/// Finding #2 (SCIM cross-tenant disable): deactivating a multi-tenant user
+/// via one tenant's SCIM credential must only deprovision them from THAT
+/// tenant -- never disable the shared global account or revoke the sessions
+/// they hold in their other tenants.
+#[test]
+fn scim_deactivate_is_tenant_scoped_for_a_multi_tenant_account() {
+    let console = console();
+    // Victim: owner of their own tenant A, with a live tenant-A session.
+    let victim = body_json(&register(
+        &console,
+        "victim2@tenant-a.test",
+        "correct-horse-65",
+    ));
+    let victim_id = victim["user"]["id"].as_str().unwrap().to_string();
+    let tenant_a = victim["tenant"]["id"].as_str().unwrap().to_string();
+    let victim_a_refresh = victim["refresh_token"].as_str().unwrap().to_string();
+
+    // Tenant B provisions the same email over SCIM (attaching a membership
+    // to the pre-existing global account), and the victim gets a B session.
+    let owner_b = body_json(&register(
+        &console,
+        "owner-b3@acme.test",
+        "correct-horse-66",
+    ));
+    let tenant_b = owner_b["tenant"]["id"].as_str().unwrap().to_string();
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_b,
+        ScimUserRequest {
+            user_name: "victim2@tenant-a.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+    assert_eq!(create.status, 201);
+    let (_, victim_b_refresh) = issue_session(
+        &console,
+        &victim_id,
+        "victim2@tenant-a.test",
+        &tenant_b,
+        "member",
+    )
+    .unwrap();
+
+    // Tenant B deactivates the victim over SCIM.
+    let patch_body = serde_json::to_vec(&serde_json::json!({ "active": false })).unwrap();
+    let patch = handle_scim_user_patch(&console, &tenant_b, &victim_id, &patch_body);
+    assert_eq!(patch.status, 200);
+    assert_eq!(body_json(&patch)["active"], false);
+
+    // The global account is NOT disabled (the pre-#232 cross-tenant DoS).
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&victim_id))
+        .unwrap()
+        .unwrap();
+    assert!(
+        user.disabled_at_unix.is_none(),
+        "tenant B's SCIM deactivation must not disable the account system-wide"
+    );
+    // Only tenant B's membership is gone; tenant A's survives.
+    assert!(membership_role_in_tenant(&console, &tenant_b, &victim_id).is_none());
+    assert!(membership_role_in_tenant(&console, &tenant_a, &victim_id).is_some());
+    // Only tenant B's session was revoked; the tenant-A session still works.
+    let b_token = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_refresh_token_by_hash(&hash_virtual_api_key_secret(&victim_b_refresh)),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(b_token.revoked_at_unix.is_some());
+    let a_refresh = handle_admin_refresh(
+        &console,
+        AdminRefreshRequest {
+            refresh_token: victim_a_refresh,
+        },
+    );
+    assert_eq!(
+        a_refresh.status, 200,
+        "the victim's tenant-A session must survive tenant B's SCIM deactivation"
+    );
+    let a_claims = decode_access_token(
+        &console,
+        body_json(&a_refresh)["access_token"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(a_claims.tenant_id, tenant_a);
+}
+
+/// Finding #2, DELETE variant plus the last-membership rule: deprovisioning
+/// from one tenant of a multi-tenant user leaves the account enabled, and
+/// only the LAST tenant's deprovision globally disables it.
+#[test]
+fn scim_delete_only_disables_globally_when_the_last_membership_is_removed() {
+    let console = console();
+    let victim = body_json(&register(
+        &console,
+        "victim3@tenant-a.test",
+        "correct-horse-67",
+    ));
+    let victim_id = victim["user"]["id"].as_str().unwrap().to_string();
+    let tenant_a = victim["tenant"]["id"].as_str().unwrap().to_string();
+    let owner_b = body_json(&register(
+        &console,
+        "owner-b4@acme.test",
+        "correct-horse-68",
+    ));
+    let tenant_b = owner_b["tenant"]["id"].as_str().unwrap().to_string();
+    handle_scim_user_create(
+        &console,
+        &tenant_b,
+        ScimUserRequest {
+            user_name: "victim3@tenant-a.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+
+    // Tenant B deletes them: tenant-scoped, account stays enabled.
+    assert_eq!(
+        handle_scim_user_delete(&console, &tenant_b, &victim_id).status,
+        204
+    );
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&victim_id))
+        .unwrap()
+        .unwrap();
+    assert!(user.disabled_at_unix.is_none());
+    assert!(membership_role_in_tenant(&console, &tenant_a, &victim_id).is_some());
+
+    // Tenant A (the last membership) deletes them: NOW the account is
+    // globally disabled, and the membership is kept for reactivation.
+    assert_eq!(
+        handle_scim_user_delete(&console, &tenant_a, &victim_id).status,
+        204
+    );
+    let user = block_on_sync_bridge(console.repositories.get_admin_user_by_id(&victim_id))
+        .unwrap()
+        .unwrap();
+    assert!(user.disabled_at_unix.is_some());
+    assert!(membership_role_in_tenant(&console, &tenant_a, &victim_id).is_some());
+}
+
+/// Finding #3 (cross-tenant role overwrite): tenant B upserting a role id
+/// that tenant A's bindings resolve to must create B's OWN role, leaving
+/// A's role -- and the permissions A's bindings grant -- untouched.
+#[test]
+fn rbac_role_upsert_cannot_overwrite_another_tenants_role() {
+    let console = console();
+    let service = service();
+    let owner_a = body_json(&register(&console, "role-a@acme.test", "correct-horse-69"));
+    let token_a = owner_a["access_token"].as_str().unwrap();
+    let tenant_a = owner_a["tenant"]["id"].as_str().unwrap().to_string();
+    let owner_b = body_json(&register(&console, "role-b@acme.test", "correct-horse-70"));
+    let token_b = owner_b["access_token"].as_str().unwrap();
+
+    // Tenant A: a narrow role, bound (owner-gated) to one of A's API keys.
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        token_a,
+        RoleUpsertRequest {
+            id: "role_contested".into(),
+            name: "Narrow".into(),
+            permissions: vec![Permission {
+                action: "chat.completions".into(),
+                resource: "model:fast-chat".into(),
+            }],
+        },
+    );
+    assert_eq!(
+        handle_rbac_binding_upsert(
+            &service,
+            &console,
+            token_a,
+            BindingUpsertRequest {
+                id: "binding_contested".into(),
+                role_id: "role_contested".into(),
+                subject: PolicySubject::ApiKey {
+                    api_key_id: "key-a".into(),
+                },
+            },
+        )
+        .status,
+        200
+    );
+
+    // Tenant B's owner "overwrites" the same role id with wildcard perms.
+    assert_eq!(
+        handle_rbac_role_upsert(
+            &service,
+            &console,
+            token_b,
+            RoleUpsertRequest {
+                id: "role_contested".into(),
+                name: "Wildcard".into(),
+                permissions: vec![Permission {
+                    action: "*".into(),
+                    resource: "*".into(),
+                }],
+            },
+        )
+        .status,
+        200
+    );
+
+    // A's binding still grants exactly A's own role: the original permission
+    // works, B's wildcard did NOT leak into A's tenant.
+    let mut request = AuthorizeRequest {
+        tenant: TenantContext {
+            organization_id: Some(tenant_a.clone()),
+            ..TenantContext::default()
+        },
+        subject: PolicySubject::ApiKey {
+            api_key_id: "key-a".into(),
+        },
+        action: "chat.completions".into(),
+        resource: "model:fast-chat".into(),
+    };
+    assert!(service.authorize(&request).allowed);
+    request.action = "admin.write".into();
+    request.resource = "everything".into();
+    assert!(
+        !service.authorize(&request).allowed,
+        "tenant B's wildcard role upsert must not escalate tenant A's binding"
+    );
+
+    // A's own catalog view still shows the narrow role, not B's wildcard.
+    let a_roles = service.rbac.list_roles_visible_to_tenant(&tenant_a);
+    let a_role = a_roles
+        .iter()
+        .find(|role| role.id == "role_contested")
+        .unwrap();
+    assert_eq!(a_role.name, "Narrow");
+    assert_eq!(a_role.permissions.len(), 1);
+}
+
+/// Finding #3 gate: role writes now require a tenant owner.
+#[test]
+fn rbac_role_upsert_is_forbidden_for_a_non_owner() {
+    let console = console();
+    let service = service();
+    let owner = body_json(&register(
+        &console,
+        "role-owner@acme.test",
+        "correct-horse-71",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let member = body_json(&register(
+        &console,
+        "role-member@acme.test",
+        "correct-horse-72",
+    ));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "role-member@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    let (member_token, _) = issue_session(
+        &console,
+        member_user_id,
+        "role-member@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+
+    let upsert = handle_rbac_role_upsert(
+        &service,
+        &console,
+        &member_token,
+        RoleUpsertRequest {
+            id: "role_member_made".into(),
+            name: "Should not exist".into(),
+            permissions: vec![],
+        },
+    );
+    assert_eq!(upsert.status, 403);
+    assert!(service.rbac.list_roles().is_empty());
+}
+
+/// Finding #3 listing: the role catalog returned to a tenant contains its
+/// own roles plus read-only global built-ins -- never another tenant's.
+#[test]
+fn rbac_roles_list_is_tenant_scoped_but_includes_global_builtins() {
+    let console = console();
+    let service = service();
+    // A global (YAML-style, tenant-less) built-in.
+    service.rbac.upsert_role(Role {
+        id: "role_global".into(),
+        name: "Global".into(),
+        tenant_id: None,
+        permissions: vec![],
+    });
+    let owner_a = body_json(&register(&console, "list-a@acme.test", "correct-horse-73"));
+    let token_a = owner_a["access_token"].as_str().unwrap();
+    let owner_b = body_json(&register(&console, "list-b@acme.test", "correct-horse-74"));
+    let token_b = owner_b["access_token"].as_str().unwrap();
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        token_a,
+        RoleUpsertRequest {
+            id: "role_of_a".into(),
+            name: "A's".into(),
+            permissions: vec![],
+        },
+    );
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        token_b,
+        RoleUpsertRequest {
+            id: "role_of_b".into(),
+            name: "B's".into(),
+            permissions: vec![],
+        },
+    );
+
+    let listed = handle_rbac_roles_list(&service, &console, token_a);
+    assert_eq!(listed.status, 200);
+    let ids: Vec<String> = body_json(&listed)["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|role| role["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.contains(&"role_of_a".to_string()));
+    assert!(ids.contains(&"role_global".to_string()));
+    assert!(
+        !ids.contains(&"role_of_b".to_string()),
+        "another tenant's roles must not be disclosed"
+    );
+
+    // And a tenant cannot delete a global built-in or another tenant's role.
+    assert_eq!(
+        handle_rbac_role_delete(&service, &console, token_a, "role_global").status,
+        404
+    );
+    assert_eq!(
+        handle_rbac_role_delete(&service, &console, token_a, "role_of_b").status,
+        404
+    );
 }

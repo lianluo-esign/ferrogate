@@ -30,15 +30,25 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 // `AsyncPostgresPool::new` (`pg_config.connect_timeout` / `tcp_user_timeout`).)
 
 #[test]
-fn schema_contract_includes_latest_guardrail_generation_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 32);
-    assert_eq!(
-        POSTGRES_SCHEMA_NAME,
-        "032_guardrail_policy_binding_generation"
-    );
+fn schema_contract_includes_latest_admin_refresh_tenant_scope_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 34);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "034_admin_refresh_token_tenant_scope");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (34, '034_admin_refresh_token_tenant_scope')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));
+}
+
+#[test]
+fn schema_contract_tenant_scopes_admin_refresh_tokens() {
+    // #232: refresh tokens carry the tenant/role their session was issued
+    // for, both on fresh installs (CREATE TABLE) and legacy databases
+    // (ALTER TABLE ADD COLUMN IF NOT EXISTS).
+    assert!(POSTGRES_SCHEMA_SQL.contains("ALTER TABLE admin_user_refresh_tokens"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS tenant_id TEXT"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS role TEXT"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("idx_admin_user_refresh_tokens_user_tenant"));
 }

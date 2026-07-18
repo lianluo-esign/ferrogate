@@ -885,16 +885,35 @@ CREATE TABLE IF NOT EXISTS admin_user_refresh_tokens (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
     token_hash TEXT NOT NULL UNIQUE,
+    -- Tenant + role the session backing this token was issued for (#232).
+    -- Nullable only for legacy rows minted before tenant stamping existed:
+    -- the auth service refuses to refresh a NULL-tenant token (forcing one
+    -- fresh login) rather than guessing which tenant to re-issue for.
+    tenant_id TEXT,
+    role TEXT,
     created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
     expires_at_unix BIGINT NOT NULL,
     revoked_at_unix BIGINT
 );
+
+-- Migration for deployments whose admin_user_refresh_tokens table predates
+-- the tenant/role stamping added by #232. Existing rows stay NULL and are
+-- rejected on refresh (see above), which is the fail-closed option.
+ALTER TABLE admin_user_refresh_tokens
+    ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE admin_user_refresh_tokens
+    ADD COLUMN IF NOT EXISTS role TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user
     ON admin_user_refresh_tokens(user_id);
 
 CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_hash
     ON admin_user_refresh_tokens(token_hash);
+
+-- Tenant-scoped revocation path (#232): SCIM deprovision revokes one
+-- (user, tenant) slice of tokens without touching other tenants' sessions.
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user_tenant
+    ON admin_user_refresh_tokens(user_id, tenant_id);
 
 -- Per-user MCP OAuth material is never stored in plaintext. The gateway
 -- encrypts PKCE verifiers and access/refresh tokens with a deployment key
@@ -1748,4 +1767,8 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (33, '033_usage_metadata_rollups_per_tenant')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (34, '034_admin_refresh_token_tenant_scope')
 ON CONFLICT (version) DO NOTHING;

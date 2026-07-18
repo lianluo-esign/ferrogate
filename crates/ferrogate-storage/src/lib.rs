@@ -494,8 +494,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 32;
-const POSTGRES_SCHEMA_NAME: &str = "032_guardrail_policy_binding_generation";
+const POSTGRES_SCHEMA_VERSION: u64 = 34;
+const POSTGRES_SCHEMA_NAME: &str = "034_admin_refresh_token_tenant_scope";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -2115,13 +2115,16 @@ impl PostgresControlPlaneStore {
         client
             .execute(
                 "INSERT INTO admin_user_refresh_tokens \
-                 (id, user_id, token_hash, created_at_unix, expires_at_unix, revoked_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 (id, user_id, token_hash, tenant_id, role, created_at_unix, expires_at_unix, \
+                 revoked_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                  ON CONFLICT (id) DO UPDATE SET revoked_at_unix = EXCLUDED.revoked_at_unix",
                 &[
                     &token.id,
                     &token.user_id,
                     &token.token_hash,
+                    &token.tenant_id,
+                    &token.role,
                     &token.created_at_unix,
                     &token.expires_at_unix,
                     &token.revoked_at_unix,
@@ -2143,8 +2146,9 @@ impl PostgresControlPlaneStore {
             .await?;
         let row = client
             .query_opt(
-                "SELECT id, user_id, token_hash, created_at_unix, expires_at_unix, \
-                 revoked_at_unix FROM admin_user_refresh_tokens WHERE token_hash = $1",
+                "SELECT id, user_id, token_hash, tenant_id, role, created_at_unix, \
+                 expires_at_unix, revoked_at_unix \
+                 FROM admin_user_refresh_tokens WHERE token_hash = $1",
                 &[&token_hash],
             )
             .await
@@ -2170,6 +2174,32 @@ impl PostgresControlPlaneStore {
                 "UPDATE admin_user_refresh_tokens SET revoked_at_unix = $1 \
                  WHERE user_id = $2 AND revoked_at_unix IS NULL",
                 &[&revoked_at_unix, &user_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(affected)
+    }
+
+    /// Revokes every not-yet-revoked refresh token a user holds for ONE
+    /// tenant (issue #232), so a tenant-scoped SCIM deprovision terminates
+    /// only that tenant's sessions and can never log the user out of the
+    /// other tenants they belong to.
+    async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        let operation = self.admin_user_operation("revoke admin user refresh tokens for tenant");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let affected = client
+            .execute(
+                "UPDATE admin_user_refresh_tokens SET revoked_at_unix = $1 \
+                 WHERE user_id = $2 AND tenant_id = $3 AND revoked_at_unix IS NULL",
+                &[&revoked_at_unix, &user_id, &tenant_id],
             )
             .await
             .map_err(postgres_error)?;
@@ -5367,9 +5397,11 @@ fn admin_user_refresh_token_from_row(row: &PostgresRow) -> StoredAdminUserRefres
         id: row.get::<_, String>(0),
         user_id: row.get::<_, String>(1),
         token_hash: row.get::<_, String>(2),
-        created_at_unix: row.get::<_, i64>(3),
-        expires_at_unix: row.get::<_, i64>(4),
-        revoked_at_unix: row.get::<_, Option<i64>>(5),
+        tenant_id: row.get::<_, Option<String>>(3),
+        role: row.get::<_, Option<String>>(4),
+        created_at_unix: row.get::<_, i64>(5),
+        expires_at_unix: row.get::<_, i64>(6),
+        revoked_at_unix: row.get::<_, Option<i64>>(7),
     }
 }
 
@@ -6662,6 +6694,34 @@ impl RuntimeControlPlaneState {
         affected
     }
 
+    /// Tenant-scoped counterpart of [`Self::revoke_all_admin_user_refresh_tokens`]
+    /// (issue #232): only revokes tokens stamped with `tenant_id`, leaving the
+    /// user's sessions in other tenants untouched.
+    pub fn revoke_admin_user_refresh_tokens_for_tenant(
+        &mut self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> u64 {
+        let mut affected = 0u64;
+        for mut token in self
+            .admin_user_refresh_tokens
+            .list()
+            .into_iter()
+            .filter(|token| {
+                token.user_id == user_id
+                    && token.tenant_id.as_deref() == Some(tenant_id)
+                    && token.revoked_at_unix.is_none()
+            })
+        {
+            token.revoked_at_unix = Some(revoked_at_unix);
+            self.admin_user_refresh_tokens
+                .insert(token.id.clone(), token);
+            affected += 1;
+        }
+        affected
+    }
+
     pub fn get_tenant_account(&self, id: &str) -> Option<StoredTenantAccount> {
         self.tenant_accounts.get(id)
     }
@@ -7536,6 +7596,17 @@ pub struct StoredAdminUserRefreshToken {
     pub id: String,
     pub user_id: String,
     pub token_hash: String,
+    /// Tenant the session backing this token was issued for (issue #232).
+    /// `None` only on legacy rows minted before tenant stamping existed;
+    /// consumers must treat such rows as unusable for session re-issue
+    /// (reject and force a fresh login) rather than guessing a tenant.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Role the session backing this token was issued with (issue #232),
+    /// recorded for audit; re-issue resolves the CURRENT membership role so
+    /// demotions take effect on refresh. `None` on legacy rows.
+    #[serde(default)]
+    pub role: Option<String>,
     #[serde(default)]
     pub created_at_unix: i64,
     pub expires_at_unix: i64,
@@ -8727,6 +8798,38 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+                    .await
+            }
+        }
+    }
+
+    /// Revokes only the refresh tokens a user holds for one tenant (issue
+    /// #232), backing tenant-scoped SCIM deprovisioning: the user's live
+    /// sessions in every other tenant keep working.
+    pub async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.revoke_admin_user_refresh_tokens_for_tenant(
+                        user_id,
+                        tenant_id,
+                        revoked_at_unix,
+                    )
+                })
+                .unwrap_or(0)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .revoke_admin_user_refresh_tokens_for_tenant(
+                        user_id,
+                        tenant_id,
+                        revoked_at_unix,
+                    )
                     .await
             }
         }

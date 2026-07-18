@@ -108,10 +108,20 @@ pub struct Permission {
     pub resource: String,
 }
 
+/// A named permission bundle. Roles are namespaced per tenant (issue #232):
+/// `tenant_id: Some(..)` marks a role owned by (and only writable/resolvable
+/// for) that tenant, while `tenant_id: None` marks a GLOBAL role -- either a
+/// platform built-in loaded from the static YAML file or a legacy role
+/// created before per-tenant namespacing. Global roles are read-only through
+/// the runtime REST API: every tenant can see and bind them, but no tenant
+/// can overwrite or delete them (that would tamper with another tenant's
+/// bindings that resolve to the same id).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     #[serde(default)]
     pub permissions: Vec<Permission>,
 }
@@ -287,17 +297,26 @@ impl RbacAuthService {
 
     pub fn authorize(&self, request: &AuthorizeRequest) -> AuthorizationDecision {
         let data = self.read_data();
-        let roles_by_id: HashMap<&str, &Role> = data
+        // Roles are namespaced per tenant (issue #232): a binding resolves
+        // its role WITHIN the binding's own tenant first, falling back to
+        // the global (tenant-less) catalog. A role another tenant defined
+        // under the same id can therefore never alter this binding's grant.
+        let roles_by_id: HashMap<(Option<&str>, &str), &Role> = data
             .roles
             .iter()
-            .map(|role| (role.id.as_str(), role))
+            .map(|role| ((role.tenant_id.as_deref(), role.id.as_str()), role))
             .collect();
         let allowed = data
             .bindings
             .iter()
             .filter(|binding| binding.subject == request.subject)
             .filter(|binding| tenant_matches(&binding.tenant, &request.tenant))
-            .filter_map(|binding| roles_by_id.get(binding.role_id.as_str()))
+            .filter_map(|binding| {
+                let binding_tenant = binding.tenant.organization_id.as_deref();
+                roles_by_id
+                    .get(&(binding_tenant, binding.role_id.as_str()))
+                    .or_else(|| roles_by_id.get(&(None, binding.role_id.as_str())))
+            })
             .flat_map(|role| role.permissions.iter())
             .any(|permission| {
                 matches_pattern(&permission.action, &request.action)
@@ -321,33 +340,56 @@ impl RbacAuthService {
         self.read_data().roles.clone()
     }
 
-    /// Creates a new role, or replaces an existing one with the same `id`.
+    /// Lists the roles a tenant may see and bind (issue #232): its own
+    /// tenant-scoped roles plus the read-only global catalog. Another
+    /// tenant's roles are never returned.
+    pub fn list_roles_visible_to_tenant(&self, tenant_id: &str) -> Vec<Role> {
+        self.read_data()
+            .roles
+            .iter()
+            .filter(|role| role.tenant_id.is_none() || role.tenant_id.as_deref() == Some(tenant_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Creates a new role, or replaces an existing one with the same
+    /// `(tenant_id, id)` pair (issue #232): two tenants reusing an id own
+    /// two independent roles, and neither can touch a global (tenant-less)
+    /// role this way.
     pub fn upsert_role(&self, role: Role) {
         let mut data = self.write_data();
         match data
             .roles
             .iter_mut()
-            .find(|existing| existing.id == role.id)
+            .find(|existing| existing.id == role.id && existing.tenant_id == role.tenant_id)
         {
             Some(existing) => *existing = role,
             None => data.roles.push(role),
         }
     }
 
-    /// Deletes a role by id. Fails (returns `false`) rather than leaving
-    /// dangling references if any binding still uses it -- delete the
-    /// binding(s) first.
-    pub fn delete_role(&self, role_id: &str) -> Result<bool, &'static str> {
+    /// Deletes one tenant's own role by id (issue #232) -- global roles and
+    /// other tenants' roles are invisible to this call. Fails rather than
+    /// leaving dangling references if any of the owning tenant's bindings
+    /// still uses the id -- delete the binding(s) first.
+    pub fn delete_tenant_role(&self, tenant_id: &str, role_id: &str) -> Result<bool, &'static str> {
         let mut data = self.write_data();
-        if data
-            .bindings
+        if !data
+            .roles
             .iter()
-            .any(|binding| binding.role_id == role_id)
+            .any(|role| role.id == role_id && role.tenant_id.as_deref() == Some(tenant_id))
         {
+            return Ok(false);
+        }
+        if data.bindings.iter().any(|binding| {
+            binding.role_id == role_id
+                && binding.tenant.organization_id.as_deref() == Some(tenant_id)
+        }) {
             return Err("role is still referenced by one or more bindings");
         }
         let before = data.roles.len();
-        data.roles.retain(|role| role.id != role_id);
+        data.roles
+            .retain(|role| !(role.id == role_id && role.tenant_id.as_deref() == Some(tenant_id)));
         Ok(data.roles.len() != before)
     }
 
@@ -360,11 +402,17 @@ impl RbacAuthService {
             .collect()
     }
 
-    /// Creates or replaces a binding. Fails if `role_id` doesn't name an
-    /// existing role, so bindings can't silently grant nothing.
+    /// Creates or replaces a binding. Fails if `role_id` doesn't name a role
+    /// the binding's tenant can actually resolve (its own, or a global one),
+    /// so bindings can't silently grant nothing -- or resolve to another
+    /// tenant's role (issue #232).
     pub fn upsert_binding(&self, binding: PolicyBinding) -> Result<(), &'static str> {
         let mut data = self.write_data();
-        if !data.roles.iter().any(|role| role.id == binding.role_id) {
+        let binding_tenant = binding.tenant.organization_id.as_deref();
+        if !data.roles.iter().any(|role| {
+            role.id == binding.role_id
+                && (role.tenant_id.is_none() || role.tenant_id.as_deref() == binding_tenant)
+        }) {
             return Err("role_id does not name an existing role");
         }
         match data
@@ -662,11 +710,10 @@ pub struct AdminTeamMemberView {
     pub role: String,
 }
 
-/// Creates or replaces a `Role` by `id` (issue #162). The role catalog is
-/// shared across tenants (a role is just a named permission bundle), so any
-/// authenticated admin-console user may define one; only granting it to a
-/// subject via a `PolicyBinding` has tenant-scoped, owner-gated
-/// consequences.
+/// Creates or replaces a `Role` by `id` within the caller's own tenant
+/// (issue #162, tenant-scoped by #232). Only a tenant `owner` may define
+/// roles, and an upsert can only ever create/replace the caller tenant's own
+/// role -- never a global built-in or another tenant's role sharing the id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleUpsertRequest {
     pub id: String,
@@ -1423,6 +1470,17 @@ fn handle_admin_refresh(console: &AdminConsoleState, payload: AdminRefreshReques
     if user.disabled_at_unix.is_some() {
         return unauthorized("this account has been disabled");
     }
+    // Re-issue for the tenant this token's session was minted for (issue
+    // #232) -- NOT `memberships.first()`, which is merely the user's oldest
+    // membership and silently swapped a multi-tenant user into the wrong
+    // tenant/role on refresh. Legacy rows without a stamped tenant are
+    // rejected (fail closed): guessing a tenant would recreate the
+    // confusion, so those sessions must re-authenticate once.
+    let Some(token_tenant_id) = stored.tenant_id.as_deref() else {
+        return unauthorized(
+            "this refresh token predates tenant-scoped sessions; please sign in again",
+        );
+    };
     let memberships = match block_on_sync_bridge(
         console
             .repositories
@@ -1431,8 +1489,15 @@ fn handle_admin_refresh(console: &AdminConsoleState, payload: AdminRefreshReques
         Ok(memberships) => memberships,
         Err(error) => return storage_error(&error),
     };
-    let Some(membership) = memberships.first() else {
-        return unauthorized("this account has no tenant membership");
+    // Resolve the CURRENT membership in the stamped tenant rather than
+    // replaying the stamped role, so role changes (e.g. an owner demoting
+    // the user) take effect on the next refresh; a revoked membership ends
+    // the session entirely.
+    let Some(membership) = memberships
+        .iter()
+        .find(|membership| membership.tenant_id == token_tenant_id)
+    else {
+        return unauthorized("this account is no longer a member of the session's tenant");
     };
     match issue_session(
         console,
@@ -1778,35 +1843,42 @@ fn tenant_context_for(tenant_id: &str) -> TenantContext {
     }
 }
 
-/// Lists every role in the shared role catalog (issue #162). Not
-/// tenant-scoped -- a role is just a named permission bundle, so browsing
-/// the catalog is not itself a sensitive operation.
+/// Lists the roles visible to the caller's tenant (issue #162, tenant-scoped
+/// by #232): the tenant's own roles plus the read-only global built-ins its
+/// bindings may resolve to. Another tenant's roles are never disclosed.
 fn handle_rbac_roles_list(
     service: &AuthService,
     console: &AdminConsoleState,
     token: &str,
 ) -> HttpResponse {
-    // Require a valid admin-console session: the role/permission catalog must
-    // not be disclosed to anonymous callers (round-13 audit). Per-tenant
-    // scoping of which roles are returned is tracked separately (roles are
-    // currently a global catalog).
-    if let Err(response) = current_admin_session(console, token) {
-        return response;
-    }
-    HttpResponse::json(200, json!({ "roles": service.rbac.list_roles() }))
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    HttpResponse::json(
+        200,
+        json!({ "roles": service.rbac.list_roles_visible_to_tenant(&membership.tenant_id) }),
+    )
 }
 
-/// Creates or replaces a role (issue #162). Requires any valid admin-console
-/// session -- defining a reusable permission bundle has no effect until a
-/// `PolicyBinding` (owner-gated, tenant-scoped) actually grants it.
+/// Creates or replaces a role owned by the caller's own tenant (issue #162,
+/// tenant-scoped by #232). Only a tenant `owner` may write roles: even
+/// though a role grants nothing until bound, an unscoped upsert could
+/// overwrite the role a DIFFERENT tenant's owner-gated bindings resolve to
+/// (cross-tenant privilege escalation / DoS, round-13 audit). Namespacing by
+/// tenant means a colliding id creates this tenant's own independent role.
 fn handle_rbac_role_upsert(
     service: &AuthService,
     console: &AdminConsoleState,
     token: &str,
     payload: RoleUpsertRequest,
 ) -> HttpResponse {
-    if let Err(response) = current_admin_session(console, token) {
-        return response;
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can manage roles");
     }
     let id = payload.id.trim().to_string();
     let name = payload.name.trim().to_string();
@@ -1819,13 +1891,16 @@ fn handle_rbac_role_upsert(
     service.rbac.upsert_role(Role {
         id: id.clone(),
         name,
+        tenant_id: Some(membership.tenant_id),
         permissions: payload.permissions,
     });
     HttpResponse::json(200, json!({ "object": "role", "id": id }))
 }
 
-/// Deletes a role by id (issue #162). Refuses if any binding still
-/// references it, so authorization decisions never silently lose their
+/// Deletes one of the caller tenant's own roles by id (issue #162,
+/// tenant-scoped and owner-gated by #232) -- global built-ins and other
+/// tenants' roles are not deletable. Refuses if any of the tenant's bindings
+/// still references it, so authorization decisions never silently lose their
 /// backing role.
 fn handle_rbac_role_delete(
     service: &AuthService,
@@ -1833,12 +1908,19 @@ fn handle_rbac_role_delete(
     token: &str,
     role_id: &str,
 ) -> HttpResponse {
-    if let Err(response) = current_admin_session(console, token) {
-        return response;
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can manage roles");
     }
-    match service.rbac.delete_role(role_id) {
+    match service
+        .rbac
+        .delete_tenant_role(&membership.tenant_id, role_id)
+    {
         Ok(true) => HttpResponse::json(200, json!({ "object": "role", "removed": true })),
-        Ok(false) => not_found("no such role"),
+        Ok(false) => not_found("no such role in this tenant"),
         Err(message) => conflict(message),
     }
 }
@@ -2114,12 +2196,23 @@ struct ScimUserRequest {
 }
 
 fn scim_user_resource(user: &StoredAdminUser, role: &str) -> serde_json::Value {
+    scim_user_resource_with_active(user, role, user.disabled_at_unix.is_none())
+}
+
+/// Variant with an explicit `active` value for tenant-scoped deprovisioning
+/// responses (issue #232): a user removed from THIS tenant is inactive here
+/// even when their global account stays enabled for their other tenants.
+fn scim_user_resource_with_active(
+    user: &StoredAdminUser,
+    role: &str,
+    active: bool,
+) -> serde_json::Value {
     json!({
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
         "id": user.id,
         "userName": user.email,
         "displayName": user.display_name,
-        "active": user.disabled_at_unix.is_none(),
+        "active": active,
         "ferrogateRole": role,
         "meta": { "resourceType": "User" }
     })
@@ -2272,21 +2365,67 @@ fn handle_scim_user_create(
     }
 
     if payload.active == Some(false) {
-        if let Err(response) = deactivate_admin_user(console, &user.id) {
+        if let Err(response) = deactivate_admin_user_in_tenant(console, tenant_id, &user.id) {
             return response;
         }
     }
 
-    HttpResponse::json(201, scim_user_resource(&user, &role))
+    HttpResponse::json(
+        201,
+        scim_user_resource_with_active(&user, &role, payload.active != Some(false)),
+    )
 }
 
-fn deactivate_admin_user(console: &AdminConsoleState, user_id: &str) -> Result<(), HttpResponse> {
+/// Tenant-scoped SCIM deprovisioning (issue #232). SCIM auth is per-tenant
+/// (the provisioning token belongs to ONE tenant), so deactivation must be
+/// too: revoke only this tenant's sessions, and either
+/// - remove only this tenant's membership when the user still belongs to
+///   other tenants (their global account and other sessions are untouched --
+///   previously any tenant owner could disable a shared account system-wide
+///   by knowing its email), or
+/// - globally disable the account (and revoke every remaining token,
+///   including legacy rows with no stamped tenant) when this was their last
+///   membership -- the membership itself is kept in that case so a SCIM
+///   PATCH `active: true` from the same tenant can reactivate them.
+fn deactivate_admin_user_in_tenant(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<(), HttpResponse> {
     let mut user = match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
         Ok(Some(user)) => user,
         Ok(None) => return Err(not_found("no such user")),
         Err(error) => return Err(storage_error(&error)),
     };
     let now = now_unix_seconds() as i64;
+    if let Err(error) = block_on_sync_bridge(
+        console
+            .repositories
+            .revoke_admin_user_refresh_tokens_for_tenant(user_id, tenant_id, now),
+    ) {
+        return Err(storage_error(&error));
+    }
+    let memberships = match block_on_sync_bridge(
+        console
+            .repositories
+            .list_admin_user_memberships_by_user(user_id),
+    ) {
+        Ok(memberships) => memberships,
+        Err(error) => return Err(storage_error(&error)),
+    };
+    let has_other_memberships = memberships
+        .iter()
+        .any(|membership| membership.tenant_id != tenant_id);
+    if has_other_memberships {
+        if let Err(error) = block_on_sync_bridge(
+            console
+                .repositories
+                .delete_admin_user_membership(user_id, tenant_id),
+        ) {
+            return Err(storage_error(&error));
+        }
+        return Ok(());
+    }
     user.disabled_at_unix = Some(now);
     if let Err(error) = block_on_sync_bridge(console.repositories.upsert_admin_user(user)) {
         return Err(storage_error(&error));
@@ -2332,10 +2471,10 @@ fn parse_scim_active_patch(body: &[u8]) -> Option<bool> {
     })
 }
 
-/// Updates a SCIM user's `active` state (issue #161). Deactivating sets
-/// `disabled_at_unix` and revokes every outstanding refresh token so a
-/// deprovisioned user's existing sessions actually end, not just future
-/// logins.
+/// Updates a SCIM user's `active` state (issue #161). Deactivation is
+/// tenant-scoped (issue #232, see `deactivate_admin_user_in_tenant`): it
+/// ends this tenant's sessions immediately and never disables the shared
+/// global account while the user still belongs to other tenants.
 fn handle_scim_user_patch(
     console: &AdminConsoleState,
     tenant_id: &str,
@@ -2345,29 +2484,41 @@ fn handle_scim_user_patch(
     let Some(role) = membership_role_in_tenant(console, tenant_id, user_id) else {
         return not_found("no such user in this tenant");
     };
-    match parse_scim_active_patch(body) {
+    let deactivated = match parse_scim_active_patch(body) {
         Some(true) => {
             if let Err(response) = reactivate_admin_user(console, user_id) {
                 return response;
             }
+            false
         }
         Some(false) => {
-            if let Err(response) = deactivate_admin_user(console, user_id) {
+            if let Err(response) = deactivate_admin_user_in_tenant(console, tenant_id, user_id) {
                 return response;
             }
+            true
         }
         None => return unprocessable("could not determine an 'active' value from the PATCH body"),
-    }
+    };
     match block_on_sync_bridge(console.repositories.get_admin_user_by_id(user_id)) {
-        Ok(Some(user)) => HttpResponse::json(200, scim_user_resource(&user, &role)),
+        Ok(Some(user)) => HttpResponse::json(
+            200,
+            scim_user_resource_with_active(
+                &user,
+                &role,
+                !deactivated && user.disabled_at_unix.is_none(),
+            ),
+        ),
         Ok(None) => not_found("no such user"),
         Err(error) => storage_error(&error),
     }
 }
 
-/// SCIM DELETE deprovisions a user (issue #161): deactivate + revoke
-/// sessions rather than hard-deleting the account, preserving audit history
-/// and any OTHER tenant's membership for the same person.
+/// SCIM DELETE deprovisions a user from THIS tenant (issue #161, tenant
+/// -scoped by #232): revoke this tenant's sessions and membership rather
+/// than hard-deleting (or globally disabling) the shared account, preserving
+/// audit history and any OTHER tenant's membership/sessions for the same
+/// person. The account is only globally disabled when this was its last
+/// remaining membership.
 fn handle_scim_user_delete(
     console: &AdminConsoleState,
     tenant_id: &str,
@@ -2376,7 +2527,7 @@ fn handle_scim_user_delete(
     if membership_role_in_tenant(console, tenant_id, user_id).is_none() {
         return not_found("no such user in this tenant");
     }
-    if let Err(response) = deactivate_admin_user(console, user_id) {
+    if let Err(response) = deactivate_admin_user_in_tenant(console, tenant_id, user_id) {
         return response;
     }
     HttpResponse::no_content(204)
@@ -2879,6 +3030,11 @@ fn issue_session(
         id: next_id("rt"),
         user_id: user_id.to_string(),
         token_hash: hash_virtual_api_key_secret(&refresh_secret),
+        // Stamp the tenant/role this session was issued for (issue #232) so
+        // a later refresh re-issues for the SAME tenant instead of whichever
+        // membership happens to sort first.
+        tenant_id: Some(tenant_id.to_string()),
+        role: Some(role.to_string()),
         created_at_unix: now,
         expires_at_unix: now + ADMIN_SESSION_REFRESH_TOKEN_TTL_SECS as i64,
         revoked_at_unix: None,
@@ -3369,6 +3525,7 @@ mod tests {
             roles: vec![Role {
                 id: "role_chat".into(),
                 name: "Chat caller".into(),
+                tenant_id: None,
                 permissions: vec![Permission {
                     action: "chat.completions".into(),
                     resource: "model:fast-chat".into(),
@@ -3402,6 +3559,7 @@ mod tests {
             roles: vec![Role {
                 id: "role_chat".into(),
                 name: "Chat caller".into(),
+                tenant_id: None,
                 permissions: vec![Permission {
                     action: "chat.completions".into(),
                     resource: "model:fast-chat".into(),
