@@ -12381,6 +12381,56 @@ mod tests {
     }
 
     #[test]
+    fn settle_wallet_balance_applies_a_settlement_id_at_most_once() {
+        // The auto-recharge double-credit fix credits the wallet via
+        // settle_wallet_balance keyed on the Stripe charge id, relying on this
+        // idempotency: a replayed settlement id must NOT re-apply the delta.
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        block_on(repositories.upsert_wallet(StoredWallet {
+            id: "tenant-x".into(),
+            tenant_id: "tenant-x".into(),
+            balance_credits: 100,
+            auto_recharge_threshold_credits: None,
+            auto_recharge_amount_credits: None,
+            dunning: false,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
+
+        // First application of the charge credit: applied, balance 100 -> 600.
+        let first = block_on(repositories.settle_wallet_balance(
+            "auto-recharge-credit:ch_123",
+            "tenant-x",
+            500,
+            2,
+        ))
+        .unwrap();
+        assert!(first.newly_applied);
+        assert_eq!(first.settlement.balance_after_credits, Some(600));
+
+        // Replay of the SAME charge (a concurrent same-key recharge): NOT
+        // re-applied, balance stays 600 -- no double credit.
+        let replay = block_on(repositories.settle_wallet_balance(
+            "auto-recharge-credit:ch_123",
+            "tenant-x",
+            500,
+            3,
+        ))
+        .unwrap();
+        assert!(!replay.newly_applied);
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-x"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            600,
+            "a replayed settlement id must not double-credit the wallet"
+        );
+    }
+
+    #[test]
     fn payment_methods_are_scoped_per_tenant_and_idempotent_on_reattachment() {
         let repositories = memory_repositories();
 

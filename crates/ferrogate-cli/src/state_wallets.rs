@@ -436,23 +436,54 @@ impl AppState {
         match outcome {
             Ok(outcome) if outcome.succeeded => {
                 let _ = self.set_wallet_dunning(tenant_id, false).await;
-                if let Err(error) = self.adjust_wallet_balance(tenant_id, amount_credits).await {
-                    warn!(
-                        tenant_id = %tenant_id,
-                        error = %error,
-                        "auto-recharge charge succeeded but crediting the wallet failed"
-                    );
+                // Credit the wallet IDEMPOTENTLY, keyed on the Stripe charge id.
+                // The prior `adjust_wallet_balance` was an unconditional
+                // `balance += amount` with no dedup, so if two concurrent
+                // same-second recharge tasks shared one Stripe idempotency key
+                // (Stripe charges the card ONCE and returns the same
+                // provider_charge_id to both) each still credited the wallet --
+                // netting the tenant free credits. Routing the credit through
+                // settle_wallet_balance (which dedups on the settlement id via
+                // wallet_settlements, exactly like the debit path) means a
+                // duplicated/replayed successful charge credits at most once.
+                let credit_settlement_id =
+                    format!("auto-recharge-credit:{}", outcome.provider_charge_id);
+                let now = now_unix_seconds().unwrap_or_default() as i64;
+                match self
+                    .repositories
+                    .settle_wallet_balance(&credit_settlement_id, tenant_id, amount_credits, now)
+                    .await
+                {
+                    Ok(settlement) if settlement.newly_applied => {
+                        self.record_wallet_ledger_event(
+                            tenant_id,
+                            "wallet.auto_recharge",
+                            "committed",
+                            format!(
+                                "auto-recharge credited {amount_credits} credits \
+                                 ({amount_usd_cents} USD cents charged, provider_charge_id={})",
+                                outcome.provider_charge_id
+                            ),
+                        );
+                    }
+                    Ok(_) => {
+                        // A duplicate of an already-credited charge (e.g. a
+                        // concurrent same-key recharge): the card was charged
+                        // once and credited once; skip the duplicate credit.
+                        warn!(
+                            tenant_id = %tenant_id,
+                            provider_charge_id = %outcome.provider_charge_id,
+                            "auto-recharge credit already applied for this charge; skipping duplicate"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            tenant_id = %tenant_id,
+                            error = %error,
+                            "auto-recharge charge succeeded but crediting the wallet failed"
+                        );
+                    }
                 }
-                self.record_wallet_ledger_event(
-                    tenant_id,
-                    "wallet.auto_recharge",
-                    "committed",
-                    format!(
-                        "auto-recharge credited {amount_credits} credits \
-                         ({amount_usd_cents} USD cents charged, provider_charge_id={})",
-                        outcome.provider_charge_id
-                    ),
-                );
             }
             Ok(outcome) => {
                 warn!(
