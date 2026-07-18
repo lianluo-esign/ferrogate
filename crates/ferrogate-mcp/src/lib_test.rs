@@ -537,6 +537,31 @@ fn read_sse_json_response_errors_on_closed_stream_without_data() {
     assert!(read_sse_json_response(&mut reader).is_err());
 }
 
+#[test]
+fn read_json_body_rejects_oversized_content_length_without_allocating() {
+    // An attacker-controlled (lying) Content-Length larger than the cap must
+    // bail BEFORE any allocation -- the prior `vec![0u8; len]` aborted the whole
+    // gateway process on a huge len.
+    let mut reader = Cursor::new(br#"{"ok":true}"#.as_slice());
+    let result = read_json_body(&mut reader, Some(MAX_MCP_RESPONSE_BYTES + 1));
+    assert!(result.is_err(), "oversized Content-Length must be rejected");
+}
+
+#[test]
+fn read_json_body_parses_a_content_length_bounded_body() {
+    let body = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+    let mut reader = Cursor::new(body.as_slice());
+    let value = read_json_body(&mut reader, Some(body.len())).unwrap();
+    assert_eq!(value["id"], 1);
+}
+
+#[test]
+fn read_json_body_parses_a_body_without_content_length() {
+    let mut reader = Cursor::new(br#"{"ok":true}"#.as_slice());
+    let value = read_json_body(&mut reader, None).unwrap();
+    assert_eq!(value["ok"], true);
+}
+
 fn spawn_https_test_server(
     cert_der: rustls::pki_types::CertificateDer<'static>,
     key_der: Vec<u8>,

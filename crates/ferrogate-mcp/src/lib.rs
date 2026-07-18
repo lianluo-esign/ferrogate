@@ -1150,19 +1150,41 @@ fn read_http_response_head<R: BufRead>(reader: &mut R) -> AnyResult<HttpResponse
     })
 }
 
+/// Upper bound on an MCP HTTP response body. An upstream MCP server is a
+/// separate trust domain (and `tls.insecure_skip_verify` permits a network
+/// MITM); without this cap an attacker-controlled `Content-Length` drove
+/// `vec![0u8; len]` to a process-fatal allocation (`handle_alloc_error` ->
+/// `abort`, killing the whole multi-tenant gateway). 16 MiB is far above any
+/// legitimate JSON-RPC tool result.
+const MAX_MCP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Reads the response body as a single JSON value (the `application/json`
 /// response shape most `StreamableHttp` MCP servers use). Prefers an exact
 /// `Content-Length`-bounded read over `read_to_end` so a well-formed
 /// response doesn't require the peer to close (and send a TLS
-/// `close_notify`) before we can parse it.
+/// `close_notify`) before we can parse it. The body is capped at
+/// [`MAX_MCP_RESPONSE_BYTES`] so a lying/oversized upstream `Content-Length`
+/// yields a bounded error instead of a fatal allocation.
 fn read_json_body<R: BufRead>(reader: &mut R, content_length: Option<usize>) -> AnyResult<Value> {
     if let Some(len) = content_length {
+        if len > MAX_MCP_RESPONSE_BYTES {
+            bail!(
+                "MCP JSON response Content-Length {len} exceeds the {MAX_MCP_RESPONSE_BYTES}-byte maximum"
+            );
+        }
         let mut raw = vec![0u8; len];
         reader.read_exact(&mut raw)?;
         return serde_json::from_slice(&raw).context("invalid MCP JSON response");
     }
+    // No Content-Length: read at most the cap (+1 to detect overflow) so a
+    // streaming/lying peer cannot grow the buffer without bound.
     let mut raw = Vec::new();
-    reader.read_to_end(&mut raw)?;
+    reader
+        .take(MAX_MCP_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() > MAX_MCP_RESPONSE_BYTES {
+        bail!("MCP JSON response exceeds the {MAX_MCP_RESPONSE_BYTES}-byte maximum");
+    }
     serde_json::from_slice(&raw).context("invalid MCP JSON response")
 }
 
@@ -1174,9 +1196,17 @@ fn read_sse_json_response<R: BufRead>(reader: &mut R) -> AnyResult<Value> {
     let mut data_buf = String::new();
     loop {
         let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
+        // Bound each line read so a peer streaming a huge line without a
+        // newline cannot grow `line` without limit (same DoS class as the
+        // Content-Length body read).
+        let read = (&mut *reader)
+            .take(MAX_MCP_RESPONSE_BYTES as u64 + 1)
+            .read_line(&mut line)?;
         if read == 0 {
             bail!("MCP SSE stream closed before a JSON-RPC response arrived");
+        }
+        if line.len() > MAX_MCP_RESPONSE_BYTES || data_buf.len() > MAX_MCP_RESPONSE_BYTES {
+            bail!("MCP SSE response exceeds the {MAX_MCP_RESPONSE_BYTES}-byte maximum");
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
