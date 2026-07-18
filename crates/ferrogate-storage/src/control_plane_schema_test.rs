@@ -36,6 +36,14 @@ fn open_repositories(dsn: &str, schema: &str) -> RuntimeStorageRepositories {
         &format!("SET search_path TO \"{schema}\"; {POSTGRES_SCHEMA_SQL}"),
     );
 
+    reopen_repositories(dsn, schema)
+}
+
+/// Open a second repository set pinned to an ALREADY-provisioned schema WITHOUT
+/// re-running the schema DDL. Modelling a gateway restart against the same
+/// durable store, the durably-persisted rows must survive across the two
+/// instances (see [`live_self_hosted_lease_state_survives_gateway_restart`]).
+fn reopen_repositories(dsn: &str, schema: &str) -> RuntimeStorageRepositories {
     let config = PostgresStorageConfig {
         dsn: dsn.to_string(),
         // One connection is enough for these single-op probes and keeps the
@@ -611,6 +619,136 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
         ),
         0,
         "the dispatch must NOT be misrouted to the public schema (#239 follow-up)",
+    );
+
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
+}
+
+/// #244 (durable dispatch lease queue): an IN-FLIGHT lease (assigned to a
+/// worker, attempt 1, unacknowledged, deadline in the future) persisted before a
+/// gateway restart must survive that restart. Modelling the restart as a SECOND
+/// repository set opened over the SAME durable schema (the reload path
+/// `AppState::try_new` runs through `self_hosted_run_dispatches()`), the reloaded
+/// lease must carry the exact assignment / attempt / ack-window state -- so the
+/// gateway resumes it (no drop) and does not re-lease it to another worker before
+/// the deadline lapses (no double-deliver). The prior tests only proved a single
+/// upsert's schema routing; this proves the lease state genuinely survives a
+/// restart round-trip through Postgres.
+#[test]
+fn live_self_hosted_lease_state_survives_gateway_restart() {
+    let Some(dsn) = dsn_or_skip("live_self_hosted_lease_state_survives_gateway_restart") else {
+        return;
+    };
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_lease_restart_test");
+    let dispatch_id = format!("dispatch-{schema}");
+    let lease_id = format!("{dispatch_id}:attempt-1");
+    let _guard = SchemaGuard::new(&dsn, &schema);
+
+    // Instance #1 -- the pre-restart gateway. Persist an in-flight lease: run
+    // leased to `worker-lease`, attempt 1, deadline 1_700_000_030, unacknowledged.
+    let pre_restart = open_repositories(&dsn, &schema);
+    // `self_hosted_run_dispatches.assigned_worker_id` FKs the worker
+    // registration, so the assigned worker must exist first (as it does in the
+    // live rebuild path, where registrations are reloaded alongside dispatches).
+    block_on(pre_restart.upsert_self_hosted_worker_registration(
+        StoredSelfHostedWorkerRegistration {
+            id: "worker-lease".into(),
+            tenant: TenantContext::default(),
+            workspace_id: "workspace-lease".into(),
+            worker_name: "lease-restart".into(),
+            status: "active".into(),
+            identity_fingerprint: "fingerprint-worker-lease".into(),
+            identity_expires_at_unix: None,
+            orchestration_enabled: true,
+            registered_at_unix: Some(1_700_000_000),
+            last_seen_at_unix: None,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            capability_envelope_json: "{}".into(),
+            token_secret: "lease-restart-secret-lease-restart".into(),
+        },
+    ))
+    .expect("seed assigned worker registration must not error");
+    block_on(
+        pre_restart.upsert_self_hosted_run_dispatch(StoredSelfHostedRunDispatch {
+            dispatch_id: dispatch_id.clone(),
+            action: "start_run".into(),
+            tenant_id: String::new(),
+            workspace_id: "workspace-lease".into(),
+            session_id: "session-lease".into(),
+            run_id: "run-lease".into(),
+            framework_adapter: "codex".into(),
+            required_capabilities: vec!["logs".into()],
+            workload_ref: "queue://runs/run-lease".into(),
+            queued_at_unix: Some(1_700_000_000),
+            assigned_worker_id: Some("worker-lease".into()),
+            lease_id: Some(lease_id.clone()),
+            lease_expires_at_unix: Some(1_700_000_030),
+            attempt: 1,
+            acknowledged_status: None,
+            acknowledged_at_unix: None,
+        }),
+    )
+    .expect("persist in-flight lease must not error");
+    // Simulate the gateway shutting down: drop every connection to the store.
+    drop(pre_restart);
+
+    // Instance #2 -- the post-restart gateway rebuilds from the SAME schema
+    // WITHOUT re-provisioning it (no DDL), exactly as a real restart would.
+    let restarted = reopen_repositories(&dsn, &schema);
+    let dispatches = block_on(restarted.self_hosted_run_dispatches());
+    drop(restarted);
+
+    let restored = dispatches
+        .iter()
+        .find(|dispatch| dispatch.dispatch_id == dispatch_id)
+        .expect("the in-flight lease must survive the gateway restart (no drop)");
+
+    // No drop: the full assignment / attempt / ack-window state is intact, so the
+    // restarted gateway can resume and honor the original worker's ack.
+    assert_eq!(
+        restored.assigned_worker_id.as_deref(),
+        Some("worker-lease"),
+        "the lease assignment must survive the restart",
+    );
+    assert_eq!(
+        restored.lease_id.as_deref(),
+        Some(lease_id.as_str()),
+        "the lease id must survive the restart",
+    );
+    assert_eq!(
+        restored.attempt, 1,
+        "the attempt count must survive the restart (not reset to 0)",
+    );
+    assert_eq!(
+        restored.lease_expires_at_unix,
+        Some(1_700_000_030),
+        "the ack window (lease deadline) must survive the restart",
+    );
+    assert_eq!(
+        restored.acknowledged_status, None,
+        "the lease must still read as unacknowledged after the restart",
+    );
+    assert_eq!(
+        restored.required_capabilities,
+        vec!["logs".to_string()],
+        "the dispatch capabilities must survive the restart",
+    );
+
+    // No double-deliver: while the deadline holds, exactly one active lease row
+    // remains bound to the original worker -- there is no second, unassigned copy
+    // the restarted gateway could hand to a different worker.
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".self_hosted_run_dispatches \
+                 WHERE run_id = 'run-lease' AND assigned_worker_id = 'worker-lease' \
+                 AND acknowledged_status IS NULL"
+            )
+        ),
+        1,
+        "exactly one in-flight lease must remain bound to the original worker",
     );
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.

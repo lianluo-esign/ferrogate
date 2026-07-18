@@ -2064,6 +2064,137 @@ mod tests {
         assert_eq!(after_expiry.attempt, 2);
     }
 
+    // Durable-lease resume (#244): an in-flight lease persisted before a gateway
+    // restart is rebuilt from storage into a FRESH queue and must not be
+    // double-delivered while its deadline holds, and its original ack must still
+    // be honored (no drop). `run_records()`/`restore_runs()` are the exact
+    // write-through/reload snapshot boundary the durable store persists across.
+    #[test]
+    fn restored_in_flight_lease_resumes_without_double_delivery_or_drop() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+
+        // Pre-restart runtime: lease the dispatch to worker-1 (attempt 1, unacked).
+        let mut before_restart = InMemorySelfHostedRunQueue::default();
+        before_restart.enqueue_run(dispatch()).unwrap();
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut before_restart,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+        assert_eq!(lease.lease_id, "dispatch-1:attempt-1");
+
+        // Simulate a gateway restart: rebuild a fresh queue purely from the
+        // persisted snapshot (no in-memory carryover from `before_restart`).
+        let persisted = before_restart.run_records();
+        let mut after_restart = InMemorySelfHostedRunQueue::default();
+        after_restart.restore_runs(persisted).unwrap();
+
+        // No double-deliver: a poll before the lease deadline lapses -- even from
+        // a fully-capable worker -- must NOT re-lease the already-leased run.
+        let during_active_lease = transport
+            .poll_run(
+                &registry,
+                &mut after_restart,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_020,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap();
+        assert!(
+            during_active_lease.is_none(),
+            "a restored in-flight lease must not be re-delivered before its deadline"
+        );
+
+        // No drop: the original lease is still ack-able after the restart.
+        let ack = transport
+            .ack_run(
+                &registry,
+                &mut after_restart,
+                SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity,
+                    dispatch_id: lease.dispatch_id.clone(),
+                    action: lease.action,
+                    lease_id: lease.lease_id.clone(),
+                    run_id: lease.run_id.clone(),
+                    status: SelfHostedRunAckStatus::Completed,
+                    reported_at_unix: 1_725_000_025,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(ack.lease_id, "dispatch-1:attempt-1");
+        assert_eq!(ack.worker_id, "worker-1");
+        assert_eq!(ack.status, SelfHostedRunAckStatus::Completed);
+    }
+
+    // Durable-lease resume (#244): if a leased run is never acked and the gateway
+    // restarts, the reloaded queue must still redeliver it ONCE the deadline
+    // lapses -- and as the NEXT attempt, proving the attempt counter survived the
+    // restart rather than resetting (which would mask duplicate delivery).
+    #[test]
+    fn restored_unacked_lease_redelivers_as_next_attempt_after_deadline() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+
+        let mut before_restart = InMemorySelfHostedRunQueue::default();
+        before_restart.enqueue_run(dispatch()).unwrap();
+        let first = transport
+            .poll_run(
+                &registry,
+                &mut before_restart,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.attempt, 1);
+
+        let mut after_restart = InMemorySelfHostedRunQueue::default();
+        after_restart
+            .restore_runs(before_restart.run_records())
+            .unwrap();
+
+        let redelivered = transport
+            .poll_run(
+                &registry,
+                &mut after_restart,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_040,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("an expired lease must be redeliverable after a restart");
+
+        assert_eq!(redelivered.lease_id, "dispatch-1:attempt-2");
+        assert_eq!(redelivered.attempt, 2);
+    }
+
     #[test]
     fn worker_poll_and_ack_reject_unsupported_protocol_version() {
         let registry = registered_registry();
