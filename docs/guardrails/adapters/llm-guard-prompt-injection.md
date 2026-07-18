@@ -112,6 +112,9 @@ milliseconds on CPU) — budget the policy `deadline_ms` accordingly.
   treat that host as inside the sensitive-data boundary.
 - **No adapter-local circuit breaker or retries** in v1; policy `on_error`
   decides fail-open vs fail-closed.
-- **Shadow → promotion pending live endpoints.** The shadow-sampling →
-  human-label comparison → scoped promotion with rollback workflow runs when
-  a real deployment supplies a live endpoint; fixtures cannot exercise it.
+- **Shadow → enforce loop is implemented and fixture-tested.** The
+  shadow-sampling → human-label comparison → scoped promotion → rollback
+  workflow is a deterministic decision procedure documented in
+  [`../shadow-to-enforce.md`](../shadow-to-enforce.md) and exercised end-to-end
+  against recorded fixtures (`adapters_test.rs`). Only running it against real
+  scanner traffic remains external (it needs a live endpoint).

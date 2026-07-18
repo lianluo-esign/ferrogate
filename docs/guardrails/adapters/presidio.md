@@ -121,7 +121,9 @@ deployment.
   deadline plus the declared failure modes govern behaviour under outage.
   `on_error` policy (block/record/fallback-detector) decides fail-open vs
   fail-closed.
-- **Shadow → promotion pending live endpoints.** The recommended rollout —
-  shadow-mode sampling, human-label comparison, then promotion by scope with
-  rollback — runs once a real deployment supplies a live analyzer endpoint;
-  it cannot be exercised against fixtures.
+- **Shadow → enforce loop is implemented and fixture-tested.** The rollout —
+  shadow-mode sampling, human-label comparison, promotion by scope, and
+  rollback — is a deterministic decision procedure documented in
+  [`../shadow-to-enforce.md`](../shadow-to-enforce.md) and exercised end-to-end
+  against recorded fixtures (`adapters_test.rs`). Only running it against real
+  analyzer traffic remains external (it needs a live endpoint).

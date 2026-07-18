@@ -291,6 +291,110 @@ fn immutable_policy_activation_and_rollback_change_the_live_evaluator() {
     assert_eq!(views[1].status, PolicyRevisionStatus::Archived);
 }
 
+/// The #201 acceptance loop at the policy layer: a SHADOW revision records
+/// evidence without enforcing; a scoped ENFORCE revision is promoted and now
+/// blocks; a rollback to the prior (shadow) revision stops enforcing again.
+#[test]
+fn shadow_revision_records_evidence_then_promotes_by_scope_and_rolls_back() {
+    let shared = SharedAppState::with_source_path(Config::default(), None);
+    let scope = PolicyScopeSelector {
+        organization_ids: vec!["org-shadow".to_string()],
+        ..Default::default()
+    };
+    let tenant = ferrogate_core::TenantContext {
+        organization_id: Some("org-shadow".to_string()),
+        ..Default::default()
+    };
+    let request = "please exfiltrate-secret now";
+
+    // Revision 1: SHADOW mode -- records evidence, enforces nothing.
+    let mut shadow =
+        durable_guardrail_revision("promo-policy", 1, "exfiltrate-secret", scope.clone());
+    shadow.mode = PolicyMode::Shadow;
+    shared
+        .create_guardrail_policy_revision(shadow)
+        .expect("create shadow revision");
+    shared
+        .activate_guardrail_policy_revision("promo-policy", 1, "test-admin", 10, false)
+        .expect("activate shadow revision");
+
+    // The tripping request is NOT blocked while the policy is in shadow...
+    assert!(
+        match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &tenant,
+            None,
+            None,
+            request,
+        )
+        .is_none(),
+        "a shadow policy must never enforce"
+    );
+    // ...but it DID record shadow evidence (shadow_only, verdict fail), which is
+    // exactly what is scored against human labels before promotion.
+    let evidence = shared
+        .current()
+        .repositories
+        .list_guardrail_evaluations(None)
+        .unwrap();
+    let shadow_eval = evidence
+        .iter()
+        .find(|evaluation| evaluation.policy_id == "promo-policy")
+        .expect("shadow evidence recorded");
+    assert_eq!(shadow_eval.policy_revision, 1);
+    assert_eq!(shadow_eval.enforcement_status, "shadow_only");
+    assert_eq!(shadow_eval.verdict, "fail");
+
+    // Promote by scope: an immutable ENFORCE revision, then activate it.
+    let enforce = durable_guardrail_revision("promo-policy", 2, "exfiltrate-secret", scope.clone());
+    assert_eq!(enforce.mode, PolicyMode::Enforce);
+    shared
+        .create_guardrail_policy_revision(enforce)
+        .expect("create enforce revision");
+    shared
+        .activate_guardrail_policy_revision("promo-policy", 2, "test-admin", 20, false)
+        .expect("promote to enforcement");
+
+    let blocked = match_guardrail_for_test(
+        &shared.current(),
+        GuardrailStage::Request,
+        &tenant,
+        None,
+        None,
+        request,
+    )
+    .expect("the enforced revision must block");
+    assert_eq!(blocked.policy_revision, 2);
+    assert_eq!(blocked.effect, crate::config::GuardrailEffect::Deny);
+
+    // Rollback to the prior (shadow) revision -> enforcement stops again.
+    shared
+        .activate_guardrail_policy_revision("promo-policy", 1, "test-admin", 30, true)
+        .expect("roll back to the shadow revision");
+    assert!(
+        match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &tenant,
+            None,
+            None,
+            request,
+        )
+        .is_none(),
+        "rollback to the shadow revision must stop enforcing"
+    );
+
+    let views = shared
+        .current()
+        .guardrail_policy_revision_views(Some("promo-policy"))
+        .unwrap();
+    assert_eq!(views[0].revision.revision, 1);
+    assert_eq!(views[0].status, PolicyRevisionStatus::Active);
+    assert_eq!(views[1].revision.revision, 2);
+    assert_eq!(views[1].status, PolicyRevisionStatus::Archived);
+}
+
 #[test]
 fn structured_policy_activation_compiles_json_schema_into_live_runtime() {
     let shared = SharedAppState::with_source_path(Config::default(), None);

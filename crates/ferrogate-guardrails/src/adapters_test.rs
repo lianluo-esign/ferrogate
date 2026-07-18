@@ -6,7 +6,11 @@
 
 use super::adapters::fixture::FixtureTransport;
 use super::conformance::{assert_detector_conforms, PROBE_SECRET};
-use super::evaluation::{reference_corpus, run_detector_evaluation};
+use super::evaluation::{
+    record_shadow_observations, reference_corpus, run_detector_evaluation,
+    score_shadow_observations, PromotionDecision, PromotionGate, PromotionThresholds,
+    RollbackDecision, ShadowObservation, ShadowOutcome,
+};
 use super::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -388,6 +392,93 @@ fn llm_guard_reference_corpus_accuracy_report() {
     // instruction-shaped benign text -- both recorded, both in the docs.
     assert_eq!(metrics.false_negative_cases, vec!["secret-aws-key"]);
     assert_eq!(metrics.false_positive_cases, vec!["benign-mentions-ignore"]);
+}
+
+// --- shadow -> score -> promote / rollback loop (#201) ----------------------
+
+/// The full acceptance loop for the prompt-injection adapter: LLM-Guard runs in
+/// SHADOW over the human-labelled corpus (recording verdicts, enforcing
+/// nothing), its recorded verdicts are scored against the labels, an
+/// injection-appropriate promotion bar promotes it to enforcement, and a
+/// simulated regression trips the rollback floor.
+#[test]
+fn llm_guard_shadow_scores_against_labels_and_promotion_gate_promotes_then_rollback() {
+    let corpus = reference_corpus();
+    let detector = llm_guard();
+
+    // 1. Shadow sampling: record verdicts without enforcing.
+    let observations = runtime().block_on(record_shadow_observations(&detector, &corpus));
+    assert_eq!(observations.len(), corpus.cases.len());
+
+    // 2. Compare shadow verdicts to the human labels -> the same numbers a live
+    //    run yields (recall 0.75 / precision 0.75 for the injection scanner).
+    let live = runtime().block_on(run_detector_evaluation(&detector, &corpus));
+    let scored = score_shadow_observations(&corpus.version, &observations);
+    assert_eq!(scored.true_positives, live.true_positives);
+    assert_eq!(scored.false_positives, live.false_positives);
+    assert_eq!(scored.false_negatives, live.false_negatives);
+    assert!((scored.recall - 0.75).abs() < 1e-9, "{}", scored.recall);
+    assert!(
+        (scored.precision - 0.75).abs() < 1e-9,
+        "{}",
+        scored.precision
+    );
+
+    // 3. Promote by an injection-appropriate bar (some false positives are
+    //    tolerable for an injection scanner; recall matters more).
+    let injection_bar = PromotionThresholds {
+        min_precision: 0.7,
+        min_recall: 0.7,
+        min_f1: 0.7,
+        max_error_rate: 0.0,
+        rollback_min_precision: 0.6,
+        rollback_min_recall: 0.5,
+    };
+    let gate = PromotionGate::new(injection_bar);
+    assert_eq!(gate.assess_shadow(&scored), PromotionDecision::Promote);
+
+    // 4a. Healthy enforced traffic (mirroring the shadow numbers) is kept.
+    assert_eq!(gate.assess_enforced(&scored), RollbackDecision::Keep);
+
+    // 4b. A regression where the enforced revision false-alarms on all benign
+    //     traffic drops precision below the rollback floor -> roll back.
+    let regressed = score_shadow_observations(
+        &corpus.version,
+        &[
+            ShadowObservation::new("attack", true, ShadowOutcome::Flagged),
+            ShadowObservation::new("benign-a", false, ShadowOutcome::Flagged),
+            ShadowObservation::new("benign-b", false, ShadowOutcome::Flagged),
+            ShadowObservation::new("benign-c", false, ShadowOutcome::Flagged),
+        ],
+    );
+    assert!(gate.assess_enforced(&regressed).is_rollback());
+}
+
+/// The DLP/PII adapter is correctly HELD in shadow when judged by an
+/// injection-recall bar it cannot meet (a PII engine catches no injections),
+/// proving the gate refuses to promote a detector outside its competence.
+#[test]
+fn presidio_shadow_is_held_when_judged_by_an_injection_recall_bar() {
+    let corpus = reference_corpus();
+    let observations = runtime().block_on(record_shadow_observations(&presidio(), &corpus));
+    let scored = score_shadow_observations(&corpus.version, &observations);
+    // Presidio: precision 1.0 but recall 0.25 on the mixed corpus.
+    assert!((scored.recall - 0.25).abs() < 1e-9, "{}", scored.recall);
+
+    let gate = PromotionGate::new(PromotionThresholds {
+        min_precision: 0.9,
+        min_recall: 0.7,
+        min_f1: 0.7,
+        max_error_rate: 0.0,
+        rollback_min_precision: 0.6,
+        rollback_min_recall: 0.5,
+    });
+    match gate.assess_shadow(&scored) {
+        PromotionDecision::Hold { unmet } => {
+            assert!(unmet.iter().any(|reason| reason.contains("recall")));
+        }
+        other => panic!("expected Hold for a PII engine on an injection bar, got {other:?}"),
+    }
 }
 
 // --- policy definitions -----------------------------------------------------
