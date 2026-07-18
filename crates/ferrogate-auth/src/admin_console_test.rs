@@ -1647,6 +1647,84 @@ fn sso_end_to_end_provisions_new_user_and_maps_group_to_role() {
     assert_eq!(replay.status, 401);
 }
 
+/// Round-13 audit: a tenant's own IdP must not be able to authenticate a
+/// pre-existing GLOBAL account that belongs to a different tenant. Otherwise a
+/// self-registered tenant owner, running their own IdP, could assert a victim's
+/// email and mint a session/refresh-token bound to the victim's account
+/// (cross-tenant account takeover).
+#[test]
+fn sso_callback_refuses_to_claim_a_foreign_pre_existing_account() {
+    let console = console();
+    // Victim owns tenant A -> a real global StoredAdminUser + tenant-A membership.
+    let victim = body_json(&register(
+        &console,
+        "victim@tenant-a.test",
+        "correct-horse-44",
+    ));
+    let victim_tenant = victim["tenant"]["id"].as_str().unwrap().to_string();
+
+    // Attacker owns tenant B and controls its IdP.
+    let attacker = body_json(&register(
+        &console,
+        "attacker@tenant-b.test",
+        "correct-horse-55",
+    ));
+    let attacker_token = attacker["access_token"].as_str().unwrap();
+    let attacker_tenant = attacker["tenant"]["id"].as_str().unwrap().to_string();
+
+    // The attacker's IdP asserts the VICTIM's email.
+    let (listener, issuer) = bind_mock_oidc_server();
+    let (key_pem, n) = generate_test_rsa_key();
+    let kid = "test-key-1";
+    let jwks_json = jwks_json_for(&n, kid);
+    let id_token = sign_test_id_token(
+        &key_pem,
+        kid,
+        &issuer,
+        "test-client-id",
+        serde_json::json!({ "email": "victim@tenant-a.test", "name": "Victim" }),
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let realm = MockOidcRealm {
+        jwks_json,
+        id_token,
+        requests: requests.clone(),
+    };
+    run_mock_oidc_server(listener, realm, issuer.clone());
+
+    let config_set =
+        handle_admin_sso_config_set(&console, attacker_token, sso_config_request(&issuer));
+    assert_eq!(config_set.status, 200);
+    let authorize = handle_sso_authorize(&console, &attacker_tenant);
+    assert_eq!(authorize.status, 200);
+    let state = body_json(&authorize)["state"].as_str().unwrap().to_string();
+
+    // The callback must REFUSE: the victim's account is not provisioned in
+    // tenant B, so its IdP cannot authenticate it.
+    let callback = handle_sso_callback(&console, "fake-authorization-code", &state);
+    assert_eq!(
+        callback.status,
+        401,
+        "SSO must not authenticate a foreign pre-existing account: {:?}",
+        body_json(&callback)
+    );
+
+    // No cross-tenant membership was created, and the victim still only belongs
+    // to tenant A -- no session/refresh-token was minted for the victim.
+    let victim_user = block_on_sync_bridge(
+        console
+            .repositories
+            .get_admin_user_by_email("victim@tenant-a.test"),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        membership_role_in_tenant(&console, &attacker_tenant, &victim_user.id).is_none(),
+        "SSO refusal must not create a cross-tenant membership for the victim",
+    );
+    assert!(membership_role_in_tenant(&console, &victim_tenant, &victim_user.id).is_some());
+}
+
 #[test]
 fn sso_callback_rejects_an_unknown_state() {
     let console = console();

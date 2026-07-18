@@ -899,7 +899,12 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
                 }
             })
         }
-        ("GET", "/v1/rbac/roles") => handle_rbac_roles_list(service),
+        ("GET", "/v1/rbac/roles") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_rbac_roles_list(service, console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
         ("POST", "/v1/rbac/roles") => {
             with_admin_console(service, |console| match request.bearer_token() {
                 Some(token) => {
@@ -1776,7 +1781,18 @@ fn tenant_context_for(tenant_id: &str) -> TenantContext {
 /// Lists every role in the shared role catalog (issue #162). Not
 /// tenant-scoped -- a role is just a named permission bundle, so browsing
 /// the catalog is not itself a sensitive operation.
-fn handle_rbac_roles_list(service: &AuthService) -> HttpResponse {
+fn handle_rbac_roles_list(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+) -> HttpResponse {
+    // Require a valid admin-console session: the role/permission catalog must
+    // not be disclosed to anonymous callers (round-13 audit). Per-tenant
+    // scoping of which roles are returned is tracked separately (roles are
+    // currently a global catalog).
+    if let Err(response) = current_admin_session(console, token) {
+        return response;
+    }
     HttpResponse::json(200, json!({ "roles": service.rbac.list_roles() }))
 }
 
@@ -2698,6 +2714,16 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
     let Some(email) = email else {
         return unprocessable("ID token did not include a usable email claim");
     };
+    // Defense-in-depth: never trust an email an IdP explicitly marks unverified
+    // (a tenant-controlled IdP asserting someone else's email). Absent claim is
+    // tolerated (many IdPs omit it); an explicit `false` is rejected.
+    if claims
+        .get("email_verified")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        return unauthorized("the identity provider reported this email as unverified");
+    }
     let display_name = claims
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -2725,7 +2751,23 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         Err(error) => return storage_error(&error),
     };
     let user = match existing {
-        Some(user) => user,
+        Some(user) => {
+            // Cross-tenant account-takeover guard: SSO trust is per-tenant (each
+            // tenant owner freely configures its own IdP `issuer`), but admin
+            // accounts are keyed globally by email. Without this check a tenant
+            // owner running their own IdP could assert a VICTIM's email and this
+            // callback would mint a session/refresh-token bound to the victim's
+            // global account. Only allow SSO to sign in a pre-existing account
+            // that is ALREADY a member of the flow's tenant (provisioned here via
+            // the normal invite/team flow); a brand-new email is JIT-created
+            // below and belongs only to this tenant.
+            if membership_role_in_tenant(console, &flow.tenant_id, &user.id).is_none() {
+                return unauthorized(
+                    "this account is not provisioned for single sign-on in this tenant",
+                );
+            }
+            user
+        }
         None => {
             let password_hash = match unusable_password_hash() {
                 Ok(hash) => hash,
