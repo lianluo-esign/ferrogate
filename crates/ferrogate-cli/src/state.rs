@@ -602,7 +602,32 @@ impl SharedAppState {
         let path = self
             .source_path()
             .ok_or_else(|| anyhow::anyhow!("runtime was not started from a config file"))?;
-        let candidate = Config::load(path)?;
+        let mut candidate = Config::load(path)?;
+        // Reconcile the durable control-plane snapshot into the file-loaded
+        // config BEFORE applying it -- exactly as startup and every other reload
+        // path do. Without this, a file reload wholesale-replaces the control
+        // plane and silently RESURRECTS api-keys that were revoked via the
+        // durable admin API (and drops durable-only resources): a
+        // security-control downgrade. `process_local_reload_rejection` already
+        // rejects listen/TLS changes; durable revocations must survive a reload
+        // the same way.
+        self.current()
+            .apply_control_plane_snapshot_to_config(&mut candidate)?;
+        Ok(self.reload_process_local(candidate))
+    }
+
+    /// Reload from an externally-supplied candidate config (e.g. the admin
+    /// config-reload payload's inline toml/yaml/caddyfile), reconciling the
+    /// durable control-plane snapshot FIRST so the reload cannot resurrect
+    /// api-keys revoked via the durable admin API (or drop durable-only
+    /// resources) -- the same reconciliation `reload_from_source_path` and the
+    /// CRUD reload paths apply.
+    pub(crate) fn reload_from_candidate_config(
+        &self,
+        mut candidate: Config,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        self.current()
+            .apply_control_plane_snapshot_to_config(&mut candidate)?;
         Ok(self.reload_process_local(candidate))
     }
 

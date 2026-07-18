@@ -10187,7 +10187,10 @@ fn reload_from_admin_payload(
     if payload.source.as_deref() == Some("file") {
         return state.reload_from_source_path();
     }
-    Ok(state.reload_process_local(config_from_admin_payload(payload, state)?))
+    // Reconcile the durable control-plane snapshot into the inline
+    // (toml/yaml/caddyfile) candidate so the reload cannot resurrect
+    // durably-revoked api-keys -- matching the source=file path.
+    state.reload_from_candidate_config(config_from_admin_payload(payload, state)?)
 }
 
 fn admin_audit_event_draft(
