@@ -1779,6 +1779,23 @@ INSERT INTO storage_schema_migrations (version, name)
 VALUES (34, '034_admin_refresh_token_tenant_scope')
 ON CONFLICT (version) DO NOTHING;
 
+-- #206: durable replay floor for signed control-plane snapshots. Persists the
+-- highest accepted snapshot revision per (tenant, deployment) identity so a
+-- process restart cannot be used to replay an authentically-signed OLDER
+-- snapshot (bounded rollback). Writers only ever raise the floor (GREATEST
+-- upsert in the storage layer).
+CREATE TABLE IF NOT EXISTS control_plane_replay_floors (
+    tenant_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
+    last_accepted_revision BIGINT NOT NULL,
+    updated_at_unix BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, deployment_id)
+);
+
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (35, '035_agent_run_audit_index')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (36, '036_control_plane_replay_floors')
 ON CONFLICT (version) DO NOTHING;

@@ -2167,6 +2167,174 @@ fn signed_snapshot_replay_floor_advances_on_local_publish() {
     );
 }
 
+/// #206 durable replay floor: the floor survives a simulated process restart.
+/// Two `SharedAppState` instances share ONE storage-repositories handle (the
+/// durable control-plane store); after the first instance publishes gen-1 and
+/// gen-2 signed snapshots, a "restarted" instance built over the same store
+/// must load floor=2 and reject a replayed, authentically-signed,
+/// still-unexpired gen-1 snapshot — the exact post-restart bounded-rollback
+/// attack the in-memory-only floor allowed.
+#[test]
+fn signed_snapshot_replay_floor_persists_across_restart() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let seed = [13u8; 32];
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_b64 = b64.encode(signing_key.verifying_key().to_bytes());
+    let seed_b64 = b64.encode(seed);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("cluster-state.json");
+    let path_str = state_path.to_string_lossy().into_owned();
+
+    let node_config = |api_key_id: &str| {
+        let mut cfg = Config::default();
+        cfg.cluster.enabled = true;
+        cfg.cluster.state_backend = "file".to_string();
+        cfg.cluster.file_state_path = Some(path_str.clone());
+        cfg.cluster.snapshot_signing_key = Some(seed_b64.clone());
+        cfg.cluster.snapshot_signing_key_id = Some("k1".to_string());
+        cfg.cluster.snapshot_trusted_keys = vec![crate::config::ClusterSnapshotKey {
+            key_id: "k1".to_string(),
+            public_key: public_b64.clone(),
+        }];
+        cfg.cluster.snapshot_tenant_id = Some("tenant-a".to_string());
+        cfg.cluster.snapshot_deployment_id = Some("deploy-a".to_string());
+        cfg.api_keys = vec![signed_snapshot_test_api_key(api_key_id)];
+        cfg.validate().expect("config valid");
+        cfg
+    };
+
+    // One shared durable store across the "restart".
+    let repositories = Arc::new(
+        runtime_storage_repositories(&node_config("key-gen-one")).expect("memory repositories"),
+    );
+
+    // Pre-restart process: publishes gen-1 (key-gen-one), then a local admin
+    // mutation publishes gen-2 — write-through persists floor=2.
+    let node = SharedAppState::with_source_path_and_repositories(
+        node_config("key-gen-one"),
+        None,
+        Arc::clone(&repositories),
+    );
+    node.sync_shared_control_plane().expect("bootstrap publish");
+    let gen1_bytes = std::fs::read(&state_path).expect("captured gen-1 snapshot");
+    node.upsert_api_key(signed_snapshot_test_api_key("key-gen-two"))
+        .expect("local upsert publishes generation 2");
+    drop(node);
+
+    // Attacker replays the authentic gen-1 snapshot into the shared file while
+    // the process is down, then the process "restarts" over the same store
+    // with a fresh config (key-fresh-config).
+    std::fs::write(&state_path, &gen1_bytes).expect("replay gen-1 file");
+    let restarted = SharedAppState::with_source_path_and_repositories(
+        node_config("key-fresh-config"),
+        None,
+        Arc::clone(&repositories),
+    );
+    let replayed = restarted
+        .sync_shared_control_plane()
+        .expect("sync must not error on a rejected replay");
+    assert!(
+        replayed.is_none(),
+        "an authentically-signed OLDER snapshot must be rejected after restart: \
+         the persisted floor (2) outlives the process",
+    );
+    let ids: Vec<String> = restarted
+        .current()
+        .config
+        .api_keys
+        .iter()
+        .map(|key| key.id.clone())
+        .collect();
+    // The restarted node rebuilt its control plane from the durable store
+    // (which includes the gen-2 mutation `key-gen-two`); the replay attempt
+    // must NOT have rolled that back to the gen-1 payload.
+    assert!(
+        ids.iter().any(|id| id == "key-gen-two"),
+        "the gen-2 mutation must survive restart + replay (no rollback), got {ids:?}",
+    );
+
+    // The restarted node keeps functioning: its own local publish supersedes
+    // the rejected replay (and write-through keeps the durable floor raised).
+    restarted
+        .upsert_api_key(signed_snapshot_test_api_key("key-gen-three"))
+        .expect("post-restart mutation publishes a new signed snapshot");
+    let published = std::fs::read_to_string(&state_path).expect("post-restart snapshot");
+    assert!(
+        published.contains("key-gen-three"),
+        "a post-restart publish must succeed over the persisted floor",
+    );
+    // And the durable floor persists onward: a THIRD instance over the same
+    // store rejects a replay of the gen-1 snapshot too.
+    std::fs::write(&state_path, &gen1_bytes).expect("replay gen-1 file again");
+    let third = SharedAppState::with_source_path_and_repositories(
+        node_config("key-third-config"),
+        None,
+        repositories,
+    );
+    assert!(
+        third
+            .sync_shared_control_plane()
+            .expect("sync must not error on a rejected replay")
+            .is_none(),
+        "the floor persisted from the post-restart publish must also survive",
+    );
+}
+
+/// #206 durable replay floor, negative control: with NO snapshot signing or
+/// verification configured, the unsigned file-backed flow is unchanged by the
+/// persistence wiring — a fresh instance over a shared store still activates a
+/// plain unsigned snapshot (no floor is loaded or written).
+#[test]
+fn unsigned_shared_snapshots_are_unaffected_by_the_persisted_replay_floor() {
+    use ferrogate_storage::SnapshotReplayFloorRepository as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("cluster-state.json");
+    let path_str = state_path.to_string_lossy().into_owned();
+
+    let node_config = |api_key_id: &str| {
+        let mut cfg = Config::default();
+        cfg.cluster.enabled = true;
+        cfg.cluster.state_backend = "file".to_string();
+        cfg.cluster.file_state_path = Some(path_str.clone());
+        cfg.api_keys = vec![signed_snapshot_test_api_key(api_key_id)];
+        cfg.validate().expect("config valid");
+        cfg
+    };
+
+    let repositories = Arc::new(
+        runtime_storage_repositories(&node_config("unsigned-key")).expect("memory repositories"),
+    );
+    let publisher = SharedAppState::with_source_path_and_repositories(
+        node_config("unsigned-key"),
+        None,
+        Arc::clone(&repositories),
+    );
+    publisher
+        .sync_shared_control_plane()
+        .expect("unsigned bootstrap publish");
+
+    let peer = SharedAppState::with_source_path_and_repositories(
+        node_config("peer-seed-key"),
+        None,
+        Arc::clone(&repositories),
+    );
+    let reload = peer
+        .sync_shared_control_plane()
+        .expect("unsigned sync must not error")
+        .expect("an unsigned snapshot must still activate when verification is off");
+    assert!(reload.committed, "unsigned activation must stay intact");
+    assert!(
+        repositories
+            .get_snapshot_replay_floor("", "")
+            .expect("floor lookup must not error")
+            .is_none(),
+        "unsigned mode must never write a replay floor",
+    );
+}
+
 fn guardrail_match_for_merge(
     effect: GuardrailEffect,
     action_kind: GuardrailActionKind,

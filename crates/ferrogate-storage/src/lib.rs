@@ -505,8 +505,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 35;
-const POSTGRES_SCHEMA_NAME: &str = "035_agent_run_audit_index";
+const POSTGRES_SCHEMA_VERSION: u64 = 36;
+const POSTGRES_SCHEMA_NAME: &str = "036_control_plane_replay_floors";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -780,6 +780,46 @@ pub trait GuardrailPolicyRepository {
         expected_generation: Option<u64>,
         binding: Option<StoredGuardrailPolicyBinding>,
     ) -> Result<(), StorageError>;
+}
+
+/// Durable replay floor for signed control-plane snapshots (#206): the highest
+/// snapshot revision a node has accepted (verified+activated or self-published)
+/// per `(tenant_id, deployment_id)` identity. Persisting it means a process
+/// restart does NOT reset the floor to zero, so an attacker with shared-file
+/// write access cannot replay an authentically-signed OLDER snapshot in the
+/// post-restart window (the previously documented bounded-rollback gap).
+pub trait SnapshotReplayFloorRepository {
+    /// The persisted floor for an identity, or `None` if never recorded.
+    fn get_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<Option<u64>, StorageError>;
+
+    /// Monotonically raise the persisted floor to at least `revision` and
+    /// return the resulting floor. Never moves the floor backward: a
+    /// lower-than-stored `revision` leaves the stored value untouched (also
+    /// race-safe across concurrent writers via a `GREATEST` upsert on the
+    /// Postgres backend).
+    fn advance_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
+    ) -> Result<u64, StorageError>;
+}
+
+/// Composite in-memory key for a snapshot replay floor. Length-prefixed so two
+/// distinct `(tenant_id, deployment_id)` pairs can never collide regardless of
+/// which characters the ids contain (a bare delimiter would alias
+/// `("a", "b<sep>c")` with `("a<sep>b", "c")`).
+fn snapshot_replay_floor_key(tenant_id: &str, deployment_id: &str) -> String {
+    format!(
+        "{}:{tenant_id}|{}:{deployment_id}",
+        tenant_id.len(),
+        deployment_id.len()
+    )
 }
 
 pub trait AppendRepository<T> {
@@ -1137,6 +1177,9 @@ pub struct RuntimeControlPlaneState {
     mcp_oauth_authorization_generations: InMemoryRepository<u64>,
     mcp_oauth_flows: InMemoryRepository<StoredMcpOauthFlow>,
     mcp_oauth_credentials: InMemoryRepository<StoredMcpOauthCredential>,
+    /// Signed-snapshot replay floors keyed by
+    /// `snapshot_replay_floor_key(tenant_id, deployment_id)` (#206).
+    snapshot_replay_floors: InMemoryRepository<u64>,
 }
 
 struct PostgresControlPlaneStore {
@@ -1477,6 +1520,74 @@ impl PostgresControlPlaneStore {
 
     fn guardrail_policy_operation(&self, name: &'static str) -> StorageOperation {
         StorageOperation::new(name, self.async_pool.statement_timeout())
+    }
+
+    /// #206: the persisted signed-snapshot replay floor for an identity.
+    async fn get_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<Option<u64>, StorageError> {
+        let operation = self.guardrail_policy_operation("get snapshot replay floor");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_opt(
+                "SELECT last_accepted_revision FROM control_plane_replay_floors \
+                 WHERE tenant_id = $1 AND deployment_id = $2",
+                &[&tenant_id, &deployment_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        Ok(row.map(|row| {
+            let value: i64 = row.get(0);
+            u64::try_from(value).unwrap_or(0)
+        }))
+    }
+
+    /// #206: monotonically raise the persisted replay floor. The `GREATEST`
+    /// upsert makes concurrent writers race-safe and guarantees the stored
+    /// floor never moves backward; returns the resulting floor.
+    async fn advance_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        let revision = i64::try_from(revision).map_err(|_| {
+            StorageError::Runtime(format!(
+                "snapshot replay floor revision {revision} exceeds the storable range"
+            ))
+        })?;
+        let operation = self.guardrail_policy_operation("advance snapshot replay floor");
+        let client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let row = client
+            .query_one(
+                "INSERT INTO control_plane_replay_floors \
+                 (tenant_id, deployment_id, last_accepted_revision, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (tenant_id, deployment_id) DO UPDATE SET \
+                     last_accepted_revision = GREATEST( \
+                         control_plane_replay_floors.last_accepted_revision, \
+                         EXCLUDED.last_accepted_revision), \
+                     updated_at_unix = CASE \
+                         WHEN EXCLUDED.last_accepted_revision > \
+                              control_plane_replay_floors.last_accepted_revision \
+                         THEN EXCLUDED.updated_at_unix \
+                         ELSE control_plane_replay_floors.updated_at_unix END \
+                 RETURNING last_accepted_revision",
+                &[&tenant_id, &deployment_id, &revision, &updated_at_unix],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let value: i64 = row.get(0);
+        Ok(u64::try_from(value).unwrap_or(0))
     }
 
     async fn insert_guardrail_policy_revision(
@@ -7014,7 +7125,27 @@ impl RuntimeControlPlaneState {
             mcp_oauth_authorization_generations: InMemoryRepository::new(),
             mcp_oauth_flows: InMemoryRepository::new(),
             mcp_oauth_credentials: InMemoryRepository::new(),
+            snapshot_replay_floors: InMemoryRepository::new(),
         }
+    }
+
+    fn get_snapshot_replay_floor(&self, tenant_id: &str, deployment_id: &str) -> Option<u64> {
+        self.snapshot_replay_floors
+            .get(&snapshot_replay_floor_key(tenant_id, deployment_id))
+    }
+
+    /// Monotonic in-memory floor advance; returns the resulting floor.
+    fn advance_snapshot_replay_floor(
+        &mut self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+    ) -> u64 {
+        let key = snapshot_replay_floor_key(tenant_id, deployment_id);
+        let floor = self.snapshot_replay_floors.get(&key).unwrap_or(0);
+        let next = floor.max(revision);
+        self.snapshot_replay_floors.insert(key, next);
+        next
     }
 
     fn insert_guardrail_policy_revision(
@@ -11921,6 +12052,51 @@ fn postgres_error_message(error: &tokio_postgres::Error) -> String {
     )
 }
 
+impl SnapshotReplayFloorRepository for RuntimeStorageRepositories {
+    fn get_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<Option<u64>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map_err(|_| {
+                    StorageError::Runtime("snapshot replay floor repository lock poisoned".into())
+                })?
+                .get_snapshot_replay_floor(tenant_id, deployment_id)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => block_on_sync_bridge(
+                control_plane.get_snapshot_replay_floor(tenant_id, deployment_id),
+            ),
+        }
+    }
+
+    fn advance_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map_err(|_| {
+                    StorageError::Runtime("snapshot replay floor repository lock poisoned".into())
+                })?
+                .advance_snapshot_replay_floor(tenant_id, deployment_id, revision)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                block_on_sync_bridge(control_plane.advance_snapshot_replay_floor(
+                    tenant_id,
+                    deployment_id,
+                    revision,
+                    updated_at_unix,
+                ))
+            }
+        }
+    }
+}
+
 fn postgres_database_error_message(message: &str, sqlstate: &str, _detail: Option<&str>) -> String {
     format!("{message} (SQLSTATE {sqlstate})")
 }
@@ -12014,6 +12190,10 @@ mod postgres_error_test;
 #[cfg(test)]
 #[path = "guardrail_policy_test.rs"]
 mod guardrail_policy_test;
+
+#[cfg(test)]
+#[path = "replay_floor_test.rs"]
+mod replay_floor_test;
 
 #[cfg(test)]
 mod tests {

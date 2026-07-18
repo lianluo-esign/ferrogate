@@ -30,14 +30,15 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 // `AsyncPostgresPool::new` (`pg_config.connect_timeout` / `tcp_user_timeout`).)
 
 #[test]
-fn schema_contract_includes_latest_admin_refresh_tenant_scope_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 35);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "035_agent_run_audit_index");
+fn schema_contract_includes_latest_replay_floor_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 36);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "036_control_plane_replay_floors");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (34, '034_admin_refresh_token_tenant_scope')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (35, '035_agent_run_audit_index')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (36, '036_control_plane_replay_floors')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));
@@ -52,4 +53,12 @@ fn schema_contract_tenant_scopes_admin_refresh_tokens() {
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS tenant_id TEXT"));
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS role TEXT"));
     assert!(POSTGRES_SCHEMA_SQL.contains("idx_admin_user_refresh_tokens_user_tenant"));
+}
+
+#[test]
+fn schema_contract_defines_the_signed_snapshot_replay_floor_table() {
+    // #206: the durable replay floor keyed by (tenant_id, deployment_id).
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS control_plane_replay_floors"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("last_accepted_revision BIGINT NOT NULL"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("PRIMARY KEY (tenant_id, deployment_id)"));
 }

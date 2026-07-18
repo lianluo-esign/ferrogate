@@ -82,15 +82,16 @@ use ferrogate_storage::{
     budget_alert_notification_id, guardrail_policy_revision_id, ControlPlaneDocuments,
     GuardrailEvaluationQuery, GuardrailEvaluationRepository, GuardrailPolicyRepository,
     PostgresStorageConfig, QuotaScopeKind, RuntimeControlPlaneState, RuntimeStorageBackend,
-    RuntimeStorageOptions, RuntimeStorageRepositories, StorageBackendEvidence, StorageError,
-    StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset,
-    StoredAuditEvent, StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
-    StoredGuardrailCheckEvaluation, StoredGuardrailEvaluation, StoredGuardrailPolicyBinding,
-    StoredGuardrailPolicyRevision, StoredManagedWorkerIsolationEvidence,
-    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
-    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredPaymentMethod,
-    StoredPermission, StoredPlan, StoredProject, StoredQuotaPolicy, StoredRequestLog, StoredRole,
-    StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    RuntimeStorageOptions, RuntimeStorageRepositories, SnapshotReplayFloorRepository,
+    StorageBackendEvidence, StorageError, StoredAgentRun, StoredAgentRunEvent,
+    StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
+    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification, StoredGuardrailCheckEvaluation,
+    StoredGuardrailEvaluation, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
+    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
+    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
+    StoredManagedWorkerSession, StoredPaymentMethod, StoredPermission, StoredPlan, StoredProject,
+    StoredQuotaPolicy, StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch,
+    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
     StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredTenantRoleBinding,
     StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWallet, StoredWorkspace,
@@ -312,17 +313,24 @@ pub(crate) struct SharedAppState {
     /// replay an authentic older snapshot between peer syncs. Shared across
     /// clones.
     ///
-    /// LIMITATION (tracked under #206's durable-channel scope): the floor is
-    /// in-memory only and resets to 0 on process restart / for a fresh node. In
-    /// the file-backed model there is no trusted durable store to persist it to
-    /// (that mode exists precisely for deployments without a shared database).
-    /// So an attacker with WRITE access to the shared-state file can, in the
-    /// window immediately after a restart, replay an *authentically signed
-    /// older* snapshot whose `not_after_unix` has not yet passed — a rollback
-    /// bounded by `cluster.snapshot_max_age_secs` (default 1h) and never
-    /// arbitrary forged content. Closing that residual window requires the
-    /// durable, signed, monotonic sync channel that is the remaining infra-side
-    /// scope of #206.
+    /// DURABILITY (#206): the floor is also persisted write-through to the
+    /// control-plane store (`SnapshotReplayFloorRepository`, keyed by the
+    /// configured `snapshot_tenant_id`/`snapshot_deployment_id`) on every
+    /// advance, and loaded back at construction — so a process restart no
+    /// longer resets it to 0 when the deployment has a durable backend
+    /// (Postgres/Supabase). With the pure in-memory storage backend the
+    /// persisted floor lives and dies with the process, which matches the
+    /// pre-existing behavior (a rollback window after restart bounded by
+    /// `cluster.snapshot_max_age_secs`); closing it there requires a durable
+    /// store by design.
+    ///
+    /// Persist-failure semantics: a failed floor WRITE is logged at `error`
+    /// level but does not block activation/publish — the in-memory floor still
+    /// protects the running process, and refusing control-plane updates on a
+    /// transient storage outage would trade a bounded, restart-only rollback
+    /// window for a live availability failure. A failed floor READ at
+    /// construction fails startup (fail closed to the persisted floor: we
+    /// never guess it back to 0 while verification is configured).
     snapshot_active_revision: Arc<AtomicU64>,
 }
 
@@ -352,6 +360,28 @@ impl SharedAppState {
         config: Config,
         source_path: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
+        Self::try_with_source_path_and_repositories(config, source_path, None)
+    }
+
+    /// Test-only: construct against an injected repositories handle so two
+    /// instances can share one durable store — simulating a process restart
+    /// over the same control-plane database for the persisted replay floor
+    /// (#206).
+    #[cfg(test)]
+    pub(crate) fn with_source_path_and_repositories(
+        config: Config,
+        source_path: Option<PathBuf>,
+        repositories: Arc<RuntimeStorageRepositories>,
+    ) -> Self {
+        Self::try_with_source_path_and_repositories(config, source_path, Some(repositories))
+            .expect("failed to initialize app state")
+    }
+
+    fn try_with_source_path_and_repositories(
+        config: Config,
+        source_path: Option<PathBuf>,
+        repositories: Option<Arc<RuntimeStorageRepositories>>,
+    ) -> anyhow::Result<Self> {
         let snapshot = config_snapshot_id(&config);
         let shared_file_control_plane = SharedFileControlPlane::from_config(&config)
             .inspect_err(|error| warn!("failed to initialize file cluster state: {error}"))
@@ -375,8 +405,12 @@ impl SharedAppState {
                 verifier: None,
             }
         };
-        Ok(Self {
-            inner: Arc::new(RwLock::new(AppState::try_new(config)?)),
+        let app_state = match repositories {
+            Some(repositories) => AppState::try_new_with_repositories(config, repositories, true)?,
+            None => AppState::try_new(config)?,
+        };
+        let state = Self {
+            inner: Arc::new(RwLock::new(app_state)),
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
                 snapshot,
             ))),
@@ -384,7 +418,30 @@ impl SharedAppState {
             shared_file_control_plane,
             snapshot_crypto: Arc::new(snapshot_crypto),
             snapshot_active_revision: Arc::new(AtomicU64::new(0)),
-        })
+        };
+        // #206: seed the replay floor from the durable store so a restart does
+        // not reopen the bounded-rollback window (an attacker replaying an
+        // authentically-signed OLDER snapshot within its TTL). Fail closed: if
+        // the persisted floor cannot be READ while snapshot signing or
+        // verification is configured, refuse to start rather than silently
+        // running with a floor of 0.
+        if let Some((tenant_id, deployment_id)) = state.snapshot_crypto.identity() {
+            let persisted = state
+                .current()
+                .repositories
+                .get_snapshot_replay_floor(tenant_id, deployment_id)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to load the persisted signed-snapshot replay floor for \
+                         tenant {tenant_id} deployment {deployment_id}: {error}"
+                    )
+                })?
+                .unwrap_or(0);
+            state
+                .snapshot_active_revision
+                .store(persisted, Ordering::Release);
+        }
+        Ok(state)
     }
 
     pub(crate) fn current(&self) -> AppState {
@@ -852,6 +909,9 @@ impl SharedAppState {
                 // must never move backward.
                 self.snapshot_active_revision
                     .fetch_max(verified.revision, Ordering::AcqRel);
+                // Write-through to the durable floor (#206) so a restart
+                // cannot be used to replay this-or-older authentic snapshots.
+                self.persist_snapshot_replay_floor(verified.revision);
             }
         }
         Ok(Some(result))
@@ -882,6 +942,36 @@ impl SharedAppState {
         if self.snapshot_crypto.signer.is_some() {
             self.snapshot_active_revision
                 .fetch_max(generation, Ordering::AcqRel);
+            self.persist_snapshot_replay_floor(generation);
+        }
+    }
+
+    /// Write-through persistence of the signed-snapshot replay floor (#206).
+    /// The store applies GREATEST semantics, so this can never lower the
+    /// durable floor. Persist-failure semantics (documented on
+    /// `snapshot_active_revision`): a failed write is loud (`error` log) but
+    /// does NOT block activation/publish — the in-memory floor still protects
+    /// the running process, and blocking control-plane updates on a transient
+    /// storage outage would turn a bounded restart-only rollback window into
+    /// a live availability failure.
+    fn persist_snapshot_replay_floor(&self, revision: u64) {
+        let Some((tenant_id, deployment_id)) = self.snapshot_crypto.identity() else {
+            return;
+        };
+        let updated_at_unix = now_unix_seconds()
+            .map(|now| i64::try_from(now).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        if let Err(error) = self.current().repositories.advance_snapshot_replay_floor(
+            tenant_id,
+            deployment_id,
+            revision,
+            updated_at_unix,
+        ) {
+            tracing::error!(
+                "failed to persist signed-snapshot replay floor {revision} for tenant \
+                 {tenant_id} deployment {deployment_id}: {error} (the in-memory floor still \
+                 protects this process, but a restart may reopen a TTL-bounded rollback window)"
+            );
         }
     }
 

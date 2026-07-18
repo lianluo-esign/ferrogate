@@ -488,6 +488,26 @@ pub(crate) struct SnapshotCrypto {
     pub(crate) verifier: Option<SnapshotVerifier>,
 }
 
+impl SnapshotCrypto {
+    /// The `(tenant_id, deployment_id)` identity this node signs/verifies
+    /// snapshots for, or `None` when neither signing nor verification is
+    /// configured. Signer and verifier always share the identity (both are
+    /// built from the same `cluster.snapshot_tenant_id`/`_deployment_id`
+    /// fields), so either side is authoritative. Used as the durable
+    /// replay-floor key (#206).
+    pub(crate) fn identity(&self) -> Option<(&str, &str)> {
+        if let Some(verifier) = &self.verifier {
+            return Some((
+                verifier.expected_tenant.as_str(),
+                verifier.expected_deployment.as_str(),
+            ));
+        }
+        self.signer
+            .as_ref()
+            .map(|signer| (signer.tenant_id.as_str(), signer.deployment_id.as_str()))
+    }
+}
+
 /// Build the snapshot signing/verification material from cluster config, or
 /// return the first configuration error. Called BOTH by `Config::validate`
 /// (result discarded) and at runtime construction, so a config that validates
