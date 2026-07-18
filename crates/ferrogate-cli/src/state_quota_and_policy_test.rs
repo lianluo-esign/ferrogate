@@ -2094,6 +2094,79 @@ fn signed_shared_snapshot_verifies_activates_and_rejects_forgery() {
     );
 }
 
+/// #206 follow-up (round-11 audit): the replay floor must advance on a LOCAL
+/// signed publish, not only on peer sync-activation. Otherwise a local admin
+/// mutation raises the live generation while the floor lags, and an attacker
+/// with shared-file write access can replay an earlier still-unexpired
+/// authentic snapshot to roll back the control plane in STEADY STATE (no
+/// restart), e.g. resurrecting a just-removed api-key.
+#[test]
+fn signed_snapshot_replay_floor_advances_on_local_publish() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let seed = [11u8; 32];
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_b64 = b64.encode(signing_key.verifying_key().to_bytes());
+    let seed_b64 = b64.encode(seed);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("cluster-state.json");
+    let path_str = state_path.to_string_lossy().into_owned();
+
+    // Symmetric HA node: signs its own publishes AND verifies (trusts its key).
+    let mut cfg = Config::default();
+    cfg.cluster.enabled = true;
+    cfg.cluster.state_backend = "file".to_string();
+    cfg.cluster.file_state_path = Some(path_str.clone());
+    cfg.cluster.snapshot_signing_key = Some(seed_b64);
+    cfg.cluster.snapshot_signing_key_id = Some("k1".to_string());
+    cfg.cluster.snapshot_trusted_keys = vec![crate::config::ClusterSnapshotKey {
+        key_id: "k1".to_string(),
+        public_key: public_b64,
+    }];
+    cfg.cluster.snapshot_tenant_id = Some("tenant-a".to_string());
+    cfg.cluster.snapshot_deployment_id = Some("deploy-a".to_string());
+    cfg.api_keys = vec![signed_snapshot_test_api_key("original-key")];
+    cfg.validate().expect("config valid");
+
+    let node = SharedAppState::with_source_path(cfg, None);
+    // Bootstrap publishes generation 1 (floor -> 1).
+    node.sync_shared_control_plane().expect("bootstrap publish");
+    let gen1_bytes = std::fs::read(&state_path).expect("captured gen-1 snapshot");
+
+    // A local admin mutation publishes generation 2 (floor MUST advance -> 2).
+    node.upsert_api_key(signed_snapshot_test_api_key("post-mutation-key"))
+        .expect("local upsert publishes generation 2");
+    assert!(
+        node.current()
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "post-mutation-key"),
+        "the local mutation must be live",
+    );
+
+    // Attacker replays the earlier, still-unexpired, authentically-signed gen-1
+    // snapshot. It must be rejected as stale (revision 1 <= floor 2), NOT
+    // activated, so the mutation is not rolled back.
+    std::fs::write(&state_path, &gen1_bytes).expect("replay gen-1 file");
+    let replayed = node
+        .sync_shared_control_plane()
+        .expect("sync must not error on a rejected replay");
+    assert!(
+        replayed.is_none(),
+        "a replayed older authentic snapshot must be rejected as stale in steady state",
+    );
+    assert!(
+        node.current()
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "post-mutation-key"),
+        "the local mutation must survive a steady-state replay attempt (no rollback)",
+    );
+}
+
 fn guardrail_match_for_merge(
     effect: GuardrailEffect,
     action_kind: GuardrailActionKind,

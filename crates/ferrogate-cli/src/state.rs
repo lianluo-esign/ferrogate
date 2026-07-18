@@ -189,11 +189,15 @@ impl SharedFileControlPlane {
         Ok(Some(snapshot))
     }
 
+    /// Returns `(revision, generation)`. `generation` is the signed envelope's
+    /// monotonic revision; callers advance the local replay floor with it so a
+    /// node cannot later accept a replay of its own (or an older) authentic
+    /// snapshot even between peer sync-activations (issue #206 follow-up).
     fn publish_from_config(
         &self,
         config: &Config,
         signer: Option<&SnapshotSigner>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, u64)> {
         // Bump the monotonic generation off the last published snapshot so the
         // cross-node revision changes on every committed mutation, even ones
         // (guardrail policy bindings) that leave `api_keys`/`policies`
@@ -250,7 +254,7 @@ impl SharedFileControlPlane {
             .map_err(|error| anyhow::anyhow!("failed to publish file cluster state: {error}"))?;
         fs::rename(&tmp, &self.path)
             .map_err(|error| anyhow::anyhow!("failed to publish file cluster state: {error}"))?;
-        Ok(revision)
+        Ok((revision, generation))
     }
 }
 
@@ -298,21 +302,27 @@ pub(crate) struct SharedAppState {
     /// config (#206). Shared across clones; `signer`/`verifier` are `Some` only
     /// when configured, so a node with neither behaves exactly as pre-#206.
     snapshot_crypto: Arc<SnapshotCrypto>,
-    /// Replay floor for signed-snapshot verification: the `revision`
-    /// (generation) of the last snapshot this node verified and activated. A
-    /// candidate must strictly exceed it. Shared across clones.
+    /// Replay floor for signed-snapshot verification: the highest snapshot
+    /// `revision` (generation) this node has either verified+activated from a
+    /// peer OR itself published+signed. A candidate must strictly exceed it.
+    /// Advanced by both the sync-activation path and every local signed publish
+    /// (`advance_snapshot_replay_floor`) via `fetch_max`, so a local admin
+    /// mutation that raises the live generation also raises the floor — closing
+    /// the steady-state rollback window where a lagging floor let an attacker
+    /// replay an authentic older snapshot between peer syncs. Shared across
+    /// clones.
     ///
-    /// LIMITATION (tracked under #206's durable-channel scope): this floor is
+    /// LIMITATION (tracked under #206's durable-channel scope): the floor is
     /// in-memory only and resets to 0 on process restart / for a fresh node. In
     /// the file-backed model there is no trusted durable store to persist it to
     /// (that mode exists precisely for deployments without a shared database).
-    /// So steady-state replay/downgrade is blocked, but an attacker with WRITE
-    /// access to the shared-state file can, immediately after a restart, replay
-    /// an *authentically signed older* snapshot whose `not_after_unix` has not
-    /// yet passed — a rollback bounded by `cluster.snapshot_max_age_secs`
-    /// (default 1h) and never arbitrary forged content. Closing this fully
-    /// requires the durable, signed, monotonic sync channel + authorized-
-    /// rollback semantics that are the remaining infra-side scope of #206.
+    /// So an attacker with WRITE access to the shared-state file can, in the
+    /// window immediately after a restart, replay an *authentically signed
+    /// older* snapshot whose `not_after_unix` has not yet passed — a rollback
+    /// bounded by `cluster.snapshot_max_age_secs` (default 1h) and never
+    /// arbitrary forged content. Closing that residual window requires the
+    /// durable, signed, monotonic sync channel that is the remaining infra-side
+    /// scope of #206.
     snapshot_active_revision: Arc<AtomicU64>,
 }
 
@@ -764,16 +774,17 @@ impl SharedAppState {
             }
         };
         let Some(snapshot) = snapshot else {
-            let revision = match control_plane
+            let (revision, generation) = match control_plane
                 .publish_from_config(&active.config, self.snapshot_crypto.signer.as_ref())
             {
-                Ok(revision) => revision,
+                Ok(published) => published,
                 Err(error) => {
                     let message = error.to_string();
                     self.mark_cluster_sync_error(message);
                     return Err(error);
                 }
             };
+            self.advance_snapshot_replay_floor(generation);
             self.update_cluster_sync_revision(revision);
             return Ok(None);
         };
@@ -836,8 +847,11 @@ impl SharedAppState {
         let result = self.reload_process_local_with_revision(candidate, Some(snapshot.revision));
         if result.committed {
             if let Some(verified) = &verified {
+                // fetch_max, not store: a concurrent local publish may have
+                // already raised the floor past this revision, and the floor
+                // must never move backward.
                 self.snapshot_active_revision
-                    .store(verified.revision, Ordering::Release);
+                    .fetch_max(verified.revision, Ordering::AcqRel);
             }
         }
         Ok(Some(result))
@@ -845,12 +859,30 @@ impl SharedAppState {
 
     fn publish_shared_control_plane(&self, config: &Config) -> anyhow::Result<String> {
         if let Some(control_plane) = &self.shared_file_control_plane {
-            let revision =
+            let (revision, generation) =
                 control_plane.publish_from_config(config, self.snapshot_crypto.signer.as_ref())?;
+            // Advance the replay floor to the generation we just signed so a
+            // subsequent replay of THIS (or any older) authentic snapshot is
+            // rejected as stale even before the next peer sync-activation --
+            // otherwise a local admin mutation raises the live generation while
+            // the floor lags at the last peer revision, opening a steady-state
+            // rollback window (issue #206 follow-up).
+            self.advance_snapshot_replay_floor(generation);
             self.update_cluster_sync_revision(revision.clone());
             return Ok(revision);
         }
         Ok(config_snapshot_id(config))
+    }
+
+    /// Monotonically raise the signed-snapshot replay floor. Only meaningful
+    /// when this node signs its own publishes; a no-op otherwise (an unsigned
+    /// node never verifies, and a pure verifier never publishes signed
+    /// snapshots). `fetch_max` keeps it race-safe across concurrent publishes.
+    fn advance_snapshot_replay_floor(&self, generation: u64) {
+        if self.snapshot_crypto.signer.is_some() {
+            self.snapshot_active_revision
+                .fetch_max(generation, Ordering::AcqRel);
+        }
     }
 
     fn reload_process_local_with_revision(
