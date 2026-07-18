@@ -1,7 +1,14 @@
 # Self-hosted worker production mTLS transport — design
 
-Status: **design + Phase 1 (policy/downgrade scaffolding) landed; verified-mTLS
-admission DEFERRED to a reviewed Phase 2.**
+Status: **design + Phase 1 (policy/downgrade scaffolding) + Phase 2/3 (verified
+mutual-TLS transport core: trust anchor, handshake + cert validation, 4-tuple
+binding, `VerifiedMutualTls` admission, and cert-bound transport-token
+issuance/rotation/expiry) landed.** The verified-mTLS core lives in
+`crates/ferrogate-runtime/src/self_hosted_mtls.rs` and is covered by the
+conformance tests in `self_hosted_mtls_conformance_test.rs` (real rustls
+handshakes over loopback with rcgen-generated certs). What remains is *deployment*
+wiring: binding this verified-mTLS terminator onto a concrete production ingress
+socket and control-plane cert issuance at worker registration.
 
 Tracking: GitHub issue #243 (Gap 2 of
 `docs/plans/2026-07-18-self-hosted-worker-gaps.md`).
@@ -127,14 +134,15 @@ Two postures, decided **server-side** (never by the client header alone):
   rejected. The client's header is advisory; the decision is made from what the
   gateway *observed* about the channel, closing T2.
 
-**Phase 1 (landed) behavior in `RequireProductionMtls`:** because verified-mTLS
-admission is not yet implemented, both currently shippable channels are
-rejected — `symmetric_aead` as an explicit **downgrade** (`403`,
-`self_hosted_worker_transport_downgrade_rejected`) and `mutual_tls` as an
-**unverifiable marker** (`501`,
-`self_hosted_worker_production_mtls_not_implemented`). Enabling production mode
-today therefore fails closed for every channel. That is intended: we would
-rather refuse traffic than accept an unverifiable claim as production-grade.
+**Behavior in `RequireProductionMtls`:** the policy admits a `VerifiedMutualTls`
+channel (produced only by a real, verified handshake) and rejects the two marker
+paths — `symmetric_aead` as an explicit **downgrade** (`403`,
+`self_hosted_worker_transport_downgrade_rejected`) and the bare `mutual_tls`
+header over the plaintext marker path as an **unverified marker** (`501`,
+`self_hosted_worker_production_mtls_not_implemented`; the error code is retained
+for wire-contract stability). A request that did not arrive on a verified channel
+therefore still fails closed: we refuse traffic rather than accept an
+unverifiable claim as production-grade.
 
 ## 5. Channel-enforcement — proving encryption, not claiming it
 
@@ -142,16 +150,16 @@ The header is a claim; the design requires **proof**. In production the
 admission decision is driven by a `SelfHostedTransportChannel` value that the
 gateway can only construct from something it actually verified:
 
-- Today the enum has exactly two variants — `UnverifiedMutualTlsMarker` and
-  `SymmetricAead` — and *neither* is admissible in production. There is
-  deliberately **no** `VerifiedMutualTls` variant yet, because nothing in this
-  build can honestly produce one.
-- Phase 2 adds a `VerifiedMutualTls { peer_cert_binding, .. }` variant that is
-  **only** constructible from a completed, verified TLS handshake at the
-  gateway's mTLS listener (peer cert chained to the trust anchor, not expired,
-  not revoked, 4-tuple binding extracted). Admission in production requires that
-  variant. This makes "the channel is encrypted + mutually authenticated" a
-  type-level fact, not a header string.
+- The enum now has three variants — `UnverifiedMutualTlsMarker`, `SymmetricAead`,
+  and `VerifiedMutualTls(..)`. Only the last is admissible in production.
+- The `VerifiedMutualTls` variant carries a
+  `ferrogate_runtime::VerifiedMutualTls` proof that is **only** constructible from
+  a completed, verified TLS handshake at `SelfHostedMtlsServer::accept` (peer cert
+  chained to the single configured trust anchor, not expired against the server
+  clock, 4-tuple binding extracted from the SPIFFE URI SAN). `VerifiedMutualTls`
+  has no public constructor, so admission in production requires an actually
+  verified channel. This makes "the channel is encrypted + mutually
+  authenticated" a type-level fact, not a header string.
 
 ## 6. Phased implementation plan
 
@@ -167,19 +175,29 @@ gateway can only construct from something it actually verified:
   `handle_self_hosted_worker_transport` before dispatch.
 - Honest error surface: `403 downgrade_rejected` / `501 not_implemented`.
 
-**Phase 2 — verified mTLS listener (DEFERRED; needs PKI infra + security review).**
-- Trust-anchor config + loader (fail-closed).
-- mTLS listener terminating client certs at the gateway; chain + expiry +
-  revocation validation; 4-tuple binding extraction.
-- `VerifiedMutualTls` channel variant constructed only from a verified
-  handshake; production admission requires it.
-- Flip `production_mtls_transport_implemented()` → `true` only when this lands
-  with green conformance tests.
+**Phase 2 — verified mTLS listener (LANDED, `self_hosted_mtls.rs`).**
+- `SelfHostedMtlsTrustAnchor` config + loader (single CA, fail-closed on any
+  parse/load error; never the OS trust store).
+- `SelfHostedMtlsServer` terminates a real rustls mutual-TLS handshake, requiring
+  + validating the client cert chain against the configured anchor (rustls/webpki
+  chain + signature + validity), with an additional server-clock `notAfter`
+  re-check, and extracts the SPIFFE 4-tuple binding.
+- `VerifiedMutualTls` channel variant constructed only from a verified handshake;
+  production admission requires it (`SelfHostedTransportPolicy::admit`).
+- `production_mtls_transport_implemented()` flipped → `true`, backed by green
+  conformance tests.
+- Remaining (deployment): binding the terminator onto a concrete production
+  ingress socket + control-plane cert issuance at registration; CRL/OCSP-style
+  revocation list (currently expiry-driven only).
 
-**Phase 3 — transport-token issuance + rotation.**
-- Post-handshake short-TTL cert-bound token issuance; rotation reusing
-  `rotate_token`; revocation on cert revoke / worker deactivate; server-clock
-  anti-replay window.
+**Phase 3 — transport-token issuance + rotation (LANDED, `self_hosted_mtls.rs`).**
+- `SelfHostedTransportTokenIssuer` mints post-handshake short-TTL tokens bound to
+  `(4-tuple, cert fingerprint, notAfter, issued_at server clock)`; the token TTL
+  is capped by the cert `notAfter`.
+- `SelfHostedTransportTokenStore` handles validate-before-rotate rotation with
+  atomic invalidation of the prior token, refuses rotation presenting a different
+  certificate, and supports immediate `revoke` on cert revoke / worker
+  deactivate. Server-clock expiry throughout.
 
 ## 7. Conformance test list
 
@@ -194,16 +212,25 @@ Phase 1 (implemented now — pure, infra-free):
   `maps_transport_security_to_observed_channel`,
   `production_policy_rejects_marker_and_aead_channels`
 
-Phase 2/3 (to add when the mTLS listener + token lifecycle land):
-- **cert-valid pass**: a request on a verified mTLS channel with a
-  correctly-bound leaf cert is admitted in production mode.
-- **cert-invalid reject**: wrong CA / expired / revoked / malformed cert →
-  handshake rejected, request refused.
-- **downgrade reject** (channel-level): a plaintext/AEAD request against the
-  production listener is refused even with a `mutual_tls` header.
-- **cert↔4-tuple mismatch reject**: cert bound to worker A used for worker B →
-  rejected.
-- **token rotation**: issue → rotate before expiry → old token invalidated →
-  new token accepted; rotation ties into `rotate_token`.
-- **expired-identity reject**: cert past `notAfter` (server clock) or
-  transport token past TTL → rejected, ignoring any client-supplied time.
+Phase 2/3 (implemented in `self_hosted_mtls_conformance_test.rs`, real handshakes):
+- **cert-valid pass** — `cert_valid_request_is_admitted_in_production`: a request
+  on a verified mTLS channel with a correctly-bound leaf cert is admitted in
+  production mode.
+- **cert-invalid reject** — `cert_from_untrusted_ca_is_rejected`,
+  `expired_cert_is_rejected`, `trust_anchor_load_is_fail_closed_on_garbage`:
+  untrusted-CA / expired / malformed anchor → handshake or load refused.
+- **downgrade reject** (channel-level) —
+  `production_posture_rejects_marker_and_aead_downgrade` (plus the Phase 1
+  `production_policy_rejects_*` tests): marker/AEAD refused under production
+  posture.
+- **cert↔4-tuple mismatch reject** —
+  `cross_worker_cert_is_rejected_for_mismatched_identity`: cert bound to worker A
+  used for worker B → rejected.
+- **token issuance / rotation / expiry** —
+  `transport_token_issuance_binds_to_cert_and_expires`,
+  `transport_token_rotation_invalidates_the_old_token`,
+  `transport_token_rotation_rejects_a_different_certificate`,
+  `expired_transport_token_is_rejected_and_rotation_refused`,
+  `transport_token_ttl_is_bounded_and_capped_by_cert_notafter`: issue → rotate
+  before expiry → old token invalidated → new token accepted; expiry/TTL bounds
+  enforced by the server clock, ignoring any client-supplied time.

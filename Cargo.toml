@@ -97,6 +97,9 @@ tempfile = "3.10"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = "0.7.18"
 toml = "0.8"
+# X.509 parsing for the self-hosted worker mTLS verifier: extract the SPIFFE
+# 4-tuple URI SAN and re-check notAfter against the server clock (issue #243).
+x509-parser = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 proptest = "1"

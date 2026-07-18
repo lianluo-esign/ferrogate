@@ -15,6 +15,7 @@ mod isolation;
 mod managed_external_action;
 mod managed_worker;
 mod reload;
+mod self_hosted_mtls;
 mod self_hosted_worker;
 mod supabase_edge_function;
 mod target_capability;
@@ -92,6 +93,13 @@ pub use managed_worker::{
     AGENT_WORKER_PROTOCOL_VERSION, AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
+pub use self_hosted_mtls::{
+    build_self_hosted_worker_client_config, connect_self_hosted_worker_client,
+    SelfHostedMtlsConnection, SelfHostedMtlsError, SelfHostedMtlsServer, SelfHostedMtlsTrustAnchor,
+    SelfHostedTransportToken, SelfHostedTransportTokenIssuer, SelfHostedTransportTokenStore,
+    SelfHostedWorkerCertBinding, VerifiedMutualTls, DEFAULT_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS,
+    MAX_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS, SELF_HOSTED_WORKER_SPIFFE_PREFIX,
+};
 pub use self_hosted_worker::{
     generate_transport_token_secret, production_mtls_transport_implemented,
     InMemorySelfHostedRunQueue, InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker,

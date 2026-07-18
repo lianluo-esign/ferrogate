@@ -23,12 +23,22 @@ ferrogate-core = { path = "../ferrogate-core" }
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
+# Verified mutual-TLS transport for self-hosted workers (issue #243). rustls
+# terminates the handshake and validates the client-cert chain against a single
+# configured anchor; the `ring` provider is selected explicitly so no ambient
+# process-default crypto provider is relied upon.
+rustls = { workspace = true, features = ["ring"] }
+rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
+# Generate a test CA + client/server leaf certs for the mTLS conformance tests
+# (issue #243) -- no external PKI required.
+rcgen.workspace = true
 tempfile.workspace = true
 
 [features]

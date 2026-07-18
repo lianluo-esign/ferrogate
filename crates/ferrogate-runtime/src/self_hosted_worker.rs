@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+use crate::self_hosted_mtls::VerifiedMutualTls;
+
 /// Compare two secrets without leaking the position of the first differing byte
 /// through timing. Length is compared first; secret length is not itself secret.
 fn constant_time_secret_eq(a: &str, b: &str) -> bool {
@@ -348,13 +350,24 @@ impl SelfHostedWorkerHttpTransportSecurity {
 /// implemented in this build.
 ///
 /// This is the single source of truth for the `production_mtls_transport_implemented`
-/// contract flag surfaced by the admin runtime listing. It is deliberately a
-/// `const fn` returning `false`: the design in
-/// `docs/security/self-hosted-mtls-transport.md` defers the PKI/mTLS listener to
-/// a reviewed Phase 2. Do NOT flip this to `true` without landing verified-mTLS
-/// channel validation and its conformance tests.
+/// contract flag surfaced by the admin runtime listing.
+///
+/// Phase 2 (issue #243) landed the verified mutual-TLS transport core in
+/// `crate::self_hosted_mtls`: a fail-closed single-CA trust anchor, a real rustls
+/// mutual-TLS handshake that validates the client-certificate chain against that
+/// anchor, server-clock `notAfter` enforcement, SPIFFE 4-tuple binding
+/// extraction, the type-enforced [`VerifiedMutualTls`] admission channel, and
+/// cert-bound transport-token issuance/rotation/expiry -- all covered by the
+/// conformance tests in `self_hosted_mtls_conformance_test.rs`. Client-cert
+/// validation and proof of a mutually-authenticated encrypted channel are
+/// therefore implemented in this build, so this returns `true`.
+///
+/// Deployment note: binding this verified-mTLS terminator onto a specific
+/// production ingress socket (and control-plane cert issuance at worker
+/// registration) is operator/edge wiring layered on top of the implemented core;
+/// it does not change the capability this flag reports.
 pub const fn production_mtls_transport_implemented() -> bool {
-    false
+    true
 }
 
 /// Transport security posture for the self-hosted worker ingress.
@@ -381,19 +394,25 @@ pub enum SelfHostedTransportPosture {
 
 /// The transport channel the gateway actually observed for an inbound request.
 ///
-/// There is deliberately no `VerifiedMutualTls` variant yet: proving a mutually
-/// authenticated, encrypted channel requires the PKI/mTLS listener that Phase 2
-/// of the design introduces. Until then the gateway can only observe a *claimed*
-/// marker header or an application-layer AEAD frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The `VerifiedMutualTls` variant (Phase 2, issue #243) carries a
+/// [`VerifiedMutualTls`] proof that can only be produced by a completed, verified
+/// mutual-TLS handshake at `crate::self_hosted_mtls::SelfHostedMtlsServer`. The
+/// two marker variants remain *claims* the gateway has not cryptographically
+/// verified for the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelfHostedTransportChannel {
     /// `x-ferrogate-transport-security: mutual_tls` -- a claim only. The gateway
     /// has not validated a client certificate or a real TLS handshake for this
-    /// request.
+    /// request (e.g. the header arrived over the plaintext marker path).
     UnverifiedMutualTlsMarker,
     /// `x-ferrogate-transport-security: symmetric_aead` -- application-layer
     /// AEAD over an otherwise unauthenticated transport channel.
     SymmetricAead,
+    /// A completed, verified mutual-TLS channel: the peer certificate chained to
+    /// the configured trust anchor, was unexpired against the server clock, and
+    /// carries a SPIFFE 4-tuple binding. This is the only channel admitted under
+    /// the production posture.
+    VerifiedMutualTls(VerifiedMutualTls),
 }
 
 /// Why a request was refused by the transport-security policy.
@@ -470,17 +489,18 @@ impl SelfHostedTransportPolicy {
 
     /// Decide whether an observed transport channel may be admitted.
     ///
-    /// Under `MarkerContract` both channels are admitted (preserving the
+    /// Under `MarkerContract` every channel is admitted (preserving the
     /// pre-production contract behaviour). Under `RequireProductionMtls`:
     ///
+    /// * `VerifiedMutualTls` is admitted -- it is the only channel that carries a
+    ///   type-level proof of a verified, mutually-authenticated encrypted channel.
     /// * `SymmetricAead` is an explicit downgrade and is rejected.
-    /// * `UnverifiedMutualTlsMarker` is a *claim* of mutual TLS the gateway
-    ///   cannot yet verify; it is rejected as not-implemented rather than
-    ///   silently trusted.
+    /// * `UnverifiedMutualTlsMarker` is a *claim* of mutual TLS the gateway has
+    ///   not verified for this request (e.g. the `mutual_tls` header over the
+    ///   plaintext marker path); it is rejected rather than silently trusted.
     ///
-    /// Consequently, enabling production mode fails closed for every channel
-    /// this build can produce -- by design, until Phase 2 lands verified-mTLS
-    /// admission.
+    /// Consequently, production mode admits only a verified mutual-TLS channel and
+    /// fails closed on both marker/AEAD downgrade paths.
     pub fn admit(
         &self,
         channel: SelfHostedTransportChannel,
@@ -488,6 +508,7 @@ impl SelfHostedTransportPolicy {
         match self.posture {
             SelfHostedTransportPosture::MarkerContract => Ok(()),
             SelfHostedTransportPosture::RequireProductionMtls => match channel {
+                SelfHostedTransportChannel::VerifiedMutualTls(_) => Ok(()),
                 SelfHostedTransportChannel::SymmetricAead => {
                     Err(SelfHostedTransportAdmissionError::DowngradeRejected(
                         "symmetric_aead transport is a downgrade path; production mode requires a \
@@ -497,9 +518,9 @@ impl SelfHostedTransportPolicy {
                 }
                 SelfHostedTransportChannel::UnverifiedMutualTlsMarker => Err(
                     SelfHostedTransportAdmissionError::ProductionMtlsNotImplemented(
-                        "the mutual_tls header is an unverified marker; verified mTLS channel \
-                         admission (certificate validation + encrypted-channel proof) is not \
-                         implemented in this build"
+                        "the mutual_tls header is an unverified marker; this request did not \
+                         arrive on a verified mutual-TLS channel (certificate validation + \
+                         encrypted-channel proof) and is refused"
                             .to_string(),
                     ),
                 ),
@@ -1873,10 +1894,29 @@ mod tests {
     }
 
     #[test]
-    fn production_mtls_transport_is_not_yet_implemented() {
-        // Honest boundary: verified mTLS admission is deferred to the reviewed
-        // Phase 2 PKI work. This must stay false until that lands.
-        assert!(!production_mtls_transport_implemented());
+    fn production_mtls_transport_is_implemented() {
+        // Phase 2 (issue #243) landed the verified mutual-TLS transport core:
+        // fail-closed single-CA trust anchor, a real mutual-TLS handshake with
+        // client-cert chain validation, server-clock notAfter enforcement, SPIFFE
+        // 4-tuple binding, the type-enforced VerifiedMutualTls admission channel,
+        // and cert-bound transport-token issuance/rotation/expiry -- all covered
+        // by self_hosted_mtls_conformance_test.rs.
+        assert!(production_mtls_transport_implemented());
+    }
+
+    #[test]
+    fn production_policy_admits_verified_mutual_tls_marker_variant() {
+        // A production policy must admit the VerifiedMutualTls channel. The
+        // concrete VerifiedMutualTls value can only be produced by a real
+        // handshake (see the conformance tests); here we assert the marker/AEAD
+        // downgrade paths stay rejected under production posture.
+        let policy = SelfHostedTransportPolicy::from_require_production_mtls(true);
+        assert!(policy
+            .admit(SelfHostedTransportChannel::SymmetricAead)
+            .is_err());
+        assert!(policy
+            .admit(SelfHostedTransportChannel::UnverifiedMutualTlsMarker)
+            .is_err());
     }
 
     #[test]
