@@ -469,3 +469,100 @@ fn ai_proxy_maps_adapter_errors_without_leaking_provider_secret() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+fn write_visibility_config(path: &std::path::Path, gateway_addr: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:65535/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "public-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+
+[[models]]
+name = "org-a-private"
+provider = "openai"
+provider_model = "gpt-4o"
+visible_organization_ids = ["org_a"]
+
+[[api_keys]]
+id = "tenant_a_models"
+name = "Tenant A models"
+key = "tenant-a-models-secret"
+scopes = ["models.read"]
+organization_id = "org_a"
+
+[[api_keys]]
+id = "tenant_b_models"
+name = "Tenant B models"
+key = "tenant-b-models-secret"
+scopes = ["models.read"]
+organization_id = "org_b"
+
+[[api_keys]]
+id = "operator_models"
+name = "Operator models"
+key = "operator-models-secret"
+scopes = ["models.read"]
+"#
+        ),
+    )
+    .unwrap();
+}
+
+// Regression for #85: GET /v1/models must not leak a model whose
+// `visible_organization_ids` excludes the caller's tenant. A tenant-scoped key
+// sees only models its tenant may invoke; a platform-operator key (no
+// organization_id) sees every enabled model.
+#[test]
+fn ai_proxy_models_listing_hides_cross_tenant_private_models() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_visibility_config(&config, &gateway_addr);
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let list = |token: &str| {
+        http_request(
+            &gateway_addr,
+            "GET",
+            "/v1/models",
+            &[&format!("Authorization: Bearer {token}")],
+            "",
+        )
+    };
+
+    // Tenant A owns the restricted model: sees both the public and its private model.
+    let tenant_a = list("tenant-a-models-secret");
+    assert!(tenant_a.contains("200 OK"), "{tenant_a}");
+    assert!(tenant_a.contains("\"id\":\"public-chat\""), "{tenant_a}");
+    assert!(tenant_a.contains("\"id\":\"org-a-private\""), "{tenant_a}");
+
+    // Tenant B is excluded by visible_organization_ids: the private model MUST NOT
+    // appear (no leak of the logical name or provider mapping), only the public one.
+    let tenant_b = list("tenant-b-models-secret");
+    assert!(tenant_b.contains("200 OK"), "{tenant_b}");
+    assert!(tenant_b.contains("\"id\":\"public-chat\""), "{tenant_b}");
+    assert!(!tenant_b.contains("org-a-private"), "{tenant_b}");
+
+    // Platform-operator key (no organization_id) sees every enabled model.
+    let operator = list("operator-models-secret");
+    assert!(operator.contains("200 OK"), "{operator}");
+    assert!(operator.contains("\"id\":\"public-chat\""), "{operator}");
+    assert!(operator.contains("\"id\":\"org-a-private\""), "{operator}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

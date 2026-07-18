@@ -294,12 +294,27 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "models.read", &ctx.request_id) {
-            Ok(_) => {
+            Ok(auth) => {
+                // A platform-operator key (organization_id: None) sees every
+                // enabled model; a tenant-scoped key sees only the models
+                // visible to its tenant/project, matching the invocation gate
+                // (can_tenant_use_model). Without this the listing leaked other
+                // tenants' private model logical names and upstream provider
+                // mapping even though invocation was blocked downstream.
+                let is_operator = auth.organization_id.is_none();
                 let data = state
                     .config
                     .models
                     .iter()
                     .filter(|model| model.enabled)
+                    .filter(|model| {
+                        is_operator
+                            || state.can_tenant_use_model(
+                                &model.name,
+                                auth.organization_id.as_deref(),
+                                auth.project_id.as_deref(),
+                            )
+                    })
                     .map(|model| OpenAiModel {
                         id: model.name.clone(),
                         object: "model",
