@@ -110,14 +110,15 @@ impl FerroGateway {
                     .await
                 }
             },
-            // POST (create a new tenant) is deliberately NOT tenant-scope
-            // checked here -- there is no existing tenant to check
-            // ownership against, and whether a tenant-scoped console
-            // session should be allowed to create unrelated new tenants
-            // at all is a separate product/policy question from the
-            // cross-tenant data leak this pass fixes (issue #185's scope
-            // is read/write access to *existing* tenant data). Tracked as
-            // a follow-up, not silently ignored.
+            // Creating a tenant account is a PLATFORM-operator action: it mints
+            // a new tenant/org and its plan+status. Requiring an operator key
+            // (organization_id: None) here closes the #84 follow-up where the
+            // create branch, being an upsert (INSERT ... ON CONFLICT (id) DO
+            // UPDATE), let a tenant-scoped admin key POST {id: <own tenant>,
+            // plan_id: enterprise} to self-escalate its plan, or POST {id:
+            // <victim>, status: suspended} to tamper with another tenant --
+            // bypassing the PATCH-only guard added for #84. Updates go through
+            // the tenant-scoped-and-guarded PATCH/PUT branch above.
             Method::POST => {
                 let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
                     Ok(auth) => auth,
@@ -132,6 +133,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let payload = match read_json_body::<AdminTenantAccountCreateRequest>(
                     session,
                     &ctx.request_id,

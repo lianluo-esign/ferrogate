@@ -399,6 +399,67 @@ fn tenant_scoped_admin_key_cannot_change_its_own_plan_or_status() {
     gateway.wait().unwrap();
 }
 
+/// #84 follow-up (round-13 audit): the tenant-account CREATE (POST) branch is an
+/// upsert, so without an operator gate a tenant-scoped key could POST its OWN
+/// tenant id with a richer plan (self-escalation) or another tenant's id
+/// (cross-tenant tamper). Creating tenant accounts must require a
+/// platform-operator key.
+#[test]
+fn tenant_scoped_admin_key_cannot_create_or_overwrite_tenant_accounts() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+
+    // Tenant A tries to upsert-overwrite its OWN account onto a richer plan.
+    let self_escalate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &TENANT_A,
+        r#"{"id":"tenant-iso-a","name":"x","slug":"x","plan_id":"enterprise","status":"active"}"#,
+    );
+    assert!(
+        status_line(&self_escalate).contains("403"),
+        "tenant must not create/overwrite a tenant account: {self_escalate}"
+    );
+    assert!(self_escalate.contains("platform_operator_required"));
+
+    // Tenant A tries to tamper with a DIFFERENT tenant via create-as-upsert.
+    let cross_tenant = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &TENANT_A,
+        r#"{"id":"tenant-iso-b","name":"x","slug":"x","status":"suspended"}"#,
+    );
+    assert!(
+        status_line(&cross_tenant).contains("403"),
+        "tenant must not create/tamper another tenant's account: {cross_tenant}"
+    );
+
+    // The platform operator retains the ability to create tenant accounts.
+    let operator_create = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        r#"{"id":"tenant-iso-new","name":"New","slug":"new","plan_id":"free"}"#,
+    );
+    assert!(
+        operator_create.contains("HTTP/1.1 200") || operator_create.contains("HTTP/1.1 201"),
+        "the operator must retain tenant-account creation: {operator_create}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 /// The same class of gap, across the other admin surfaces fixed alongside
 /// wallets: tenant-accounts, projects, virtual-keys, and quota-policies.
 #[test]
