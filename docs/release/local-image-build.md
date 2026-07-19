@@ -117,6 +117,25 @@ scripts/build-image-crane.sh --tag v2026.07.19 \
   --artifact-dir ./release-artifacts        # add --push once a write:packages token exists
 ```
 
+## Key rotation, revocation, exceptions (#208 release governance)
+
+- **Signing key custody.** The local-key path uses a cosign key pair held by the
+  release owner. Private key stays off the repo and out of images (never `git add`
+  a `*.key`; `COSIGN_PASSWORD` supplies its passphrase). Rotate by
+  `cosign generate-key-pair` and distributing the new `cosign.pub` out-of-band;
+  consumers pin the new pubkey in `verify-image-crane.sh --pubkey`.
+- **Revocation.** To revoke a published tag, delete/yank the GHCR package version
+  and publish a superseding digest; announce the bad digest so consumers reject it
+  via `--digest`. For the `write:packages` token, revoke the PAT in GitHub settings.
+- **Vulnerability exceptions.** A `cargo-audit` finding blocks release by default.
+  A time-boxed exception (e.g. an `unmaintained` transitive dep with no fix) is
+  recorded in `deny.toml`/`audit.toml` `[advisories] ignore = ["RUSTSEC-YYYY-NNNN"]`
+  with an owner + expiry date in a comment; expired ignores must be re-reviewed.
+  Current standing exceptions: the 4 `unmaintained` warnings via `pingora 0.8.0`
+  (tracked; no upstream fix — revisit on the next pingora bump).
+- **Ownership.** Release owner = whoever holds the signing key + `write:packages`
+  token; they own rotation cadence and exception expiry review.
+
 ## Supply-chain trade-off (see #208)
 
 This path signs (if you opt in) with a **local key**, not the GitHub-workflow
