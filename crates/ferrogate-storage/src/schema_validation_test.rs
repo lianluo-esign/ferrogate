@@ -97,9 +97,11 @@ fn upgrade_indexes_come_after_the_migration_that_adds_their_column() {
         let add_at = POSTGRES_SCHEMA_SQL
             .find(add_column)
             .unwrap_or_else(|| panic!("schema must contain `{add_column}`"));
+        // Match the actual CREATE statement, not a mention in a comment.
+        let create_index = format!("CREATE INDEX IF NOT EXISTS {index_name}");
         let index_at = POSTGRES_SCHEMA_SQL
-            .find(index_name)
-            .unwrap_or_else(|| panic!("schema must contain index `{index_name}`"));
+            .find(&create_index)
+            .unwrap_or_else(|| panic!("schema must contain `{create_index}`"));
         assert!(
             add_at < index_at,
             "`{add_column}` (@{add_at}) must precede index `{index_name}` (@{index_at}) so the \
