@@ -40,7 +40,13 @@ pub(crate) fn build_supabase_repositories(
         PostgresStorageConfig {
             dsn: dsn.to_string(),
             pool_size: 4,
-            pool_acquire_timeout_millis: 1_000,
+            // The first acquisition includes the full TCP/TLS handshake to a
+            // (often remote) Supabase pooler, which regularly exceeds 1s — a 1s
+            // deadline flaked auth/billing schema init against real Supabase
+            // before the first query ran (#255; same failure #250 fixed for the
+            // migration tool). Generous is correct here; statement_timeout_millis
+            // below still bounds each individual operation.
+            pool_acquire_timeout_millis: 30_000,
             tls_mode: parse_postgres_tls_mode(connection.tls_mode)?,
             tls_ca_cert_path: None,
             connect_timeout_secs: 10,
