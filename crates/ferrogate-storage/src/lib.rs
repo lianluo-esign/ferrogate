@@ -1294,15 +1294,44 @@ impl PostgresControlPlaneStore {
             )
             .await
             .map_err(postgres_error)?;
+        // Key the advisory lock on the CONFIGURED schema (not the connection's
+        // default `current_schema()`), so two gateways initializing different
+        // schemas on one database do not serialize on each other while two
+        // initializing the same schema do.
+        let configured_schema = self.async_pool.configured_schema().map(str::to_string);
         transaction
             .query_one(
                 "SELECT pg_advisory_xact_lock(\
-                    hashtextextended(current_database() || ':' || current_schema(), 0)\
+                    hashtextextended(\
+                        current_database() || ':' || COALESCE($1, current_schema()), 0\
+                    )\
                  )",
-                &[],
+                &[&configured_schema],
             )
             .await
             .map_err(postgres_error)?;
+        // Route the schema DDL into the configured `postgres_schema`. The sync
+        // driver used to do this per-session (`CREATE SCHEMA IF NOT EXISTS ...;
+        // SET search_path ...`); the async pool (#221) intentionally pins
+        // `search_path` per-transaction instead, so the DDL transaction must
+        // pin it too -- otherwise every unqualified `CREATE TABLE` in
+        // `POSTGRES_SCHEMA_SQL` lands in the connection-default schema
+        // (`public`) and the configured schema is silently left empty.
+        if let Some(schema) = configured_schema.as_deref() {
+            transaction
+                .batch_execute(&format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    quote_postgres_identifier(schema)
+                ))
+                .await
+                .map_err(postgres_error)?;
+        }
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
         transaction
             .batch_execute(POSTGRES_SCHEMA_SQL)
             .await
@@ -1313,15 +1342,28 @@ impl PostgresControlPlaneStore {
 
     async fn validate_schema(&self) -> Result<(), StorageError> {
         let operation = self.document_operation("validate schema");
-        let client = self
+        let mut client = self
             .async_pool
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
-        // schema-agnostic: `validate_postgres_schema` inspects the pg catalog /
-        // `information_schema` against `current_schema()`, deliberately validating
-        // whatever schema the connection resolves; pinning a `search_path` here
-        // would defeat the check rather than route a control-plane table (#239).
-        validate_postgres_schema(&client).await
+        // Validate against the same search path every data query pins
+        // (`"<postgres_schema>", <search_path...>`): `to_regclass` /
+        // `current_schema()` then resolve exactly the tables the gateway will
+        // read and write at runtime. Without the pin, validation resolved the
+        // connection-default schema (`public`) and could pass while the
+        // configured schema was empty (or vice versa).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        // `&*transaction` derefs the deadpool wrapper to the underlying
+        // `tokio_postgres::Transaction`, which implements `GenericClient`.
+        validate_postgres_schema(&*transaction).await?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
     }
 
     fn schema_evidence(&self) -> StorageSchemaEvidence {
@@ -6938,7 +6980,10 @@ fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-async fn validate_postgres_schema(client: &deadpool_postgres::Object) -> Result<(), StorageError> {
+async fn validate_postgres_schema<C>(client: &C) -> Result<(), StorageError>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
     const TABLES: &[&str] = &[
         "control_plane_resources",
         "agent_runs",

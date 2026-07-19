@@ -1080,6 +1080,9 @@ fn wait_for_postgres_query_named(container_name: &str) -> Result<()> {
 fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let expected_tables = [
         "control_plane_resources",
+        // #206 (migration 36): durable replay floor for signed control-plane
+        // snapshots.
+        "control_plane_replay_floors",
         "agent_runs",
         "agent_run_events",
         "managed_worker_templates",
@@ -1109,6 +1112,7 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "usage_aggregate_rollups",
         "billing_ledger",
         "billing_report_outbox",
+        "admin_user_refresh_tokens",
         "storage_schema_migrations",
     ];
     for table in expected_tables {
@@ -1168,6 +1172,25 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         bail!(
             "expected {schema}.guardrail_policy_bindings.generation to be bigint NOT NULL, got {guardrail_generation}"
         );
+    }
+
+    // #232 (migration 34): admin refresh tokens are stamped with the tenant +
+    // role their session was issued for.
+    let text_columns = [
+        ("admin_user_refresh_tokens", "tenant_id"),
+        ("admin_user_refresh_tokens", "role"),
+    ];
+    for (table, column) in text_columns {
+        let data_type = postgres_scalar(&format!(
+            "SELECT data_type FROM information_schema.columns \
+             WHERE table_schema = '{}' AND table_name = '{}' AND column_name = '{}'",
+            sql_literal(schema),
+            sql_literal(table),
+            sql_literal(column)
+        ))?;
+        if data_type.trim() != "text" {
+            bail!("expected {schema}.{table}.{column} to be text, got {data_type}");
+        }
     }
 
     let bigint_columns = [(
@@ -1242,6 +1265,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_usage_rollups_tenant_model_provider",
         "idx_billing_ledger_request_attempt",
         "idx_mcp_oauth_flows_pending_subject",
+        // #232 (migration 34): tenant-scoped refresh-token revocation path.
+        "idx_admin_user_refresh_tokens_user_tenant",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(

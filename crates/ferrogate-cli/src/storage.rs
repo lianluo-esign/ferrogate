@@ -38,7 +38,12 @@ fn migrate_to_supabase(args: StorageMigrateToSupabaseArgs) -> AnyResult<()> {
     let base_config = |dsn: String| PostgresStorageConfig {
         dsn,
         pool_size: 2,
-        pool_acquire_timeout_millis: 1_000,
+        // This is an offline migration tool, and the first pool acquisition
+        // includes the full TCP/TLS handshake to the (often remote) database:
+        // a 1s deadline made the tool fail against real Supabase poolers
+        // before the first query ran (#250). Generous is correct here; the
+        // per-statement deadline below still bounds each operation.
+        pool_acquire_timeout_millis: 30_000,
         tls_mode,
         tls_ca_cert_path: args
             .postgres_tls_ca_cert_path

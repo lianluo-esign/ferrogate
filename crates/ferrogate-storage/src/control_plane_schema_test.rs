@@ -753,3 +753,80 @@ fn live_self_hosted_lease_state_survives_gateway_restart() {
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.
 }
+
+/// #250: the gateway's OWN schema initialization (`migration_mode: auto` /
+/// `initialize_schema`) must create the configured `postgres_schema` and land
+/// every table of `POSTGRES_SCHEMA_SQL` inside it -- NOT in the
+/// connection-default schema (`public`). The sync driver did this per-session
+/// (`CREATE SCHEMA IF NOT EXISTS ...; SET search_path ...`); when #221 removed
+/// it, the async DDL transaction ran unpinned, so a fresh auto-migrated
+/// deployment left the configured schema empty while validation (also
+/// unpinned) still passed against `public`. Surfaced by the release e2e:
+/// `expected ferrogate_control.control_plane_resources, got count 0`.
+///
+/// Deliberately does NOT pre-provision the schema: initialization itself must
+/// create it, then validation (schema-pinned) must pass against it.
+#[test]
+fn live_initialize_schema_provisions_the_configured_schema_not_public() {
+    let Some(dsn) =
+        dsn_or_skip("live_initialize_schema_provisions_the_configured_schema_not_public")
+    else {
+        return;
+    };
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_init_test");
+    let _guard = SchemaGuard::new(&dsn, &schema);
+
+    let config = PostgresStorageConfig {
+        dsn: dsn.to_string(),
+        pool_size: 1,
+        pool_acquire_timeout_millis: 30_000,
+        tls_mode: PostgresTlsMode::Disable,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
+        schema: Some(schema.to_string()),
+        search_path: Vec::new(),
+    };
+    // initialize_schema = true (the auto-migration path under test) and
+    // validate_schema = true (validation must resolve the configured schema).
+    let repositories = RuntimeStorageRepositories::postgres_for_migration(config, true, true)
+        .expect("schema initialization + validation against the configured schema");
+    drop(repositories);
+
+    // Migration 1's most fundamental table and migration 36's newest table
+    // must both exist in the CONFIGURED schema.
+    for table in [
+        "control_plane_resources",
+        "control_plane_replay_floors",
+        "storage_schema_migrations",
+    ] {
+        assert_eq!(
+            count_rows(
+                &dsn,
+                &format!(
+                    "SELECT COUNT(*)::BIGINT FROM information_schema.tables \
+                     WHERE table_schema = '{schema}' AND table_name = '{table}'"
+                )
+            ),
+            1,
+            "initialize_schema must create {table} inside the configured schema {schema}",
+        );
+    }
+
+    // The migration ledger inside the configured schema must record the
+    // current head (36 / 036_control_plane_replay_floors).
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".storage_schema_migrations \
+                 WHERE version = 36 AND name = '036_control_plane_replay_floors'"
+            )
+        ),
+        1,
+        "the configured schema's migration ledger must record head 36",
+    );
+
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
+}

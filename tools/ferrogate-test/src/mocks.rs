@@ -87,6 +87,14 @@ pub(crate) fn spawn_local_provider_upstream_with_timeout(
                         Ok(request) => request,
                         Err(_) => continue,
                     };
+                    // A connection that closed without sending any bytes is not
+                    // a provider request -- environments like WSL2 probe every
+                    // new listener with empty localhost connects, and counting
+                    // those against `expected_requests` shut the mock down
+                    // before the gateway's first real request arrived.
+                    if request.trim().is_empty() {
+                        continue;
+                    }
                     let response = provider_response_for_request(&request);
                     let _ = write!(
                         stream,

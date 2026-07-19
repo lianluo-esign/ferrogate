@@ -73,6 +73,7 @@ pub(crate) struct AsyncPostgresPool {
     acquire_timeout: Duration,
     statement_timeout: Duration,
     transaction_search_path_sql: Option<String>,
+    configured_schema: Option<String>,
     metrics: PostgresPoolMetrics,
 }
 
@@ -141,6 +142,7 @@ impl AsyncPostgresPool {
                     postgres_search_path_sql(config)
                 )
             }),
+            configured_schema: config.schema.clone(),
             metrics: PostgresPoolMetrics::default(),
         })
     }
@@ -194,6 +196,14 @@ impl AsyncPostgresPool {
 
     pub(crate) fn transaction_search_path_sql(&self) -> Option<&str> {
         self.transaction_search_path_sql.as_deref()
+    }
+
+    /// The `postgres_schema` this pool was configured with, if any. Schema DDL
+    /// (`initialize_schema`) must create + target this schema, and schema
+    /// validation must resolve tables against it, mirroring how every data
+    /// query pins it via [`Self::transaction_search_path_sql`] (#237-#239).
+    pub(crate) fn configured_schema(&self) -> Option<&str> {
+        self.configured_schema.as_deref()
     }
 
     pub(crate) fn statement_timeout(&self) -> Duration {

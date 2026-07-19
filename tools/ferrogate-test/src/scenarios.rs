@@ -256,9 +256,12 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["data"][0]["dispatch_contract"]["inbound_customer_host_required"],
                 false
             );
+            // #243 Phase 2: the verified mutual-TLS transport core landed, so the
+            // gateway now (correctly) reports the production transport as
+            // implemented.
             assert_eq!(
                 body["data"][0]["dispatch_contract"]["production_mtls_transport_implemented"],
-                false
+                true
             );
             assert!(body["data"][0]["dispatch_contract"]["actions"]
                 .as_array()
