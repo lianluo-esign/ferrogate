@@ -235,7 +235,21 @@ def validate_runtime_contract(path: Path, contract: dict[str, Any]) -> list[str]
             failures.append(
                 f"{path}: operation path {operation_path} is not owned by a route pattern"
             )
+    # Data-plane serve routes (e.g. the static-site surface `/sites/{*rest}`,
+    # #258) deliver operator/tenant content, not a stable FerroGate API
+    # operation, so they legitimately carry no OpenAPI operation. They are still
+    # declared as route patterns (the runtime router owns them and the Rust
+    # api_contract test verifies that), but are exempt from the
+    # operation-coverage requirement.
+    data_plane_groups = {"site"}
+    data_plane_patterns = {
+        route.get("pattern")
+        for route in route_patterns or []
+        if isinstance(route, dict) and route.get("group") in data_plane_groups
+    }
     for pattern in patterns:
+        if pattern in data_plane_patterns:
+            continue
         if not any(route_pattern_matches(pattern, operation_path) for operation_path in operation_paths):
             failures.append(f"{path}: route pattern {pattern} has no documented operation")
     return failures
