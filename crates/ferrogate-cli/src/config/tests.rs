@@ -564,14 +564,56 @@ fn rejects_unsupported_cache_mode() {
         r#"
 [cache]
 enabled = true
-mode = "semantic"
+mode = "fuzzy"
 "#,
     )
     .unwrap();
 
     let error = format!("{:#}", Config::load(&path).unwrap_err());
     assert!(error.contains("unknown variant"), "{error}");
-    assert!(error.contains("semantic"), "{error}");
+    assert!(error.contains("fuzzy"), "{error}");
+}
+
+#[test]
+fn accepts_semantic_cache_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &path,
+        r#"
+[cache]
+enabled = true
+mode = "semantic"
+semantic_similarity_threshold = 0.9
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).expect("semantic cache mode should load");
+    assert_eq!(config.cache.mode, CacheMode::Semantic);
+    assert!((config.cache.semantic_similarity_threshold - 0.9).abs() < 1e-6);
+}
+
+#[test]
+fn rejects_semantic_threshold_out_of_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &path,
+        r#"
+[cache]
+enabled = true
+mode = "semantic"
+semantic_similarity_threshold = 1.5
+"#,
+    )
+    .unwrap();
+
+    let error = format!("{:#}", Config::load(&path).unwrap_err());
+    assert!(
+        error.contains("cache.semantic_similarity_threshold"),
+        "{error}"
+    );
 }
 
 #[test]

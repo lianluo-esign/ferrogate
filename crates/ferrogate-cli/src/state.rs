@@ -29,10 +29,11 @@ use crate::config::signed_snapshot::{
 };
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
-    AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
-    GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailRule, GuardrailStage,
-    HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus,
-    Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode, Upstream,
+    AnalyticsConfig, AnalyticsProvider, ApiKey, CacheMode, Config, GatewayConfigProfile,
+    GuardrailEffect, GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailRule,
+    GuardrailStage, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
+    PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode,
+    Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -1359,6 +1360,11 @@ pub(crate) struct AppState {
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     analytics_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
+    /// Optional semantic (vector-similarity) response cache (#273), active only
+    /// when `cache.mode = "semantic"`. Shares the exact-match cache's TTL,
+    /// record cap, tenant scoping, and guardrail-policy invalidation; sits
+    /// behind the same seam so exact-match behavior is unchanged when disabled.
+    semantic_cache: Arc<Mutex<semantic_cache::SemanticResponseCache>>,
     self_hosted_dispatch: Arc<Mutex<SelfHostedWorkerDispatchRuntime>>,
     mcp_manager: Arc<McpManager>,
     mcp_dispatch_permits: Arc<Semaphore>,
@@ -2825,6 +2831,9 @@ struct GatewayMetricsAccumulator {
     request_status_totals: BTreeMap<u16, u64>,
     cache_hits_total: u64,
     cache_misses_total: u64,
+    /// Subset of `cache_hits_total` served by the semantic (vector-similarity)
+    /// layer rather than an exact-match key (#273).
+    semantic_cache_hits_total: u64,
     guardrail_match_total: u64,
     guardrail_denial_total: u64,
     guardrail_redaction_total: u64,
@@ -3132,6 +3141,10 @@ impl GatewayMetricsAccumulator {
         self.cache_misses_total = self.cache_misses_total.saturating_add(1);
     }
 
+    fn record_semantic_cache_hit(&mut self) {
+        self.semantic_cache_hits_total = self.semantic_cache_hits_total.saturating_add(1);
+    }
+
     fn record_guardrail_match(&mut self, effect: GuardrailEffect) {
         self.guardrail_match_total = self.guardrail_match_total.saturating_add(1);
         match effect {
@@ -3264,6 +3277,7 @@ impl GatewayMetricsAccumulator {
                 .collect(),
             cache_hits_total: self.cache_hits_total,
             cache_misses_total: self.cache_misses_total,
+            semantic_cache_hits_total: self.semantic_cache_hits_total,
             guardrail_match_total: self.guardrail_match_total,
             guardrail_denial_total: self.guardrail_denial_total,
             guardrail_redaction_total: self.guardrail_redaction_total,
@@ -4283,6 +4297,7 @@ impl AppState {
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             analytics_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
+            semantic_cache: Arc::new(Mutex::new(semantic_cache::SemanticResponseCache::default())),
             self_hosted_dispatch,
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             mcp_dispatch_permits: Arc::new(Semaphore::new(
@@ -4333,6 +4348,7 @@ impl AppState {
         next.metrics = Arc::clone(&self.metrics);
         next.analytics_export = Arc::clone(&self.analytics_export);
         next.response_cache = Arc::clone(&self.response_cache);
+        next.semantic_cache = Arc::clone(&self.semantic_cache);
         next.mcp_manager = Arc::clone(&self.mcp_manager);
         next.mcp_manager.reconfigure(&next.config.mcp_servers);
         next.approvals = self.approvals.clone();
@@ -6428,6 +6444,9 @@ mod state_observability;
 
 #[path = "state_routing.rs"]
 mod state_routing;
+
+#[path = "semantic_cache.rs"]
+pub(crate) mod semantic_cache;
 
 #[path = "state_agent_runtime.rs"]
 mod state_agent_runtime;

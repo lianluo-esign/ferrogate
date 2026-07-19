@@ -714,6 +714,7 @@ impl AppState {
                 request_status_totals: Vec::new(),
                 cache_hits_total: 0,
                 cache_misses_total: 0,
+                semantic_cache_hits_total: 0,
                 guardrail_match_total: 0,
                 guardrail_denial_total: 0,
                 guardrail_redaction_total: 0,

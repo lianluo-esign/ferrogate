@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_providers::RoutingStrategy;
 
-use super::Config;
+use super::{CacheMode, Config};
 
 struct WorkflowToolNames {
     names: HashSet<String>,
@@ -563,6 +563,14 @@ impl Config {
         }
         if self.cache.max_records == 0 {
             bail!("field cache.max_records: must be greater than zero");
+        }
+        if matches!(self.cache.mode, CacheMode::Semantic) {
+            let threshold = self.cache.semantic_similarity_threshold;
+            if !(threshold > 0.0 && threshold <= 1.0) {
+                bail!(
+                    "field cache.semantic_similarity_threshold: must be within (0.0, 1.0] for semantic mode"
+                );
+            }
         }
         Ok(())
     }

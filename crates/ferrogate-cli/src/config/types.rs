@@ -1367,6 +1367,12 @@ pub(crate) struct CacheConfig {
     pub(crate) ttl_secs: u64,
     #[serde(default = "default_cache_max_records")]
     pub(crate) max_records: usize,
+    /// Cosine-similarity threshold for `CacheMode::Semantic` (#273). A prior
+    /// cached response is served only when the current request's prompt
+    /// embedding is within this cosine distance of the stored one. Ignored
+    /// unless `mode = "semantic"`. Range (0.0, 1.0].
+    #[serde(default = "default_cache_semantic_similarity_threshold")]
+    pub(crate) semantic_similarity_threshold: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1374,6 +1380,12 @@ pub(crate) struct CacheConfig {
 pub(crate) enum CacheMode {
     #[default]
     ExactMatch,
+    /// Embedding-based similarity lookup (#273): on an exact-match miss, the
+    /// gateway embeds the request prompt and serves a prior cached response
+    /// whose stored embedding is within `semantic_similarity_threshold`.
+    /// Behind the same cache seam — same tenant scoping and guardrail-policy
+    /// invalidation as exact-match.
+    Semantic,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1805,6 +1817,10 @@ fn default_cache_max_records() -> usize {
     1_000
 }
 
+fn default_cache_semantic_similarity_threshold() -> f32 {
+    0.92
+}
+
 fn default_tool_approval_timeout_secs() -> u64 {
     30
 }
@@ -1935,6 +1951,7 @@ impl Default for CacheConfig {
             mode: CacheMode::ExactMatch,
             ttl_secs: default_cache_ttl_secs(),
             max_records: default_cache_max_records(),
+            semantic_similarity_threshold: default_cache_semantic_similarity_threshold(),
         }
     }
 }

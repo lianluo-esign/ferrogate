@@ -276,6 +276,121 @@ impl AppState {
         }
     }
 
+    fn record_semantic_cache_hit(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_semantic_cache_hit();
+        }
+    }
+
+    /// True when the semantic (vector-similarity) cache layer is active. It sits
+    /// behind the exact-match seam, so it additionally requires the exact-match
+    /// cache to be on (`cache.enabled`) via the shared per-model/key/profile
+    /// toggles evaluated in `ai_cache_enabled`; this only checks the mode.
+    pub(crate) fn semantic_cache_active(&self) -> bool {
+        self.config.cache.enabled && matches!(self.config.cache.mode, CacheMode::Semantic)
+    }
+
+    /// Build the per-request semantic context (scope bucket + prompt embedding)
+    /// when semantic mode is active. Returns `None` in exact-match mode so the
+    /// seam is a no-op and exact-match behavior is unchanged. The scope binds
+    /// every field of the exact key except the request body — tenant, route,
+    /// model, provider, and the guardrail-policy fingerprint — so tenant
+    /// isolation and guardrail-policy invalidation carry over exactly.
+    pub(crate) fn semantic_cache_context(
+        &self,
+        route: &str,
+        tenant: &ferrogate_core::TenantContext,
+        logical_model: &str,
+        provider: &str,
+        provider_model: &str,
+        body: &serde_json::Value,
+    ) -> Option<semantic_cache::SemanticCacheContext> {
+        if !self.semantic_cache_active() {
+            return None;
+        }
+        let scope =
+            self.ai_semantic_scope_hash(route, tenant, logical_model, provider, provider_model);
+        let prompt = semantic_cache::prompt_text_for_embedding(body);
+        Some(semantic_cache::SemanticCacheContext {
+            scope,
+            embedding: semantic_cache::embed_text(&prompt),
+        })
+    }
+
+    fn ai_semantic_scope_hash(
+        &self,
+        route: &str,
+        tenant: &ferrogate_core::TenantContext,
+        logical_model: &str,
+        provider: &str,
+        provider_model: &str,
+    ) -> u64 {
+        #[derive(Serialize)]
+        struct ScopeInput<'a> {
+            route: &'a str,
+            organization_id: &'a Option<String>,
+            team_id: &'a Option<String>,
+            project_id: &'a Option<String>,
+            user_id: &'a Option<String>,
+            api_key_id: &'a Option<String>,
+            logical_model: &'a str,
+            provider: &'a str,
+            provider_model: &'a str,
+            guardrail_policy_fingerprint: u64,
+        }
+
+        let bytes = serde_json::to_vec(&ScopeInput {
+            route,
+            organization_id: &tenant.organization_id,
+            team_id: &tenant.team_id,
+            project_id: &tenant.project_id,
+            user_id: &tenant.user_id,
+            api_key_id: &tenant.api_key_id,
+            logical_model,
+            provider,
+            provider_model,
+            guardrail_policy_fingerprint: self.guardrail_policy_fingerprint,
+        })
+        .expect("semantic cache scope serialization should not fail");
+        fnv1a64(&bytes)
+    }
+
+    /// Look up a semantically-similar cached response. Fail-open: a poisoned
+    /// lock or an empty bucket simply misses (the caller then falls through to
+    /// the upstream), never erroring. Records a semantic-hit metric on success.
+    pub(crate) fn lookup_semantic_response_cache(
+        &self,
+        context: &semantic_cache::SemanticCacheContext,
+    ) -> Option<AiCachedResponse> {
+        let now = now_unix_seconds().unwrap_or_default();
+        let threshold = self.config.cache.semantic_similarity_threshold;
+        let (response, similarity) =
+            self.semantic_cache.lock().ok().and_then(|cache| {
+                cache.lookup(context.scope, &context.embedding, threshold, now)
+            })?;
+        self.record_semantic_cache_hit();
+        tracing::debug!(similarity, threshold, "semantic cache hit");
+        Some(response)
+    }
+
+    pub(crate) fn store_semantic_response_cache(
+        &self,
+        context: semantic_cache::SemanticCacheContext,
+        response: AiCachedResponse,
+    ) {
+        let now = now_unix_seconds().unwrap_or_default();
+        if let Ok(mut cache) = self.semantic_cache.lock() {
+            cache.insert(
+                context.scope,
+                context.embedding,
+                response,
+                self.config.cache.ttl_secs,
+                self.config.cache.max_records,
+                now,
+            );
+        }
+    }
+
     pub(crate) fn resolve_model(
         &self,
         logical_model: &str,

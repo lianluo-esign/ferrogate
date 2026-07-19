@@ -345,6 +345,9 @@ pub struct GatewayMetricsSnapshot {
     pub request_status_totals: Vec<RequestStatusMetric>,
     pub cache_hits_total: u64,
     pub cache_misses_total: u64,
+    /// Subset of `cache_hits_total` served by the semantic vector-similarity
+    /// layer rather than an exact-match key (issue #273).
+    pub semantic_cache_hits_total: u64,
     pub guardrail_match_total: u64,
     pub guardrail_denial_total: u64,
     pub guardrail_redaction_total: u64,
@@ -641,6 +644,10 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_ai_cache_requests_total{{status=\"miss\"}} {}\n",
         snapshot.cache_misses_total
+    ));
+    output.push_str(&format!(
+        "ferrogate_ai_cache_requests_total{{status=\"semantic_hit\"}} {}\n",
+        snapshot.semantic_cache_hits_total
     ));
 
     push_help(
@@ -1088,6 +1095,12 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "AI response cache misses.",
             snapshot.cache_misses_total as f64,
             vec![OtlpAttribute::new("status", "miss")],
+        ),
+        sum_metric_json(
+            "ferrogate.ai_cache.requests",
+            "AI response cache hits served by the semantic similarity layer.",
+            snapshot.semantic_cache_hits_total as f64,
+            vec![OtlpAttribute::new("status", "semantic_hit")],
         ),
         sum_metric_json(
             "ferrogate.guardrail.matches",

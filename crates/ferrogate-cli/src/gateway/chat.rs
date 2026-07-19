@@ -512,8 +512,26 @@ impl FerroGateway {
                         )
                     })
             };
+            // Semantic layer (#273) sits behind the same seam: only built when
+            // an exact cache_key exists (so it inherits the enabled/non-stream
+            // + per-model/key/profile gating) and `cache.mode = "semantic"`.
+            let semantic_ctx = cache_key.as_ref().and_then(|_| {
+                state.semantic_cache_context(
+                    endpoint.route(),
+                    &policy_request.tenant,
+                    &request.model,
+                    &provider.name,
+                    &model_route.provider_model,
+                    &body_json,
+                )
+            });
             if let Some(cache_key) = cache_key.as_ref() {
-                if let Some(cached) = state.lookup_ai_response_cache(cache_key) {
+                let cached = state.lookup_ai_response_cache(cache_key).or_else(|| {
+                    semantic_ctx
+                        .as_ref()
+                        .and_then(|context| state.lookup_semantic_response_cache(context))
+                });
+                if let Some(cached) = cached {
                     state.record_ai_cache_hit();
                     let record_bodies = auth.can_record_bodies(state.config.telemetry.log_bodies);
                     state.record_request_log(StoredRequestLog {
@@ -1967,6 +1985,18 @@ impl FerroGateway {
                                         body: final_body.clone(),
                                     },
                                 );
+                                // Mirror the store into the semantic layer so a
+                                // later paraphrase can match this embedding.
+                                if let Some(context) = semantic_ctx {
+                                    state.store_semantic_response_cache(
+                                        context,
+                                        crate::state::AiCachedResponse {
+                                            status_code: final_status.as_u16(),
+                                            content_type: final_content_type.clone(),
+                                            body: final_body.clone(),
+                                        },
+                                    );
+                                }
                             }
                         }
 

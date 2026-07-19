@@ -972,3 +972,157 @@ effect = "redact"
     assert_ne!(cache_key(&baseline), cache_key(&tightened));
     assert_ne!(cache_key(&tightened), cache_key(&tightened_further));
 }
+
+// ---------------------------------------------------------------------------
+// Semantic response cache (#273)
+// ---------------------------------------------------------------------------
+
+fn semantic_cache_config(threshold: f32) -> Config {
+    let mut config = Config::default();
+    config.cache.enabled = true;
+    config.cache.mode = CacheMode::Semantic;
+    config.cache.semantic_similarity_threshold = threshold;
+    config
+}
+
+fn tenant_with_org(org: &str) -> ferrogate_core::TenantContext {
+    ferrogate_core::TenantContext {
+        organization_id: Some(org.to_string()),
+        ..Default::default()
+    }
+}
+
+fn chat_body(prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": "fast-chat",
+        "messages": [{"role": "user", "content": prompt}],
+    })
+}
+
+fn cached(body: &str) -> AiCachedResponse {
+    AiCachedResponse {
+        status_code: 200,
+        content_type: "application/json".to_string(),
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+/// Disabled by default: exact-match mode must produce no semantic context, so
+/// the seam is a strict no-op and exact-match behavior is untouched.
+#[test]
+fn semantic_context_absent_unless_semantic_mode() {
+    let tenant = ferrogate_core::TenantContext::default();
+    let body = chat_body("hello there");
+
+    let exact = AppState::new(Config::default());
+    assert!(exact
+        .semantic_cache_context(
+            "openai.chat.completions",
+            &tenant,
+            "fast-chat",
+            "openai",
+            "gpt-4o-mini",
+            &body,
+        )
+        .is_none());
+
+    let semantic = AppState::new(semantic_cache_config(0.9));
+    assert!(semantic
+        .semantic_cache_context(
+            "openai.chat.completions",
+            &tenant,
+            "fast-chat",
+            "openai",
+            "gpt-4o-mini",
+            &body,
+        )
+        .is_some());
+}
+
+/// A paraphrased prompt within threshold hits; a cross-tenant identical prompt
+/// never hits (acceptance criterion #1). Below-threshold prompts also miss.
+#[test]
+fn semantic_cache_hits_paraphrase_but_isolates_tenants() {
+    let state = AppState::new(semantic_cache_config(0.85));
+    let tenant_a = tenant_with_org("org-a");
+    let tenant_b = tenant_with_org("org-b");
+    let ctx = |tenant: &ferrogate_core::TenantContext, prompt: &str| {
+        state
+            .semantic_cache_context(
+                "openai.chat.completions",
+                tenant,
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &chat_body(prompt),
+            )
+            .expect("semantic mode yields a context")
+    };
+
+    state.store_semantic_response_cache(
+        ctx(
+            &tenant_a,
+            "Please summarize the quarterly earnings report for Acme Corp",
+        ),
+        cached("cached-answer"),
+    );
+
+    // Paraphrase from the same tenant hits.
+    let paraphrase = ctx(
+        &tenant_a,
+        "Please summarize the quarterly earnings report for Acme Corporation",
+    );
+    let hit = state
+        .lookup_semantic_response_cache(&paraphrase)
+        .expect("paraphrase within threshold should hit");
+    assert_eq!(hit.body, b"cached-answer");
+
+    // Identical prompt from a different tenant must never hit (no cross bleed).
+    let cross_tenant = ctx(
+        &tenant_b,
+        "Please summarize the quarterly earnings report for Acme Corp",
+    );
+    assert!(state
+        .lookup_semantic_response_cache(&cross_tenant)
+        .is_none());
+
+    // An unrelated prompt from the same tenant falls below threshold and misses.
+    let unrelated = ctx(&tenant_a, "Translate this banana bread recipe into French");
+    assert!(state.lookup_semantic_response_cache(&unrelated).is_none());
+}
+
+/// Parity with the exact key (#233): the semantic scope must rotate whenever
+/// the guardrail policy set changes, so entries cached under a looser policy
+/// are no longer reachable after tightening.
+#[test]
+fn semantic_scope_rotates_when_guardrail_policy_changes() {
+    fn guardrail_rule(toml: &str) -> GuardrailRule {
+        toml::from_str(toml).expect("test guardrail rule must parse")
+    }
+    let scope = |state: &AppState| {
+        state.ai_semantic_scope_hash(
+            "openai.chat.completions",
+            &ferrogate_core::TenantContext::default(),
+            "fast-chat",
+            "openai",
+            "gpt-4o-mini",
+        )
+    };
+
+    let baseline = AppState::new(semantic_cache_config(0.9));
+    let baseline_again = AppState::new(semantic_cache_config(0.9));
+    let mut tightened_config = semantic_cache_config(0.9);
+    tightened_config.guardrails = vec![guardrail_rule(
+        r#"
+id = "redact-secret"
+name = "Redact leaked secret"
+stage = "response"
+keywords = ["ferro-secret-9922"]
+effect = "redact"
+"#,
+    )];
+    let tightened = AppState::new(tightened_config);
+
+    assert_eq!(scope(&baseline), scope(&baseline_again));
+    assert_ne!(scope(&baseline), scope(&tightened));
+}

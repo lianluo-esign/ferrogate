@@ -123,6 +123,7 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         ],
         cache_hits_total: 1,
         cache_misses_total: 1,
+        semantic_cache_hits_total: 1,
         guardrail_match_total: 2,
         guardrail_denial_total: 1,
         guardrail_redaction_total: 1,
@@ -175,6 +176,7 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_request_errors_total 1"));
     assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 1"));
     assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 1"));
+    assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"semantic_hit\"} 1"));
     assert!(text.contains("ferrogate_guardrail_matches_total 2"));
     assert!(text.contains("ferrogate_guardrail_denials_total 1"));
     assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
