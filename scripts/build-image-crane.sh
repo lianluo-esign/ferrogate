@@ -37,6 +37,10 @@ TAG=""
 DO_PUSH="false"
 BASE="gcr.io/distroless/static-debian12:latest"
 TARGET="x86_64-unknown-linux-musl"
+DO_SBOM="true"                 # syft SPDX (source dep graph + image)
+SIGN="none"                    # none | local-key
+COSIGN_KEY="${COSIGN_KEY:-}"   # for --sign local-key
+ARTIFACT_DIR="${ARTIFACT_DIR:-${TMPDIR:-/tmp}}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +48,11 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="$2"; shift 2;;
     --base) BASE="$2"; shift 2;;
     --push) DO_PUSH="true"; shift;;
+    --sbom) DO_SBOM="true"; shift;;
+    --no-sbom) DO_SBOM="false"; shift;;
+    --sign) SIGN="$2"; shift 2;;
+    --cosign-key) COSIGN_KEY="$2"; shift 2;;
+    --artifact-dir) ARTIFACT_DIR="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -112,9 +121,34 @@ echo "   assembled: $OUT_TARBALL ($(stat -c%s "$OUT_TARBALL") bytes)"
 "$CRANE" config "$OUT_TARBALL" 2>/dev/null | \
   python3 -c "import json,sys;c=json.load(sys.stdin)['config'];print('   entrypoint',c['Entrypoint'],c.get('Cmd'));print('   ports',c.get('ExposedPorts'))" 2>/dev/null || true
 
+echo "== 3.5/4 SBOM + sign (evidence, #208) =="
+mkdir -p "$ARTIFACT_DIR"
+SBOM_SRC="$ARTIFACT_DIR/sbom-${TAG}.src.spdx.json"
+SBOM_IMG="$ARTIFACT_DIR/sbom-${TAG}.image.spdx.json"
+SIG="$ARTIFACT_DIR/ferrogate-${TAG}.oci.tar.sig"
+if [ "$DO_SBOM" = "true" ] && command -v syft >/dev/null; then
+  # source graph = the real supply-chain inventory for a static Rust binary;
+  # image scan = base + embedded binary.
+  syft scan "dir:$ROOT" -o spdx-json 2>/dev/null > "$SBOM_SRC" \
+    && echo "   SBOM(src): $SBOM_SRC ($(python3 -c "import json;print(len(json.load(open('$SBOM_SRC'))['packages']))" 2>/dev/null) pkgs)"
+  syft scan "docker-archive:$OUT_TARBALL" -o spdx-json 2>/dev/null > "$SBOM_IMG" \
+    && echo "   SBOM(img): $SBOM_IMG"
+else
+  echo "   (SBOM skipped: --no-sbom or syft absent)"
+fi
+if [ "$SIGN" = "local-key" ]; then
+  command -v cosign >/dev/null || { echo "ERROR: --sign local-key needs cosign" >&2; exit 1; }
+  [ -f "$COSIGN_KEY" ] || { echo "ERROR: --sign local-key needs --cosign-key <key> (COSIGN_PASSWORD env for its passphrase)" >&2; exit 1; }
+  # Offline detached signature over the exact OCI artifact; verify with
+  # scripts/verify-image-crane.sh. NOT GitHub-workflow keyless provenance (see docs).
+  cosign sign-blob --key "$COSIGN_KEY" --yes "$OUT_TARBALL" \
+    --output-signature "$SIG" --tlog-upload=false 2>/dev/null \
+    && echo "   signed(local-key): $SIG"
+fi
+
 echo "== 4/4 push to GHCR =="
 if [ "$DO_PUSH" != "true" ]; then
-  KEEP="${TMPDIR:-/tmp}/ferrogate-${TAG}.oci.tar"
+  KEEP="$ARTIFACT_DIR/ferrogate-${TAG}.oci.tar"
   cp "$OUT_TARBALL" "$KEEP"
   echo "   (dry-run: pass --push to push ${IMAGE}:${TAG}); kept $KEEP"
   exit 0

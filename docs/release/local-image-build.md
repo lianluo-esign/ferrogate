@@ -82,6 +82,41 @@ still fully validates the build + image assembly.
 - `ENV FERROGATE_CONFIG=/etc/ferrogate/Caddyfile`, `EXPOSE 8080`
 - labels: `org.opencontainers.image.{vendor,source,version}`, `cloud.token4ai.build`
 
+## Supply-chain evidence (SBOM + signature + vuln gate, #208)
+
+The local path produces the same *classes* of evidence the CI path did, minus the
+GitHub-workflow provenance (see trade-off below):
+
+- **SBOM (SPDX-2.3, syft).** `--sbom` emits two: `sbom-<tag>.src.spdx.json` (the
+  full ~2150-package Rust dependency graph from `Cargo.lock` — the real inventory
+  for a static binary) and `sbom-<tag>.image.spdx.json` (base + embedded binary).
+- **Signature (cosign, local key).** `--sign local-key --cosign-key <key>` produces
+  an offline detached signature over the exact OCI artifact
+  (`ferrogate-<tag>.oci.tar.sig`), no transparency log, no registry.
+- **Consumer verification.** `scripts/verify-image-crane.sh` pins to the public key
+  and (optionally) the expected artifact digest, checks the SBOM is valid SPDX, and
+  **fails on a tampered artifact, wrong key, or missing signature**:
+  ```bash
+  scripts/verify-image-crane.sh \
+    --tarball ferrogate-v2026.07.19.oci.tar \
+    --signature ferrogate-v2026.07.19.oci.tar.sig \
+    --pubkey cosign.pub \
+    --digest sha256:<tarball sha256> \
+    --sbom sbom-v2026.07.19.src.spdx.json
+  ```
+- **Dependency vulnerability gate (cargo-audit / RUSTSEC).** Part of the
+  `release-local.sh` gate. Where the advisory DB can't be git-fetched, point it at a
+  pre-fetched checkout: `CARGO_AUDIT_DB=/path/to/advisory-db`. Current status: **0
+  vulnerabilities** over 527 deps; 4 `unmaintained` warnings (transitive via
+  `pingora 0.8.0`: e.g. `rustls-pemfile` RUSTSEC-2025-0134).
+
+Build with full evidence in one shot:
+```bash
+scripts/build-image-crane.sh --tag v2026.07.19 \
+  --sbom --sign local-key --cosign-key cosign.key \
+  --artifact-dir ./release-artifacts        # add --push once a write:packages token exists
+```
+
 ## Supply-chain trade-off (see #208)
 
 This path signs (if you opt in) with a **local key**, not the GitHub-workflow

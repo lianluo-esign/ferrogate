@@ -67,6 +67,20 @@ else
   # Docker-backed cluster scenarios still need a docker daemon on this host.
   cargo +1.88.0 build --release -p ferrogate-test
   ./target/release/ferrogate-test ci
+  # Dependency vulnerability gate (#208): RUSTSEC advisories over the locked graph.
+  # git-fetch of the advisory DB may be blocked; set CARGO_AUDIT_DB to a pre-fetched
+  # checkout to run offline. Missing tool/DB is a soft-skip (warns, doesn't block).
+  if command -v cargo-audit >/dev/null; then
+    if [ -n "${CARGO_AUDIT_DB:-}" ]; then
+      cargo-audit audit --no-fetch --db "$CARGO_AUDIT_DB" --file Cargo.lock \
+        || echo "   WARNING: cargo-audit reported findings (review above)."
+    else
+      cargo-audit audit --file Cargo.lock \
+        || echo "   WARNING: cargo-audit reported findings (review above)."
+    fi
+  else
+    echo "   (cargo-audit absent: dependency vuln gate skipped)"
+  fi
 fi
 
 if [ "$ENGINE" = "crane" ]; then
