@@ -7,9 +7,9 @@
 use serde_json::{json, Map, Value};
 
 use crate::{
-    canonical::CanonicalAiRequest, AdapterError, ChatCompletionPlan, ProviderAdapter,
-    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
-    ResponsesPlan, SecretValue,
+    canonical::CanonicalAiRequest, AdapterError, ChatCompletionPlan, EmbeddingsPlan,
+    ProviderAdapter, ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest,
+    ProviderUsage, ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -86,6 +86,59 @@ impl ProviderAdapter for GeminiAdapter {
             stream: request.stream,
             headers: gemini_headers(provider.api_key),
         })
+    }
+
+    fn prepare_embeddings(
+        &self,
+        provider: ProviderConfig,
+        request: EmbeddingsPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let body = ensure_object_body(request.body)?;
+        let inputs = embeddings_text_inputs(&body)?;
+        let model_path = format!(
+            "models/{}",
+            request.provider_model.trim_start_matches("models/")
+        );
+        let requests: Vec<Value> = inputs
+            .iter()
+            .map(|text| {
+                json!({
+                    "model": model_path,
+                    "content": { "parts": [{ "text": text }] },
+                })
+            })
+            .collect();
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name,
+            endpoint: batch_embed_contents_endpoint(&provider.base_url, &request.provider_model),
+            body: json!({ "requests": requests }),
+            stream: false,
+            headers: gemini_headers(provider.api_key),
+        })
+    }
+
+    fn translate_embeddings_response(
+        &self,
+        body: &[u8],
+        model: &str,
+    ) -> Result<Option<Value>, AdapterError> {
+        let value = parse_embeddings_response_body(body)?;
+        let embeddings = value
+            .get("embeddings")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AdapterError::InvalidRequest {
+                message: "Gemini embeddings response is missing an embeddings array".into(),
+            })?;
+        let vectors = embeddings
+            .iter()
+            .map(|entry| entry.get("values").cloned().unwrap_or_else(|| json!([])))
+            .collect();
+        // batchEmbedContents does not report token counts, so the gateway
+        // falls back to its request-side estimate for metering (mirrors the
+        // handler's `record_estimated_provider_attempt_billing_event` path).
+        Ok(Some(openai_embeddings_response(vectors, model, None)))
     }
 
     fn normalize_error_response(
@@ -298,6 +351,92 @@ fn generate_content_endpoint(base_url: &str, provider_model: &str, stream: bool)
         provider_model.trim_start_matches("models/"),
         action
     )
+}
+
+fn batch_embed_contents_endpoint(base_url: &str, provider_model: &str) -> String {
+    format!(
+        "{}/models/{}:batchEmbedContents",
+        base_url.trim_end_matches('/'),
+        provider_model.trim_start_matches("models/"),
+    )
+}
+
+/// Extract the text inputs from an OpenAI-shaped embeddings request body
+/// (`"input"` as a string or an array of strings). `pub(crate)` so the
+/// `vertex` and `bedrock` adapters reuse the same OpenAI-side parsing
+/// before mapping into their own native request shapes (issue #274).
+///
+/// OpenAI also accepts pre-tokenized integer-id inputs; the non-OpenAI
+/// embedding APIs targeted here take raw text only, so a non-string array
+/// element is rejected as an `InvalidRequest` rather than silently
+/// producing a malformed upstream request.
+pub(crate) fn embeddings_text_inputs(body: &Value) -> Result<Vec<String>, AdapterError> {
+    match body.get("input") {
+        Some(Value::String(text)) => Ok(vec![text.clone()]),
+        Some(Value::Array(items)) => {
+            let mut inputs = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(text) => inputs.push(text.clone()),
+                    _ => {
+                        return Err(AdapterError::InvalidRequest {
+                            message:
+                                "embeddings adapter supports string or string-array input only"
+                                    .into(),
+                        });
+                    }
+                }
+            }
+            Ok(inputs)
+        }
+        _ => Err(AdapterError::InvalidRequest {
+            message: "embeddings request must include a string or string-array \"input\"".into(),
+        }),
+    }
+}
+
+/// Build the canonical OpenAI-shaped embeddings response body from a list
+/// of already-extracted embedding vectors (each a JSON array of floats),
+/// the logical model to echo, and optional provider-reported prompt
+/// tokens. `pub(crate)` so every non-OpenAI adapter returns a byte-shape
+/// identical to the OpenAI-compatible pass-through (issue #274).
+pub(crate) fn openai_embeddings_response(
+    embeddings: Vec<Value>,
+    model: &str,
+    prompt_tokens: Option<u64>,
+) -> Value {
+    let data: Vec<Value> = embeddings
+        .into_iter()
+        .enumerate()
+        .map(|(index, embedding)| {
+            json!({
+                "object": "embedding",
+                "index": index,
+                "embedding": embedding,
+            })
+        })
+        .collect();
+    let mut response = json!({
+        "object": "list",
+        "data": data,
+        "model": model,
+    });
+    if let Some(tokens) = prompt_tokens {
+        response["usage"] = json!({
+            "prompt_tokens": tokens,
+            "total_tokens": tokens,
+        });
+    }
+    response
+}
+
+/// Parse a provider embeddings response body as JSON, mapping a decode
+/// failure to an `InvalidRequest` adapter error (issue #274). Shared by the
+/// Gemini/Vertex/Bedrock `translate_embeddings_response` implementations.
+pub(crate) fn parse_embeddings_response_body(body: &[u8]) -> Result<Value, AdapterError> {
+    serde_json::from_slice::<Value>(body).map_err(|error| AdapterError::InvalidRequest {
+        message: format!("provider embeddings response must be JSON: {error}"),
+    })
 }
 
 fn fallback_error_message(parsed: Option<&Value>, body: &[u8]) -> Option<String> {
@@ -533,5 +672,124 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(13));
         assert_eq!(usage.completion_tokens, Some(8));
         assert_eq!(usage.total_tokens, Some(21));
+    }
+
+    #[test]
+    fn converts_embeddings_plan_to_gemini_batch_embed_contents_request() {
+        let adapter = GeminiAdapter;
+        let prepared = adapter
+            .prepare_embeddings(
+                provider(Some("provider-secret")),
+                EmbeddingsPlan {
+                    logical_model: "flash-embed".into(),
+                    provider_model: "text-embedding-004".into(),
+                    body: json!({
+                        "model": "flash-embed",
+                        "input": ["alpha", "beta"]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents"
+        );
+        assert_eq!(
+            prepared.body["requests"][0]["model"],
+            "models/text-embedding-004"
+        );
+        assert_eq!(
+            prepared.body["requests"][0]["content"]["parts"][0]["text"],
+            "alpha"
+        );
+        assert_eq!(
+            prepared.body["requests"][1]["content"]["parts"][0]["text"],
+            "beta"
+        );
+        assert!(!prepared.stream);
+        assert!(prepared.headers.iter().any(|header| {
+            header.name == "x-goog-api-key" && header.value.expose_secret() == "provider-secret"
+        }));
+    }
+
+    #[test]
+    fn accepts_single_string_embeddings_input() {
+        let adapter = GeminiAdapter;
+        let prepared = adapter
+            .prepare_embeddings(
+                provider(None),
+                EmbeddingsPlan {
+                    logical_model: "flash-embed".into(),
+                    provider_model: "models/text-embedding-004".into(),
+                    body: json!({"input": "hello"}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.body["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            prepared.body["requests"][0]["content"]["parts"][0]["text"],
+            "hello"
+        );
+    }
+
+    #[test]
+    fn rejects_pre_tokenized_embeddings_input() {
+        let adapter = GeminiAdapter;
+        let error = adapter
+            .prepare_embeddings(
+                provider(None),
+                EmbeddingsPlan {
+                    logical_model: "flash-embed".into(),
+                    provider_model: "text-embedding-004".into(),
+                    body: json!({"input": [1, 2, 3]}),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AdapterError::InvalidRequest {
+                message: "embeddings adapter supports string or string-array input only".into()
+            }
+        );
+    }
+
+    #[test]
+    fn normalizes_gemini_batch_embed_response_to_openai_shape() {
+        let adapter = GeminiAdapter;
+        let normalized = adapter
+            .translate_embeddings_response(
+                br#"{"embeddings":[{"values":[0.1,0.2,0.3]},{"values":[0.4,0.5,0.6]}]}"#,
+                "flash-embed",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(normalized["object"], "list");
+        assert_eq!(normalized["model"], "flash-embed");
+        assert_eq!(normalized["data"][0]["object"], "embedding");
+        assert_eq!(normalized["data"][0]["index"], 0);
+        assert_eq!(normalized["data"][0]["embedding"][2], 0.3);
+        assert_eq!(normalized["data"][1]["index"], 1);
+        assert_eq!(normalized["data"][1]["embedding"][0], 0.4);
+        // batchEmbedContents reports no usage, so none is synthesized.
+        assert!(normalized.get("usage").is_none());
+    }
+
+    #[test]
+    fn rejects_gemini_embedding_response_without_embeddings_array() {
+        let adapter = GeminiAdapter;
+        let error = adapter
+            .translate_embeddings_response(br#"{"unexpected":true}"#, "flash-embed")
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AdapterError::InvalidRequest {
+                message: "Gemini embeddings response is missing an embeddings array".into()
+            }
+        );
     }
 }

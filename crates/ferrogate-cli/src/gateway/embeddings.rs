@@ -762,14 +762,59 @@ impl FerroGateway {
                             completed_at_unix: Some(now_unix_seconds()),
                         });
 
-                        return write_raw_response(
-                            session,
-                            response.status,
-                            &response.content_type,
-                            response.body.into(),
-                            &ctx.request_id,
-                        )
-                        .await;
+                        // Non-OpenAI adapter families (Gemini, Vertex,
+                        // Bedrock) return a native embeddings envelope; the
+                        // adapter normalizes it into the OpenAI-shaped body
+                        // clients expect. `None` means the upstream body is
+                        // already canonical and passes through byte-for-byte
+                        // (the OpenAI-compatible family), preserving the
+                        // previous behavior exactly (issue #274).
+                        match state.translate_embeddings_response(
+                            &provider.kind,
+                            &response.body,
+                            &request.model,
+                        ) {
+                            Ok(Some(normalized)) => {
+                                return write_json_response(
+                                    session,
+                                    response.status,
+                                    &normalized,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
+                            Ok(None) => {
+                                return write_raw_response(
+                                    session,
+                                    response.status,
+                                    &response.content_type,
+                                    response.body.into(),
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                self.record_embeddings_error_log(
+                                    ctx,
+                                    policy_request.tenant.clone(),
+                                    Some(&request.model),
+                                    Some(&provider.name),
+                                    StatusCode::BAD_GATEWAY,
+                                    "provider_adapter_error",
+                                );
+                                write_json_error(
+                                    session,
+                                    StatusCode::BAD_GATEWAY,
+                                    "provider_adapter_error",
+                                    format!(
+                                        "provider embeddings response translation failed: {error:?}"
+                                    ),
+                                    &ctx.request_id,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        }
                     }
                     Err(error) => {
                         state.record_provider_failure(&provider.name);

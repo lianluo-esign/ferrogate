@@ -346,6 +346,26 @@ pub trait ProviderAdapter: Send + Sync {
         })
     }
 
+    /// Translate a successful native-family embeddings response into an
+    /// OpenAI-shaped `{"object":"list","data":[{"object":"embedding",
+    /// "index":N,"embedding":[...]}],"model":...}` body (issue #274).
+    ///
+    /// The default returns `Ok(None)`, meaning "pass the upstream body
+    /// through byte-for-byte" -- the correct behaviour for the
+    /// OpenAI-compatible family, whose `/embeddings` response already is
+    /// the canonical shape. Non-OpenAI families (Gemini, Vertex, Bedrock)
+    /// override this to normalize their native embedding envelopes, so a
+    /// client always sees the same OpenAI-shaped response regardless of the
+    /// resolved upstream. `model` is the logical model the caller
+    /// requested, echoed back in the `model` field.
+    fn translate_embeddings_response(
+        &self,
+        _body: &[u8],
+        _model: &str,
+    ) -> Result<Option<Value>, AdapterError> {
+        Ok(None)
+    }
+
     fn prepare_model_catalog(
         &self,
         _provider: ProviderConfig,

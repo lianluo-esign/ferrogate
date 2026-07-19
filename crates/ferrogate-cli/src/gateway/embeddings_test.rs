@@ -210,6 +210,46 @@ fn request_plan_accepts_a_valid_string_input_and_normalizes_a_guardrail_envelope
 }
 
 #[test]
+fn translate_embeddings_response_selects_adapter_family_by_provider_kind() {
+    let state = AppState::new(embeddings_plan_config());
+
+    // OpenAI-compatible upstreams already return the canonical shape, so
+    // the handler passes them through untouched (None).
+    let passthrough = state
+        .translate_embeddings_response("openai", br#"{"object":"list","data":[]}"#, "fast-embed")
+        .unwrap();
+    assert!(passthrough.is_none());
+
+    // A Gemini upstream's native batchEmbedContents envelope is normalized
+    // into an OpenAI-shaped embeddings response, echoing the logical model.
+    let normalized = state
+        .translate_embeddings_response(
+            "gemini",
+            br#"{"embeddings":[{"values":[0.1,0.2,0.3]}]}"#,
+            "fast-embed",
+        )
+        .unwrap()
+        .expect("gemini response is normalized");
+    assert_eq!(normalized["object"], "list");
+    assert_eq!(normalized["model"], "fast-embed");
+    assert_eq!(normalized["data"][0]["object"], "embedding");
+    assert_eq!(normalized["data"][0]["index"], 0);
+    assert_eq!(normalized["data"][0]["embedding"][2], 0.3);
+}
+
+#[test]
+fn translate_embeddings_response_surfaces_malformed_upstream_body() {
+    let state = AppState::new(embeddings_plan_config());
+    let error = state
+        .translate_embeddings_response("gemini", b"not json", "fast-embed")
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ferrogate_providers::AdapterError::InvalidRequest { .. }
+    ));
+}
+
+#[test]
 fn embeddings_attempt_retries_before_falling_back_for_retryable_status() {
     let decision = embeddings_attempt_decision(true, 0, /* max_dispatch_retries */ 2, 0, 2);
     assert!(matches!(decision, EmbeddingsAttemptDecision::RetryProvider));

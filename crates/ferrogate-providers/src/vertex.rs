@@ -17,15 +17,17 @@
 // not implemented in this first cut, matching the scope `bedrock.rs`
 // already established for the same issue.
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::bedrock::extract_host;
 use crate::gemini::{
-    ensure_object_body, generation_config, openai_messages_to_gemini_contents, system_instruction,
+    embeddings_text_inputs, ensure_object_body, generation_config, openai_embeddings_response,
+    openai_messages_to_gemini_contents, parse_embeddings_response_body, system_instruction,
 };
 use crate::{
-    AdapterError, ChatCompletionPlan, GeminiAdapter, ProviderAdapter, ProviderConfig,
-    ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    AdapterError, ChatCompletionPlan, EmbeddingsPlan, GeminiAdapter, ProviderAdapter,
+    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
+    SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -77,6 +79,77 @@ impl ProviderAdapter for VertexAiAdapter {
         })
     }
 
+    fn prepare_embeddings(
+        &self,
+        provider: ProviderConfig,
+        request: EmbeddingsPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let credentials =
+            provider
+                .gcp_credentials
+                .as_ref()
+                .ok_or_else(|| AdapterError::InvalidRequest {
+                    message: "vertex provider is missing GCP credentials".into(),
+                })?;
+        let body = ensure_object_body(request.body)?;
+        let inputs = embeddings_text_inputs(&body)?;
+        // Vertex text-embedding models use the `:predict` endpoint with an
+        // `instances` array (one `{"content": text}` per input), distinct
+        // from the public Generative Language API's `:batchEmbedContents`.
+        let instances: Vec<Value> = inputs
+            .iter()
+            .map(|text| json!({ "content": text }))
+            .collect();
+        let endpoint = predict_endpoint(&provider.base_url, credentials, &request.provider_model)?;
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name,
+            endpoint,
+            body: json!({ "instances": instances }),
+            stream: false,
+            headers: vertex_headers(&credentials.access_token),
+        })
+    }
+
+    fn translate_embeddings_response(
+        &self,
+        body: &[u8],
+        model: &str,
+    ) -> Result<Option<Value>, AdapterError> {
+        let value = parse_embeddings_response_body(body)?;
+        let predictions = value
+            .get("predictions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AdapterError::InvalidRequest {
+                message: "Vertex embeddings response is missing a predictions array".into(),
+            })?;
+        let mut vectors = Vec::with_capacity(predictions.len());
+        let (mut token_total, mut saw_tokens) = (0_u64, false);
+        for prediction in predictions {
+            let embeddings = prediction.get("embeddings");
+            vectors.push(
+                embeddings
+                    .and_then(|embeddings| embeddings.get("values"))
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            );
+            if let Some(tokens) = embeddings
+                .and_then(|embeddings| embeddings.get("statistics"))
+                .and_then(|statistics| statistics.get("token_count"))
+                .and_then(Value::as_u64)
+            {
+                token_total += tokens;
+                saw_tokens = true;
+            }
+        }
+        Ok(Some(openai_embeddings_response(
+            vectors,
+            model,
+            saw_tokens.then_some(token_total),
+        )))
+    }
+
     fn normalize_error_response(
         &self,
         status: u16,
@@ -92,8 +165,37 @@ impl ProviderAdapter for VertexAiAdapter {
     }
 
     fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage> {
-        GeminiAdapter.extract_usage(body)
+        // Chat/`generateContent` responses carry a Gemini-shaped
+        // `usageMetadata`; embeddings `:predict` responses instead report
+        // per-instance `statistics.token_count`, so fall back to summing
+        // those for provider-reported embeddings metering (issue #274).
+        GeminiAdapter
+            .extract_usage(body)
+            .or_else(|| vertex_embeddings_usage(body))
     }
+}
+
+fn vertex_embeddings_usage(body: &[u8]) -> Option<ProviderUsage> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let predictions = value.get("predictions").and_then(Value::as_array)?;
+    let mut total = 0_u64;
+    let mut saw_tokens = false;
+    for prediction in predictions {
+        if let Some(tokens) = prediction
+            .get("embeddings")
+            .and_then(|embeddings| embeddings.get("statistics"))
+            .and_then(|statistics| statistics.get("token_count"))
+            .and_then(Value::as_u64)
+        {
+            total += tokens;
+            saw_tokens = true;
+        }
+    }
+    saw_tokens.then_some(ProviderUsage {
+        prompt_tokens: Some(total),
+        completion_tokens: None,
+        total_tokens: Some(total),
+    })
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -140,6 +242,26 @@ fn generate_content_endpoint(
         .trim_start_matches("models/");
     Ok(format!(
         "{scheme}://{host}/v1/projects/{}/locations/{}/publishers/google/models/{model}:{action}",
+        credentials.project_id, credentials.location,
+    ))
+}
+
+fn predict_endpoint(
+    base_url: &str,
+    credentials: &crate::types::GcpProviderCredentials,
+    provider_model: &str,
+) -> Result<String, AdapterError> {
+    let host = extract_host(base_url)?;
+    let scheme = if base_url.trim_start().starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    };
+    let model = provider_model
+        .trim_start_matches("publishers/google/models/")
+        .trim_start_matches("models/");
+    Ok(format!(
+        "{scheme}://{host}/v1/projects/{}/locations/{}/publishers/google/models/{model}:predict",
         credentials.project_id, credentials.location,
     ))
 }
@@ -334,5 +456,84 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(13));
         assert_eq!(usage.completion_tokens, Some(8));
         assert_eq!(usage.total_tokens, Some(21));
+    }
+
+    #[test]
+    fn converts_embeddings_plan_to_vertex_predict_request() {
+        let adapter = VertexAiAdapter;
+        let prepared = adapter
+            .prepare_embeddings(
+                provider(),
+                EmbeddingsPlan {
+                    logical_model: "vertex-embed".into(),
+                    provider_model: "text-embedding-004".into(),
+                    body: json!({"input": ["alpha", "beta"]}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-gcp-project/locations/us-central1/publishers/google/models/text-embedding-004:predict"
+        );
+        assert_eq!(prepared.body["instances"][0]["content"], "alpha");
+        assert_eq!(prepared.body["instances"][1]["content"], "beta");
+        assert!(!prepared.stream);
+        assert_eq!(
+            prepared
+                .headers
+                .iter()
+                .find(|header| header.name == "authorization")
+                .map(|header| header.value.expose_secret()),
+            Some("Bearer ya29.EXAMPLE_ACCESS_TOKEN")
+        );
+    }
+
+    #[test]
+    fn rejects_embeddings_without_gcp_credentials() {
+        let mut provider = provider();
+        provider.gcp_credentials = None;
+        let adapter = VertexAiAdapter;
+        let error = adapter
+            .prepare_embeddings(
+                provider,
+                EmbeddingsPlan {
+                    logical_model: "vertex-embed".into(),
+                    provider_model: "text-embedding-004".into(),
+                    body: json!({"input": "hello"}),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AdapterError::InvalidRequest {
+                message: "vertex provider is missing GCP credentials".into()
+            }
+        );
+    }
+
+    #[test]
+    fn normalizes_vertex_predict_response_and_meters_reported_tokens() {
+        let adapter = VertexAiAdapter;
+        let raw = br#"{"predictions":[
+            {"embeddings":{"values":[0.1,0.2],"statistics":{"token_count":3}}},
+            {"embeddings":{"values":[0.3,0.4],"statistics":{"token_count":4}}}
+        ]}"#;
+
+        let normalized = adapter
+            .translate_embeddings_response(raw, "vertex-embed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized["object"], "list");
+        assert_eq!(normalized["model"], "vertex-embed");
+        assert_eq!(normalized["data"][0]["embedding"][1], 0.2);
+        assert_eq!(normalized["data"][1]["index"], 1);
+        assert_eq!(normalized["usage"]["prompt_tokens"], 7);
+        assert_eq!(normalized["usage"]["total_tokens"], 7);
+
+        let usage = adapter.extract_usage(raw).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(7));
+        assert_eq!(usage.total_tokens, Some(7));
     }
 }

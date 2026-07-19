@@ -71,6 +71,16 @@ impl ProviderAdapterRegistry {
             .prepare_embeddings(provider, request)
     }
 
+    pub fn translate_embeddings_response(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+        model: &str,
+    ) -> Result<Option<Value>, AdapterError> {
+        self.adapter_for(provider_kind)?
+            .translate_embeddings_response(body, model)
+    }
+
     pub fn prepare_model_catalog(
         &self,
         provider: ProviderConfig,

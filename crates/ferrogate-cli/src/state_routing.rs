@@ -82,6 +82,21 @@ impl AppState {
         )
     }
 
+    /// Normalize a successful provider embeddings response into the
+    /// canonical OpenAI-shaped body, or `None` when the upstream body
+    /// already is OpenAI-shaped and should pass through unchanged (issue
+    /// #274). Selects the adapter family by the resolved route's provider
+    /// kind, mirroring how chat dispatch picks its adapter.
+    pub(crate) fn translate_embeddings_response(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+        logical_model: &str,
+    ) -> Result<Option<serde_json::Value>, AdapterError> {
+        self.provider_adapters
+            .translate_embeddings_response(provider_kind, body, logical_model)
+    }
+
     pub(crate) fn provider_config(&self, provider: &Provider) -> ProviderConfig {
         let api_key = self
             .resolved_provider_secrets

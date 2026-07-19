@@ -17,10 +17,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 
+use crate::gemini::{
+    embeddings_text_inputs, openai_embeddings_response, parse_embeddings_response_body,
+};
 use crate::sigv4::{sign, AwsCredentials, SigningRequest};
+use crate::types::AwsProviderCredentials;
 use crate::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    AdapterError, ChatCompletionPlan, EmbeddingsPlan, ProviderAdapter, ProviderConfig,
+    ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -56,83 +60,77 @@ impl ProviderAdapter for BedrockAdapter {
             bedrock_body["inferenceConfig"] = inference_config;
         }
 
-        let host = extract_host(&provider.base_url)?;
         let path = format!(
             "/model/{}/converse",
             percent_encode_path_segment(&request.provider_model)
         );
-        // Real Bedrock is https-only; `http://` is accepted too so tests
-        // (and any local/VPC-endpoint mock) can exercise this adapter
-        // against a plain-HTTP mock server the same way every other
-        // adapter in this crate is tested, rather than requiring a real
-        // TLS-terminated stand-in.
-        let scheme = if provider.base_url.trim_start().starts_with("http://") {
-            "http"
-        } else {
-            "https"
-        };
-        let endpoint = format!("{scheme}://{host}{path}");
-        let body_bytes =
-            serde_json::to_vec(&bedrock_body).map_err(|error| AdapterError::InvalidRequest {
-                message: format!("failed to serialize Bedrock request body: {error}"),
-            })?;
+        sign_bedrock_request(&provider, credentials, &path, bedrock_body, request.stream)
+    }
 
-        let timestamp_unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        let signed = sign(
-            &SigningRequest {
-                method: "POST",
-                path: &path,
-                host: &host,
-                region: &credentials.region,
-                service: "bedrock",
-                body: &body_bytes,
-                timestamp_unix,
-            },
-            &AwsCredentials {
-                access_key_id: credentials.access_key_id.clone(),
-                secret_access_key: credentials.secret_access_key.expose_secret().to_string(),
-                session_token: credentials
-                    .session_token
-                    .as_ref()
-                    .map(|token| token.expose_secret().to_string()),
-            },
-        );
-
-        let mut headers = vec![
-            ProviderHeader {
-                name: "content-type".into(),
-                value: SecretValue::new("application/json"),
-            },
-            ProviderHeader {
-                name: "host".into(),
-                value: SecretValue::new(host),
-            },
-            ProviderHeader {
-                name: "x-amz-date".into(),
-                value: SecretValue::new(signed.x_amz_date),
-            },
-            ProviderHeader {
-                name: "authorization".into(),
-                value: SecretValue::new(signed.authorization),
-            },
-        ];
-        if let Some(session_token) = signed.x_amz_security_token {
-            headers.push(ProviderHeader {
-                name: "x-amz-security-token".into(),
-                value: SecretValue::new(session_token),
+    fn prepare_embeddings(
+        &self,
+        provider: ProviderConfig,
+        request: EmbeddingsPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let credentials =
+            provider
+                .aws_credentials
+                .as_ref()
+                .ok_or_else(|| AdapterError::InvalidRequest {
+                    message: "bedrock provider is missing AWS credentials".into(),
+                })?;
+        let body = ensure_object_body(request.body)?;
+        let inputs = embeddings_text_inputs(&body)?;
+        // The Titan Embeddings `InvokeModel` body takes a single
+        // `inputText`; batch fan-out across the array would need N signed
+        // calls, out of scope for a single prepared request, so a
+        // multi-element `input` fails closed here rather than silently
+        // embedding only the first element.
+        let [input] = inputs.as_slice() else {
+            return Err(AdapterError::InvalidRequest {
+                message: "bedrock embeddings adapter supports a single string input".into(),
             });
-        }
+        };
 
-        Ok(ProviderHttpRequest {
-            provider: provider.name,
-            endpoint,
-            body: bedrock_body,
-            stream: request.stream,
-            headers,
-        })
+        let path = format!(
+            "/model/{}/invoke",
+            percent_encode_path_segment(&request.provider_model)
+        );
+        sign_bedrock_request(
+            &provider,
+            credentials,
+            &path,
+            json!({ "inputText": input }),
+            false,
+        )
+    }
+
+    fn translate_embeddings_response(
+        &self,
+        body: &[u8],
+        model: &str,
+    ) -> Result<Option<Value>, AdapterError> {
+        let value = parse_embeddings_response_body(body)?;
+        // Titan Embeddings reports a single `embedding` vector plus an
+        // `inputTextTokenCount`; the Cohere-on-Bedrock family reports an
+        // `embeddings` array of vectors. Accept both so this one adapter
+        // covers the two dominant Bedrock embedding wire shapes.
+        let vectors = if let Some(embedding) = value.get("embedding").filter(|v| v.is_array()) {
+            vec![embedding.clone()]
+        } else if let Some(embeddings) = value.get("embeddings").and_then(Value::as_array) {
+            embeddings.clone()
+        } else {
+            return Err(AdapterError::InvalidRequest {
+                message: "Bedrock embeddings response is missing an embedding vector".into(),
+            });
+        };
+        let prompt_tokens = value.get("inputTextTokenCount").and_then(Value::as_u64);
+        Ok(Some(openai_embeddings_response(
+            vectors,
+            model,
+            prompt_tokens,
+        )))
     }
 
     fn normalize_error_response(
@@ -175,7 +173,17 @@ impl ProviderAdapter for BedrockAdapter {
 
     fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage> {
         let value = serde_json::from_slice::<Value>(body).ok()?;
-        let usage = value.get("usage")?;
+        // Titan Embeddings `InvokeModel` responses report a flat
+        // `inputTextTokenCount` rather than a Converse-shaped `usage`
+        // object, so meter that as prompt/total tokens (issue #274).
+        let Some(usage) = value.get("usage") else {
+            let embedding_tokens = value.get("inputTextTokenCount").and_then(Value::as_u64)?;
+            return Some(ProviderUsage {
+                prompt_tokens: Some(embedding_tokens),
+                completion_tokens: None,
+                total_tokens: Some(embedding_tokens),
+            });
+        };
         let prompt_tokens = usage.get("inputTokens").and_then(Value::as_u64);
         let completion_tokens = usage.get("outputTokens").and_then(Value::as_u64);
         let total_tokens = usage
@@ -192,6 +200,90 @@ impl ProviderAdapter for BedrockAdapter {
             || extracted.total_tokens.is_some())
         .then_some(extracted)
     }
+}
+
+/// SigV4-sign a Bedrock Runtime `POST {path}` request against `provider`'s
+/// host and AWS credentials, returning the prepared HTTP request. Shared by
+/// `prepare_chat_completions` (`/converse`) and `prepare_embeddings`
+/// (`/invoke`) so both go through one signing path (issue #274).
+fn sign_bedrock_request(
+    provider: &ProviderConfig,
+    credentials: &AwsProviderCredentials,
+    path: &str,
+    body: Value,
+    stream: bool,
+) -> Result<ProviderHttpRequest, AdapterError> {
+    let host = extract_host(&provider.base_url)?;
+    // Real Bedrock is https-only; `http://` is accepted too so tests (and
+    // any local/VPC-endpoint mock) can exercise this adapter against a
+    // plain-HTTP mock server the same way every other adapter in this crate
+    // is tested, rather than requiring a real TLS-terminated stand-in.
+    let scheme = if provider.base_url.trim_start().starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    };
+    let endpoint = format!("{scheme}://{host}{path}");
+    let body_bytes = serde_json::to_vec(&body).map_err(|error| AdapterError::InvalidRequest {
+        message: format!("failed to serialize Bedrock request body: {error}"),
+    })?;
+
+    let timestamp_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let signed = sign(
+        &SigningRequest {
+            method: "POST",
+            path,
+            host: &host,
+            region: &credentials.region,
+            service: "bedrock",
+            body: &body_bytes,
+            timestamp_unix,
+        },
+        &AwsCredentials {
+            access_key_id: credentials.access_key_id.clone(),
+            secret_access_key: credentials.secret_access_key.expose_secret().to_string(),
+            session_token: credentials
+                .session_token
+                .as_ref()
+                .map(|token| token.expose_secret().to_string()),
+        },
+    );
+
+    let mut headers = vec![
+        ProviderHeader {
+            name: "content-type".into(),
+            value: SecretValue::new("application/json"),
+        },
+        ProviderHeader {
+            name: "host".into(),
+            value: SecretValue::new(host),
+        },
+        ProviderHeader {
+            name: "x-amz-date".into(),
+            value: SecretValue::new(signed.x_amz_date),
+        },
+        ProviderHeader {
+            name: "authorization".into(),
+            value: SecretValue::new(signed.authorization),
+        },
+    ];
+    if let Some(session_token) = signed.x_amz_security_token {
+        headers.push(ProviderHeader {
+            name: "x-amz-security-token".into(),
+            value: SecretValue::new(session_token),
+        });
+    }
+
+    Ok(ProviderHttpRequest {
+        provider: provider.name.clone(),
+        endpoint,
+        body,
+        stream,
+        headers,
+    })
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -536,6 +628,100 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(13));
         assert_eq!(usage.completion_tokens, Some(8));
         assert_eq!(usage.total_tokens, Some(21));
+    }
+
+    #[test]
+    fn converts_embeddings_plan_to_signed_titan_invoke_request() {
+        let adapter = BedrockAdapter;
+        let prepared = adapter
+            .prepare_embeddings(
+                provider(),
+                EmbeddingsPlan {
+                    logical_model: "bedrock-embed".into(),
+                    provider_model: "amazon.titan-embed-text-v2:0".into(),
+                    body: json!({"input": "embed this"}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/\
+             amazon.titan-embed-text-v2%3A0/invoke"
+        );
+        assert_eq!(prepared.body["inputText"], "embed this");
+        assert!(!prepared.stream);
+
+        let header = |name: &str| {
+            prepared
+                .headers
+                .iter()
+                .find(|header| header.name == name)
+                .map(|header| header.value.expose_secret())
+        };
+        assert!(header("x-amz-date").is_some());
+        assert!(header("authorization")
+            .unwrap()
+            .starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"));
+        assert!(!format!("{prepared:?}").contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn rejects_multi_input_embeddings_for_bedrock() {
+        let adapter = BedrockAdapter;
+        let error = adapter
+            .prepare_embeddings(
+                provider(),
+                EmbeddingsPlan {
+                    logical_model: "bedrock-embed".into(),
+                    provider_model: "amazon.titan-embed-text-v2:0".into(),
+                    body: json!({"input": ["a", "b"]}),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AdapterError::InvalidRequest {
+                message: "bedrock embeddings adapter supports a single string input".into()
+            }
+        );
+    }
+
+    #[test]
+    fn normalizes_titan_embedding_response_and_meters_reported_tokens() {
+        let adapter = BedrockAdapter;
+        let raw = br#"{"embedding":[0.1,0.2,0.3],"inputTextTokenCount":5}"#;
+
+        let normalized = adapter
+            .translate_embeddings_response(raw, "bedrock-embed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized["object"], "list");
+        assert_eq!(normalized["model"], "bedrock-embed");
+        assert_eq!(normalized["data"][0]["index"], 0);
+        assert_eq!(normalized["data"][0]["embedding"][2], 0.3);
+        assert_eq!(normalized["usage"]["prompt_tokens"], 5);
+
+        let usage = adapter.extract_usage(raw).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(5));
+    }
+
+    #[test]
+    fn normalizes_cohere_on_bedrock_embeddings_array_response() {
+        let adapter = BedrockAdapter;
+        let normalized = adapter
+            .translate_embeddings_response(
+                br#"{"embeddings":[[0.1,0.2],[0.3,0.4]]}"#,
+                "bedrock-embed",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(normalized["data"][0]["embedding"][0], 0.1);
+        assert_eq!(normalized["data"][1]["embedding"][1], 0.4);
+        assert!(normalized.get("usage").is_none());
     }
 
     #[test]
