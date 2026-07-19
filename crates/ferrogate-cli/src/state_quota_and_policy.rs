@@ -1111,6 +1111,7 @@ fn guardrail_protocol_name(protocol: ferrogate_guardrails::GuardrailProtocol) ->
         ferrogate_guardrails::GuardrailProtocol::ChatCompletions => "chat_completions",
         ferrogate_guardrails::GuardrailProtocol::Responses => "responses",
         ferrogate_guardrails::GuardrailProtocol::Embeddings => "embeddings",
+        ferrogate_guardrails::GuardrailProtocol::Images => "images",
         ferrogate_guardrails::GuardrailProtocol::ManagedAction => "managed_action",
         // #278: agent-to-agent message exchange over the /v1/agents ingress.
         ferrogate_guardrails::GuardrailProtocol::A2a => "a2a",

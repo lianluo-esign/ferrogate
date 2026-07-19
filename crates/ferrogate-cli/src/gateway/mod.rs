@@ -26,6 +26,7 @@ mod external_actions;
 mod function_egress;
 mod guardrail_policies;
 mod handlers;
+mod images;
 mod local;
 mod managed_action_guardrail;
 mod mcp_identity;

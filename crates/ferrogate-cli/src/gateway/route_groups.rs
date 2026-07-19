@@ -217,6 +217,11 @@ impl FerroGateway {
                 .await?;
             return Ok(true);
         }
+        if req.path == "/v1/images/generations" {
+            self.handle_images(session, ctx, req.headers.clone())
+                .await?;
+            return Ok(true);
+        }
         Ok(false)
     }
 

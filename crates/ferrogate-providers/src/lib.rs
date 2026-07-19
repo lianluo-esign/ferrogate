@@ -41,7 +41,7 @@ pub use sigv4::{
 pub use types::{
     canonical_provider_adapter_family, is_openai_compatible_provider_kind,
     provider_compatibility_kind, AdapterError, AwsProviderCredentials, ChatCompletionPlan,
-    EmbeddingsPlan, GcpProviderCredentials, ProviderAdapter, ProviderAdapterFamily,
+    EmbeddingsPlan, GcpProviderCredentials, ImagesPlan, ProviderAdapter, ProviderAdapterFamily,
     ProviderAdapterFamilyDescriptor, ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig,
     ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
     SecretValue, SUPPORTED_PROVIDER_ADAPTER_FAMILIES,

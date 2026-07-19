@@ -6411,6 +6411,67 @@
         }
       }
     },
+    "/v1/images/generations": {
+      "post": {
+        "operationId": "createImage",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Generate images from a text prompt (OpenAI-compatible; billed per generated image).",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "images.generate"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Generate images from a text prompt (OpenAI-compatible; billed per generated image).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "description": "The resolved model's provider family does not support image generation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tools": {
       "get": {
         "operationId": "listTools",

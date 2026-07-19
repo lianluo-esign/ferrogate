@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::{
     canonical_provider_adapter_family, AdapterError, AnthropicAdapter, AzureOpenAiAdapter,
-    BedrockAdapter, ChatCompletionPlan, EmbeddingsPlan, GeminiAdapter, GrokAdapter,
+    BedrockAdapter, ChatCompletionPlan, EmbeddingsPlan, GeminiAdapter, GrokAdapter, ImagesPlan,
     OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderAdapterFamily,
     ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
@@ -79,6 +79,15 @@ impl ProviderAdapterRegistry {
     ) -> Result<Option<Value>, AdapterError> {
         self.adapter_for(provider_kind)?
             .translate_embeddings_response(body, model)
+    }
+
+    pub fn prepare_images(
+        &self,
+        provider: ProviderConfig,
+        request: ImagesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.adapter_for(&provider.kind)?
+            .prepare_images(provider, request)
     }
 
     pub fn prepare_model_catalog(
@@ -433,6 +442,51 @@ mod tests {
         assert!(registry.is_retryable_status("openai", 429).unwrap());
         assert!(registry.is_retryable_status("gemini", 503).unwrap());
         assert!(!registry.is_retryable_status("anthropic", 400).unwrap());
+    }
+
+    #[test]
+    fn prepares_image_generation_for_openai_compatible_family() {
+        let registry = ProviderAdapterRegistry::default();
+        let prepared = registry
+            .prepare_images(
+                provider("openai"),
+                ImagesPlan {
+                    logical_model: "art".into(),
+                    provider_model: "gpt-image-1".into(),
+                    body: json!({"model": "art", "prompt": "a red fox"}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://api.openai.example/v1/images/generations"
+        );
+        assert_eq!(prepared.body["model"], "gpt-image-1");
+    }
+
+    #[test]
+    fn image_generation_fails_closed_for_unsupported_family() {
+        // Issue #275: only the OpenAI-compatible family exposes image
+        // generation; every other family must fail closed with a precise
+        // capability error rather than dispatching an unsupported call.
+        let registry = ProviderAdapterRegistry::default();
+        for kind in ["anthropic", "gemini", "bedrock", "vertex"] {
+            let error = registry
+                .prepare_images(
+                    provider(kind),
+                    ImagesPlan {
+                        logical_model: "art".into(),
+                        provider_model: "some-model".into(),
+                        body: json!({"model": "art", "prompt": "a red fox"}),
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, AdapterError::UnsupportedCapability { .. }),
+                "expected UnsupportedCapability for {kind}, got {error:?}"
+            );
+        }
     }
 
     #[test]

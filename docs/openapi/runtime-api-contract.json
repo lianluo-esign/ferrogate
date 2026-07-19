@@ -59,6 +59,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/images/generations",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/tools",
       "group": "tool"
     },
@@ -1976,6 +1980,17 @@
       "auth": {
         "kind": "bearer",
         "scope": "messages.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/images/generations",
+      "method": "post",
+      "operation_id": "createImage",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "images.generate"
       },
       "rbac_action": null
     },

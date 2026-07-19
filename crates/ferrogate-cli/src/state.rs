@@ -70,9 +70,10 @@ use ferrogate_policy::{
 };
 use ferrogate_providers::{
     AdapterError, AwsProviderCredentials, ChatCompletionPlan, EmbeddingsPlan,
-    GcpProviderCredentials, ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute,
-    ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
-    ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy, SecretValue,
+    GcpProviderCredentials, ImagesPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
+    ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
+    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
+    SecretValue,
 };
 use ferrogate_runtime::{
     InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAckStatus,

@@ -10,9 +10,9 @@ use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 
 use crate::types::is_openai_compatible_provider_kind;
 use crate::{
-    AdapterError, ChatCompletionPlan, EmbeddingsPlan, ProviderAdapter, ProviderCatalogModel,
-    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHeader,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
+    AdapterError, ChatCompletionPlan, EmbeddingsPlan, ImagesPlan, ProviderAdapter,
+    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
+    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -76,6 +76,24 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
         Ok(ProviderHttpRequest {
             provider: provider.name.clone(),
             endpoint: embeddings_endpoint(&provider.base_url),
+            body,
+            stream: false,
+            headers: provider_headers(provider.api_key),
+        })
+    }
+
+    fn prepare_images(
+        &self,
+        provider: ProviderConfig,
+        request: ImagesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let mut body = ensure_labeled_object_body(request.body, "image generation request body")?;
+        body["model"] = Value::String(request.provider_model);
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name.clone(),
+            endpoint: images_generations_endpoint(&provider.base_url),
             body,
             stream: false,
             headers: provider_headers(provider.api_key),
@@ -283,6 +301,10 @@ fn responses_endpoint(base_url: &str) -> String {
 
 fn embeddings_endpoint(base_url: &str) -> String {
     format!("{}/embeddings", base_url.trim_end_matches('/'))
+}
+
+fn images_generations_endpoint(base_url: &str) -> String {
+    format!("{}/images/generations", base_url.trim_end_matches('/'))
 }
 
 fn models_endpoint(base_url: &str) -> String {
@@ -691,6 +713,60 @@ mod tests {
             error,
             AdapterError::InvalidRequest {
                 message: "embeddings request body must be a JSON object".into()
+            }
+        );
+    }
+
+    #[test]
+    fn prepares_image_generation_request() {
+        let adapter = OpenAiCompatibleAdapter;
+        let prepared = adapter
+            .prepare_images(
+                provider(Some("provider-secret")),
+                ImagesPlan {
+                    logical_model: "art".into(),
+                    provider_model: "gpt-image-1".into(),
+                    body: json!({
+                        "model": "art",
+                        "prompt": "a red fox",
+                        "n": 2
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://api.openai.example/v1/images/generations"
+        );
+        assert_eq!(prepared.body["model"], "gpt-image-1");
+        assert_eq!(prepared.body["prompt"], "a red fox");
+        assert_eq!(prepared.body["n"], 2);
+        assert!(!prepared.stream);
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|header| header.value.expose_secret() == "Bearer provider-secret"));
+    }
+
+    #[test]
+    fn rejects_non_object_image_generation_body() {
+        let adapter = OpenAiCompatibleAdapter;
+        let error = adapter
+            .prepare_images(
+                provider(None),
+                ImagesPlan {
+                    logical_model: "art".into(),
+                    provider_model: "gpt-image-1".into(),
+                    body: json!("bad"),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AdapterError::InvalidRequest {
+                message: "image generation request body must be a JSON object".into()
             }
         );
     }

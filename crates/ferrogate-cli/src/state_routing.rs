@@ -82,6 +82,28 @@ impl AppState {
         )
     }
 
+    /// Prepare an OpenAI-compatible image-generation dispatch (issue #275).
+    /// Only the OpenAI-compatible provider family implements
+    /// `prepare_images`; every other family returns
+    /// [`ferrogate_providers::AdapterError::UnsupportedCapability`] so the
+    /// ingress fails closed rather than dispatching an unsupported call.
+    pub(crate) fn prepare_images(
+        &self,
+        provider: &Provider,
+        model_route: &ModelRoute,
+        logical_model: String,
+        body: serde_json::Value,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.provider_adapters.prepare_images(
+            self.provider_config(provider),
+            ImagesPlan {
+                logical_model,
+                provider_model: model_route.provider_model.clone(),
+                body,
+            },
+        )
+    }
+
     /// Normalize a successful provider embeddings response into the
     /// canonical OpenAI-shaped body, or `None` when the upstream body
     /// already is OpenAI-shaped and should pass through unchanged (issue

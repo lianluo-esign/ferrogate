@@ -109,6 +109,17 @@ pub struct EmbeddingsPlan {
     pub body: Value,
 }
 
+/// Plan for an OpenAI-compatible `POST /v1/images/generations` request
+/// (issue #275). Like [`EmbeddingsPlan`] it never streams; the multimodal
+/// output is delivered as a single JSON envelope (`url`/`b64_json`) rather
+/// than an SSE stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagesPlan {
+    pub logical_model: String,
+    pub provider_model: String,
+    pub body: Value,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
 
@@ -176,8 +187,22 @@ impl fmt::Debug for ProviderCatalogRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
-    UnsupportedProviderKind { kind: String },
-    InvalidRequest { message: String },
+    UnsupportedProviderKind {
+        kind: String,
+    },
+    InvalidRequest {
+        message: String,
+    },
+    /// The resolved provider family cannot serve this request modality
+    /// (issue #275): e.g. an Anthropic/Gemini/Bedrock route asked to do
+    /// `/v1/images/generations`, which only the OpenAI-compatible family
+    /// exposes. Distinct from [`Self::UnsupportedProviderKind`] (the kind
+    /// itself is unknown) so the ingress can fail closed with a precise
+    /// capability error instead of a misleading "unknown provider" one.
+    UnsupportedCapability {
+        capability: String,
+        kind: String,
+    },
 }
 
 impl fmt::Display for AdapterError {
@@ -187,6 +212,12 @@ impl fmt::Display for AdapterError {
                 write!(formatter, "unsupported provider kind {kind}")
             }
             Self::InvalidRequest { message } => formatter.write_str(message),
+            Self::UnsupportedCapability { capability, kind } => {
+                write!(
+                    formatter,
+                    "provider kind {kind} does not support {capability}"
+                )
+            }
         }
     }
 }
@@ -342,6 +373,23 @@ pub trait ProviderAdapter: Send + Sync {
         _request: EmbeddingsPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
         Err(AdapterError::UnsupportedProviderKind {
+            kind: self.kind().to_string(),
+        })
+    }
+
+    /// Translate an OpenAI-shaped image-generation request into an upstream
+    /// call (issue #275). The default fails closed with
+    /// [`AdapterError::UnsupportedCapability`]: only the OpenAI-compatible
+    /// family exposes `/v1/images/generations`, so every other family
+    /// (Anthropic, Gemini, Vertex, Bedrock, ...) rejects the request at
+    /// preparation time rather than dispatching an unsupported call.
+    fn prepare_images(
+        &self,
+        _provider: ProviderConfig,
+        _request: ImagesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        Err(AdapterError::UnsupportedCapability {
+            capability: "image generation".to_string(),
             kind: self.kind().to_string(),
         })
     }
