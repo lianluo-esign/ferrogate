@@ -289,23 +289,75 @@ impl FerroGateway {
             }
         };
 
-        // Supply-chain hardening (issue #179): content-type allowlist,
-        // malware-signature scan, and mcp_manifest stdio-transport block --
-        // FerroGate is the origin server vouching for this content once
-        // stored, not just proxying it, so this runs before anything is
-        // durably written.
-        if let Err(message) =
-            super::asset_security::validate_asset_content(asset_type, &content_type, &content)
+        // Supply-chain trust (issues #179 + #261): the synchronous content
+        // gates, a pluggable malware scan (default offline EICAR; opt-in
+        // ClamAV/hosted-HTTP), detached publisher-signature verification, and
+        // a cross-tenant publish approval gate all run here, before anything
+        // is durably written -- FerroGate vouches for this content once stored,
+        // not just proxying it.
+        let security = super::asset_security::AssetSecurityContext::from_env();
+        let signature_input = headers
+            .get("x-asset-signature")
+            .and_then(|value| value.to_str().ok())
+            .map(|material| super::asset_signature::AssetSignatureInput {
+                format: headers
+                    .get("x-asset-signature-format")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(super::asset_signature::SignatureFormat::parse)
+                    .unwrap_or(super::asset_signature::SignatureFormat::Minisign),
+                material: material.to_string(),
+                key_id: headers
+                    .get("x-asset-signature-key-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            });
+        let visibility = headers
+            .get("x-asset-visibility")
+            .and_then(|value| value.to_str().ok())
+            .and_then(super::asset_publish_gate::PublishVisibility::parse)
+            .unwrap_or(super::asset_publish_gate::PublishVisibility::TenantPrivate);
+        // Reuse the existing tool_approvals machinery: the approval id names a
+        // durable approval record whose status the gate reads (never a
+        // client-asserted status).
+        let approval = headers
+            .get("x-asset-approval-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|id| {
+                state
+                    .tool_approval(id)
+                    .map(|record| (id.to_string(), record.status))
+            });
+        let screen_id = stored_asset_id(&tenant_id, asset_type, name, version);
+        let screen_hash = sha256_hex(&content);
+        let screening = match super::asset_security::screen_asset_push(
+            &security,
+            super::asset_security::AssetPushScreeningRequest {
+                asset_id: &screen_id,
+                tenant_id: &tenant_id,
+                asset_type,
+                content_type: &content_type,
+                content: &content,
+                content_sha256: &screen_hash,
+                signature: signature_input,
+                visibility,
+                approval,
+                now_unix: now_unix_seconds(),
+            },
+        )
+        .await
         {
-            return write_json_error(
-                session,
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "asset_rejected",
-                message,
-                &ctx.request_id,
-            )
-            .await;
-        }
+            Ok(screening) => screening,
+            Err(rejection) => {
+                return write_json_error(
+                    session,
+                    rejection.status(),
+                    rejection.code,
+                    rejection.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
 
         // Site bundles (issue #258): a `static_site` pushed as a zip archive is
         // unpacked into per-file objects and a site manifest, published under
@@ -411,13 +463,21 @@ impl FerroGateway {
         };
         match state.upsert_asset(asset.clone()).await {
             Ok(()) => {
+                // Immutable trust evidence (#261): the scan/signature/approval
+                // outcome and the verification manifest are recorded on the
+                // push audit event, retrievable via the Admin audit API.
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
                     "asset.push",
                     &id,
                     "committed",
-                    format!("asset {id} pushed ({} bytes)", asset.size_bytes),
+                    format!(
+                        "asset {id} pushed ({} bytes); {}; manifest={}",
+                        asset.size_bytes,
+                        screening.audit_detail(),
+                        screening.manifest_json(),
+                    ),
                 ));
                 let body = AssetMutationResponse {
                     object: "asset",
