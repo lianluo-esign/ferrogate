@@ -55,6 +55,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1/messages",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/tools",
       "group": "tool"
     },
@@ -1961,6 +1965,17 @@
       "auth": {
         "kind": "bearer",
         "scope": "embeddings.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/messages",
+      "method": "post",
+      "operation_id": "createMessage",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "messages.create"
       },
       "rbac_action": null
     },

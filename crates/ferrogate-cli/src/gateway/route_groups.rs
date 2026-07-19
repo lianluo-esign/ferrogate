@@ -207,6 +207,11 @@ impl FerroGateway {
                 .await?;
             return Ok(true);
         }
+        if req.path == "/v1/messages" {
+            self.handle_messages(session, ctx, req.headers.clone())
+                .await?;
+            return Ok(true);
+        }
         if req.path == "/v1/embeddings" {
             self.handle_embeddings(session, ctx, req.headers.clone())
                 .await?;

@@ -7,6 +7,7 @@
 //! AI provider adapter boundaries.
 
 mod anthropic;
+pub mod anthropic_messages;
 mod azure;
 mod bedrock;
 mod canonical;

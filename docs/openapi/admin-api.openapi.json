@@ -6361,6 +6361,56 @@
         }
       }
     },
+    "/v1/messages": {
+      "post": {
+        "operationId": "createMessage",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Create an Anthropic-native Messages completion (streaming or non-streaming).",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "messages.create"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Create an Anthropic-native Messages completion (streaming or non-streaming).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tools": {
       "get": {
         "operationId": "listTools",
