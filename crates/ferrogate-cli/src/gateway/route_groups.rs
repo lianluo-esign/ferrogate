@@ -59,6 +59,7 @@ pub(super) enum RouteGroup {
     AdminVirtualKey,
     QuotaPolicy,
     Asset,
+    Site,
     Billing,
     Rbac,
     Plans,
@@ -96,6 +97,7 @@ impl RouteGroup {
             "admin_virtual_key" => Self::AdminVirtualKey,
             "quota_policy" => Self::QuotaPolicy,
             "asset" => Self::Asset,
+            "site" => Self::Site,
             "billing" => Self::Billing,
             "rbac" => Self::Rbac,
             "plans" => Self::Plans,
@@ -177,6 +179,7 @@ impl FerroGateway {
             }
             RouteGroup::QuotaPolicy => self.try_quota_policy_routes(session, ctx, req).await,
             RouteGroup::Asset => self.try_asset_routes(session, ctx, req).await,
+            RouteGroup::Site => self.try_site_routes(session, ctx, req).await,
             RouteGroup::Billing => self.try_billing_routes(session, ctx, req).await,
             RouteGroup::Rbac => self.try_rbac_routes(session, ctx, req).await,
             RouteGroup::Plans => self.try_plans_routes(session, ctx, req).await,
@@ -824,6 +827,20 @@ impl FerroGateway {
     ) -> PingoraResult<bool> {
         if req.path == "/v1/assets" || req.path.starts_with("/v1/assets/") {
             self.handle_assets(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_site_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path.starts_with("/sites/") {
+            self.handle_site_serve(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
             return Ok(true);
         }

@@ -102,6 +102,9 @@ fn every_previously_flat_route_still_resolves_to_a_group() {
         "/admin/v1/quota-policies/tenant/t1",
         "/v1/assets",
         "/v1/assets/cli_tool/name/1.0.0",
+        "/sites/org_demo/marketing/",
+        "/sites/org_demo/marketing/style.css",
+        "/sites/org_demo/marketing/docs/readme.md",
         "/admin/v1/tenants",
         "/admin/v1/metering-events",
         "/admin/v1/billing-events",
@@ -124,4 +127,16 @@ fn dynamic_and_unknown_paths_fall_through() {
     assert_eq!(match_route_group("/healthz"), Some(RouteGroup::Health));
     assert_eq!(match_route_group("/readyz"), Some(RouteGroup::Readiness));
     assert!(match_route_group("/some/customer/upstream/path").is_none());
+}
+
+#[test]
+fn site_serve_paths_resolve_to_the_site_group() {
+    assert_eq!(
+        match_route_group("/sites/org_demo/marketing/"),
+        Some(RouteGroup::Site)
+    );
+    assert_eq!(
+        match_route_group("/sites/org_demo/marketing/docs/readme.md"),
+        Some(RouteGroup::Site)
+    );
 }

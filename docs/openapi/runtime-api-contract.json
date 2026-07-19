@@ -363,6 +363,10 @@
       "group": "asset"
     },
     {
+      "pattern": "/sites/{*rest}",
+      "group": "site"
+    },
+    {
       "pattern": "/admin/v1/permissions",
       "group": "rbac"
     },

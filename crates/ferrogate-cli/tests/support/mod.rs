@@ -44,6 +44,38 @@ pub fn wait_for_gateway(addr: &str) {
     panic!("gateway did not become ready at {addr}");
 }
 
+/// Like [`http_request`] but sends a binary request body and returns the raw
+/// response bytes, for endpoints that push non-UTF-8 payloads (e.g. a zip site
+/// bundle) or serve binary content.
+#[allow(dead_code)]
+pub fn http_request_bytes(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &[u8],
+) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    )
+    .unwrap();
+    for header in headers {
+        write!(stream, "{header}\r\n").unwrap();
+    }
+    write!(stream, "\r\n").unwrap();
+    stream.write_all(body).unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    response
+}
+
 pub fn http_request(addr: &str, method: &str, path: &str, headers: &[&str], body: &str) -> String {
     let mut stream = TcpStream::connect(addr).unwrap();
     // Generous read timeout: some endpoints (e.g. `/v1/tools/execute` gated on a

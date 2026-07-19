@@ -16,14 +16,38 @@ use ferrogate_storage::{sha256_hex, stored_asset_id, StoredAsset};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
+use super::sites::is_zip_archive;
 use super::FerroGateway;
 use crate::{
     auth::authenticate,
     responses::{
-        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        AdminDeleteResponse, AdminList, AssetMutationResponse, AssetSummary,
+        write_cacheable_response, write_json_error, write_json_error_and_close,
+        write_json_response, AdminDeleteResponse, AdminList, AssetCacheHeaders,
+        AssetMutationResponse, AssetSummary,
     },
 };
+
+/// Default `Cache-Control` for authenticated `/v1/assets/*` pulls (issue
+/// #258): private and always revalidated, so an agent re-pulling a tool gets a
+/// cheap `304` via the strong `ETag` without a shared cache ever storing a
+/// tenant's asset.
+const DEFAULT_ASSET_CACHE_CONTROL: &str = "private, max-age=0, must-revalidate";
+
+/// A storage-layer failure while reading or writing asset bytes, carrying the
+/// HTTP error the gateway should return. Lets the bucket-fetch/bucket-put
+/// helpers be shared between the pull path and the static-site serve/publish
+/// paths (issue #258) without each call site re-deriving the error response.
+pub(super) struct AssetError {
+    pub(super) status: StatusCode,
+    pub(super) code: &'static str,
+    pub(super) message: String,
+}
+
+impl AssetError {
+    pub(super) async fn write(self, session: &mut Session, request_id: &str) -> PingoraResult<()> {
+        write_json_error(session, self.status, self.code, self.message, request_id).await
+    }
+}
 
 /// Hard per-request body ceiling, matching the `stored_assets.size_bytes`
 /// CHECK constraint (`sql/001_init_postgres.sql`) -- a tenant's
@@ -267,6 +291,18 @@ impl FerroGateway {
             .await;
         }
 
+        // Site bundles (issue #258): a `static_site` pushed as a zip archive is
+        // unpacked into per-file objects and a site manifest, published under
+        // the `/sites/{tenant}/{name}` serve surface, rather than stored as a
+        // single opaque blob.
+        if asset_type == "static_site" && is_zip_archive(&content) {
+            return self
+                .publish_site_bundle(
+                    session, ctx, &auth, headers, &tenant_id, name, version, &content,
+                )
+                .await;
+        }
+
         // Authentication already resolved the complete tenant -> project ->
         // workspace -> key quota chain and failed closed on repository errors.
         // Reading that same value here is the write-path == runtime-read-path
@@ -336,21 +372,11 @@ impl FerroGateway {
         // bucket PUT failure fails the whole push (not a silent fallback
         // to inline storage) -- an operator who configured a bucket
         // expects assets to actually land there.
-        let (stored_content, storage_uri) = if let Some(bucket) = state.asset_bucket_client() {
-            if let Err(error) = bucket.put_object(&id, &content, &content_type).await {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "asset_bucket_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-            (Vec::new(), Some(id.clone()))
-        } else {
-            (content.to_vec(), None)
-        };
+        let (stored_content, storage_uri) =
+            match self.store_asset_bytes(&id, &content, &content_type).await {
+                Ok(pair) => pair,
+                Err(error) => return error.write(session, &ctx.request_id).await,
+            };
 
         let asset = StoredAsset {
             id: id.clone(),
@@ -436,32 +462,9 @@ impl FerroGateway {
                 // in the bucket, not `asset.content` (which is empty for
                 // these rows) -- fetch them before the same integrity
                 // re-verification every asset read already does.
-                let content = if let Some(storage_uri) = asset.storage_uri.as_deref() {
-                    let Some(bucket) = state.asset_bucket_client() else {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "asset_bucket_unavailable",
-                            "this asset is bucket-backed but no asset_bucket is configured",
-                            &ctx.request_id,
-                        )
-                        .await;
-                    };
-                    match bucket.get_object(storage_uri).await {
-                        Ok(content) => content,
-                        Err(error) => {
-                            return write_json_error(
-                                session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "asset_bucket_unavailable",
-                                error.to_string(),
-                                &ctx.request_id,
-                            )
-                            .await;
-                        }
-                    }
-                } else {
-                    asset.content
+                let content = match self.load_asset_content(&asset).await {
+                    Ok(content) => content,
+                    Err(error) => return error.write(session, &ctx.request_id).await,
                 };
                 // Re-verify content integrity on every read (#176/#179):
                 // a mismatch means storage-layer corruption or tampering,
@@ -476,14 +479,25 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                write_raw_response(
+                // HTTP caching semantics (issue #258): strong ETag from the
+                // stored sha256, Last-Modified, Cache-Control, and Range/304/206
+                // handling shared with the static-site serve mode.
+                let cache = AssetCacheHeaders {
+                    content_type: &asset.content_type,
+                    etag: format!("\"{}\"", asset.content_hash),
+                    last_modified_unix: asset.updated_at_unix,
+                    cache_control: DEFAULT_ASSET_CACHE_CONTROL,
+                };
+                write_cacheable_response(
                     session,
-                    StatusCode::OK,
-                    &asset.content_type,
+                    headers,
+                    &Method::GET,
                     Bytes::from(content),
+                    &cache,
                     &ctx.request_id,
                 )
-                .await
+                .await?;
+                Ok(())
             }
             Ok(None) => {
                 write_json_error(
@@ -598,6 +612,62 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+}
+
+impl FerroGateway {
+    /// Reads an asset's real bytes, fetching from the object-storage bucket
+    /// when the row is bucket-backed (`storage_uri`) and returning the inline
+    /// `content` otherwise. Shared by the pull path and the static-site serve
+    /// mode (issue #258); integrity re-verification stays with the caller.
+    pub(super) async fn load_asset_content(
+        &self,
+        asset: &StoredAsset,
+    ) -> Result<Vec<u8>, AssetError> {
+        let Some(storage_uri) = asset.storage_uri.as_deref() else {
+            return Ok(asset.content.clone());
+        };
+        let Some(bucket) = self.state.current().asset_bucket_client() else {
+            return Err(AssetError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "asset_bucket_unavailable",
+                message: "this asset is bucket-backed but no asset_bucket is configured"
+                    .to_string(),
+            });
+        };
+        bucket
+            .get_object(storage_uri)
+            .await
+            .map_err(|error| AssetError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "asset_bucket_unavailable",
+                message: error.to_string(),
+            })
+    }
+
+    /// Persists asset bytes to the configured object-storage bucket, returning
+    /// the `(inline_content, storage_uri)` pair to store on the row: empty
+    /// inline content plus the bucket key when bucket-backed, or the inline
+    /// bytes with no `storage_uri` otherwise. Shared by the push path and the
+    /// static-site publish path (issue #258).
+    pub(super) async fn store_asset_bytes(
+        &self,
+        id: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<(Vec<u8>, Option<String>), AssetError> {
+        let Some(bucket) = self.state.current().asset_bucket_client() else {
+            return Ok((content.to_vec(), None));
+        };
+        bucket
+            .put_object(id, content, content_type)
+            .await
+            .map_err(|error| AssetError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "asset_bucket_unavailable",
+                message: error.to_string(),
+            })?;
+        Ok((Vec::new(), Some(id.to_string())))
     }
 }
 

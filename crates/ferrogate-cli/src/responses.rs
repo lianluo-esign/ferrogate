@@ -1677,6 +1677,244 @@ pub(crate) async fn write_raw_response(
     session.write_response_body(Some(body), true).await
 }
 
+/// HTTP caching metadata attached to an asset/site GET response
+/// (issue #258): a strong validator derived from the stored sha256, a
+/// `Last-Modified` timestamp, and a `Cache-Control` policy, so conditional
+/// (`If-None-Match`/`If-Modified-Since`) and `Range` requests can be answered
+/// with `304`/`206` instead of always re-transmitting the whole body.
+pub(crate) struct AssetCacheHeaders<'a> {
+    pub(crate) content_type: &'a str,
+    /// Strong ETag validator, already quoted (e.g. `"<sha256hex>"`).
+    pub(crate) etag: String,
+    pub(crate) last_modified_unix: i64,
+    pub(crate) cache_control: &'a str,
+}
+
+/// The outcome of evaluating conditional/range request headers against a
+/// stored asset's validators. Kept pure (and unit-tested) so the async writer
+/// below stays a thin translation from decision to pingora response bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConditionalOutcome {
+    /// Validators matched the client's cached copy -> 304, no body.
+    NotModified,
+    /// Serve the whole representation -> 200.
+    Full,
+    /// Serve a single inclusive byte range `[start, end]` -> 206.
+    Range { start: usize, end: usize },
+    /// A syntactically valid range that falls outside the body -> 416.
+    RangeNotSatisfiable,
+}
+
+/// Decides how to answer a GET given its conditional/range headers. `If-None-Match`
+/// takes precedence over `If-Modified-Since` (RFC 7232 §6); a satisfiable `Range`
+/// yields a 206, an out-of-bounds one a 416, and an unparseable/multi range is
+/// ignored (falls back to a full 200) per RFC 7233 §4.
+pub(crate) fn evaluate_conditional_request(
+    req_headers: &http::HeaderMap,
+    etag: &str,
+    last_modified_unix: i64,
+    total_len: usize,
+) -> ConditionalOutcome {
+    if let Some(if_none_match) = req_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        if if_none_match_matches(if_none_match, etag) {
+            return ConditionalOutcome::NotModified;
+        }
+    } else if let Some(if_modified_since) = req_headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(since_unix) = parse_http_date(if_modified_since) {
+            if last_modified_unix > 0 && last_modified_unix <= since_unix {
+                return ConditionalOutcome::NotModified;
+            }
+        }
+    }
+    if let Some(range) = req_headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        return parse_single_byte_range(range, total_len);
+    }
+    ConditionalOutcome::Full
+}
+
+/// `true` when an `If-None-Match` header (a comma-separated list, `*`, or a
+/// weak/strong tag) matches `etag`. Weak comparison is used (the `W/` prefix is
+/// ignored), which is what conditional GETs on immutable content want.
+fn if_none_match_matches(if_none_match: &str, etag: &str) -> bool {
+    let normalized_etag = etag.trim_start_matches("W/");
+    if_none_match.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate.trim_start_matches("W/") == normalized_etag
+    })
+}
+
+fn parse_single_byte_range(header_value: &str, total_len: usize) -> ConditionalOutcome {
+    let Some(spec) = header_value.trim().strip_prefix("bytes=") else {
+        return ConditionalOutcome::Full;
+    };
+    // Only single-range requests are supported; a multi-range request degrades
+    // to a full response rather than a `multipart/byteranges` body.
+    if spec.contains(',') {
+        return ConditionalOutcome::Full;
+    }
+    let Some((start_spec, end_spec)) = spec.split_once('-') else {
+        return ConditionalOutcome::Full;
+    };
+    let start_spec = start_spec.trim();
+    let end_spec = end_spec.trim();
+    if total_len == 0 {
+        return ConditionalOutcome::RangeNotSatisfiable;
+    }
+    let last = total_len - 1;
+    let (start, end) = if start_spec.is_empty() {
+        // Suffix range: the final N bytes (`bytes=-N`).
+        let Ok(suffix) = end_spec.parse::<usize>() else {
+            return ConditionalOutcome::Full;
+        };
+        if suffix == 0 {
+            return ConditionalOutcome::RangeNotSatisfiable;
+        }
+        let suffix = suffix.min(total_len);
+        (total_len - suffix, last)
+    } else {
+        let Ok(start) = start_spec.parse::<usize>() else {
+            return ConditionalOutcome::Full;
+        };
+        let end = if end_spec.is_empty() {
+            last
+        } else {
+            match end_spec.parse::<usize>() {
+                Ok(end) => end.min(last),
+                Err(_) => return ConditionalOutcome::Full,
+            }
+        };
+        (start, end)
+    };
+    if start > last || start > end {
+        return ConditionalOutcome::RangeNotSatisfiable;
+    }
+    ConditionalOutcome::Range { start, end }
+}
+
+/// Formats a Unix timestamp as an RFC 7231 IMF-fixdate (`Last-Modified`).
+fn format_http_date(unix_secs: i64) -> Option<String> {
+    let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_secs, 0)?;
+    Some(datetime.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+}
+
+/// Parses an IMF-fixdate `If-Modified-Since` header back to a Unix timestamp.
+fn parse_http_date(value: &str) -> Option<i64> {
+    let naive =
+        chrono::NaiveDateTime::parse_from_str(value.trim(), "%a, %d %b %Y %H:%M:%S GMT").ok()?;
+    Some(naive.and_utc().timestamp())
+}
+
+fn apply_asset_validators(
+    response: &mut ResponseHeader,
+    cache: &AssetCacheHeaders<'_>,
+) -> PingoraResult<()> {
+    response.insert_header(header::ETAG, cache.etag.as_str())?;
+    response.insert_header(header::CACHE_CONTROL, cache.cache_control)?;
+    if let Some(last_modified) = format_http_date(cache.last_modified_unix) {
+        response.insert_header(header::LAST_MODIFIED, last_modified)?;
+    }
+    response.insert_header("accept-ranges", "bytes")?;
+    Ok(())
+}
+
+fn apply_common_headers(response: &mut ResponseHeader, request_id: &str) -> PingoraResult<()> {
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(response)
+}
+
+/// Serves `body` with HTTP caching semantics (issue #258): strong `ETag`,
+/// `Last-Modified`, `Cache-Control`, `Accept-Ranges`, `304 Not Modified` for a
+/// matching conditional GET, and `206 Partial Content` / `416` for a `Range`
+/// request. `HEAD` gets the full header set with no body. Shared by the
+/// authenticated `/v1/assets/*` pull path and the `/sites/*` serve mode.
+pub(crate) async fn write_cacheable_response(
+    session: &mut Session,
+    req_headers: &http::HeaderMap,
+    method: &http::Method,
+    body: Bytes,
+    cache: &AssetCacheHeaders<'_>,
+    request_id: &str,
+) -> PingoraResult<StatusCode> {
+    let total_len = body.len();
+    let is_head = *method == http::Method::HEAD;
+    let outcome = evaluate_conditional_request(
+        req_headers,
+        &cache.etag,
+        cache.last_modified_unix,
+        total_len,
+    );
+    match outcome {
+        ConditionalOutcome::NotModified => {
+            let mut response = ResponseHeader::build(StatusCode::NOT_MODIFIED, Some(8))?;
+            apply_asset_validators(&mut response, cache)?;
+            apply_common_headers(&mut response, request_id)?;
+            session
+                .write_response_header(Box::new(response), false)
+                .await?;
+            session.write_response_body(None, true).await?;
+            Ok(StatusCode::NOT_MODIFIED)
+        }
+        ConditionalOutcome::RangeNotSatisfiable => {
+            let mut response = ResponseHeader::build(StatusCode::RANGE_NOT_SATISFIABLE, Some(8))?;
+            response.insert_header(header::CONTENT_TYPE, cache.content_type)?;
+            response.insert_header(header::CONTENT_RANGE, format!("bytes */{total_len}"))?;
+            apply_asset_validators(&mut response, cache)?;
+            apply_common_headers(&mut response, request_id)?;
+            session
+                .write_response_header(Box::new(response), false)
+                .await?;
+            session.write_response_body(None, true).await?;
+            Ok(StatusCode::RANGE_NOT_SATISFIABLE)
+        }
+        ConditionalOutcome::Range { start, end } => {
+            let len = end - start + 1;
+            let mut response = ResponseHeader::build(StatusCode::PARTIAL_CONTENT, Some(9))?;
+            response.insert_header(header::CONTENT_TYPE, cache.content_type)?;
+            response.insert_header(header::CONTENT_LENGTH, len.to_string())?;
+            response.insert_header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total_len}"),
+            )?;
+            apply_asset_validators(&mut response, cache)?;
+            apply_common_headers(&mut response, request_id)?;
+            session
+                .write_response_header(Box::new(response), false)
+                .await?;
+            let out_body = if is_head {
+                None
+            } else {
+                Some(body.slice(start..end + 1))
+            };
+            session.write_response_body(out_body, true).await?;
+            Ok(StatusCode::PARTIAL_CONTENT)
+        }
+        ConditionalOutcome::Full => {
+            let mut response = ResponseHeader::build(StatusCode::OK, Some(8))?;
+            response.insert_header(header::CONTENT_TYPE, cache.content_type)?;
+            response.insert_header(header::CONTENT_LENGTH, total_len.to_string())?;
+            apply_asset_validators(&mut response, cache)?;
+            apply_common_headers(&mut response, request_id)?;
+            session
+                .write_response_header(Box::new(response), false)
+                .await?;
+            let out_body = if is_head { None } else { Some(body) };
+            session.write_response_body(out_body, true).await?;
+            Ok(StatusCode::OK)
+        }
+    }
+}
+
 pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
     session: &mut Session,
     status: StatusCode,
@@ -1813,4 +2051,155 @@ pub(crate) async fn write_json_error_and_close(
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use http::HeaderMap;
+
+    const ETAG: &str = "\"abc123\"";
+
+    fn headers(pairs: &[(http::HeaderName, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(name.clone(), value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn no_conditional_headers_serves_full_body() {
+        let outcome = evaluate_conditional_request(&HeaderMap::new(), ETAG, 1000, 100);
+        assert_eq!(outcome, ConditionalOutcome::Full);
+    }
+
+    #[test]
+    fn matching_if_none_match_is_not_modified() {
+        let map = headers(&[(header::IF_NONE_MATCH, ETAG)]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 100),
+            ConditionalOutcome::NotModified
+        );
+    }
+
+    #[test]
+    fn wildcard_and_list_if_none_match_match() {
+        let star = headers(&[(header::IF_NONE_MATCH, "*")]);
+        assert_eq!(
+            evaluate_conditional_request(&star, ETAG, 1000, 100),
+            ConditionalOutcome::NotModified
+        );
+        let list = headers(&[(header::IF_NONE_MATCH, "\"other\", \"abc123\"")]);
+        assert_eq!(
+            evaluate_conditional_request(&list, ETAG, 1000, 100),
+            ConditionalOutcome::NotModified
+        );
+    }
+
+    #[test]
+    fn non_matching_if_none_match_serves_full() {
+        let map = headers(&[(header::IF_NONE_MATCH, "\"different\"")]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 100),
+            ConditionalOutcome::Full
+        );
+    }
+
+    #[test]
+    fn if_modified_since_not_modified_and_modified() {
+        // Stored at epoch 1000; a client copy dated after that -> 304.
+        let after = format_http_date(2000).unwrap();
+        let map = headers(&[(header::IF_MODIFIED_SINCE, after.as_str())]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 100),
+            ConditionalOutcome::NotModified
+        );
+        // A client copy dated before the stored mtime -> full body.
+        let before = format_http_date(500).unwrap();
+        let map = headers(&[(header::IF_MODIFIED_SINCE, before.as_str())]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 100),
+            ConditionalOutcome::Full
+        );
+    }
+
+    #[test]
+    fn if_none_match_wins_over_if_modified_since() {
+        // Even with a stale If-Modified-Since, a non-matching ETag serves full.
+        let map = headers(&[
+            (header::IF_NONE_MATCH, "\"different\""),
+            (
+                header::IF_MODIFIED_SINCE,
+                format_http_date(9999).unwrap().as_str(),
+            ),
+        ]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 100),
+            ConditionalOutcome::Full
+        );
+    }
+
+    #[test]
+    fn byte_range_is_parsed() {
+        let map = headers(&[(header::RANGE, "bytes=0-99")]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 500),
+            ConditionalOutcome::Range { start: 0, end: 99 }
+        );
+    }
+
+    #[test]
+    fn open_ended_and_suffix_ranges_clamp_to_body() {
+        let open = headers(&[(header::RANGE, "bytes=100-")]);
+        assert_eq!(
+            evaluate_conditional_request(&open, ETAG, 1000, 500),
+            ConditionalOutcome::Range {
+                start: 100,
+                end: 499
+            }
+        );
+        let suffix = headers(&[(header::RANGE, "bytes=-100")]);
+        assert_eq!(
+            evaluate_conditional_request(&suffix, ETAG, 1000, 500),
+            ConditionalOutcome::Range {
+                start: 400,
+                end: 499
+            }
+        );
+        let over_end = headers(&[(header::RANGE, "bytes=0-9999")]);
+        assert_eq!(
+            evaluate_conditional_request(&over_end, ETAG, 1000, 500),
+            ConditionalOutcome::Range { start: 0, end: 499 }
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_range_is_not_satisfiable() {
+        let map = headers(&[(header::RANGE, "bytes=600-700")]);
+        assert_eq!(
+            evaluate_conditional_request(&map, ETAG, 1000, 500),
+            ConditionalOutcome::RangeNotSatisfiable
+        );
+    }
+
+    #[test]
+    fn unparseable_or_multi_range_falls_back_to_full() {
+        let bad_unit = headers(&[(header::RANGE, "items=0-1")]);
+        assert_eq!(
+            evaluate_conditional_request(&bad_unit, ETAG, 1000, 500),
+            ConditionalOutcome::Full
+        );
+        let multi = headers(&[(header::RANGE, "bytes=0-1,2-3")]);
+        assert_eq!(
+            evaluate_conditional_request(&multi, ETAG, 1000, 500),
+            ConditionalOutcome::Full
+        );
+    }
+
+    #[test]
+    fn http_date_round_trips() {
+        let formatted = format_http_date(1_700_000_000).unwrap();
+        assert_eq!(parse_http_date(&formatted), Some(1_700_000_000));
+    }
 }
