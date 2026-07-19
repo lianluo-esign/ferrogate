@@ -16,6 +16,7 @@ COPY vendor ./vendor
 COPY Ferrogate ./Ferrogate
 COPY config ./config
 COPY sql ./sql
+COPY docs ./docs
 RUN cargo build --release -p ferrogate-cli -p ferrogate-auth --locked
 
 FROM debian:bookworm-slim
