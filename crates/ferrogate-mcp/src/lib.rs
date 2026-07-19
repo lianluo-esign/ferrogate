@@ -29,6 +29,7 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
     StreamOwned,
 };
+use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -909,7 +910,7 @@ fn validate_mcp_tls_config(tls: &McpTlsConfig) -> AnyResult<()> {
     if let Some(path) = tls.ca_cert_path.as_deref() {
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read tls.ca_cert_path {path}"))?;
-        let certs = rustls_pemfile::certs(&mut bytes.as_slice())
+        let certs = CertificateDer::pem_reader_iter(&mut bytes.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .with_context(|| format!("failed to parse tls.ca_cert_path {path} as PEM"))?;
         if certs.is_empty() {
@@ -962,7 +963,7 @@ fn mcp_tls_client_config(tls: &McpTlsConfig) -> AnyResult<Arc<ClientConfig>> {
     if let Some(path) = tls.ca_cert_path.as_deref() {
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read tls.ca_cert_path {path}"))?;
-        let certs = rustls_pemfile::certs(&mut bytes.as_slice())
+        let certs = CertificateDer::pem_reader_iter(&mut bytes.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .with_context(|| format!("failed to parse tls.ca_cert_path {path} as PEM"))?;
         for cert in certs {

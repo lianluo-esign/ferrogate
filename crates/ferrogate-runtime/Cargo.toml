@@ -35,7 +35,7 @@ time.workspace = true
 # configured anchor; the `ring` provider is selected explicitly so no ambient
 # process-default crypto provider is relied upon.
 rustls = { workspace = true, features = ["ring"] }
-rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

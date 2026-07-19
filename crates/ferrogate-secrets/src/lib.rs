@@ -29,6 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result as AnyResult};
 use http::Uri;
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls_pki_types::{pem::PemObject, CertificateDer};
 
 /// A parsed secret reference. See the crate-level docs for the supported
 /// URI schemes.
@@ -258,7 +259,7 @@ fn tls_client_config(ca_cert_path: Option<&str>) -> AnyResult<Arc<ClientConfig>>
     if let Some(path) = ca_cert_path {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read CA cert {path}"))?;
-        let certs = rustls_pemfile::certs(&mut bytes.as_slice())
+        let certs = CertificateDer::pem_reader_iter(&mut bytes.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .with_context(|| format!("failed to parse CA cert {path} as PEM"))?;
         for cert in certs {

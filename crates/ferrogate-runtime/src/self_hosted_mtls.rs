@@ -47,6 +47,7 @@ use rustls::{
     server::WebPkiClientVerifier,
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, Stream,
 };
+use rustls_pki_types::pem::PemObject;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
@@ -246,7 +247,7 @@ impl SelfHostedMtlsTrustAnchor {
     pub fn from_pem(pem: &str) -> Result<Self, SelfHostedMtlsError> {
         let mut reader = std::io::BufReader::new(pem.as_bytes());
         let mut anchors = Vec::new();
-        for entry in rustls_pemfile::certs(&mut reader) {
+        for entry in CertificateDer::pem_reader_iter(&mut reader) {
             let cert = entry.map_err(|error| {
                 SelfHostedMtlsError::TrustAnchorLoad(format!(
                     "trust anchor PEM is not valid: {error}"
@@ -1084,7 +1085,7 @@ fn validate_cert_ttl(ttl_secs: u64) -> Result<u64, SelfHostedMtlsError> {
 fn single_certificate_der_from_pem(pem: &str) -> Result<Vec<u8>, SelfHostedMtlsError> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
     let mut certs = Vec::new();
-    for entry in rustls_pemfile::certs(&mut reader) {
+    for entry in CertificateDer::pem_reader_iter(&mut reader) {
         let cert = entry.map_err(|error| {
             SelfHostedMtlsError::CertIssuance(format!("issuing CA PEM is not valid: {error}"))
         })?;
