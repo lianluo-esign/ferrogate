@@ -144,6 +144,109 @@ fn sign_internal(
     }
 }
 
+/// Everything needed to build one SigV4 *query-string presigned URL* --
+/// the same inputs as [`SigningRequest`] minus the body (a presigned
+/// PUT/GET signs an `UNSIGNED-PAYLOAD` marker instead of a concrete body,
+/// so the holder can stream arbitrary bytes) plus a TTL.
+#[derive(Clone, Copy)]
+pub struct PresignRequest<'a> {
+    pub method: &'a str,
+    /// Absolute path only (no scheme/host/query), e.g. `/bucket/key`.
+    pub path: &'a str,
+    pub host: &'a str,
+    pub region: &'a str,
+    pub service: &'a str,
+    /// URL validity window in seconds; the caller is responsible for
+    /// clamping to the S3 maximum of 604800 (7 days).
+    pub expires_secs: u64,
+    pub timestamp_unix: u64,
+}
+
+/// Builds the signed query string (without a leading `?`) for an S3
+/// SigV4 *query-string presigned URL* -- the direct large-object upload /
+/// download path (issue #259) where the signature travels in the query
+/// string so the bytes bypass the gateway. Unlike [`sign`] /
+/// [`sign_with_content_hash_header`] (which fold auth into request
+/// headers), this signs the `X-Amz-*` query parameters with the payload
+/// hash fixed to `UNSIGNED-PAYLOAD`, exactly as AWS's own presigners do,
+/// so the recipient (Supabase Storage's S3 endpoint or any S3-compatible
+/// service) verifies it identically. Returns the full canonical query
+/// string with `X-Amz-Signature` appended; the caller assembles
+/// `scheme://host{path}?{returned}`.
+pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials) -> String {
+    let (amz_date, date_stamp) = format_timestamps(request.timestamp_unix);
+    let credential_scope = format!(
+        "{date_stamp}/{}/{}/aws4_request",
+        request.region, request.service
+    );
+    let credential = format!("{}/{credential_scope}", credentials.access_key_id);
+
+    // The canonical query string is sorted by (encoded) key name; the
+    // `X-Amz-*` keys here are already alphabetical, and inserting the
+    // optional security token between `X-Amz-Expires` and
+    // `X-Amz-SignedHeaders` keeps them so.
+    let mut params: Vec<(&str, String)> = vec![
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+        ("X-Amz-Credential", credential),
+        ("X-Amz-Date", amz_date.clone()),
+        ("X-Amz-Expires", request.expires_secs.to_string()),
+    ];
+    if let Some(token) = &credentials.session_token {
+        params.push(("X-Amz-Security-Token", token.clone()));
+    }
+    params.push(("X-Amz-SignedHeaders", "host".to_string()));
+    let canonical_query = params
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}={}",
+                percent_encode_query(name),
+                percent_encode_query(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let canonical_request = format!(
+        "{}\n{}\n{canonical_query}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
+        request.method,
+        canonical_uri(request.path),
+        request.host,
+    );
+
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        hex_sha256(canonical_request.as_bytes())
+    );
+    let signing_key = derive_signing_key(
+        &credentials.secret_access_key,
+        &date_stamp,
+        request.region,
+        request.service,
+    );
+    let signature = hex_hmac(&signing_key, string_to_sign.as_bytes());
+
+    format!("{canonical_query}&X-Amz-Signature={signature}")
+}
+
+/// RFC 3986 encoding for a canonical query-string key or value: every byte
+/// outside the unreserved set (`A-Za-z0-9-_.~`) is percent-encoded,
+/// including `/` (so the slashes inside `X-Amz-Credential` become `%2F`) --
+/// stricter than [`percent_encode_segment`], which preserves `/` as a path
+/// separator and passes through pre-formed `%XY` escapes.
+fn percent_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 fn derive_signing_key(
     secret_access_key: &str,
     date_stamp: &str,
@@ -423,6 +526,128 @@ mod tests {
             signed_a.authorization, signed_b.authorization,
             "a different payload must produce a different signature (payload hash is part of the canonical request)"
         );
+    }
+
+    #[test]
+    fn percent_encode_query_escapes_slashes_and_reserved_bytes() {
+        // The credential scope's `/` separators must become `%2F` in the
+        // canonical query string (unlike a path, where `/` is preserved).
+        assert_eq!(
+            percent_encode_query("AKID/20150830/us-east-1/s3/aws4_request"),
+            "AKID%2F20150830%2Fus-east-1%2Fs3%2Faws4_request"
+        );
+        // Unreserved bytes pass through unchanged.
+        assert_eq!(percent_encode_query("A-Za-z0-9_.~"), "A-Za-z0-9_.~");
+    }
+
+    #[test]
+    fn presign_query_produces_a_sigv4_query_string_with_all_required_parameters() {
+        let credentials = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+        let request = PresignRequest {
+            method: "PUT",
+            path: "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0",
+            host: "project.supabase.co",
+            region: "us-east-1",
+            service: "s3",
+            expires_secs: 900,
+            timestamp_unix: 1_440_938_160,
+        };
+        let query = presign_query(&request, &credentials);
+
+        assert!(query.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        // The credential's slashes must be encoded as %2F inside the query.
+        assert!(query
+            .contains("X-Amz-Credential=AKIDEXAMPLE%2F20150830%2Fus-east-1%2Fs3%2Faws4_request"));
+        assert!(query.contains("X-Amz-Date=20150830T123600Z"));
+        assert!(query.contains("X-Amz-Expires=900"));
+        assert!(query.contains("X-Amz-SignedHeaders=host"));
+        assert!(!query.contains("X-Amz-Security-Token"));
+
+        // The signature is the last parameter and a 64-char lowercase hex.
+        let signature = query.rsplit("X-Amz-Signature=").next().unwrap();
+        assert_eq!(signature.len(), 64);
+        assert!(signature
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+        // Canonical query parameters must be sorted by name (the recipient
+        // re-derives the signature from the same sorted set).
+        let algorithm = query.find("X-Amz-Algorithm").unwrap();
+        let credential = query.find("X-Amz-Credential").unwrap();
+        let date = query.find("X-Amz-Date=").unwrap();
+        let expires = query.find("X-Amz-Expires").unwrap();
+        let signed_headers = query.find("X-Amz-SignedHeaders").unwrap();
+        assert!(algorithm < credential && credential < date && date < expires);
+        assert!(expires < signed_headers);
+    }
+
+    #[test]
+    fn presign_query_signature_depends_on_method_key_and_expiry() {
+        let credentials = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+        let put = PresignRequest {
+            method: "PUT",
+            path: "/bucket/key",
+            host: "host.test",
+            region: "us-east-1",
+            service: "s3",
+            expires_secs: 900,
+            timestamp_unix: 1_440_938_160,
+        };
+        let get = PresignRequest {
+            method: "GET",
+            ..put
+        };
+        let other_key = PresignRequest {
+            path: "/bucket/other",
+            ..put
+        };
+        let longer_ttl = PresignRequest {
+            expires_secs: 3600,
+            ..put
+        };
+        let sig = |request: &PresignRequest| {
+            presign_query(request, &credentials)
+                .rsplit("X-Amz-Signature=")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(
+            sig(&put),
+            sig(&get),
+            "method is part of the canonical request"
+        );
+        assert_ne!(sig(&put), sig(&other_key), "the object key is signed");
+        assert_ne!(sig(&put), sig(&longer_ttl), "X-Amz-Expires is signed");
+    }
+
+    #[test]
+    fn presign_query_includes_the_security_token_when_present() {
+        let credentials = AwsCredentials {
+            access_key_id: "ASIAEXAMPLE".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: Some("temp/token+value".to_string()),
+        };
+        let request = PresignRequest {
+            method: "GET",
+            path: "/bucket/key",
+            host: "host.test",
+            region: "us-east-1",
+            service: "s3",
+            expires_secs: 60,
+            timestamp_unix: 1_440_938_160,
+        };
+        let query = presign_query(&request, &credentials);
+        // The token is present and URL-encoded (`/` -> %2F, `+` -> %2B).
+        assert!(query.contains("X-Amz-Security-Token=temp%2Ftoken%2Bvalue"));
     }
 
     #[test]

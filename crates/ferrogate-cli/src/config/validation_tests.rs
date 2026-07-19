@@ -315,6 +315,7 @@ fn enabled_asset_bucket() -> AssetBucketConfig {
         region: Some("us-east-1".into()),
         access_key_id: Some("AKIDEXAMPLE".into()),
         secret_access_key_env: Some("FERROGATE_ASSET_BUCKET_SECRET".into()),
+        ..AssetBucketConfig::default()
     }
 }
 

@@ -33,8 +33,9 @@ pub use openai::OpenAiCompatibleAdapter;
 pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use sigv4::{
-    sign as sign_sigv4, sign_with_content_hash_header as sign_sigv4_with_content_hash_header,
-    AwsCredentials, SignedHeaders, SigningRequest,
+    presign_query as presign_sigv4_query, sign as sign_sigv4,
+    sign_with_content_hash_header as sign_sigv4_with_content_hash_header, AwsCredentials,
+    PresignRequest, SignedHeaders, SigningRequest,
 };
 pub use types::{
     canonical_provider_adapter_family, is_openai_compatible_provider_kind,

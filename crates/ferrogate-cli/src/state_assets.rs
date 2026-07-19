@@ -101,6 +101,31 @@ impl AppState {
     /// (`validate_asset_bucket`) already rejects an incomplete `enabled =
     /// true` section at load time, so a `None` here in practice only ever
     /// means "bucket storage isn't configured, use the inline path".
+    /// TTL (seconds) for gateway-issued presigned asset URLs (issue #259),
+    /// read from `[asset_bucket].presign_ttl_secs` and bounded to `[1,
+    /// 604800]` (S3's 7-day maximum). Defaults to 900s (15 minutes).
+    pub(crate) fn asset_presign_ttl_secs(&self) -> u64 {
+        const DEFAULT_TTL_SECS: u64 = 900;
+        const MAX_TTL_SECS: u64 = 604_800;
+        self.config
+            .asset_bucket
+            .presign_ttl_secs
+            .unwrap_or(DEFAULT_TTL_SECS)
+            .clamp(1, MAX_TTL_SECS)
+    }
+
+    /// Per-object size ceiling (bytes) for the presigned large-file path
+    /// (issue #259), read from `[asset_bucket].presign_max_object_bytes`.
+    /// Defaults to 5 GiB. This is a per-object cap layered on top of the
+    /// tenant-wide cumulative `asset_storage_quota_bytes`.
+    pub(crate) fn asset_presign_max_object_bytes(&self) -> u64 {
+        const DEFAULT_MAX_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+        self.config
+            .asset_bucket
+            .presign_max_object_bytes
+            .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
+    }
+
     pub(crate) fn asset_bucket_client(
         &self,
     ) -> Option<crate::gateway::asset_bucket::AssetBucketClient> {

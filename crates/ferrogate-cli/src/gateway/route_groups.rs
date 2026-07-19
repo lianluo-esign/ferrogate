@@ -825,6 +825,13 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
+        // Large-file presigned path (issue #259): matched first so its
+        // `/v1/assets/presign/...` sub-paths reach asset_presign.rs rather
+        // than the inline 3-segment handler. Falls through when the path is
+        // not a presign route.
+        if self.try_asset_presign_routes(session, ctx, req).await? {
+            return Ok(true);
+        }
         if req.path == "/v1/assets" || req.path.starts_with("/v1/assets/") {
             self.handle_assets(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;

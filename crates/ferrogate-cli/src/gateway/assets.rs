@@ -50,11 +50,25 @@ impl AssetError {
     }
 }
 
-/// Hard per-request body ceiling, matching the `stored_assets.size_bytes`
-/// CHECK constraint (`sql/001_init_postgres.sql`) -- a tenant's
-/// `default_asset_storage_quota_bytes` is enforced separately, on top of
-/// this, as the cumulative-across-all-assets cap.
-const MAX_ASSET_BYTES: usize = 10 * 1024 * 1024;
+/// Largest object the inline (in-memory, Pingora hot-path) push will
+/// buffer. Objects at or below this stay on the simple inline path;
+/// larger objects must use the presigned direct path (issue #259,
+/// `gateway/asset_presign.rs`), which streams straight to the bucket so
+/// bytes never buffer in the gateway. The tenant's cumulative
+/// `asset_storage_quota_bytes` is enforced separately, on top of this.
+const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Per-request byte ceiling for an inline push: the inline buffering cap,
+/// further tightened to the tenant's cumulative asset storage quota when
+/// that is smaller (a single object can never exceed the whole quota).
+/// Replaces the former hard `MAX_ASSET_BYTES` constant with a
+/// plan/quota-driven limit (issue #259).
+fn inline_push_byte_limit(asset_storage_quota_bytes: Option<u64>) -> usize {
+    let limit = asset_storage_quota_bytes.map_or(INLINE_ASSET_MAX_BYTES, |quota| {
+        quota.min(INLINE_ASSET_MAX_BYTES)
+    });
+    usize::try_from(limit).unwrap_or(usize::MAX)
+}
 
 impl FerroGateway {
     pub(super) async fn handle_assets(
@@ -256,7 +270,8 @@ impl FerroGateway {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let content = match read_request_body(session, MAX_ASSET_BYTES).await? {
+        let inline_limit = inline_push_byte_limit(auth.effective_quota.asset_storage_quota_bytes);
+        let content = match read_request_body(session, inline_limit).await? {
             Ok(body) => body,
             Err(limit) => {
                 write_json_error_and_close(
@@ -695,4 +710,32 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inline_push_byte_limit, INLINE_ASSET_MAX_BYTES};
+
+    #[test]
+    fn inline_push_byte_limit_is_the_buffering_cap_when_quota_is_unset_or_larger() {
+        // No quota configured: the inline path buffers up to its own cap.
+        assert_eq!(
+            inline_push_byte_limit(None),
+            INLINE_ASSET_MAX_BYTES as usize
+        );
+        // A quota larger than the inline cap can't loosen the inline cap.
+        assert_eq!(
+            inline_push_byte_limit(Some(INLINE_ASSET_MAX_BYTES * 100)),
+            INLINE_ASSET_MAX_BYTES as usize
+        );
+    }
+
+    #[test]
+    fn inline_push_byte_limit_tightens_to_a_smaller_plan_quota() {
+        // A per-plan quota smaller than the inline cap drives the limit --
+        // this is the plan/quota-driven replacement for the old hard
+        // MAX_ASSET_BYTES constant (issue #259).
+        assert_eq!(inline_push_byte_limit(Some(4_096)), 4_096);
+        assert_eq!(inline_push_byte_limit(Some(0)), 0);
+    }
 }

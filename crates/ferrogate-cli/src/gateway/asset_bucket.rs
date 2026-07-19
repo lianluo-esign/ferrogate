@@ -23,7 +23,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ferrogate_providers::{sign_sigv4_with_content_hash_header, AwsCredentials, SigningRequest};
+use ferrogate_providers::{
+    presign_sigv4_query, sign_sigv4_with_content_hash_header, AwsCredentials, PresignRequest,
+    SigningRequest,
+};
 
 use super::dispatch::provider_http_client;
 
@@ -124,6 +127,93 @@ impl AssetBucketClient {
             anyhow::bail!("asset bucket DELETE failed (HTTP {status}): {text}");
         }
         Ok(())
+    }
+
+    /// HEAD the object, returning its size (`Content-Length`) or `None`
+    /// when it does not exist (404). The large-file commit path (issue
+    /// #259) uses this to gate the object's size against the registered
+    /// intent *before* downloading it for the sha256 + supply-chain checks.
+    pub(crate) async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = self.object_path(key);
+        let signed = self.sign("HEAD", &path, &host, b"");
+        let client = provider_http_client()?;
+        let mut request = client
+            .head(format!("{scheme}://{host}{path}"))
+            .header("host", host.clone())
+            .header("x-amz-date", signed.x_amz_date.clone())
+            .header("authorization", signed.authorization.clone());
+        if let Some(content_sha256) = &signed.x_amz_content_sha256 {
+            request = request.header("x-amz-content-sha256", content_sha256.clone());
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("asset bucket HEAD failed (HTTP {status}): {text}");
+        }
+        let size = response
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("asset bucket HEAD returned no valid Content-Length"))?;
+        Ok(Some(size))
+    }
+
+    /// Issues a short-TTL SigV4 query-string presigned upload URL (issue
+    /// #259). The holder streams the object bytes straight to the bucket
+    /// with a plain `PUT` (no auth headers), bypassing the gateway hot
+    /// path; the gateway later verifies the committed object.
+    pub(crate) fn presign_put(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        self.presign_url("PUT", key, expires_secs, timestamp_unix)
+    }
+
+    /// Issues a short-TTL SigV4 query-string presigned download URL (issue
+    /// #259) so reads never require the bucket to be public.
+    pub(crate) fn presign_get(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        self.presign_url("GET", key, expires_secs, timestamp_unix)
+    }
+
+    fn presign_url(
+        &self,
+        method: &'static str,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = self.object_path(key);
+        let query = presign_sigv4_query(
+            &PresignRequest {
+                method,
+                path: &path,
+                host: &host,
+                region: &self.config.region,
+                service: "s3",
+                expires_secs,
+                timestamp_unix,
+            },
+            &AwsCredentials {
+                access_key_id: self.config.access_key_id.clone(),
+                secret_access_key: self.config.secret_access_key.clone(),
+                session_token: None,
+            },
+        );
+        Ok(format!("{scheme}://{host}{path}?{query}"))
     }
 
     fn object_path(&self, key: &str) -> String {
@@ -347,6 +437,67 @@ mod tests {
 
         let request = captured.lock().unwrap().clone().unwrap();
         assert_eq!(request.method, "DELETE");
+    }
+
+    #[test]
+    fn presign_put_builds_a_path_style_sigv4_query_string_url_with_a_bounded_ttl() {
+        let bucket = client("https://project.supabase.co/storage/v1/s3".into());
+        let url = bucket
+            .presign_put("tenant-a:cli_tool:hello:1.0.0", 900, 1_440_938_160)
+            .unwrap();
+
+        // Path-style URL against the configured endpoint host + bucket/key.
+        assert!(url.starts_with(
+            "https://project.supabase.co/storage/v1/s3/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0?"
+        ));
+        // SigV4 query-string presign markers, bounded TTL, and a signature.
+        assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(url.contains("X-Amz-Expires=900"));
+        assert!(url.contains("X-Amz-SignedHeaders=host"));
+        assert!(url.contains("X-Amz-Signature="));
+        // The secret key never leaks into the URL.
+        assert!(!url.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn presign_get_and_presign_put_sign_the_same_key_differently() {
+        let bucket = client("http://127.0.0.1:9999".into());
+        let put = bucket.presign_put("k", 300, 1_440_938_160).unwrap();
+        let get = bucket.presign_get("k", 300, 1_440_938_160).unwrap();
+        assert!(put.starts_with("http://127.0.0.1:9999/ferrogate-assets/k?"));
+        let put_sig = put.rsplit("X-Amz-Signature=").next().unwrap();
+        let get_sig = get.rsplit("X-Amz-Signature=").next().unwrap();
+        assert_ne!(
+            put_sig, get_sig,
+            "PUT and GET presigns of the same key must differ (method is signed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn head_object_returns_the_content_length() {
+        let (endpoint, captured) = spawn_bucket_mock("200 OK", b"");
+        let bucket = client(endpoint);
+
+        let size = bucket
+            .head_object("tenant-a:cli_tool:hello:1.0.0")
+            .await
+            .unwrap();
+        // The mock echoes the request body length as Content-Length (0 here).
+        assert_eq!(size, Some(0));
+        let request = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "HEAD");
+        assert!(request.has_authorization);
+    }
+
+    #[tokio::test]
+    async fn head_object_returns_none_on_404() {
+        let (endpoint, _captured) = spawn_bucket_mock("404 Not Found", b"");
+        let bucket = client(endpoint);
+        let size = bucket
+            .head_object("tenant-a:cli_tool:missing:1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(size, None);
     }
 
     #[test]

@@ -158,6 +158,17 @@ pub(crate) struct AssetBucketConfig {
     pub(crate) access_key_id: Option<String>,
     #[serde(default)]
     pub(crate) secret_access_key_env: Option<String>,
+    /// TTL (seconds) for gateway-issued presigned upload/download URLs
+    /// (issue #259). Bounded to S3's 7-day maximum and defaulted to 15
+    /// minutes when unset -- short-lived by design so a leaked URL expires
+    /// quickly.
+    #[serde(default)]
+    pub(crate) presign_ttl_secs: Option<u64>,
+    /// Per-object size ceiling (bytes) for the presigned large-file path
+    /// (issue #259). Independent of the cumulative, tenant-wide
+    /// `asset_storage_quota_bytes` cap. Defaults to 5 GiB when unset.
+    #[serde(default)]
+    pub(crate) presign_max_object_bytes: Option<u64>,
 }
 
 /// Pre-authentication network controls (issue #166), applied to every

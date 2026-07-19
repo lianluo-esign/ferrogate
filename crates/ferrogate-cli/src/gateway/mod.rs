@@ -8,6 +8,7 @@ mod agent_runs;
 mod agent_schedules;
 mod api_contract;
 pub(crate) mod asset_bucket;
+mod asset_presign;
 mod asset_security;
 mod assets;
 mod billing_outbox;
