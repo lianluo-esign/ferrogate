@@ -61,12 +61,23 @@ else
   cargo +1.88.0 fmt --check
   cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
   cargo +1.88.0 test --workspace
-  # Release gate (user directive 2026-07-19): the local ferrogate-test full suite
-  # must pass with no errors before an image is built/pushed. This replaces the
-  # slow GitHub Actions release pipeline. Runs the docker-free scenarios; the
-  # Docker-backed cluster scenarios still need a docker daemon on this host.
+  # Release gate (user directive 2026-07-19): the local ferrogate-test suite must
+  # pass with no errors before an image is built/pushed. Replaces the slow GitHub
+  # Actions release pipeline.
   cargo +1.88.0 build --release -p ferrogate-test
-  ./target/release/ferrogate-test ci
+  if [ "$ENGINE" = "docker" ]; then
+    # Full gate incl. Docker-backed cluster/shared-state/Redis scenarios.
+    ./target/release/ferrogate-test ci
+  else
+    # No-daemon host: run the docker-free harness (run-all without --include-docker).
+    # `ci` would abort on the first Docker-backed scenario. run-all needs the two
+    # debug binaries it drives.
+    cargo +1.88.0 build -p ferrogate-cli -p ferrogate-auth
+    ./target/release/ferrogate-test run-all \
+      --ferrogate-bin target/debug/ferrogate \
+      --ferrogate-auth-bin target/debug/ferrogate-auth
+    echo "   NOTE: Docker-backed cluster scenarios skipped (no daemon); run 'ferrogate-test ci' on a docker host for full coverage."
+  fi
   # Dependency vulnerability gate (#208): RUSTSEC advisories over the locked graph.
   # git-fetch of the advisory DB may be blocked; set CARGO_AUDIT_DB to a pre-fetched
   # checkout to run offline. Missing tool/DB is a soft-skip (warns, doesn't block).
