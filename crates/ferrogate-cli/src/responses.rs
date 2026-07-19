@@ -1897,11 +1897,30 @@ fn apply_common_headers(response: &mut ResponseHeader, request_id: &str) -> Ping
     apply_cors_headers(response)
 }
 
+/// Attaches caller-supplied response headers (issue #301) — the asset pull
+/// path's `x-ferrogate-asset-*` resolution metadata and yank `warning` — to a
+/// cacheable response arm.
+fn apply_extra_headers(
+    response: &mut ResponseHeader,
+    extra_headers: &[(&'static str, String)],
+) -> PingoraResult<()> {
+    for (name, value) in extra_headers {
+        response.insert_header(*name, value)?;
+    }
+    Ok(())
+}
+
 /// Serves `body` with HTTP caching semantics (issue #258): strong `ETag`,
 /// `Last-Modified`, `Cache-Control`, `Accept-Ranges`, `304 Not Modified` for a
 /// matching conditional GET, and `206 Partial Content` / `416` for a `Range`
 /// request. `HEAD` gets the full header set with no body. Shared by the
 /// authenticated `/v1/assets/*` pull path and the `/sites/*` serve mode.
+///
+/// `extra_headers` are caller-supplied response headers attached to every arm
+/// (issue #301): the pull path uses them to carry its registry-resolution
+/// metadata (`x-ferrogate-asset-*`) and the yank `warning` header alongside the
+/// conditional-caching behaviour, so a re-pull still short-circuits to `304`
+/// without dropping the resolution headers.
 pub(crate) async fn write_cacheable_response(
     session: &mut Session,
     req_headers: &http::HeaderMap,
@@ -1909,6 +1928,7 @@ pub(crate) async fn write_cacheable_response(
     body: Bytes,
     cache: &AssetCacheHeaders<'_>,
     request_id: &str,
+    extra_headers: &[(&'static str, String)],
 ) -> PingoraResult<StatusCode> {
     let total_len = body.len();
     let is_head = *method == http::Method::HEAD;
@@ -1923,6 +1943,7 @@ pub(crate) async fn write_cacheable_response(
             let mut response = ResponseHeader::build(StatusCode::NOT_MODIFIED, Some(8))?;
             apply_asset_validators(&mut response, cache)?;
             apply_common_headers(&mut response, request_id)?;
+            apply_extra_headers(&mut response, extra_headers)?;
             session
                 .write_response_header(Box::new(response), false)
                 .await?;
@@ -1935,6 +1956,7 @@ pub(crate) async fn write_cacheable_response(
             response.insert_header(header::CONTENT_RANGE, format!("bytes */{total_len}"))?;
             apply_asset_validators(&mut response, cache)?;
             apply_common_headers(&mut response, request_id)?;
+            apply_extra_headers(&mut response, extra_headers)?;
             session
                 .write_response_header(Box::new(response), false)
                 .await?;
@@ -1952,6 +1974,7 @@ pub(crate) async fn write_cacheable_response(
             )?;
             apply_asset_validators(&mut response, cache)?;
             apply_common_headers(&mut response, request_id)?;
+            apply_extra_headers(&mut response, extra_headers)?;
             session
                 .write_response_header(Box::new(response), false)
                 .await?;
@@ -1969,6 +1992,7 @@ pub(crate) async fn write_cacheable_response(
             response.insert_header(header::CONTENT_LENGTH, total_len.to_string())?;
             apply_asset_validators(&mut response, cache)?;
             apply_common_headers(&mut response, request_id)?;
+            apply_extra_headers(&mut response, extra_headers)?;
             session
                 .write_response_header(Box::new(response), false)
                 .await?;
@@ -1977,35 +2001,6 @@ pub(crate) async fn write_cacheable_response(
             Ok(StatusCode::OK)
         }
     }
-}
-
-/// Raw-body response with extra caller-supplied headers (issue #260): the
-/// asset pull path uses this to attach resolution metadata
-/// (`x-ferrogate-asset-*`) and, for an exact pull of a yanked version, a
-/// `warning` deprecation header, while otherwise matching
-/// [`write_raw_response`] byte-for-byte.
-pub(crate) async fn write_raw_response_with_headers(
-    session: &mut Session,
-    status: StatusCode,
-    content_type: &str,
-    body: Bytes,
-    request_id: &str,
-    extra_headers: &[(&'static str, String)],
-) -> PingoraResult<()> {
-    let mut response = ResponseHeader::build(status, Some(4 + extra_headers.len()))?;
-    response.insert_header(header::CONTENT_TYPE, content_type)?;
-    response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
-    response.insert_header("x-request-id", request_id)?;
-    response.insert_header("x-trace-id", request_id)?;
-    response.insert_header("x-ferrogate-runtime", "pingora")?;
-    for (name, value) in extra_headers {
-        response.insert_header(*name, value)?;
-    }
-    apply_cors_headers(&mut response)?;
-    session
-        .write_response_header(Box::new(response), false)
-        .await?;
-    session.write_response_body(Some(body), true).await
 }
 
 pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(

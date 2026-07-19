@@ -28,8 +28,8 @@ use super::FerroGateway;
 use crate::{
     auth::authenticate,
     responses::{
-        write_json_error, write_json_error_and_close, write_json_response,
-        write_raw_response_with_headers, AdminDeleteResponse, AdminList,
+        write_cacheable_response, write_json_error, write_json_error_and_close,
+        write_json_response, AdminDeleteResponse, AdminList, AssetCacheHeaders,
         AssetChannelMutationResponse, AssetChannelSummary, AssetManifest, AssetManifestVariant,
         AssetManifestVersion, AssetMutationResponse, AssetSummary,
     },
@@ -58,6 +58,12 @@ impl AssetError {
 /// bytes never buffer in the gateway. The tenant's cumulative
 /// `asset_storage_quota_bytes` is enforced separately, on top of this.
 const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Default `Cache-Control` for a pulled asset (issues #258/#301): assets are
+/// tenant-private and content-addressed, so clients must revalidate against the
+/// strong `ETag` rather than serve a stale cached copy. Re-added on the
+/// registry pull path so a conditional re-pull can short-circuit to `304`.
+const DEFAULT_ASSET_CACHE_CONTROL: &str = "private, max-age=0, must-revalidate";
 
 /// Per-request byte ceiling for an inline push: the inline buffering cap,
 /// further tightened to the tenant's cumulative asset storage quota when
@@ -666,7 +672,7 @@ impl FerroGateway {
         )
         .await;
 
-        self.write_asset_body(session, ctx, selected.clone(), &extra_headers)
+        self.write_asset_body(session, ctx, headers, selected.clone(), &extra_headers)
             .await
     }
 
@@ -1131,12 +1137,16 @@ impl FerroGateway {
         Ok(())
     }
 
-    /// Fetch content (bucket or inline), re-verify its hash, and write the raw
-    /// body with the supplied extra headers.
+    /// Fetch content (bucket or inline), re-verify its hash, and serve it with
+    /// full HTTP caching (304/Range, issue #258) while carrying the caller's
+    /// registry-resolution metadata + yank `warning` as extra response headers
+    /// (issue #301). `req_headers` supplies the client's conditional/range
+    /// headers.
     async fn write_asset_body(
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,
+        req_headers: &http::HeaderMap,
         asset: StoredAsset,
         extra_headers: &[(&'static str, String)],
     ) -> PingoraResult<()> {
@@ -1180,15 +1190,27 @@ impl FerroGateway {
             )
             .await;
         }
-        write_raw_response_with_headers(
+        // HTTP caching semantics (issue #258): a strong ETag from the stored
+        // sha256, Last-Modified, Cache-Control, and 304/206 handling shared with
+        // the static-site serve mode -- restored on the registry pull path
+        // (issue #301) while still carrying the #260 resolution/yank headers.
+        let cache = AssetCacheHeaders {
+            content_type: &asset.content_type,
+            etag: format!("\"{}\"", asset.content_hash),
+            last_modified_unix: asset.updated_at_unix,
+            cache_control: DEFAULT_ASSET_CACHE_CONTROL,
+        };
+        write_cacheable_response(
             session,
-            StatusCode::OK,
-            &asset.content_type,
+            req_headers,
+            &Method::GET,
             Bytes::from(content),
+            &cache,
             &ctx.request_id,
             extra_headers,
         )
-        .await
+        .await?;
+        Ok(())
     }
 }
 

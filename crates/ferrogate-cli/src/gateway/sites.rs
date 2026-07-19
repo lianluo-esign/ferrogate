@@ -333,6 +333,7 @@ impl FerroGateway {
             Bytes::from(content),
             &cache,
             &ctx.request_id,
+            &[],
         )
         .await
     }
