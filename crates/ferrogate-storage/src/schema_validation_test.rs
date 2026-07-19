@@ -31,8 +31,8 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 39);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "039_asset_egress_quota");
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 40);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "040_wallet_reservations");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
@@ -43,6 +43,8 @@ fn schema_contract_includes_latest_asset_egress_migration() {
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (38, '038_asset_registry_semantics')"));
     // #262: asset egress governance columns + migration (039, after #260's 038).
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (39, '039_asset_egress_quota')"));
+    // #281: durable wallet reserve/hold primitive (040, after #262's 039).
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (40, '040_wallet_reservations')"));
     assert!(
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")
@@ -75,6 +77,26 @@ fn schema_contract_defines_the_asset_registry_tables() {
     assert!(
         add_variant < add_constraint,
         "the variant-widened UNIQUE must come after its ADD COLUMN"
+    );
+}
+
+#[test]
+fn schema_contract_defines_the_wallet_reservations_table() {
+    // #281: durable reserve/hold rows for exact-amount, irreversible spends.
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS wallet_reservations"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("idx_wallet_reservations_tenant_status"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("idx_wallet_reservations_active_expiry"));
+    // #254: any CREATE INDEX over the table must come after the CREATE TABLE
+    // that defines its columns, never before.
+    let create_table = POSTGRES_SCHEMA_SQL
+        .find("CREATE TABLE IF NOT EXISTS wallet_reservations")
+        .expect("wallet_reservations table present");
+    let create_index = POSTGRES_SCHEMA_SQL
+        .find("idx_wallet_reservations_active_expiry")
+        .expect("wallet_reservations expiry index present");
+    assert!(
+        create_table < create_index,
+        "wallet_reservations indexes must come after the CREATE TABLE"
     );
 }
 

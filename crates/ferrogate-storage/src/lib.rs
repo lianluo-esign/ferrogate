@@ -231,8 +231,10 @@ pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
 
 mod wallet;
 pub use wallet::{
-    payment_method_id, StoredPaymentMethod, StoredWallet, StoredWalletSettlement,
-    WalletSettlementOutcome,
+    payment_method_id, StoredPaymentMethod, StoredWallet, StoredWalletReservation,
+    StoredWalletSettlement, WalletReservationResult, WalletReservationSettlement,
+    WalletSettlementOutcome, WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_RELEASED,
+    WALLET_RESERVATION_SETTLED,
 };
 
 mod guardrail_evidence;
@@ -512,8 +514,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 39;
-const POSTGRES_SCHEMA_NAME: &str = "039_asset_egress_quota";
+const POSTGRES_SCHEMA_VERSION: u64 = 40;
+const POSTGRES_SCHEMA_NAME: &str = "040_wallet_reservations";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1180,6 +1182,8 @@ pub struct RuntimeControlPlaneState {
     billing_event_ids: InMemoryRepository<BillingEvent>,
     wallets: InMemoryRepository<StoredWallet>,
     wallet_settlements: InMemoryRepository<StoredWalletSettlement>,
+    // #281: durable reserve/hold rows keyed by reservation id.
+    wallet_reservations: InMemoryRepository<StoredWalletReservation>,
     payment_methods: InMemoryRepository<StoredPaymentMethod>,
     guardrail_policy_revisions: InMemoryRepository<StoredGuardrailPolicyRevision>,
     guardrail_policy_bindings: InMemoryRepository<StoredGuardrailPolicyBinding>,
@@ -7164,6 +7168,7 @@ where
         "usage_metadata_rollups",
         "wallets",
         "wallet_settlements",
+        "wallet_reservations",
         "payment_methods",
         "agent_schedules",
         "agent_schedule_fires",
@@ -8768,6 +8773,7 @@ impl RuntimeControlPlaneState {
             billing_event_ids: InMemoryRepository::new(),
             wallets: InMemoryRepository::new(),
             wallet_settlements: InMemoryRepository::new(),
+            wallet_reservations: InMemoryRepository::new(),
             payment_methods: InMemoryRepository::new(),
             guardrail_policy_revisions: InMemoryRepository::new(),
             guardrail_policy_bindings: InMemoryRepository::new(),
@@ -16283,6 +16289,262 @@ mod tests {
                 .balance_credits,
             600,
             "a replayed settlement id must not double-credit the wallet"
+        );
+    }
+
+    fn wallet_repositories_with_balance(tenant: &str, balance: i64) -> RuntimeStorageRepositories {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        block_on(repositories.upsert_wallet(StoredWallet {
+            id: tenant.into(),
+            tenant_id: tenant.into(),
+            balance_credits: balance,
+            auto_recharge_threshold_credits: None,
+            auto_recharge_amount_credits: None,
+            dunning: false,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .unwrap();
+        repositories
+    }
+
+    #[test]
+    fn wallet_reserve_reduces_available_balance_and_rejects_over_reserve() {
+        // #281: a hold reduces AVAILABLE (not actual) balance, so a second
+        // reserve sees less headroom and an over-reserve is rejected without
+        // ever touching the real balance.
+        let repositories = wallet_repositories_with_balance("tenant-r", 1_000);
+
+        // Reserve 600 of 1_000: leaves 400 available, real balance untouched.
+        let first =
+            block_on(repositories.reserve_wallet_credits("hold-a", "tenant-r", 600, 100, 2))
+                .unwrap();
+        assert!(matches!(first, WalletReservationResult::Reserved(_)));
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-r"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            1_000,
+            "a hold must not debit the real balance"
+        );
+
+        // Reserving 400 more exactly exhausts available balance.
+        let second =
+            block_on(repositories.reserve_wallet_credits("hold-b", "tenant-r", 400, 100, 2))
+                .unwrap();
+        assert!(matches!(second, WalletReservationResult::Reserved(_)));
+
+        // One more credit is now unaffordable: no oversell.
+        let third =
+            block_on(repositories.reserve_wallet_credits("hold-c", "tenant-r", 1, 100, 2)).unwrap();
+        assert!(matches!(
+            third,
+            WalletReservationResult::Insufficient {
+                available_credits: 0,
+                requested_credits: 1,
+            }
+        ));
+
+        // Re-reserving an existing id is idempotent (returns the same hold).
+        let replay =
+            block_on(repositories.reserve_wallet_credits("hold-a", "tenant-r", 600, 100, 9))
+                .unwrap();
+        assert!(matches!(
+            replay,
+            WalletReservationResult::Reserved(r) if r.amount_credits == 600
+        ));
+
+        // No wallet row -> opt-in, no hold taken.
+        assert!(matches!(
+            block_on(repositories.reserve_wallet_credits("hold-x", "no-wallet", 5, 100, 2))
+                .unwrap(),
+            WalletReservationResult::NoWallet
+        ));
+    }
+
+    #[test]
+    fn wallet_reservation_settle_debits_the_reserved_amount_and_clears_the_hold() {
+        // #281: settle captures the exact reserved amount into a real debit,
+        // records a ledger row whose id references the originating hold, marks
+        // the hold settled, and is idempotent on replay.
+        let repositories = wallet_repositories_with_balance("tenant-s", 1_000);
+        block_on(repositories.reserve_wallet_credits("hold-s", "tenant-s", 300, 100, 2)).unwrap();
+
+        let settled = block_on(repositories.settle_wallet_reservation("hold-s", 5)).unwrap();
+        assert!(settled.newly_applied);
+        assert_eq!(settled.reservation.status, WALLET_RESERVATION_SETTLED);
+        // The ledger entry references its originating hold (shared id).
+        assert_eq!(settled.settlement.id, "hold-s");
+        assert_eq!(settled.reservation.settlement_id.as_deref(), Some("hold-s"));
+        assert_eq!(settled.settlement.delta_credits, -300);
+        assert_eq!(settled.settlement.balance_after_credits, Some(700));
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-s"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            700,
+            "settle debits the reserved amount"
+        );
+
+        // The hold no longer counts against available balance: the remaining
+        // 700 is fully reservable again.
+        assert!(matches!(
+            block_on(repositories.reserve_wallet_credits("hold-s2", "tenant-s", 700, 100, 6))
+                .unwrap(),
+            WalletReservationResult::Reserved(_)
+        ));
+
+        // Settling the same hold again is an idempotent no-op (no double debit).
+        let replay = block_on(repositories.settle_wallet_reservation("hold-s", 7)).unwrap();
+        assert!(!replay.newly_applied);
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-s"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            700,
+            "a replayed settle must not debit twice"
+        );
+    }
+
+    #[test]
+    fn wallet_reservation_release_restores_available_balance() {
+        // #281: releasing a hold frees its credits back to available balance.
+        let repositories = wallet_repositories_with_balance("tenant-rel", 500);
+        block_on(repositories.reserve_wallet_credits("hold-rel", "tenant-rel", 500, 100, 2))
+            .unwrap();
+
+        // Fully reserved: nothing else fits.
+        assert!(matches!(
+            block_on(repositories.reserve_wallet_credits("hold-rel2", "tenant-rel", 1, 100, 2))
+                .unwrap(),
+            WalletReservationResult::Insufficient { .. }
+        ));
+
+        let released = block_on(repositories.release_wallet_reservation("hold-rel", 3)).unwrap();
+        assert_eq!(released.status, WALLET_RESERVATION_RELEASED);
+
+        // The freed credits are reservable again; the real balance is unchanged.
+        assert!(matches!(
+            block_on(repositories.reserve_wallet_credits("hold-rel3", "tenant-rel", 500, 100, 4))
+                .unwrap(),
+            WalletReservationResult::Reserved(_)
+        ));
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-rel"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            500
+        );
+
+        // Releasing again is idempotent; settling a released hold is rejected.
+        assert!(block_on(repositories.release_wallet_reservation("hold-rel", 5)).is_ok());
+        assert!(matches!(
+            block_on(repositories.settle_wallet_reservation("hold-rel", 6)),
+            Err(StorageError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn wallet_reservation_expiry_auto_releases_and_settle_after_release_is_rejected() {
+        // #281 acceptance: a crash between reserve and settle expires the hold;
+        // the sweeper releases it, and a later settle is rejected idempotently.
+        let repositories = wallet_repositories_with_balance("tenant-exp", 1_000);
+        block_on(repositories.reserve_wallet_credits("hold-exp", "tenant-exp", 400, 50, 2))
+            .unwrap();
+
+        // An expired hold stops counting against available balance even before
+        // the sweep, so the full balance is reservable at now=100 (> ttl 50).
+        assert!(matches!(
+            block_on(repositories.reserve_wallet_credits(
+                "hold-live",
+                "tenant-exp",
+                1_000,
+                200,
+                100
+            ))
+            .unwrap(),
+            WalletReservationResult::Reserved(_)
+        ));
+        block_on(repositories.release_wallet_reservation("hold-live", 100)).unwrap();
+
+        // Sweeper marks the expired hold released and reports it.
+        let swept = block_on(repositories.sweep_expired_wallet_reservations(100)).unwrap();
+        assert_eq!(swept, vec!["hold-exp".to_string()]);
+
+        // Settling the expired/released hold is rejected -- the spend never
+        // happened, and the real balance is untouched.
+        assert!(matches!(
+            block_on(repositories.settle_wallet_reservation("hold-exp", 101)),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            block_on(repositories.get_wallet("tenant-exp"))
+                .unwrap()
+                .unwrap()
+                .balance_credits,
+            1_000
+        );
+
+        // Settling an unknown hold is a NotFound, never a silent debit.
+        assert!(matches!(
+            block_on(repositories.settle_wallet_reservation("nope", 101)),
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn concurrent_reserves_cannot_oversell_a_wallet_balance() {
+        // #281 core correctness property: N parallel reserves against a balance
+        // that affords only N-1 of them let exactly N-1 through -- no oversell.
+        use std::sync::{Arc, Barrier};
+
+        let repositories = Arc::new(wallet_repositories_with_balance("tenant-race", 900));
+        let threads = 10usize; // 10 x 100 credits, but only 900 funded.
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for i in 0..threads {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                // Release all threads at once for maximum contention.
+                barrier.wait();
+                block_on(repositories.reserve_wallet_credits(
+                    &format!("hold-{i}"),
+                    "tenant-race",
+                    100,
+                    1_000,
+                    2,
+                ))
+            }));
+        }
+
+        let mut reserved = 0;
+        let mut insufficient = 0;
+        for handle in handles {
+            match handle.join().unwrap().unwrap() {
+                WalletReservationResult::Reserved(_) => reserved += 1,
+                WalletReservationResult::Insufficient { .. } => insufficient += 1,
+                WalletReservationResult::NoWallet => panic!("wallet exists"),
+            }
+        }
+        assert_eq!(reserved, 9, "exactly floor(900/100) reserves may succeed");
+        assert_eq!(insufficient, 1, "the oversell attempt must be rejected");
+
+        // Live holds never exceed the funded balance.
+        let held: i64 = block_on(repositories.list_wallet_reservations("tenant-race"))
+            .unwrap()
+            .iter()
+            .filter(|r| r.status == WALLET_RESERVATION_ACTIVE)
+            .map(|r| r.amount_credits)
+            .sum();
+        assert_eq!(
+            held, 900,
+            "held credits must never exceed the funded balance"
         );
     }
 

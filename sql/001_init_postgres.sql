@@ -1948,3 +1948,47 @@ ALTER TABLE plans
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (39, '039_asset_egress_quota')
 ON CONFLICT (version) DO NOTHING;
+
+-- #281: durable wallet reserve/hold primitive for exact-amount, irreversible
+-- spends (x402/AP2 prerequisite, parent #268). `adjust_wallet_balance` is
+-- check-then-debit with no hold, so N concurrent spends can each pass the same
+-- balance read and overdraw a prepaid balance. A reservation row holds an
+-- exact credit amount against a wallet and reduces its AVAILABLE (not actual)
+-- balance until it is either settled (converted to a real debit ledger entry)
+-- or released (cancelled). Reserves serialize on the owning `wallets` row
+-- (SELECT ... FOR UPDATE in the storage layer), so N parallel reserves against
+-- a balance that only affords N-1 of them let exactly N-1 through -- no
+-- oversell. `status` is 'active' | 'settled' | 'released'. An expired 'active'
+-- hold no longer counts against available balance (the `expires_at_unix` guard
+-- in the reserve query) and is swept to 'released' by the billing-outbox-style
+-- sweeper, so a crash between reserve and settle self-heals; a settle after
+-- expiry/release is rejected, keeping the spend exact and idempotent.
+CREATE TABLE IF NOT EXISTS wallet_reservations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    amount_credits BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at_unix BIGINT NOT NULL,
+    -- Set to the wallet_settlements.id produced when this hold settles, so the
+    -- ledger charge and its originating hold reference each other. The
+    -- settlement id IS the reservation id -- a 1:1, exact-amount mapping, which
+    -- also makes settle idempotent through the wallet_settlements primary key.
+    settlement_id TEXT,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+-- Available-balance computation and the admin per-tenant hold listing both
+-- filter by (tenant_id, status).
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_tenant_status
+    ON wallet_reservations(tenant_id, status);
+
+-- Sweeper scans active holds whose TTL has passed; the partial index keeps it
+-- off already-settled/released rows.
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_active_expiry
+    ON wallet_reservations(expires_at_unix)
+    WHERE status = 'active';
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (40, '040_wallet_reservations')
+ON CONFLICT (version) DO NOTHING;

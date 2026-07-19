@@ -1116,6 +1116,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "storage_schema_migrations",
         "agent_schedules",
         "agent_schedule_fires",
+        // #281 (migration 40): durable wallet reserve/hold primitive.
+        "wallet_reservations",
     ];
     for table in expected_tables {
         let count = postgres_scalar(&format!(
@@ -1284,10 +1286,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 38",
+         FROM {}.storage_schema_migrations WHERE version = 40",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "38:038_asset_registry_semantics" {
+    if migration_version.trim() != "40:040_wallet_reservations" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1918,11 +1920,8 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 38);
-                assert_eq!(
-                    body["storage"]["schema"]["name"],
-                    "038_asset_registry_semantics"
-                );
+                assert_eq!(body["storage"]["schema"]["version"], 40);
+                assert_eq!(body["storage"]["schema"]["name"], "040_wallet_reservations");
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
                     .as_str()
