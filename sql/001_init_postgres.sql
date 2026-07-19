@@ -248,14 +248,16 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_workspace_status
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity
     ON self_hosted_worker_registrations(identity_fingerprint);
 
-CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity_expiry
-    ON self_hosted_worker_registrations(identity_expires_at_unix);
-
 ALTER TABLE self_hosted_worker_registrations
     ADD COLUMN IF NOT EXISTS identity_expires_at_unix BIGINT;
 
 ALTER TABLE self_hosted_worker_registrations
     ADD COLUMN IF NOT EXISTS token_secret TEXT NOT NULL DEFAULT '';
+
+-- Placed AFTER the ADD COLUMN so an upgrade (table predates the column) does not
+-- fail building this index over a not-yet-existent column.
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity_expiry
+    ON self_hosted_worker_registrations(identity_expires_at_unix);
 
 CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
     id TEXT PRIMARY KEY,
@@ -1139,10 +1141,6 @@ CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
 CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_key
     ON usage_metadata_rollups(metadata_key, period_month);
 
--- Per-tenant lookup index for the scoped group_by=metadata read path (#226).
-CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
-    ON usage_metadata_rollups(organization_id, metadata_key, period_month);
-
 -- Migration 033 (#226): add organization_id to existing tables and drop the
 -- pre-#226 (period_month, metadata_key, metadata_value) UNIQUE constraint, which
 -- would otherwise reject two tenants sharing a metadata key/value in the same
@@ -1150,8 +1148,18 @@ CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
 -- operator-only) and keep their historical totals; the deterministic PK now
 -- dedups on the org-scoped id. Pre-migration rows cannot be re-attributed to a
 -- tenant (their originating tenant is unrecoverable post-aggregation).
+-- NOTE: the ADD COLUMN must precede the idx_usage_metadata_rollups_org_key index
+-- below. On an UPGRADE the table already exists (created pre-#226 without
+-- organization_id), so `CREATE TABLE IF NOT EXISTS` above is a no-op and the
+-- org-scoped index can only be built once this ALTER has added the column.
 ALTER TABLE usage_metadata_rollups
     ADD COLUMN IF NOT EXISTS organization_id TEXT NOT NULL DEFAULT '';
+
+-- Per-tenant lookup index for the scoped group_by=metadata read path (#226).
+-- Placed AFTER the ADD COLUMN so the upgrade path (table missing the column)
+-- does not fail building an index over a not-yet-existent column.
+CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
+    ON usage_metadata_rollups(organization_id, metadata_key, period_month);
 
 DO $$
 DECLARE
