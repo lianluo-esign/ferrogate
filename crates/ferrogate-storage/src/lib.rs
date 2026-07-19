@@ -7161,6 +7161,39 @@ where
         }
     }
 
+    // #256: other migration-added columns that a hand-built or partially-migrated
+    // schema can silently lack (validate_schema must fail-fast on all of them, not
+    // just the provider-attempt set above). organization_id (#226, migration 33) is
+    // the exact column whose absence aborted the live migration in #254.
+    const REQUIRED_MIGRATION_COLUMNS: &[(&str, &str, &str, &str)] = &[
+        ("usage_metadata_rollups", "organization_id", "text", "NO"),
+        (
+            "self_hosted_worker_registrations",
+            "token_secret",
+            "text",
+            "NO",
+        ),
+    ];
+    for (table, column, expected_type, expected_nullable) in REQUIRED_MIGRATION_COLUMNS {
+        let definition = client
+            .query_opt(
+                "SELECT data_type, is_nullable FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = $1 AND column_name = $2",
+                &[table, column],
+            )
+            .await
+            .map_err(postgres_error)?
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)));
+        if definition.as_ref().map(|(value, _)| value.as_str()) != Some(*expected_type)
+            || definition.as_ref().map(|(_, value)| value.as_str()) != Some(*expected_nullable)
+        {
+            return Err(StorageError::Postgres(format!(
+                "required schema column {table}.{column} must be {expected_type} NOT NULL"
+            )));
+        }
+    }
+
     for (table, expected_column) in [
         ("metering_events", "billing_event_id"),
         ("metering_event_routes", "billing_event_id"),
