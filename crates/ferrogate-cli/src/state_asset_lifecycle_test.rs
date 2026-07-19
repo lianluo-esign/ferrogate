@@ -9,7 +9,10 @@
 
 use super::*;
 
-use ferrogate_storage::{stored_asset_id, StoredAsset, StoredAssetChannel};
+use ferrogate_storage::{
+    stored_asset_id, StoredAsset, StoredAssetChannel, StoredAuditEvent, StoredRequestLog,
+    RETENTION_RESOURCE_REQUEST_LOG, RETENTION_SCOPE_DEFAULT,
+};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -259,4 +262,252 @@ fn prune_emits_an_audit_event() {
     assert!(audits
         .iter()
         .any(|event| event.action == "asset.retention.prune" && event.message.contains("pruned")));
+}
+
+// -- #284: compliance-data retention (request_logs / audit_events) --
+
+fn now_secs() -> i64 {
+    now_unix_seconds().unwrap() as i64
+}
+
+fn tenant_ctx(org: &str) -> ferrogate_core::TenantContext {
+    ferrogate_core::TenantContext {
+        organization_id: Some(org.to_string()),
+        ..ferrogate_core::TenantContext::default()
+    }
+}
+
+fn request_log(id: &str, org: &str, started: i64, response_recorded: bool) -> StoredRequestLog {
+    StoredRequestLog {
+        request_id: id.into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: tenant_ctx(org),
+        route: None,
+        provider: None,
+        logical_model: None,
+        provider_model: None,
+        gateway_config_id: None,
+        gateway_config_revision: None,
+        status_code: 200,
+        error_code: None,
+        prompt_recorded: false,
+        response_recorded,
+        prompt_body: None,
+        response_body: response_recorded.then(|| "body".to_string()),
+        cache_status: None,
+        started_at_unix: Some(started.max(0) as u64),
+        completed_at_unix: None,
+    }
+}
+
+fn audit_event(id: &str, org: &str, occurred: i64) -> StoredAuditEvent {
+    StoredAuditEvent {
+        id: id.into(),
+        request_id: format!("req-{id}"),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        actor_api_key_id: None,
+        tenant: tenant_ctx(org),
+        action: "test.action".into(),
+        target: "t".into(),
+        outcome: "committed".into(),
+        message: "m".into(),
+        occurred_at_unix: Some(occurred.max(0) as u64),
+    }
+}
+
+/// Config with compliance retention enabled and the given per-table defaults.
+fn compliance_config(
+    dry_run: bool,
+    request_log_max_age: Option<i64>,
+    audit_event_max_age: Option<i64>,
+    response_body_max_age: Option<i64>,
+) -> crate::config::AssetLifecycleConfig {
+    crate::config::AssetLifecycleConfig {
+        enabled: true,
+        dry_run,
+        retention_min_age_secs: 0,
+        default_request_log_max_age_secs: request_log_max_age,
+        default_audit_event_max_age_secs: audit_event_max_age,
+        default_response_body_max_age_secs: response_body_max_age,
+        ..crate::config::AssetLifecycleConfig::default()
+    }
+}
+
+#[test]
+fn request_logs_past_max_age_are_pruned_while_audit_events_floor_survives() {
+    // request_logs TTL 100s; audit_events have NO configured TTL (their longer
+    // legal floor -> never pruned). Ancient rows of both are seeded.
+    let state = state_with(compliance_config(false, Some(100), None, None));
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("req-old", "t1", 1_000, false)),
+    );
+    block_on(state.repositories.append_request_log(request_log(
+        "req-fresh",
+        "t1",
+        now_secs(),
+        false,
+    )));
+    block_on(
+        state
+            .repositories
+            .append_audit_event(audit_event("aud-old", "t1", 1_000)),
+    );
+
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert_eq!(report.request_logs_pruned, 1);
+    assert_eq!(report.audit_events_pruned, 0);
+
+    let logs: Vec<String> = block_on(state.repositories.request_logs())
+        .into_iter()
+        .map(|log| log.request_id)
+        .collect();
+    assert_eq!(logs, vec!["req-fresh".to_string()]);
+
+    // The ancient audit row survives its longer floor.
+    let audits = block_on(state.repositories.audit_events());
+    assert!(audits.iter().any(|event| event.id == "aud-old"));
+    // The purge audited itself (evidence of deletion).
+    assert!(audits
+        .iter()
+        .any(|event| event.action == "request_logs.retention.prune"
+            && event.message.contains("purged 1")));
+}
+
+#[test]
+fn disabled_compliance_retention_is_a_no_op() {
+    let mut config = compliance_config(false, Some(1), Some(1), None);
+    config.enabled = false;
+    let state = state_with(config);
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("req-old", "t1", 1_000, false)),
+    );
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert_eq!(report, AssetLifecycleSweepReport::default());
+    assert_eq!(block_on(state.repositories.request_logs()).len(), 1);
+}
+
+#[test]
+fn compliance_dry_run_reports_but_deletes_nothing() {
+    let state = state_with(compliance_config(true, Some(100), None, None));
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("req-old", "t1", 1_000, false)),
+    );
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert!(report.dry_run);
+    assert_eq!(report.request_logs_would_prune, 1);
+    assert_eq!(report.request_logs_pruned, 0);
+    assert_eq!(block_on(state.repositories.request_logs()).len(), 1);
+}
+
+#[test]
+fn compliance_retention_is_tenant_isolated_via_per_tenant_policy() {
+    // No config default -> only t1's explicit request_logs policy prunes;
+    // t2 has no policy, so its ancient row is untouched.
+    let state = state_with(compliance_config(false, None, None, None));
+    block_on(
+        state
+            .repositories
+            .upsert_retention_policy(log_retention_policy(
+                "t1",
+                RETENTION_RESOURCE_REQUEST_LOG,
+                RETENTION_SCOPE_DEFAULT,
+                None,
+                Some(100),
+                0,
+                0,
+            )),
+    )
+    .unwrap();
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("t1-old", "t1", 1_000, false)),
+    );
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("t2-old", "t2", 1_000, false)),
+    );
+
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert_eq!(report.request_logs_pruned, 1);
+
+    let logs: Vec<String> = block_on(state.repositories.request_logs())
+        .into_iter()
+        .map(|log| log.request_id)
+        .collect();
+    assert_eq!(logs, vec!["t2-old".to_string()]);
+}
+
+#[test]
+fn response_body_captures_get_the_shortest_ttl() {
+    // General request_log TTL is effectively infinite; only the shorter
+    // response-body TTL prunes the response-recorded row.
+    let state = state_with(compliance_config(
+        false,
+        Some(1_000_000_000_000),
+        None,
+        Some(100),
+    ));
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("plain", "t1", 1_000, false)),
+    );
+    block_on(
+        state
+            .repositories
+            .append_request_log(request_log("with-body", "t1", 1_000, true)),
+    );
+
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert_eq!(report.request_logs_pruned, 1);
+    let logs: Vec<String> = block_on(state.repositories.request_logs())
+        .into_iter()
+        .map(|log| log.request_id)
+        .collect();
+    assert_eq!(logs, vec!["plain".to_string()]);
+}
+
+#[test]
+fn audit_events_past_max_age_are_pruned_and_audited() {
+    let state = state_with(compliance_config(false, None, Some(100), None));
+    block_on(
+        state
+            .repositories
+            .append_audit_event(audit_event("aud-old", "t1", 1_000)),
+    );
+    block_on(
+        state
+            .repositories
+            .append_audit_event(audit_event("aud-fresh", "t1", now_secs())),
+    );
+
+    let report = block_on(state.sweep_asset_lifecycle_once());
+    assert_eq!(report.audit_events_pruned, 1);
+
+    let audits = block_on(state.repositories.audit_events());
+    assert!(audits.iter().all(|event| event.id != "aud-old"));
+    assert!(audits.iter().any(|event| event.id == "aud-fresh"));
+    assert!(audits
+        .iter()
+        .any(|event| event.action == "audit_events.retention.prune"));
 }

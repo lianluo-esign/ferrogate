@@ -17,8 +17,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use ferrogate_storage::{
-    pinned_versions, plan_blob_gc, plan_version_retention, retention_policy_id, RetentionPolicy,
-    StoredAsset, RETENTION_RESOURCE_ASSET, RETENTION_SCOPE_DEFAULT,
+    pinned_versions, plan_blob_gc, plan_log_retention, plan_version_retention, retention_policy_id,
+    LogRetentionCandidate, RetentionPolicy, StoredAsset, StoredRetentionPolicy,
+    RETENTION_RESOURCE_ASSET, RETENTION_RESOURCE_AUDIT_EVENT, RETENTION_RESOURCE_REQUEST_LOG,
+    RETENTION_SCOPE_DEFAULT, RETENTION_SCOPE_RESPONSE_BODY,
 };
 
 use super::*;
@@ -42,6 +44,18 @@ pub(crate) struct AssetLifecycleSweepReport {
     pub(crate) gc_deleted: u64,
     /// Orphan blobs that WOULD be deleted (populated in `dry_run`).
     pub(crate) gc_would_delete: u64,
+    /// #284: request_logs rows examined by the compliance retention pass.
+    pub(crate) request_logs_scanned: u64,
+    /// #284: request_logs rows actually pruned (0 in `dry_run`).
+    pub(crate) request_logs_pruned: u64,
+    /// #284: request_logs rows that WOULD be pruned (populated in `dry_run`).
+    pub(crate) request_logs_would_prune: u64,
+    /// #284: audit_events rows examined by the compliance retention pass.
+    pub(crate) audit_events_scanned: u64,
+    /// #284: audit_events rows actually pruned (0 in `dry_run`).
+    pub(crate) audit_events_pruned: u64,
+    /// #284: audit_events rows that WOULD be pruned (populated in `dry_run`).
+    pub(crate) audit_events_would_prune: u64,
     /// Delete operations (row or blob) that failed.
     pub(crate) failed: u64,
 }
@@ -50,10 +64,15 @@ impl AssetLifecycleSweepReport {
     fn scanned_total(&self) -> u64 {
         self.retention_versions_scanned
             .saturating_add(self.gc_objects_scanned)
+            .saturating_add(self.request_logs_scanned)
+            .saturating_add(self.audit_events_scanned)
     }
 
     fn pruned_total(&self) -> u64 {
-        self.retention_pruned.saturating_add(self.gc_deleted)
+        self.retention_pruned
+            .saturating_add(self.gc_deleted)
+            .saturating_add(self.request_logs_pruned)
+            .saturating_add(self.audit_events_pruned)
     }
 }
 
@@ -76,6 +95,8 @@ impl AppState {
         if config.gc_enabled {
             self.run_asset_blob_gc(&config, &mut report).await;
         }
+        // #284: adopt the same engine for compliance-data TTL/purge.
+        self.apply_compliance_retention(&config, &mut report).await;
 
         self.record_asset_lifecycle_metrics(
             report.scanned_total(),
@@ -91,6 +112,12 @@ impl AppState {
             gc_scanned = report.gc_objects_scanned,
             gc_deleted = report.gc_deleted,
             gc_would_delete = report.gc_would_delete,
+            request_logs_scanned = report.request_logs_scanned,
+            request_logs_pruned = report.request_logs_pruned,
+            request_logs_would_prune = report.request_logs_would_prune,
+            audit_events_scanned = report.audit_events_scanned,
+            audit_events_pruned = report.audit_events_pruned,
+            audit_events_would_prune = report.audit_events_would_prune,
             failed = report.failed,
             "asset lifecycle sweep complete"
         );
@@ -320,6 +347,238 @@ impl AppState {
         }
     }
 
+    /// #284: compliance-data retention. Adopts the #263 retention engine for
+    /// the high-write operational tables (`request_logs`, `audit_events`) --
+    /// the SAME `retention_policies` rows + sweeper, just a different
+    /// `resource_type`. Each table resolves a per-tenant policy, plans the
+    /// age/count prune with the same fail-safe planner (never inside the legal
+    /// floor / grace window), and batch-deletes expired rows, auditing the
+    /// purge itself. `dry_run` reports what WOULD be pruned without deleting.
+    async fn apply_compliance_retention(
+        &self,
+        config: &crate::config::AssetLifecycleConfig,
+        report: &mut AssetLifecycleSweepReport,
+    ) {
+        self.apply_request_log_retention(config, report).await;
+        self.apply_audit_event_retention(config, report).await;
+    }
+
+    /// Retention pass over `request_logs`: group rows by tenant, resolve the
+    /// tenant's `request_logs` policy (a `retention_policies` row, else the
+    /// config default), plan the prune, and (unless `dry_run`) batch-delete.
+    /// Response-body captures (`response_recorded`) get the shortest TTL: a
+    /// row is pruned as soon as EITHER the general rule OR the response-body
+    /// rule selects it.
+    async fn apply_request_log_retention(
+        &self,
+        config: &crate::config::AssetLifecycleConfig,
+        report: &mut AssetLifecycleSweepReport,
+    ) {
+        let logs = self.repositories.request_logs().await;
+        if logs.is_empty() {
+            return;
+        }
+        report.request_logs_scanned = report
+            .request_logs_scanned
+            .saturating_add(logs.len() as u64);
+        let now = now_unix_seconds().unwrap_or(0) as i64;
+        let min_age = config.retention_min_age_secs.max(0);
+
+        // Group by tenant (organization); response-recorded rows also tracked
+        // separately for the shorter response-body TTL.
+        let mut general: BTreeMap<String, Vec<LogRetentionCandidate>> = BTreeMap::new();
+        let mut response: BTreeMap<String, Vec<LogRetentionCandidate>> = BTreeMap::new();
+        for log in &logs {
+            let tenant = log.tenant.organization_id.clone().unwrap_or_default();
+            let created = log
+                .started_at_unix
+                .or(log.completed_at_unix)
+                .unwrap_or_default() as i64;
+            let candidate = LogRetentionCandidate {
+                id: log.request_id.clone(),
+                created_at_unix: created,
+            };
+            if log.response_recorded {
+                response
+                    .entry(tenant.clone())
+                    .or_default()
+                    .push(candidate.clone());
+            }
+            general.entry(tenant).or_default().push(candidate);
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut to_delete: Vec<String> = Vec::new();
+        for (tenant, candidates) in &general {
+            let policies = self
+                .repositories
+                .list_retention_policies(tenant, RETENTION_RESOURCE_REQUEST_LOG)
+                .await
+                .unwrap_or_default();
+            let general_policy = resolve_log_policy(
+                &policies,
+                RETENTION_SCOPE_DEFAULT,
+                config.default_request_log_max_age_secs,
+                min_age,
+            );
+            for id in plan_log_retention(candidates, now, &general_policy) {
+                if seen.insert(id.clone()) {
+                    to_delete.push(id);
+                }
+            }
+            // Shorter response-body TTL: an EXTRA rule over response-recorded
+            // rows only (the general rule already covered them above).
+            let response_policy = resolve_log_policy(
+                &policies,
+                RETENTION_SCOPE_RESPONSE_BODY,
+                config.default_response_body_max_age_secs,
+                min_age,
+            );
+            if !response_policy.is_noop() {
+                if let Some(resp_candidates) = response.get(tenant) {
+                    for id in plan_log_retention(resp_candidates, now, &response_policy) {
+                        if seen.insert(id.clone()) {
+                            to_delete.push(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.commit_request_log_prune(config, report, to_delete)
+            .await;
+    }
+
+    /// Retention pass over `audit_events`: same shape as request logs but with
+    /// audit_events' (typically longer) legal floor and no response-body scope.
+    async fn apply_audit_event_retention(
+        &self,
+        config: &crate::config::AssetLifecycleConfig,
+        report: &mut AssetLifecycleSweepReport,
+    ) {
+        let events = self.repositories.audit_events().await;
+        if events.is_empty() {
+            return;
+        }
+        report.audit_events_scanned = report
+            .audit_events_scanned
+            .saturating_add(events.len() as u64);
+        let now = now_unix_seconds().unwrap_or(0) as i64;
+        let min_age = config.retention_min_age_secs.max(0);
+
+        let mut groups: BTreeMap<String, Vec<LogRetentionCandidate>> = BTreeMap::new();
+        for event in &events {
+            let tenant = event.tenant.organization_id.clone().unwrap_or_default();
+            groups
+                .entry(tenant)
+                .or_default()
+                .push(LogRetentionCandidate {
+                    id: event.id.clone(),
+                    created_at_unix: event.occurred_at_unix.unwrap_or_default() as i64,
+                });
+        }
+
+        let mut to_delete: Vec<String> = Vec::new();
+        for (tenant, candidates) in &groups {
+            let policies = self
+                .repositories
+                .list_retention_policies(tenant, RETENTION_RESOURCE_AUDIT_EVENT)
+                .await
+                .unwrap_or_default();
+            let policy = resolve_log_policy(
+                &policies,
+                RETENTION_SCOPE_DEFAULT,
+                config.default_audit_event_max_age_secs,
+                min_age,
+            );
+            to_delete.extend(plan_log_retention(candidates, now, &policy));
+        }
+
+        self.commit_audit_event_prune(config, report, to_delete)
+            .await;
+    }
+
+    /// Apply a planned `request_logs` prune: `dry_run` only counts; otherwise
+    /// batch-delete (capped per tick) and audit the purge as its own evidence.
+    async fn commit_request_log_prune(
+        &self,
+        config: &crate::config::AssetLifecycleConfig,
+        report: &mut AssetLifecycleSweepReport,
+        mut ids: Vec<String>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        report.request_logs_would_prune = report
+            .request_logs_would_prune
+            .saturating_add(ids.len() as u64);
+        if report.dry_run {
+            tracing::info!(
+                would_prune = ids.len(),
+                "compliance retention: request_logs dry-run"
+            );
+            return;
+        }
+        ids.truncate(config.max_log_deletes_per_tick);
+        match self.repositories.delete_request_logs(&ids).await {
+            Ok(deleted) => {
+                report.request_logs_pruned = report.request_logs_pruned.saturating_add(deleted);
+                if deleted > 0 {
+                    self.record_asset_lifecycle_audit(
+                        "",
+                        "request_logs.retention.prune",
+                        "request_logs".to_string(),
+                        format!("compliance retention purged {deleted} request_logs row(s)"),
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "compliance retention: failed to prune request_logs");
+                report.failed = report.failed.saturating_add(1);
+            }
+        }
+    }
+
+    /// Apply a planned `audit_events` prune (mirrors the request_logs commit).
+    async fn commit_audit_event_prune(
+        &self,
+        config: &crate::config::AssetLifecycleConfig,
+        report: &mut AssetLifecycleSweepReport,
+        mut ids: Vec<String>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        report.audit_events_would_prune = report
+            .audit_events_would_prune
+            .saturating_add(ids.len() as u64);
+        if report.dry_run {
+            tracing::info!(
+                would_prune = ids.len(),
+                "compliance retention: audit_events dry-run"
+            );
+            return;
+        }
+        ids.truncate(config.max_log_deletes_per_tick);
+        match self.repositories.delete_audit_events(&ids).await {
+            Ok(deleted) => {
+                report.audit_events_pruned = report.audit_events_pruned.saturating_add(deleted);
+                if deleted > 0 {
+                    self.record_asset_lifecycle_audit(
+                        "",
+                        "audit_events.retention.prune",
+                        "audit_events".to_string(),
+                        format!("compliance retention purged {deleted} audit_events row(s)"),
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "compliance retention: failed to prune audit_events");
+                report.failed = report.failed.saturating_add(1);
+            }
+        }
+    }
+
     /// Tenant/project offboarding cascade (issue #263): delete every asset row +
     /// bucket blob + channel pointer owned by `tenant_id`, leaving zero storage
     /// behind, and emit an audit event recording exactly what was purged. Best
@@ -446,6 +705,56 @@ fn resolve_retention_policy(
         keep_last_n: config.default_keep_last_n,
         max_age_secs: config.default_max_age_secs,
         min_age_secs: config.retention_min_age_secs.max(0),
+    }
+}
+
+/// #284: resolve the retention rule for one operational-log table + scope. An
+/// exact `retention_policies` row for `scope` wins; otherwise the config
+/// default max-age applies (age-based, no count dimension). `min_age_secs` is
+/// the compliance legal floor / grace window -- a row younger than it is never
+/// pruned. A `None` config default with no row is a no-op (nothing pruned).
+fn resolve_log_policy(
+    policies: &[StoredRetentionPolicy],
+    scope: &str,
+    config_default_max_age_secs: Option<i64>,
+    min_age_secs: i64,
+) -> RetentionPolicy {
+    if let Some(policy) = policies.iter().find(|policy| policy.scope == scope) {
+        let mut resolved = policy.as_retention_policy();
+        // A tenant policy may leave the floor at 0; enforce the config floor as
+        // a lower bound so a per-tenant rule can never breach the grace window.
+        resolved.min_age_secs = resolved.min_age_secs.max(min_age_secs.max(0));
+        return resolved;
+    }
+    RetentionPolicy {
+        keep_last_n: None,
+        max_age_secs: config_default_max_age_secs,
+        min_age_secs: min_age_secs.max(0),
+    }
+}
+
+/// #284: convenience constructor for a `request_logs` / `audit_events`
+/// retention policy row with the deterministic id, for admin tooling / tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn log_retention_policy(
+    tenant_id: &str,
+    resource_type: &str,
+    scope: &str,
+    keep_last_n: Option<u64>,
+    max_age_secs: Option<i64>,
+    min_age_secs: i64,
+    now: i64,
+) -> ferrogate_storage::StoredRetentionPolicy {
+    ferrogate_storage::StoredRetentionPolicy {
+        id: retention_policy_id(tenant_id, resource_type, scope),
+        tenant_id: tenant_id.to_string(),
+        resource_type: resource_type.to_string(),
+        scope: scope.to_string(),
+        keep_last_n,
+        max_age_secs,
+        min_age_secs,
+        created_at_unix: now,
+        updated_at_unix: now,
     }
 }
 

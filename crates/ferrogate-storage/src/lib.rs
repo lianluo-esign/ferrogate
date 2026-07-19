@@ -247,9 +247,10 @@ pub use workflow_budget::{
 // #263: asset lifecycle engine (version retention + unreferenced-blob GC).
 mod asset_lifecycle;
 pub use asset_lifecycle::{
-    pinned_versions, plan_blob_gc, plan_version_retention, retention_policy_id, BucketObject,
-    RetentionPlan, RetentionPolicy, RetentionPruneTarget, StoredRetentionPolicy,
-    RETENTION_RESOURCE_ASSET, RETENTION_SCOPE_DEFAULT,
+    pinned_versions, plan_blob_gc, plan_log_retention, plan_version_retention, retention_policy_id,
+    BucketObject, LogRetentionCandidate, RetentionPlan, RetentionPolicy, RetentionPruneTarget,
+    StoredRetentionPolicy, RETENTION_RESOURCE_ASSET, RETENTION_RESOURCE_AUDIT_EVENT,
+    RETENTION_RESOURCE_REQUEST_LOG, RETENTION_SCOPE_DEFAULT, RETENTION_SCOPE_RESPONSE_BODY,
 };
 
 mod guardrail_evidence;
@@ -5034,6 +5035,65 @@ impl PostgresControlPlaneStore {
             )?);
         }
         Ok(events)
+    }
+
+    /// #284: batched delete of `request_logs` rows by primary key, for the
+    /// compliance retention sweeper. Idempotent (deleting an already-gone row
+    /// is a no-op) so it is safe to run concurrently on every gateway instance.
+    /// Returns the number of rows actually deleted.
+    async fn delete_request_logs(&self, request_ids: &[String]) -> Result<u64, StorageError> {
+        if request_ids.is_empty() {
+            return Ok(0);
+        }
+        let operation = self.observability_operation("prune request logs");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute(
+                "DELETE FROM request_logs WHERE request_id = ANY($1)",
+                &[&request_ids],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected)
+    }
+
+    /// #284: batched delete of `audit_events` rows by primary key, for the
+    /// compliance retention sweeper. Idempotent and multi-instance-safe.
+    async fn delete_audit_events(&self, ids: &[String]) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let operation = self.observability_operation("prune audit events");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute("DELETE FROM audit_events WHERE id = ANY($1)", &[&ids])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected)
     }
 
     fn agent_run_operation(&self, name: &'static str) -> StorageOperation {
@@ -10986,6 +11046,19 @@ impl<T> InMemoryAppendRepository<T> {
             }
         }
     }
+
+    /// Retain only the records for which `keep` returns `true`, dropping the
+    /// rest. Returns the number of records removed. Used by the compliance
+    /// retention sweeper (#284) to prune request_logs / audit_events on the
+    /// in-memory backend, mirroring the Postgres batched delete.
+    pub fn retain<F>(&mut self, keep: F) -> usize
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let before = self.records.len();
+        self.records.retain(keep);
+        before.saturating_sub(self.records.len())
+    }
 }
 
 impl<T: Clone> AppendRepository<T> for InMemoryAppendRepository<T> {
@@ -13400,6 +13473,56 @@ impl RuntimeStorageRepositories {
                     limit,
                 })
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+        }
+    }
+
+    /// #284: batched, idempotent delete of `request_logs` rows by
+    /// `request_id`, for the compliance retention sweeper. On Postgres this is
+    /// a single `DELETE ... WHERE request_id = ANY($1)`; on the in-memory
+    /// backend it retains only the rows whose id is not in `request_ids`.
+    /// Returns the number of rows removed.
+    pub async fn delete_request_logs(&self, request_ids: &[String]) -> Result<u64, StorageError> {
+        if request_ids.is_empty() {
+            return Ok(0);
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_request_logs(request_ids).await
+            }
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let drop: std::collections::HashSet<&str> =
+                    request_ids.iter().map(String::as_str).collect();
+                let removed = self
+                    .request_logs
+                    .lock()
+                    .map(|mut logs| logs.retain(|log| !drop.contains(log.request_id.as_str())))
+                    .unwrap_or(0);
+                Ok(removed as u64)
+            }
+        }
+    }
+
+    /// #284: batched, idempotent delete of `audit_events` rows by `id`, for the
+    /// compliance retention sweeper. Postgres uses `DELETE ... WHERE id =
+    /// ANY($1)`; the in-memory backend retains only the rows not listed.
+    pub async fn delete_audit_events(&self, ids: &[String]) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_audit_events(ids).await
+            }
+            RuntimeControlPlaneBackend::Memory(_) => {
+                let drop: std::collections::HashSet<&str> =
+                    ids.iter().map(String::as_str).collect();
+                let removed = self
+                    .audit_events
+                    .lock()
+                    .map(|mut events| events.retain(|event| !drop.contains(event.id.as_str())))
+                    .unwrap_or(0);
+                Ok(removed as u64)
+            }
         }
     }
 

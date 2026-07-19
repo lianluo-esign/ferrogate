@@ -77,6 +77,37 @@ shared public schema. Multi-tenancy is modeled as a first-class hierarchy —
 tenant account → project → workspace — each with its own storage table and
 admin-console CRUD page.
 
+## Data Retention & Minimization
+
+The generalizable retention engine (`retention_policies` table +
+`ferrogate-storage::asset_lifecycle`, issue #263) is adopted by the shared
+asset-lifecycle sweeper (`crates/ferrogate-cli/src/state_asset_lifecycle.rs`,
+`sweep_asset_lifecycle_once`) to apply per-tenant TTL/purge to the high-write
+compliance tables `request_logs` and `audit_events` (issue #284). Each table
+resolves a per-tenant `retention_policies` row (`resource_type` =
+`request_logs` / `audit_events`, `scope` = `*` for the tenant default) and
+falls back to the deployment defaults on `[asset_lifecycle]`
+(`default_request_log_max_age_secs`, `default_audit_event_max_age_secs`,
+`default_response_body_max_age_secs`). Rows past their max-age (or beyond a
+`keep_last_n` cap) are batch-deleted with the same fail-safe planner used for
+assets (`plan_log_retention`): nothing inside the `retention_min_age_secs`
+grace window / legal floor is ever pruned, so a longer floor on `audit_events`
+lets those rows survive while `request_logs` expire. The purge is itself
+audited (`request_logs.retention.prune` / `audit_events.retention.prune`
+`StoredAuditEvent`s) as evidence of deletion, and folded into the
+`ferrogate_asset_lifecycle_{scanned,pruned,failed}_total` Prometheus counters.
+
+Defaults: retention is **disabled** until an operator opts in
+(`[asset_lifecycle] enabled = true`), and enabling it starts in `dry_run`
+report-only mode. Response-body captures (`response_recorded`) get the
+shortest TTL via `default_response_body_max_age_secs`
+(scope `response_body`), minimizing retention of the highest-sensitivity data.
+
+SOC2 mapping: this control implements the data-minimization / defined-retention
+expectations scoped in `docs/soc2-audit-scoping.md` — bounded growth of
+operational/audit data, a per-tenant retention policy, and tamper-evident
+audit records of each purge.
+
 ## Secrets Management
 
 Upstream provider API keys and ACME DNS-provider credentials can be

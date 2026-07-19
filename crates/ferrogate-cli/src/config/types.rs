@@ -191,6 +191,27 @@ pub(crate) struct AssetLifecycleConfig {
     /// unbounded number of bucket DELETEs. Default 100.
     #[serde(default = "default_asset_lifecycle_max_gc_deletes")]
     pub(crate) max_gc_deletes_per_tick: usize,
+    /// #284: tenant/plan default max-age (seconds) for `request_logs` rows
+    /// without a more specific `retention_policies` row. `None` disables the
+    /// request-log TTL default (no pruning unless a tenant policy opts in).
+    #[serde(default)]
+    pub(crate) default_request_log_max_age_secs: Option<i64>,
+    /// #284: tenant/plan default max-age (seconds) for `audit_events` rows.
+    /// Audit rows carry a LONGER legal floor than request logs, so this is
+    /// typically larger (or `None` -- never purge -- while request logs do).
+    #[serde(default)]
+    pub(crate) default_audit_event_max_age_secs: Option<i64>,
+    /// #284: shortest default TTL, applied to `request_logs` rows that captured
+    /// a response body (`response_recorded`). Data-minimization for the
+    /// highest-sensitivity captures; `None` falls back to the request-log
+    /// default. A response-body row is pruned as soon as EITHER this or the
+    /// general request-log rule selects it.
+    #[serde(default)]
+    pub(crate) default_response_body_max_age_secs: Option<i64>,
+    /// #284: upper bound on operational-log row deletes per table per tick, so
+    /// one pass can never issue an unbounded DELETE. Default 5000.
+    #[serde(default = "default_asset_lifecycle_max_log_deletes")]
+    pub(crate) max_log_deletes_per_tick: usize,
 }
 
 fn default_asset_lifecycle_tick_interval_secs() -> u64 {
@@ -203,6 +224,10 @@ fn default_asset_lifecycle_grace_secs() -> i64 {
 
 fn default_asset_lifecycle_max_gc_deletes() -> usize {
     100
+}
+
+fn default_asset_lifecycle_max_log_deletes() -> usize {
+    5_000
 }
 
 fn default_asset_lifecycle_dry_run() -> bool {
@@ -221,6 +246,10 @@ impl Default for AssetLifecycleConfig {
             gc_enabled: false,
             gc_grace_secs: default_asset_lifecycle_grace_secs(),
             max_gc_deletes_per_tick: default_asset_lifecycle_max_gc_deletes(),
+            default_request_log_max_age_secs: None,
+            default_audit_event_max_age_secs: None,
+            default_response_body_max_age_secs: None,
+            max_log_deletes_per_tick: default_asset_lifecycle_max_log_deletes(),
         }
     }
 }

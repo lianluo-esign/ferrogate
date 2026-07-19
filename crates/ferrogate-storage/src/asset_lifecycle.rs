@@ -26,10 +26,23 @@ use crate::{StoredAsset, StoredAssetChannel};
 /// later (filed separately) without a schema change.
 pub const RETENTION_RESOURCE_ASSET: &str = "asset";
 
+/// Resource-type discriminator for the compliance-data adopters (issue #284):
+/// per-tenant TTL/purge over the high-write operational tables, driven by the
+/// same [`StoredRetentionPolicy`] rows + sweeper #263 built for assets.
+pub const RETENTION_RESOURCE_REQUEST_LOG: &str = "request_logs";
+/// Resource-type discriminator for `audit_events` retention (issue #284).
+/// Audit rows typically carry a LONGER legal floor than request logs.
+pub const RETENTION_RESOURCE_AUDIT_EVENT: &str = "audit_events";
+
 /// The wildcard `scope` value: the tenant-wide default policy for a
 /// `resource_type`, applied to any `{asset_type}/{name}` without a more
 /// specific policy row.
 pub const RETENTION_SCOPE_DEFAULT: &str = "*";
+
+/// Scope narrowing `request_logs` retention to just the rows that captured a
+/// response body (`response_recorded`), which get the shortest default TTL
+/// (issue #284 -- data minimization for the highest-sensitivity captures).
+pub const RETENTION_SCOPE_RESPONSE_BODY: &str = "response_body";
 
 /// A durable, generalizable retention rule (issue #263). NOT hard-coded to
 /// assets: `resource_type` selects the engine (`asset` today) and `scope`
@@ -214,6 +227,74 @@ pub fn plan_version_retention(
         }
     }
     plan
+}
+
+/// One flat operational-log row considered for retention (issue #284). Unlike
+/// assets, `request_logs` / `audit_events` rows have no version dimension, so
+/// each row is its own retention unit: a stable `id` plus its creation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRetentionCandidate {
+    /// The row's primary key (`request_logs.request_id`, `audit_events.id`).
+    pub id: String,
+    /// Row creation time in unix seconds (`started_at_unix` / `occurred_at_unix`).
+    pub created_at_unix: i64,
+}
+
+/// Decide which flat operational-log rows to prune for ONE tenant under a
+/// resolved [`RetentionPolicy`] (issue #284). Adopts the same fail-safe rules
+/// as [`plan_version_retention`], minus channel pins (flat rows have none):
+///
+///   * a row younger than `min_age_secs` is NEVER pruned -- this is the
+///     compliance legal floor / grace window (e.g. audit_events keep a longer
+///     floor than request_logs);
+///   * a row among the newest `keep_last_n` (when set) is retained;
+///   * a row younger than `max_age_secs` (when set) is retained;
+///   * everything a dimension actually selected (beyond the keep window, or
+///     older than max-age) is pruned.
+///
+/// A no-op policy (neither dimension set) prunes nothing. Recency is by
+/// `created_at_unix`, with the `id` as a deterministic tiebreak so two rows
+/// sharing a timestamp order stably. Returns the ids to delete.
+pub fn plan_log_retention(
+    candidates: &[LogRetentionCandidate],
+    now: i64,
+    policy: &RetentionPolicy,
+) -> Vec<String> {
+    if policy.is_noop() || candidates.is_empty() {
+        return Vec::new();
+    }
+    // Newest first (created desc, id desc as a stable deterministic tiebreak).
+    let mut ordered: Vec<&LogRetentionCandidate> = candidates.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.created_at_unix
+            .cmp(&a.created_at_unix)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+
+    let keep_last_n = policy.keep_last_n.map(|n| n as usize);
+    let mut prune: Vec<String> = Vec::new();
+    for (index, candidate) in ordered.iter().enumerate() {
+        // Grace / legal floor: too new to touch, whatever the rule says.
+        let age = now.saturating_sub(candidate.created_at_unix);
+        if age < policy.min_age_secs {
+            continue;
+        }
+        // Retained by recency: within the newest N.
+        if keep_last_n.is_some_and(|n| index < n) {
+            continue;
+        }
+        // Retained by age: younger than the max-age cutoff.
+        if policy.max_age_secs.is_some_and(|max| age <= max) {
+            continue;
+        }
+        // A prune candidate only when a dimension actually selected it.
+        let beyond_keep_window = keep_last_n.is_some_and(|n| index >= n);
+        let older_than_max_age = policy.max_age_secs.is_some_and(|max| age > max);
+        if beyond_keep_window || older_than_max_age {
+            prune.push(candidate.id.clone());
+        }
+    }
+    prune
 }
 
 /// The versions any channel points at, for one asset line's channel rows.
