@@ -53,6 +53,12 @@ else
   cargo +1.88.0 fmt --check
   cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
   cargo +1.88.0 test --workspace
+  # Release gate (user directive 2026-07-19): the local ferrogate-test full suite
+  # must pass with no errors before an image is built/pushed. This replaces the
+  # slow GitHub Actions release pipeline. Runs the docker-free scenarios; the
+  # Docker-backed cluster scenarios still need a docker daemon on this host.
+  cargo +1.88.0 build --release -p ferrogate-test
+  ./target/release/ferrogate-test ci
 fi
 
 echo "== 2/5 docker build =="
