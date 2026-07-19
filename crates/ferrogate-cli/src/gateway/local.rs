@@ -17,7 +17,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
 
-use crate::gateway::dispatch::{dispatch_provider_request, dispatch_provider_streaming_request};
+use crate::gateway::dispatch::dispatch_provider_request;
 use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
@@ -30,7 +30,7 @@ use crate::{
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
-        write_raw_response, write_streaming_response, AdminAcmeStatus, AdminAgentUpstream,
+        write_raw_response, write_streaming_bytes_response, AdminAcmeStatus, AdminAgentUpstream,
         AdminAgentUpstreamMutation, AdminAgentUpstreamMutationResponse, AdminAgentWorkflow,
         AdminAgentWorkflowCounters, AdminAgentWorkflowMutationResponse, AdminApiKey,
         AdminApiKeyMutation, AdminApiKeyMutationResponse, AdminConfigReloadResponse,
@@ -8942,62 +8942,386 @@ impl FerroGateway {
             }
         };
 
+        // #278: A2A ingress deep governance. The upstream forward is now wrapped
+        // in the same auth -> policy -> guardrails -> dispatch -> metering ->
+        // request-log chokepoint the OpenAI/Anthropic/MCP ingresses use. A2A
+        // parsing + envelope construction lives in `super::a2a`; the enforcement
+        // primitives (`match_guardrail`, `evaluate_policy`,
+        // `record_a2a_exchange_event`, `record_request_log`) are reused verbatim.
+        let request_started_at = std::time::Instant::now();
+        let started_at_unix = a2a_now_unix_seconds();
+        let tenant = auth.tenant_context();
+        let stream = path.ends_with("/message:stream");
+        let request_bytes = body.len() as u64;
+        let message_count = super::a2a::a2a_message_count(&payload);
+        let agent_id = upstream.id.clone();
+
+        // #278: per-upstream policy context, identical shape to the RequestContext
+        // fed to evaluate_policy / match_guardrail on the inference ingresses.
+        let policy_request = ferrogate_core::RequestContext {
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: Some(super::a2a::A2A_ROUTE.into()),
+            upstream: Some(agent_id.clone()),
+            tenant: tenant.clone(),
+        };
+
+        // #278: request-stage guardrail over the parsed A2A message parts.
+        let input_envelope = super::a2a::a2a_input_envelope(&agent_id, &payload);
+        if let Some(guardrail) = state
+            .match_guardrail(
+                GuardrailStage::Request,
+                crate::state::GuardrailEvaluationContext {
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.as_deref(),
+                    agent_run_id: None,
+                    workflow_id: None,
+                    workflow_version: None,
+                    workflow_node_id: None,
+                    actor_api_key_id: auth.api_key_id.as_deref(),
+                    tenant: &tenant,
+                    service_account_id: auth.service_account_id(),
+                    gateway_config_id: None,
+                    model: None,
+                    provider: Some(&agent_id),
+                    streaming: stream,
+                    envelope: &input_envelope,
+                    managed_action: None,
+                },
+            )
+            .await
+        {
+            state.record_guardrail_match(&guardrail);
+            state.record_admin_audit_event(AdminAuditEventDraft {
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: auth.api_key_id.clone(),
+                tenant: tenant.clone(),
+                action: "guardrail.deny".into(),
+                target: guardrail.evidence_target(),
+                outcome: "blocked".into(),
+                message: format!(
+                    "guardrail {} blocked a2a request for agent {} at {}",
+                    guardrail.rule_name,
+                    agent_id,
+                    guardrail.evidence_location()
+                ),
+            });
+            self.record_a2a_error_log(
+                ctx,
+                &tenant,
+                &agent_id,
+                StatusCode::FORBIDDEN,
+                &guardrail.code,
+                started_at_unix,
+            );
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                guardrail.code.clone(),
+                guardrail.message.clone(),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        // #278: per-upstream policy (allowed capabilities / content-class deny
+        // rules) evaluated through the shared policy engine.
+        if let ferrogate_policy::PolicyDecision::Deny { code, message } =
+            state.evaluate_policy(&policy_request, None, Some(&agent_id))
+        {
+            state.record_admin_audit_event(AdminAuditEventDraft {
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: auth.api_key_id.clone(),
+                tenant: tenant.clone(),
+                action: "policy.deny".into(),
+                target: format!("a2a:{agent_id}"),
+                outcome: "blocked".into(),
+                message: format!("policy denied a2a request for agent {agent_id}: {message}"),
+            });
+            self.record_a2a_error_log(
+                ctx,
+                &tenant,
+                &agent_id,
+                StatusCode::FORBIDDEN,
+                &code,
+                started_at_unix,
+            );
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                code,
+                message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+
         let request = ferrogate_providers::ProviderHttpRequest {
-            provider: upstream.id.clone(),
+            provider: agent_id.clone(),
             endpoint: upstream.endpoint.clone(),
             body: payload,
-            stream: path.ends_with("/message:stream"),
+            stream,
             headers: agent_upstream_headers(upstream, &auth, &ctx.request_id),
         };
         let timeout = std::time::Duration::from_secs(30);
-        if request.stream {
-            match dispatch_provider_streaming_request(request, timeout).await {
-                Ok(response) => {
-                    write_streaming_response(
-                        session,
-                        response.status,
-                        &response.content_type,
-                        response.initial_body,
-                        response.body,
-                        &ctx.request_id,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    write_json_error(
-                        session,
-                        StatusCode::BAD_GATEWAY,
-                        "agent_upstream_error",
-                        error.to_string(),
-                        &ctx.request_id,
-                    )
-                    .await
-                }
+
+        // #278: buffer the upstream reply (streamed or unary) so the response
+        // stage guardrail and metering evaluate the full A2A message body,
+        // exactly as the messages ingress buffers its stream before governance.
+        let response = match dispatch_provider_request(request, timeout, 128 * 1024).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.record_a2a_error_log(
+                    ctx,
+                    &tenant,
+                    &agent_id,
+                    StatusCode::BAD_GATEWAY,
+                    "agent_upstream_error",
+                    started_at_unix,
+                );
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_GATEWAY,
+                    "agent_upstream_error",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
             }
-        } else {
-            match dispatch_provider_request(request, timeout, 128 * 1024).await {
-                Ok(response) => {
-                    write_raw_response(
+        };
+
+        let latency_ms = request_started_at.elapsed().as_millis() as u64;
+        let response_status = response.status;
+        let content_type = response.content_type.clone();
+        let mut response_body = response.body;
+
+        // #278: response-stage guardrail (block / redact) over the reply parts.
+        let output_envelope = super::a2a::a2a_output_envelope(&agent_id, &response_body, stream);
+        if let Some(guardrail) = state
+            .match_guardrail(
+                GuardrailStage::Response,
+                crate::state::GuardrailEvaluationContext {
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.as_deref(),
+                    agent_run_id: None,
+                    workflow_id: None,
+                    workflow_version: None,
+                    workflow_node_id: None,
+                    actor_api_key_id: auth.api_key_id.as_deref(),
+                    tenant: &tenant,
+                    service_account_id: auth.service_account_id(),
+                    gateway_config_id: None,
+                    model: None,
+                    provider: Some(&agent_id),
+                    streaming: stream,
+                    envelope: &output_envelope,
+                    managed_action: None,
+                },
+            )
+            .await
+        {
+            state.record_guardrail_match(&guardrail);
+            match guardrail.effect {
+                GuardrailEffect::Deny => {
+                    state.record_admin_audit_event(AdminAuditEventDraft {
+                        request_id: ctx.request_id.clone(),
+                        trace_id: ctx.trace_id.clone(),
+                        agent_run_id: None,
+                        workflow_id: None,
+                        workflow_version: None,
+                        workflow_node_id: None,
+                        actor_api_key_id: auth.api_key_id.clone(),
+                        tenant: tenant.clone(),
+                        action: "guardrail.deny".into(),
+                        target: guardrail.evidence_target(),
+                        outcome: "blocked".into(),
+                        message: format!(
+                            "guardrail {} blocked a2a response for agent {} at {}",
+                            guardrail.rule_name,
+                            agent_id,
+                            guardrail.evidence_location()
+                        ),
+                    });
+                    self.record_a2a_error_log(
+                        ctx,
+                        &tenant,
+                        &agent_id,
+                        StatusCode::FORBIDDEN,
+                        &guardrail.code,
+                        started_at_unix,
+                    );
+                    return write_json_error(
                         session,
-                        response.status,
-                        &response.content_type,
-                        Bytes::from(response.body),
+                        StatusCode::FORBIDDEN,
+                        guardrail.code.clone(),
+                        guardrail.message.clone(),
                         &ctx.request_id,
                     )
-                    .await
+                    .await;
                 }
-                Err(error) => {
-                    write_json_error(
-                        session,
-                        StatusCode::BAD_GATEWAY,
-                        "agent_upstream_error",
-                        error.to_string(),
-                        &ctx.request_id,
-                    )
-                    .await
+                GuardrailEffect::Redact => {
+                    response_body = guardrail
+                        .redact_text(&String::from_utf8_lossy(&response_body))
+                        .into_bytes();
+                    state.record_admin_audit_event(AdminAuditEventDraft {
+                        request_id: ctx.request_id.clone(),
+                        trace_id: ctx.trace_id.clone(),
+                        agent_run_id: None,
+                        workflow_id: None,
+                        workflow_version: None,
+                        workflow_node_id: None,
+                        actor_api_key_id: auth.api_key_id.clone(),
+                        tenant: tenant.clone(),
+                        action: "guardrail.redact".into(),
+                        target: guardrail.evidence_target(),
+                        outcome: "redacted".into(),
+                        message: format!(
+                            "guardrail {} redacted a2a response for agent {} at {}",
+                            guardrail.rule_name,
+                            agent_id,
+                            guardrail.evidence_location()
+                        ),
+                    });
                 }
             }
         }
+
+        // #278: meter the exchange (message count + bytes) attributable to the
+        // calling key/tenant through the durable metering path.
+        let total_bytes = request_bytes + response_body.len() as u64;
+        if let Err(error) = state
+            .record_a2a_exchange_event(
+                &ctx.request_id,
+                ctx.trace_id.as_deref(),
+                &tenant,
+                &agent_id,
+                stream,
+                message_count,
+                total_bytes,
+                response_status.as_u16(),
+                Some(latency_ms),
+            )
+            .await
+        {
+            tracing::warn!(
+                request_id = %ctx.request_id,
+                agent = %agent_id,
+                error = ?error,
+                "failed to record a2a exchange metering event"
+            );
+        }
+
+        // #278: request-log parity — A2A traffic appears in structured request
+        // logs like every other governed ingress.
+        let record_bodies = auth.can_record_bodies(state.config.telemetry.log_bodies);
+        state.record_request_log(ferrogate_storage::StoredRequestLog {
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: tenant.clone(),
+            route: Some(super::a2a::A2A_ROUTE.into()),
+            provider: Some(agent_id.clone()),
+            logical_model: Some(format!("a2a:{agent_id}")),
+            provider_model: None,
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: response_status.as_u16(),
+            error_code: None,
+            prompt_recorded: record_bodies,
+            response_recorded: record_bodies,
+            prompt_body: record_bodies.then(|| String::from_utf8_lossy(&body).into_owned()),
+            response_body: record_bodies.then(|| {
+                String::from_utf8_lossy(&response_body)
+                    .chars()
+                    .take(16 * 1024)
+                    .collect()
+            }),
+            cache_status: None,
+            started_at_unix: Some(started_at_unix),
+            completed_at_unix: Some(a2a_now_unix_seconds()),
+        });
+
+        if stream {
+            write_streaming_bytes_response(
+                session,
+                response_status,
+                &content_type,
+                response_body,
+                &ctx.request_id,
+            )
+            .await
+        } else {
+            write_raw_response(
+                session,
+                response_status,
+                &content_type,
+                Bytes::from(response_body),
+                &ctx.request_id,
+            )
+            .await
+        }
+    }
+
+    /// #278: emit a structured request log for an A2A request rejected before a
+    /// successful upstream reply (guardrail block, policy deny, upstream error),
+    /// so denials appear in the request-log/usage views the same way the
+    /// inference ingresses record their governance rejections.
+    fn record_a2a_error_log(
+        &self,
+        ctx: &ProxyContext,
+        tenant: &ferrogate_core::TenantContext,
+        agent_id: &str,
+        status: StatusCode,
+        error_code: &str,
+        started_at_unix: u64,
+    ) {
+        self.state
+            .current()
+            .record_request_log(ferrogate_storage::StoredRequestLog {
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                cluster_id: None,
+                node_id: None,
+                tenant: tenant.clone(),
+                route: Some(super::a2a::A2A_ROUTE.into()),
+                provider: Some(agent_id.to_string()),
+                logical_model: Some(format!("a2a:{agent_id}")),
+                provider_model: None,
+                gateway_config_id: None,
+                gateway_config_revision: None,
+                status_code: status.as_u16(),
+                error_code: Some(error_code.to_string()),
+                prompt_recorded: false,
+                response_recorded: false,
+                prompt_body: None,
+                response_body: None,
+                cache_status: None,
+                started_at_unix: Some(started_at_unix),
+                completed_at_unix: Some(a2a_now_unix_seconds()),
+            });
     }
 
     pub(super) async fn handle_agent_discovery(
@@ -9260,6 +9584,15 @@ fn agent_upstream_discovery<'a>(
         endpoint: &upstream.endpoint,
         capabilities: &upstream.capabilities,
     }
+}
+
+/// #278: wall-clock seconds for A2A request-log timestamps, matching the
+/// `now_unix_seconds` helpers the other gateway modules use for the same field.
+fn a2a_now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 fn agent_upstream_headers(

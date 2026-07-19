@@ -27,6 +27,12 @@ pub enum GuardrailProtocol {
     /// HTTP `normalize_request`/`normalize_response` extractors are never
     /// invoked for it.
     ManagedAction,
+    /// An agent-to-agent (A2A) message exchange over the `/v1/agents/{id}`
+    /// ingress (issue #278). Like [`GuardrailProtocol::ManagedAction`], its
+    /// envelope is built directly from the parsed A2A message parts in the
+    /// gateway ingress, not via the HTTP `normalize_request`/`normalize_response`
+    /// extractors, so those are no-ops for this protocol.
+    A2a,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -174,9 +180,10 @@ pub fn normalize_request(protocol: GuardrailProtocol, body: &Value) -> Guardrail
         GuardrailProtocol::ChatCompletions => extract_chat_request(body, &mut builder),
         GuardrailProtocol::Responses => extract_responses_request(body, &mut builder),
         GuardrailProtocol::Embeddings => extract_embeddings_request(body, &mut builder),
-        // #200: managed actions never reach the HTTP-body extractor — their
-        // envelope is built directly via `GuardrailEnvelope::managed_action`.
-        GuardrailProtocol::ManagedAction => {}
+        // #200/#278: managed actions and A2A exchanges never reach the HTTP-body
+        // extractor — their envelope is built directly (via
+        // `GuardrailEnvelope::managed_action` / the A2A ingress parser).
+        GuardrailProtocol::ManagedAction | GuardrailProtocol::A2a => {}
     }
     builder.finish()
 }
@@ -193,12 +200,13 @@ pub fn normalize_response(
     let mut builder = EnvelopeBuilder::new(protocol, DetectorStage::Response);
     if matches!(
         protocol,
-        GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction
+        GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction | GuardrailProtocol::A2a
     ) {
         // Embeddings have no model-generated text; managed-action outputs
-        // (#200) are evaluated via `GuardrailEnvelope::managed_action`, never
-        // this HTTP normalizer. Skip extraction and the raw-body fallback so a
-        // caller can never mistake either for assistant text.
+        // (#200) and A2A message replies (#278) are evaluated via their own
+        // directly-built envelopes, never this HTTP normalizer. Skip extraction
+        // and the raw-body fallback so a caller can never mistake either for
+        // assistant text.
         return builder.finish();
     }
     if streaming {
@@ -207,7 +215,9 @@ pub fn normalize_response(
         match protocol {
             GuardrailProtocol::ChatCompletions => extract_chat_response(&value, &mut builder),
             GuardrailProtocol::Responses => extract_responses_response(&value, &mut builder),
-            GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction => {
+            GuardrailProtocol::Embeddings
+            | GuardrailProtocol::ManagedAction
+            | GuardrailProtocol::A2a => {
                 unreachable!("returned above")
             }
         }
@@ -566,8 +576,11 @@ fn extract_sse(protocol: GuardrailProtocol, body: &[u8], builder: &mut EnvelopeB
             GuardrailProtocol::Responses => {
                 accumulate_responses_sse(event, &value, &mut accumulated)
             }
-            // #200: managed actions do not stream via SSE.
-            GuardrailProtocol::Embeddings | GuardrailProtocol::ManagedAction => {}
+            // #200/#278: managed actions and A2A exchanges build their SSE
+            // envelopes directly in the gateway, not through this normalizer.
+            GuardrailProtocol::Embeddings
+            | GuardrailProtocol::ManagedAction
+            | GuardrailProtocol::A2a => {}
         }
     }
     for ((source, location), text) in accumulated {
@@ -682,6 +695,7 @@ fn protocol_name(protocol: GuardrailProtocol) -> &'static str {
         GuardrailProtocol::Responses => "responses",
         GuardrailProtocol::Embeddings => "embeddings",
         GuardrailProtocol::ManagedAction => "managed_action",
+        GuardrailProtocol::A2a => "a2a",
     }
 }
 

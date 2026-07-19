@@ -702,6 +702,119 @@ impl AppState {
         Ok(())
     }
 
+    /// #278: settle and record one A2A (agent-to-agent) message-exchange
+    /// metering event through the SAME durable metering + billing-outbox path
+    /// token usage and asset egress flow through, so A2A traffic lands in the
+    /// ledger and the usage aggregates keyed to the calling key/tenant — closing
+    /// the "ungoverned channel" gap where `/v1/agents/{id}` forwarded without
+    /// being metered. The event carries zero token usage and a dedicated
+    /// `a2a:{agent_id}` logical model so agent-to-agent traffic is a first-class,
+    /// separately-attributable billing dimension; `message_count` and `bytes`
+    /// travel in metadata as the metered units. A2A message/byte units are not
+    /// priced by default, so — exactly like an unpriced model or unpriced egress
+    /// — the event is metered and audited but carries no `cost_usd` and never
+    /// debits a wallet.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_a2a_exchange_event(
+        &self,
+        request_id: &str,
+        trace_id: Option<&str>,
+        tenant: &ferrogate_core::TenantContext,
+        agent_id: &str,
+        stream: bool,
+        message_count: u64,
+        bytes: u64,
+        status_code: u16,
+        latency_ms: Option<u64>,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("a2a_agent_id".to_string(), agent_id.to_string());
+        metadata.insert("a2a_message_count".to_string(), message_count.to_string());
+        metadata.insert("a2a_bytes".to_string(), bytes.to_string());
+        metadata.insert("a2a_stream".to_string(), stream.to_string());
+
+        let event = BillingEvent {
+            request_id: request_id.to_string(),
+            trace_id: trace_id.map(str::to_string),
+            provider_attempt: ProviderAttempt::for_request(request_id, 0),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
+            tenant: tenant.clone(),
+            logical_model: format!("a2a:{agent_id}"),
+            provider: "a2a".to_string(),
+            provider_model: if stream {
+                "message:stream".to_string()
+            } else {
+                "message".to_string()
+            },
+            usage: BillingTokenUsage::new(0, 0, 0),
+            usage_source: BillingUsageSource::GatewayEstimate,
+            status_code,
+            occurred_at_unix: now_unix_seconds(),
+            cost_usd: None,
+            latency_ms,
+            metadata,
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
+        };
+
+        // Same durable outbox path token usage / asset egress use so an A2A
+        // charge survives a billing outage or gateway restart and lands in the
+        // usage_monthly_rollups / usage aggregates, idempotent on the ledger
+        // entry id.
+        let recorded = if self.billing_reporter.is_some() {
+            let entry_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+            let now = now_unix_seconds().unwrap_or_default() as i64;
+            let outcome = self
+                .repositories
+                .append_billing_event_with_outbox_enqueue(event.clone(), &entry_id, now)
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist a2a exchange event: {error}"),
+                    )
+                })?;
+            if let Some(error) = outcome.enqueue_error {
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_billing_report_enqueue_failure();
+                }
+                warn!(
+                    request_id = %event.request_id,
+                    error = %error,
+                    "failed to enqueue a2a exchange billing report for durable delivery"
+                );
+            }
+            outcome.recorded
+        } else {
+            self.repositories
+                .append_billing_event(event.clone())
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist a2a exchange event: {error}"),
+                    )
+                })?
+        };
+        if !recorded {
+            return Ok(());
+        }
+        self.metering_events.record(event.clone())?;
+        self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event.clone());
+        }
+        // A2A spend counts toward the tenant's monthly budget/alert tiers just
+        // like token and egress spend.
+        self.dispatch_budget_threshold_alerts(tenant).await;
+        Ok(())
+    }
+
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
         let mut snapshot = self
             .metrics
