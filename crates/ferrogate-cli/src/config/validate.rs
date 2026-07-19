@@ -1214,6 +1214,51 @@ impl Config {
                     );
                 }
             }
+            // Canary rollout target (issue #276): a config-only alternate
+            // route selected for a sticky percentage of traffic. Validated
+            // like the primary route so a misconfigured canary fails closed
+            // at load time rather than breaking canary-bucket traffic at
+            // request time.
+            if let Some(canary) = model.canary.as_ref().filter(|canary| canary.enabled) {
+                if !provider_names.contains(canary.provider.as_str()) {
+                    bail!(
+                        "field models[{index}].canary.provider: model {} references unknown canary provider {}",
+                        model.name,
+                        canary.provider
+                    );
+                }
+                if canary.provider_model.trim().is_empty() {
+                    bail!("field models[{index}].canary.provider_model: cannot be empty");
+                }
+                if canary.percent > 100 {
+                    bail!(
+                        "field models[{index}].canary.percent: must be between 0 and 100 (got {})",
+                        canary.percent
+                    );
+                }
+            }
+            // Shadow/mirror target (issue #276): metered but never billed, so
+            // it does not carry the billing-service price requirement the
+            // primary/fallback routes do; still validated for a real provider
+            // and a sane sample percentage.
+            if let Some(shadow) = model.shadow.as_ref().filter(|shadow| shadow.enabled) {
+                if !provider_names.contains(shadow.provider.as_str()) {
+                    bail!(
+                        "field models[{index}].shadow.provider: model {} references unknown shadow provider {}",
+                        model.name,
+                        shadow.provider
+                    );
+                }
+                if shadow.provider_model.trim().is_empty() {
+                    bail!("field models[{index}].shadow.provider_model: cannot be empty");
+                }
+                if shadow.sample_percent > 100 {
+                    bail!(
+                        "field models[{index}].shadow.sample_percent: must be between 0 and 100 (got {})",
+                        shadow.sample_percent
+                    );
+                }
+            }
         }
         Ok(names)
     }

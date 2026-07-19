@@ -82,6 +82,8 @@ fn gateway_provider_attempt_collision_fails_closed_without_double_debiting_walle
             provider: "openai".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy: RoutingStrategy::Priority,
+            canary: None,
+            shadow: None,
             fallbacks: vec![],
             visible_organization_ids: vec![],
             visible_project_ids: vec![],

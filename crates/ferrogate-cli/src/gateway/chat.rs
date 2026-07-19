@@ -230,6 +230,25 @@ impl FerroGateway {
             mut routes,
             guardrail_envelope,
         } = request_plan;
+        // Shadow/mirror rollout (issue #276): fire-and-forget a sampled,
+        // budget-capped duplicate of this request to a secondary provider.
+        // Spawned here (before the primary dispatch) so it adds no client
+        // latency and is fully isolated from the primary path -- its response
+        // is discarded, it is metered as shadow but never billed, and any
+        // failure is swallowed. A no-op for models without a shadow target.
+        super::shadow::spawn_shadow_mirror(
+            &state,
+            super::shadow::ShadowMirrorParams {
+                endpoint,
+                request_id: ctx.request_id.clone(),
+                route: endpoint.route(),
+                logical_model: request.model.clone(),
+                tenant: auth.tenant_context(),
+                api_key_id: auth.api_key_id.clone(),
+                sticky_key: rollout_sticky_key(&auth, &request.model),
+                body: body_json.clone(),
+            },
+        );
         let request_started_at_unix = now_unix_seconds();
         let workflow_provider_constraint = match enforce_ai_workflow_policy(
             &state,
@@ -2484,16 +2503,16 @@ async fn read_provider_streaming_body<R: Read + Send + 'static>(
     }
 }
 
-struct AiProviderRequestInput<'a> {
-    endpoint: AiEndpoint,
-    provider: &'a Provider,
-    model_route: &'a ModelRoute,
-    tenant: &'a TenantContext,
-    api_key_id: Option<&'a str>,
-    route: Option<&'a str>,
-    logical_model: String,
-    stream: bool,
-    body: serde_json::Value,
+pub(super) struct AiProviderRequestInput<'a> {
+    pub(super) endpoint: AiEndpoint,
+    pub(super) provider: &'a Provider,
+    pub(super) model_route: &'a ModelRoute,
+    pub(super) tenant: &'a TenantContext,
+    pub(super) api_key_id: Option<&'a str>,
+    pub(super) route: Option<&'a str>,
+    pub(super) logical_model: String,
+    pub(super) stream: bool,
+    pub(super) body: serde_json::Value,
 }
 
 fn build_ai_ingress_plan(
@@ -2625,6 +2644,18 @@ fn build_ai_ingress_plan(
     })
 }
 
+/// Caller-stable key for sticky canary/shadow rollout splits (issue #276):
+/// api key first, then tenant identifiers, falling back to the logical model
+/// so the split is always deterministic even for unauthenticated-shaped
+/// contexts. A given caller consistently lands on (or off) a rollout.
+fn rollout_sticky_key(auth: &AuthContext, logical_model: &str) -> String {
+    auth.api_key_id
+        .clone()
+        .or_else(|| auth.organization_id.clone())
+        .or_else(|| auth.project_id.clone())
+        .unwrap_or_else(|| logical_model.to_string())
+}
+
 fn build_ai_request_plan(
     state: &AppState,
     ingress: AiIngressPlan,
@@ -2733,8 +2764,21 @@ fn build_ai_request_plan(
     }
 
     let estimated_usage = estimate_chat_completion_usage(&body_json, &request.model);
-    let routes =
+    let mut routes =
         state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
+    // Canary rollout (issue #276): when the caller's sticky key falls in the
+    // canary bucket, promote the configured canary route to the front of the
+    // candidate list so it is evaluated exactly like the primary (fully
+    // governed/billed/guarded) yet still falls back to the primary on error.
+    // A no-op for models without a canary, so unconfigured behavior is
+    // unchanged. Applied before the region-empty check so a canary that is
+    // the only region-eligible route still serves.
+    state.apply_canary_route(
+        &request.model,
+        &rollout_sticky_key(&auth, &request.model),
+        &auth.region_allowlist,
+        &mut routes,
+    );
     // Fail closed (issue #173): a region-constrained tenant with zero
     // surviving candidates is rejected with a specific, logged reason
     // rather than silently falling through to whatever routes remained
@@ -3319,7 +3363,7 @@ fn gateway_config_error_response(
     }
 }
 
-fn prepare_ai_provider_request(
+pub(super) fn prepare_ai_provider_request(
     state: &AppState,
     input: AiProviderRequestInput<'_>,
 ) -> Result<ProviderHttpRequest, ferrogate_providers::AdapterError> {
@@ -3771,6 +3815,8 @@ mod tests {
                 provider: "openai".into(),
                 provider_model: "gpt-test".into(),
                 routing_strategy: ferrogate_providers::RoutingStrategy::Priority,
+                canary: None,
+                shadow: None,
                 fallbacks: Vec::new(),
                 visible_organization_ids: Vec::new(),
                 visible_project_ids: vec!["project_gateway".into()],

@@ -717,6 +717,25 @@ pub(crate) struct Model {
     pub(crate) routing_strategy: RoutingStrategy,
     #[serde(default)]
     pub(crate) fallbacks: Vec<ModelFallback>,
+    /// Canary rollout (issue #276): route a deterministic, sticky
+    /// percentage of this logical model's traffic to an alternate
+    /// provider/model. Sticky by api key / tenant so a given caller lands
+    /// consistently on (or off) the canary. When selected the canary simply
+    /// becomes the leading candidate, so it is evaluated exactly like the
+    /// primary route -- fully governed, billed, and guarded -- and falls
+    /// back to the primary on failure. Absent = no canary (behavior
+    /// unchanged); `percent = 100` promotes the canary to primary as a
+    /// config-only change.
+    #[serde(default)]
+    pub(crate) canary: Option<CanaryRoute>,
+    /// Shadow/mirror rollout (issue #276): duplicate a sampled,
+    /// budget-capped fraction of this model's requests to a secondary
+    /// provider/model without affecting the client response. Fire-and-forget
+    /// (adds no client latency); metered as shadow (never billed to the
+    /// tenant, never trips the primary provider's circuit breaker). Absent =
+    /// no shadow.
+    #[serde(default)]
+    pub(crate) shadow: Option<ShadowRoute>,
     #[serde(default)]
     pub(crate) visible_organization_ids: Vec<String>,
     #[serde(default)]
@@ -733,6 +752,45 @@ pub(crate) struct Model {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) cache_enabled: Option<bool>,
+}
+
+/// Canary target for a logical model (issue #276).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct CanaryRoute {
+    /// Provider name from `[[providers]]` to canary onto.
+    pub(crate) provider: String,
+    /// Actual model name sent to the canary provider.
+    pub(crate) provider_model: String,
+    /// Percentage of traffic (0-100) routed to the canary. `0` disables the
+    /// split (no canary traffic); `100` sends all traffic to the canary
+    /// (canary becomes primary).
+    #[serde(default)]
+    pub(crate) percent: u8,
+    #[serde(default)]
+    pub(crate) input_price_per_1m: Option<f64>,
+    #[serde(default)]
+    pub(crate) output_price_per_1m: Option<f64>,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+}
+
+/// Shadow/mirror target for a logical model (issue #276).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ShadowRoute {
+    /// Provider name from `[[providers]]` to mirror requests to.
+    pub(crate) provider: String,
+    /// Actual model name sent to the shadow provider.
+    pub(crate) provider_model: String,
+    /// Percentage of requests (0-100) mirrored to the shadow target,
+    /// sampled stickily by api key / tenant. `0` disables mirroring.
+    #[serde(default)]
+    pub(crate) sample_percent: u8,
+    /// Maximum shadow dispatches admitted per process lifetime (across all
+    /// callers of this model); `0` = uncapped. Caps the mirror's cost.
+    #[serde(default)]
+    pub(crate) max_requests: u64,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1384,6 +1384,10 @@ pub(crate) struct AppState {
     guardrail_evidence_hmac_key: Option<Arc<[u8]>>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
+    /// Process-lifetime shadow-mirror budget ledger (issue #276), keyed by
+    /// logical model. Shared across `AppState` clones so the per-model
+    /// `shadow.max_requests` cap holds across every request handler.
+    shadow_budget: Arc<ferrogate_routing::ShadowBudgetLedger>,
     request_ids: Arc<AtomicU64>,
     drain: Arc<AtomicBool>,
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
@@ -2835,6 +2839,13 @@ struct GatewayMetricsAccumulator {
     /// Subset of `cache_hits_total` served by the semantic (vector-similarity)
     /// layer rather than an exact-match key (#273).
     semantic_cache_hits_total: u64,
+    /// Shadow/mirror dispatches that completed against the shadow provider
+    /// (issue #276). Metered here as shadow but never billed to the tenant.
+    shadow_dispatch_total: u64,
+    /// Shadow/mirror dispatches that failed (adapter-prepare error, transport
+    /// failure, or a non-2xx upstream). Swallowed -- never affects the primary
+    /// response (issue #276).
+    shadow_dispatch_failure_total: u64,
     guardrail_match_total: u64,
     guardrail_denial_total: u64,
     guardrail_redaction_total: u64,
@@ -3150,6 +3161,14 @@ impl GatewayMetricsAccumulator {
 
     fn record_semantic_cache_hit(&mut self) {
         self.semantic_cache_hits_total = self.semantic_cache_hits_total.saturating_add(1);
+    }
+
+    fn record_shadow_dispatch(&mut self) {
+        self.shadow_dispatch_total = self.shadow_dispatch_total.saturating_add(1);
+    }
+
+    fn record_shadow_dispatch_failure(&mut self) {
+        self.shadow_dispatch_failure_total = self.shadow_dispatch_failure_total.saturating_add(1);
     }
 
     fn record_guardrail_match(&mut self, effect: GuardrailEffect) {
@@ -4338,6 +4357,7 @@ impl AppState {
                 .map(|key| Arc::from(key.into_bytes())),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
+            shadow_budget: Arc::new(ferrogate_routing::ShadowBudgetLedger::default()),
             request_ids: Arc::new(AtomicU64::new(request_id_seed())),
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
@@ -6465,6 +6485,9 @@ mod state_observability;
 #[path = "state_routing.rs"]
 mod state_routing;
 
+#[path = "state_rollout.rs"]
+mod state_rollout;
+
 #[path = "semantic_cache.rs"]
 pub(crate) mod semantic_cache;
 
@@ -6507,6 +6530,8 @@ mod tests {
             provider: "openai".into(),
             provider_model: "gpt-test".into(),
             routing_strategy: RoutingStrategy::default(),
+            canary: None,
+            shadow: None,
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),

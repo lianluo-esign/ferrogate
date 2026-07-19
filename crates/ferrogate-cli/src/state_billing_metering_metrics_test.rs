@@ -28,6 +28,8 @@ fn prometheus_metrics_snapshot_aggregates_request_logs_and_distinct_attempts() {
             provider: "openai".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy: RoutingStrategy::Priority,
+            canary: None,
+            shadow: None,
             fallbacks: vec![],
             visible_organization_ids: vec![],
             visible_project_ids: vec![],

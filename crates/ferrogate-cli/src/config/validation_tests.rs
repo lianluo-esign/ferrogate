@@ -66,6 +66,8 @@ fn rejects_model_with_unknown_provider() {
             provider: "missing".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy: RoutingStrategy::Priority,
+            canary: None,
+            shadow: None,
             fallbacks: vec![],
             visible_organization_ids: vec![],
             visible_project_ids: vec![],
@@ -103,6 +105,95 @@ fn rejects_model_with_unknown_fallback_provider() {
 
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("fallback provider missing"));
+}
+
+#[test]
+fn rejects_canary_with_unknown_provider() {
+    let mut model = model();
+    model.canary = Some(CanaryRoute {
+        provider: "missing".into(),
+        provider_model: "gpt-4o".into(),
+        percent: 10,
+        input_price_per_1m: None,
+        output_price_per_1m: None,
+        enabled: true,
+    });
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("unknown canary provider"));
+}
+
+#[test]
+fn rejects_canary_percent_above_one_hundred() {
+    let mut model = model();
+    model.canary = Some(CanaryRoute {
+        provider: "openai".into(),
+        provider_model: "gpt-4o".into(),
+        percent: 150,
+        input_price_per_1m: None,
+        output_price_per_1m: None,
+        enabled: true,
+    });
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("canary.percent"));
+}
+
+#[test]
+fn accepts_valid_canary_and_shadow_targets() {
+    let mut model = model();
+    model.canary = Some(CanaryRoute {
+        provider: "openai".into(),
+        provider_model: "gpt-4o".into(),
+        percent: 10,
+        input_price_per_1m: None,
+        output_price_per_1m: None,
+        enabled: true,
+    });
+    model.shadow = Some(ShadowRoute {
+        provider: "openai".into(),
+        provider_model: "gpt-4o".into(),
+        sample_percent: 5,
+        max_requests: 100,
+        enabled: true,
+    });
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    config.validate().expect("valid canary + shadow config");
+}
+
+#[test]
+fn rejects_shadow_with_unknown_provider() {
+    let mut model = model();
+    model.shadow = Some(ShadowRoute {
+        provider: "missing".into(),
+        provider_model: "gpt-4o".into(),
+        sample_percent: 5,
+        max_requests: 0,
+        enabled: true,
+    });
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("unknown shadow provider"));
 }
 
 #[test]
@@ -3401,6 +3492,8 @@ fn model() -> Model {
         provider: "openai".into(),
         provider_model: "gpt-4o-mini".into(),
         routing_strategy: RoutingStrategy::Priority,
+        canary: None,
+        shadow: None,
         fallbacks: vec![],
         visible_organization_ids: vec![],
         visible_project_ids: vec![],

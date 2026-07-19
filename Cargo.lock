@@ -1192,6 +1192,7 @@ dependencies = [
  "ferrogate-observability",
  "ferrogate-policy",
  "ferrogate-providers",
+ "ferrogate-routing",
  "ferrogate-runtime",
  "ferrogate-secrets",
  "ferrogate-storage",

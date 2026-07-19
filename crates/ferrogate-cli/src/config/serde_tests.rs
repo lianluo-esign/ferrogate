@@ -163,3 +163,69 @@ fn config_model_supports_serde_roundtrip() {
     );
     decoded.validate().unwrap();
 }
+
+#[test]
+fn model_canary_and_shadow_parse_from_toml_and_validate() {
+    // Issue #276: canary + shadow are additive, `#[serde(default)]` fields on
+    // a model. A config without them still parses (unchanged behavior); a
+    // config with them round-trips and validates against the providers.
+    let toml = r#"
+        [[providers]]
+        name = "openai"
+        kind = "openai"
+        base_url = "http://127.0.0.1:8081/v1"
+
+        [[providers]]
+        name = "openai-next"
+        kind = "openai"
+        base_url = "http://127.0.0.1:8082/v1"
+
+        [[models]]
+        name = "fast-chat"
+        provider = "openai"
+        provider_model = "gpt-4o-mini"
+        input_price_per_1m = 1.0
+        output_price_per_1m = 1.0
+
+        [models.canary]
+        provider = "openai-next"
+        provider_model = "gpt-4o"
+        percent = 10
+
+        [models.shadow]
+        provider = "openai-next"
+        provider_model = "gpt-4o"
+        sample_percent = 5
+        max_requests = 100
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    config.validate().unwrap();
+
+    let canary = config.models[0].canary.as_ref().expect("canary parsed");
+    assert_eq!(canary.provider, "openai-next");
+    assert_eq!(canary.percent, 10);
+    assert!(canary.enabled, "enabled defaults to true");
+
+    let shadow = config.models[0].shadow.as_ref().expect("shadow parsed");
+    assert_eq!(shadow.sample_percent, 5);
+    assert_eq!(shadow.max_requests, 100);
+
+    // A model without canary/shadow still parses with both defaulting to None.
+    let plain: Config = toml::from_str(
+        r#"
+        [[providers]]
+        name = "openai"
+        kind = "openai"
+        base_url = "http://127.0.0.1:8081/v1"
+
+        [[models]]
+        name = "fast-chat"
+        provider = "openai"
+        provider_model = "gpt-4o-mini"
+    "#,
+    )
+    .unwrap();
+    assert!(plain.models[0].canary.is_none());
+    assert!(plain.models[0].shadow.is_none());
+}

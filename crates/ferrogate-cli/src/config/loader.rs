@@ -125,6 +125,8 @@ impl Config {
                     provider_model: model.provider_model,
                     routing_strategy: ferrogate_providers::RoutingStrategy::Priority,
                     fallbacks: Vec::new(),
+                    canary: None,
+                    shadow: None,
                     visible_organization_ids: Vec::new(),
                     visible_project_ids: Vec::new(),
                     capabilities: model.capabilities,

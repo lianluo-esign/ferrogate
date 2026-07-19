@@ -732,6 +732,8 @@ mod tests {
             provider: "openai".into(),
             provider_model: "gpt-test".into(),
             routing_strategy: RoutingStrategy::default(),
+            canary: None,
+            shadow: None,
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),

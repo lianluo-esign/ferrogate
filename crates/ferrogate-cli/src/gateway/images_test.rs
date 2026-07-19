@@ -74,6 +74,8 @@ fn images_plan_config() -> Config {
             provider: "openai".into(),
             provider_model: "gpt-image-1".into(),
             routing_strategy: ferrogate_providers::RoutingStrategy::Priority,
+            canary: None,
+            shadow: None,
             fallbacks: Vec::new(),
             visible_organization_ids: Vec::new(),
             visible_project_ids: Vec::new(),

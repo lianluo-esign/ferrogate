@@ -192,6 +192,8 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
             provider: "primary".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy: RoutingStrategy::Priority,
+            canary: None,
+            shadow: None,
             fallbacks: vec![
                 crate::config::ModelFallback {
                     provider: "backup-a".into(),
@@ -305,6 +307,8 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
             provider: "eu-primary".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy,
+            canary: None,
+            shadow: None,
             fallbacks: vec![
                 crate::config::ModelFallback {
                     provider: "us-fallback".into(),
@@ -457,6 +461,8 @@ fn orders_lowest_cost_routes_by_estimated_price() {
             provider: "primary".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy: RoutingStrategy::LowestCost,
+            canary: None,
+            shadow: None,
             fallbacks: vec![
                 crate::config::ModelFallback {
                     provider: "backup-a".into(),
@@ -822,6 +828,8 @@ fn routing_strategy_test_config(
             provider: "primary".into(),
             provider_model: "gpt-4o-mini".into(),
             routing_strategy,
+            canary: None,
+            shadow: None,
             fallbacks: vec![
                 crate::config::ModelFallback {
                     provider: "backup-a".into(),
