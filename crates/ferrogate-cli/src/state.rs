@@ -79,14 +79,16 @@ use ferrogate_runtime::{
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
-    budget_alert_notification_id, guardrail_policy_revision_id, ControlPlaneDocuments,
-    GuardrailEvaluationQuery, GuardrailEvaluationRepository, GuardrailPolicyRepository,
-    PostgresStorageConfig, QuotaScopeKind, RuntimeControlPlaneState, RuntimeStorageBackend,
-    RuntimeStorageOptions, RuntimeStorageRepositories, SnapshotReplayFloorRepository,
-    StorageBackendEvidence, StorageError, StoredAgentRun, StoredAgentRunEvent,
-    StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
-    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification, StoredGuardrailCheckEvaluation,
-    StoredGuardrailEvaluation, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
+    agent_schedule_fire_id, budget_alert_notification_id, guardrail_policy_revision_id,
+    CatchupPolicy, ControlPlaneDocuments, GuardrailEvaluationQuery, GuardrailEvaluationRepository,
+    GuardrailPolicyRepository, OverlapPolicy, PostgresStorageConfig, QuotaScopeKind,
+    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
+    RuntimeStorageRepositories, ScheduleFireOutcome, ScheduleTargetKind,
+    SnapshotReplayFloorRepository, StorageBackendEvidence, StorageError, StoredAgentRun,
+    StoredAgentRunEvent, StoredAgentSchedule, StoredAgentScheduleFire, StoredAgentWorkerInstance,
+    StoredApiKey, StoredAsset, StoredAuditEvent, StoredBillingReportOutboxEntry,
+    StoredBudgetAlertNotification, StoredGuardrailCheckEvaluation, StoredGuardrailEvaluation,
+    StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
     StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
     StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
     StoredManagedWorkerSession, StoredPaymentMethod, StoredPermission, StoredPlan, StoredProject,
@@ -3765,6 +3767,35 @@ impl SelfHostedWorkerDispatchRuntime {
             .map(|_| ())
     }
 
+    /// Enqueue a schedule-originated dispatch (#246). Idempotent on
+    /// `dispatch_id`: a re-enqueue of an already-present dispatch (e.g. a second
+    /// gateway instance firing the same schedule slot with the same
+    /// deterministic id) is treated as success, so the self-hosted lease queue
+    /// carries exactly one dispatch per slot.
+    fn enqueue_scheduled_dispatch(
+        &mut self,
+        dispatch: SelfHostedRunDispatch,
+    ) -> Result<(), SelfHostedWorkerError> {
+        match self.queue.enqueue_run(dispatch) {
+            Ok(()) => Ok(()),
+            Err(SelfHostedWorkerError::InvalidTransport(message))
+                if message.contains("already exists") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether `dispatch_id` is still in the queue and has NOT been
+    /// acknowledged. Used by the scheduler's overlap `skip` policy to detect a
+    /// previous fire that is still in flight.
+    fn dispatch_unacked(&self, dispatch_id: &str) -> bool {
+        self.queue.run_records().into_iter().any(|record| {
+            record.dispatch.dispatch_id == dispatch_id && record.acknowledged_status.is_none()
+        })
+    }
+
     fn seed_run(
         &mut self,
         registration: &StoredSelfHostedWorkerRegistration,
@@ -6316,6 +6347,8 @@ mod state_routing;
 mod state_agent_runtime;
 #[path = "state_guardrail_evidence.rs"]
 mod state_guardrail_evidence;
+#[path = "state_scheduler.rs"]
+mod state_scheduler;
 
 #[cfg(test)]
 mod tests {

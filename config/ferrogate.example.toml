@@ -226,3 +226,23 @@ keywords = ["EXFILTRATE"]
 # counter_backend = "redis"
 # redis_url = "redis://redis:6379/0"
 # counter_timeout_millis = 500
+
+# Time-based agent schedule triggers (#246). A control-plane trigger layer:
+# when a schedule is due the tick loop enqueues a dispatch into the EXISTING
+# self-hosted lease queue (or creates an agent run) and records an idempotent
+# fire-history row. Disabled by default -- like the billing outbox sweeper the
+# loop is always spawned but no-ops entirely until `enabled = true`, so turning
+# it on via `/admin/v1/config/reload` needs no restart. Firing is at-most-once
+# per (schedule, slot) with minute-level precision; `tick_interval_secs` only
+# bounds how quickly a due schedule is detected. Schedule DEFINITIONS live in
+# the `agent_schedules` table (managed programmatically today; admin CRUD is
+# tracked as follow-up work under #246).
+[scheduler]
+enabled = false
+# Seconds between due-schedule scans (default 5, well below minute precision).
+tick_interval_secs = 5
+# Upper bound on catch-up fires processed per schedule per tick after downtime,
+# so a long outage can never replay an unbounded backlog (default 1).
+max_catchup_fires = 1
+# IANA timezone applied to a cron schedule that does not set its own.
+default_timezone = "UTC"

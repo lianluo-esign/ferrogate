@@ -455,6 +455,52 @@ dashboard, Prompt Engineering Studio, org→workspace RBAC management + budgets
 governance UI, Model Catalog, MCP registry/discovery UI, semantic caching, and
 (if pursued) the hosted agent runtime + memory + sandbox.
 
+### 5.10 Time-based agent schedule triggers (#246)
+
+FerroGate can execute agent runs on demand (`POST /v1/agent-runs`) and via a
+dispatch seeded at self-hosted worker registration, but there was no way to run
+an agent on a recurring schedule. The scheduler adds that first-class trigger
+without building a second task-state machine: it is a **control-plane trigger
+layer** that reuses the existing self-hosted dispatch lease queue
+(`queued → leased → acknowledged`, persisted to `self_hosted_run_dispatches`)
+as the pull-side runtime. This matches the Postgres-scheduler pattern used by
+Windmill and Hatchet (transactional enqueue + durable fire history).
+
+**Schema (v37, `037_agent_schedules`).** Two tables:
+
+- `agent_schedules` — the schedule *definitions*: `spec_kind` (`cron` |
+  `interval`), `cron_expr` + IANA `timezone` (DST-correct via `croner` +
+  `chrono-tz`) or `interval_secs`, `target_kind` (`self_hosted_dispatch` |
+  `agent_run`) + `target_json`, `overlap_policy` (`skip` | `allow`),
+  `catchup_policy` (`skip_missed` | `fire_once`), and `next_fire_at_unix`.
+- `agent_schedule_fires` — the durable fire-history ledger and idempotency
+  gate, with **`UNIQUE (schedule_id, scheduled_fire_at_unix)`**. `ON CONFLICT DO
+  NOTHING` means a lost multi-instance race can never double-trigger a slot.
+
+All queries are schema-pinned via `AsyncPostgresPool::transaction_search_path_sql()`
+(#237–#239).
+
+**Tick loop (`ferrogate-cli`, `state_scheduler.rs`).** Modeled on
+`start_billing_outbox_sweeper`: always spawned, `Arc<AtomicBool>` stop flag +
+`Drop`-join, re-reads `state.current()` each tick so config hot-reload applies,
+and no-ops entirely when `scheduler.enabled = false` (default). Each tick lists
+due schedules and, per schedule: enqueues a **deterministic** dispatch id
+(`schedule-dispatch-{id}-{slot}`) into the lease queue (idempotent — two
+gateways racing the same slot enqueue the *same* dispatch, which the queue
+dedups), records the idempotent fire row, then advances `next_fire_at` strictly
+past `now`. Correctness is belt-and-braces: deterministic dispatch id *and*
+unique fire row. Firing is **at-most-once per (schedule, slot)** with
+minute-level precision. Overlap `skip` (default) suppresses a fire while the
+previous dispatch is still unacked; catch-up `skip_missed` (default, n8n
+semantics) fast-forwards past missed slots without firing them, with a bounded
+jump so a long outage never replays an unbounded backlog. Worker poll/ack
+consumes schedule-originated dispatches with no protocol change.
+
+**Deferred (TODO #246):** admin CRUD/run-now/pause-resume/fires-history REST
+surface under `/admin/v1/agent-schedules` (schedules are managed via the storage
+repository today), the `agent_run` target kind (only `self_hosted_dispatch` is
+wired), and the end-to-end poll/ack + restart-dedup harness.
+
 ---
 
 ## 6. Phased roadmap

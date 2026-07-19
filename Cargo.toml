@@ -52,7 +52,14 @@ base64 = "0.22.1"
 blake2 = "0.10"
 bytes = "1.7"
 chacha20poly1305 = "0.10"
+# Wall-clock arithmetic + IANA timezone database for cron schedule next-fire
+# computation (#246). `chrono` is already resolved transitively; `chrono-tz`
+# adds the IANA zone table so cron schedules honor an explicit timezone (incl.
+# DST transitions), and `croner` parses/evaluates the 5-field cron expression.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
+croner = "3"
 deadpool-postgres = "0.14.1"
 # Asymmetric signatures for signed policy-snapshot verification (#206). Ed25519
 # lets the control plane sign snapshots with a private key the data plane never

@@ -17,6 +17,9 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
 deadpool-postgres.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }

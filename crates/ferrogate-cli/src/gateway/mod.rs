@@ -187,6 +187,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _mcp_health = start_mcp_health_scheduler(&state);
     let _external_action_authorizer = start_external_action_authorizer_if_configured(&state);
     let _billing_outbox_sweeper = start_billing_outbox_sweeper(&state);
+    let _agent_schedule_sweeper = start_agent_schedule_sweeper(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -422,6 +423,51 @@ fn start_billing_outbox_sweeper(state: &SharedAppState) -> BillingOutboxSweeperH
         }
     });
     BillingOutboxSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that fires due time-based agent schedules (issue #246).
+struct AgentScheduleSweeperHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for AgentScheduleSweeperHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the scheduler tick loop, unconditionally, exactly like
+/// `start_billing_outbox_sweeper` (issue #144): `sweep_agent_schedules_once`
+/// re-reads `state.current()` and no-ops when `scheduler.enabled = false`, so
+/// enabling the scheduler later via the admin hot config-reload path starts
+/// firing on the next tick with no restart. The tick interval is re-read each
+/// iteration so a reload of `scheduler.tick_interval_secs` also takes effect
+/// live. Firing is at-most-once per (schedule, slot) via the
+/// `agent_schedule_fires` unique constraint, so this loop is safe to run on
+/// every gateway instance concurrently.
+fn start_agent_schedule_sweeper(state: &SharedAppState) -> AgentScheduleSweeperHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let current = state.current();
+            let tick_secs = current.config.scheduler.tick_interval_secs.clamp(1, 3_600);
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            block_on_sync_bridge(state.current().sweep_agent_schedules_once());
+        }
+    });
+    AgentScheduleSweeperHandle {
         stop,
         handle: Some(handle),
     }

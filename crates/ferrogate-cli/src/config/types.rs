@@ -81,6 +81,56 @@ pub(crate) struct Config {
     pub(crate) network_access: NetworkAccessConfig,
     #[serde(default)]
     pub(crate) asset_bucket: AssetBucketConfig,
+    #[serde(default)]
+    pub(crate) scheduler: SchedulerConfig,
+}
+
+/// Time-based agent schedule triggers (#246). The scheduler is a control-plane
+/// trigger layer: when a schedule is due it enqueues a dispatch into the
+/// existing self-hosted lease queue (or creates an agent run). `enabled =
+/// false` (the default) is a complete no-op -- the tick loop is always spawned
+/// (like the billing outbox sweeper) but returns immediately when disabled, so
+/// turning it on via `/admin/v1/config/reload` needs no restart. Firing is
+/// at-most-once per (schedule, slot) with minute-level precision; the tick
+/// interval only bounds detection latency.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct SchedulerConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Seconds between due-schedule scans. Default 5s -- far below the
+    /// minute-level firing contract so a due schedule is picked up promptly.
+    #[serde(default = "default_scheduler_tick_interval_secs")]
+    pub(crate) tick_interval_secs: u64,
+    /// Upper bound on catch-up fires processed per schedule in a single tick
+    /// after downtime, so a long outage can never replay an unbounded backlog.
+    #[serde(default = "default_scheduler_max_catchup_fires")]
+    pub(crate) max_catchup_fires: u64,
+    /// IANA timezone applied to a cron schedule that does not set its own.
+    #[serde(default = "default_scheduler_default_timezone")]
+    pub(crate) default_timezone: String,
+}
+
+fn default_scheduler_tick_interval_secs() -> u64 {
+    5
+}
+
+fn default_scheduler_max_catchup_fires() -> u64 {
+    1
+}
+
+fn default_scheduler_default_timezone() -> String {
+    "UTC".to_string()
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval_secs: default_scheduler_tick_interval_secs(),
+            max_catchup_fires: default_scheduler_max_catchup_fires(),
+            default_timezone: default_scheduler_default_timezone(),
+        }
+    }
 }
 
 /// S3-compatible object-storage bucket for `/v1/assets/*` content (issue
@@ -2002,6 +2052,7 @@ impl Default for Config {
             routes: Vec::new(),
             network_access: NetworkAccessConfig::default(),
             asset_bucket: AssetBucketConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }

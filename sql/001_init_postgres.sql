@@ -1799,3 +1799,74 @@ ON CONFLICT (version) DO NOTHING;
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (36, '036_control_plane_replay_floors')
 ON CONFLICT (version) DO NOTHING;
+
+-- #246: time-based agent schedule triggers. `agent_schedules` holds the
+-- control-plane schedule DEFINITIONS (cron/interval + firing target); the
+-- scheduler tick loop enqueues a dispatch into the EXISTING self-hosted lease
+-- queue (`self_hosted_run_dispatches`) or creates an agent run when a schedule
+-- is due -- it does NOT reimplement a second task-state machine. Firing is
+-- at-most-once per (schedule, slot): the `agent_schedule_fires` UNIQUE
+-- (schedule_id, scheduled_fire_at_unix) row is the correctness gate, so a lost
+-- multi-instance race can never double-trigger the same slot even if two
+-- gateways evaluate the same due schedule concurrently.
+CREATE TABLE IF NOT EXISTS agent_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    -- 'cron' | 'interval'
+    spec_kind TEXT NOT NULL,
+    cron_expr TEXT,
+    -- IANA timezone name (e.g. 'UTC', 'America/New_York'); cron only.
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    interval_secs BIGINT,
+    -- 'self_hosted_dispatch' | 'agent_run'
+    target_kind TEXT NOT NULL,
+    -- Agent/workflow ref, framework_adapter, required capabilities, input
+    -- payload template -- interpreted by the fire action.
+    target_json JSONB NOT NULL DEFAULT '{}'::JSONB,
+    -- 'skip' | 'allow'
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    -- 'skip_missed' | 'fire_once'
+    catchup_policy TEXT NOT NULL DEFAULT 'skip_missed',
+    jitter_secs BIGINT NOT NULL DEFAULT 0,
+    next_fire_at_unix BIGINT,
+    last_fire_at_unix BIGINT,
+    created_at_unix BIGINT NOT NULL,
+    updated_at_unix BIGINT NOT NULL,
+    revision BIGINT NOT NULL DEFAULT 1
+);
+
+-- Due-schedule scan: enabled rows whose next_fire_at has arrived, cheapest
+-- first. Partial index keeps the hot path off disabled/unscheduled rows.
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_due
+    ON agent_schedules(next_fire_at_unix ASC)
+    WHERE enabled AND next_fire_at_unix IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_tenant
+    ON agent_schedules(tenant_id, workspace_id, name);
+
+-- Durable fire history + idempotency ledger. One row per (schedule, slot); the
+-- UNIQUE constraint + ON CONFLICT DO NOTHING makes a slot fire at most once
+-- across every gateway instance racing the same database.
+CREATE TABLE IF NOT EXISTS agent_schedule_fires (
+    fire_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES agent_schedules(schedule_id) ON DELETE CASCADE,
+    scheduled_fire_at_unix BIGINT NOT NULL,
+    fired_at_unix BIGINT NOT NULL,
+    node_id TEXT,
+    -- 'dispatched' | 'skipped_overlap' | 'skipped_disabled' | 'error'
+    outcome TEXT NOT NULL,
+    dispatch_id TEXT,
+    run_id TEXT,
+    detail TEXT,
+    UNIQUE (schedule_id, scheduled_fire_at_unix)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_schedule_fires_history
+    ON agent_schedule_fires(schedule_id, scheduled_fire_at_unix DESC);
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (37, '037_agent_schedules')
+ON CONFLICT (version) DO NOTHING;

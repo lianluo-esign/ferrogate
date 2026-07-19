@@ -233,6 +233,7 @@ impl Config {
                 .collect(),
             network_access: crate::config::NetworkAccessConfig::default(),
             asset_bucket: crate::config::AssetBucketConfig::default(),
+            scheduler: crate::config::SchedulerConfig::default(),
         }
     }
 

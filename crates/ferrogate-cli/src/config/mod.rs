@@ -40,7 +40,7 @@ pub(crate) use self::types::{
     ObservabilityConfig, ObservabilityProvider, PluginCompatibility, PluginConfig, PluginManifest,
     PolicyRule, PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
-    ReliabilityConfig, RouteRule, SkillPackage, SkillPackageCapability, SkillPackageCapabilityKind,
-    SkillPackageCompatibility, SkillPackageResources, StorageConfig, StorageMigrationMode,
-    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    ReliabilityConfig, RouteRule, SchedulerConfig, SkillPackage, SkillPackageCapability,
+    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
+    StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
 };

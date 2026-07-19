@@ -218,6 +218,13 @@ impl StorageOperation {
 mod budget_alerts;
 pub use budget_alerts::{budget_alert_notification_id, StoredBudgetAlertNotification};
 
+mod agent_schedule;
+pub use agent_schedule::{
+    agent_schedule_fire_id, compute_next_cron_fire_at, CatchupPolicy, OverlapPolicy, ScheduleError,
+    ScheduleFireOutcome, ScheduleSpecKind, ScheduleTargetKind, StoredAgentSchedule,
+    StoredAgentScheduleFire,
+};
+
 mod metadata_rollups;
 use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
@@ -505,8 +512,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 36;
-const POSTGRES_SCHEMA_NAME: &str = "036_control_plane_replay_floors";
+const POSTGRES_SCHEMA_VERSION: u64 = 37;
+const POSTGRES_SCHEMA_NAME: &str = "037_agent_schedules";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1180,6 +1187,10 @@ pub struct RuntimeControlPlaneState {
     /// Signed-snapshot replay floors keyed by
     /// `snapshot_replay_floor_key(tenant_id, deployment_id)` (#206).
     snapshot_replay_floors: InMemoryRepository<u64>,
+    /// Time-based agent schedule definitions keyed by `schedule_id` (#246).
+    agent_schedules: InMemoryRepository<StoredAgentSchedule>,
+    /// Idempotent fire-history ledger keyed by `fire_id` (#246).
+    agent_schedule_fires: InMemoryRepository<StoredAgentScheduleFire>,
 }
 
 struct PostgresControlPlaneStore {
@@ -7040,6 +7051,8 @@ where
         "wallets",
         "wallet_settlements",
         "payment_methods",
+        "agent_schedules",
+        "agent_schedule_fires",
     ];
     for table in TABLES {
         let exists = client
@@ -7079,6 +7092,7 @@ where
         ("mcp_oauth_credentials", "scopes_json"),
         ("audit_events", "audit_json"),
         ("api_keys", "scopes_json"),
+        ("agent_schedules", "target_json"),
     ];
     for (table, column) in JSONB_COLUMNS {
         let data_type = client
@@ -8595,6 +8609,8 @@ impl RuntimeControlPlaneState {
             mcp_oauth_flows: InMemoryRepository::new(),
             mcp_oauth_credentials: InMemoryRepository::new(),
             snapshot_replay_floors: InMemoryRepository::new(),
+            agent_schedules: InMemoryRepository::new(),
+            agent_schedule_fires: InMemoryRepository::new(),
         }
     }
 
@@ -13661,6 +13677,10 @@ mod schema_routing_test_support;
 #[cfg(test)]
 #[path = "replay_floor_test.rs"]
 mod replay_floor_test;
+
+#[cfg(test)]
+#[path = "agent_schedule_test.rs"]
+mod agent_schedule_test;
 
 #[cfg(test)]
 #[path = "usage_metadata_schema_test.rs"]

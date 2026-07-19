@@ -30,18 +30,30 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 // `AsyncPostgresPool::new` (`pg_config.connect_timeout` / `tcp_user_timeout`).)
 
 #[test]
-fn schema_contract_includes_latest_replay_floor_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 36);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "036_control_plane_replay_floors");
+fn schema_contract_includes_latest_agent_schedules_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 37);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "037_agent_schedules");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (34, '034_admin_refresh_token_tenant_scope')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (35, '035_agent_run_audit_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (36, '036_control_plane_replay_floors')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (37, '037_agent_schedules')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));
+}
+
+#[test]
+fn schema_contract_defines_the_agent_schedule_tables() {
+    // #246: schedule definitions + idempotent fire-history ledger. The UNIQUE
+    // (schedule_id, scheduled_fire_at_unix) constraint is the at-most-once
+    // firing gate for multi-instance deployments.
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS agent_schedules"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS agent_schedule_fires"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("UNIQUE (schedule_id, scheduled_fire_at_unix)"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("idx_agent_schedules_due"));
 }
 
 #[test]
