@@ -10,6 +10,7 @@
 use super::*;
 use ferrogate_storage::{RuntimeControlPlaneState, RuntimeStorageBackend, StorageProviderKind};
 use serde_json::Value;
+use std::sync::Mutex;
 
 fn console() -> AdminConsoleState {
     let repositories = Arc::new(RuntimeStorageRepositories::new(
@@ -1488,17 +1489,34 @@ fn handle_mock_oidc_connection(
     let _ = stream.flush();
 }
 
+/// Env var the tests point `client_secret_ref` at. Since the mock IdP's token
+/// endpoint does not validate the client secret, any resolvable value works;
+/// what matters is that the secret is stored/resolved via a `secret_ref` rather
+/// than persisted in plaintext (#283).
+const TEST_OIDC_SECRET_ENV: &str = "FERROGATE_TEST_OIDC_CLIENT_SECRET";
+
 fn sso_config_request(issuer: &str) -> SsoConfigRequest {
+    // SAFETY: single-threaded test setup; the value is stable across the suite.
+    std::env::set_var(TEST_OIDC_SECRET_ENV, "test-client-secret");
     SsoConfigRequest {
-        issuer: issuer.to_string(),
-        client_id: "test-client-id".into(),
-        client_secret: "test-client-secret".into(),
-        redirect_uri: "http://localhost:3000/callback".into(),
+        provider_kind: "oidc".into(),
+        issuer: Some(issuer.to_string()),
+        client_id: Some("test-client-id".into()),
+        client_secret_ref: Some(format!("env://{TEST_OIDC_SECRET_ENV}")),
+        redirect_uri: Some("http://localhost:3000/callback".into()),
         group_role_mapping: [("Engineering".to_string(), "admin".to_string())]
             .into_iter()
             .collect(),
         default_role: "member".into(),
         group_claim: "groups".into(),
+        idp_entity_id: None,
+        idp_sso_url: None,
+        idp_certificate: None,
+        sp_entity_id: None,
+        acs_url: None,
+        email_attribute: None,
+        name_attribute: None,
+        groups_attribute: None,
     }
 }
 
@@ -2294,5 +2312,247 @@ fn rbac_roles_list_is_tenant_scoped_but_includes_global_builtins() {
     assert_eq!(
         handle_rbac_role_delete(&service, &console, token_a, "role_of_b").status,
         404
+    );
+}
+
+// -- issue #283: SAML SP flow end-to-end (redirect binding) ----------------
+
+const SAML_SIG_ALG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+
+/// Generates an RSA key (PEM) + self-signed X.509 certificate (PEM) via
+/// openssl, mirroring the OIDC tests' reliance on the openssl CLI.
+fn saml_key_and_cert() -> (std::path::PathBuf, String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("key.pem");
+    let cert_path = dir.path().join("cert.pem");
+    assert!(std::process::Command::new("openssl")
+        .args(["genrsa", "-out"])
+        .arg(&key_path)
+        .arg("2048")
+        .output()
+        .expect("openssl available")
+        .status
+        .success());
+    assert!(std::process::Command::new("openssl")
+        .args(["req", "-x509", "-new", "-key"])
+        .arg(&key_path)
+        .args(["-days", "1", "-subj", "/CN=saml-idp", "-out"])
+        .arg(&cert_path)
+        .output()
+        .expect("openssl req")
+        .status
+        .success());
+    let cert_pem = std::fs::read_to_string(&cert_path).unwrap();
+    (key_path, cert_pem, dir)
+}
+
+fn saml_config_request(cert_pem: &str) -> SsoConfigRequest {
+    SsoConfigRequest {
+        provider_kind: "saml".into(),
+        issuer: None,
+        client_id: None,
+        client_secret_ref: None,
+        redirect_uri: None,
+        group_role_mapping: [("Engineering".to_string(), "admin".to_string())]
+            .into_iter()
+            .collect(),
+        default_role: "member".into(),
+        group_claim: "groups".into(),
+        idp_entity_id: Some("https://idp.example/entity".into()),
+        idp_sso_url: Some("https://idp.example/sso".into()),
+        idp_certificate: Some(cert_pem.to_string()),
+        sp_entity_id: Some("sp-entity-id".into()),
+        acs_url: Some("https://sp.example/acs".into()),
+        email_attribute: Some("email".into()),
+        name_attribute: Some("displayName".into()),
+        groups_attribute: Some("groups".into()),
+    }
+}
+
+fn saml_response_xml(request_id: &str, email: &str, group: &str) -> String {
+    format!(
+        "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+         xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" InResponseTo=\"{request_id}\">\
+         <saml:Issuer>https://idp.example/entity</saml:Issuer>\
+         <samlp:Status><samlp:StatusCode Value=\"urn:oasis:names:tc:SAML:2.0:status:Success\"/></samlp:Status>\
+         <saml:Assertion><saml:Issuer>https://idp.example/entity</saml:Issuer>\
+         <saml:Subject><saml:NameID>{email}</saml:NameID></saml:Subject>\
+         <saml:Conditions NotBefore=\"2020-01-01T00:00:00Z\" NotOnOrAfter=\"2999-01-01T00:00:00Z\">\
+         <saml:AudienceRestriction><saml:Audience>sp-entity-id</saml:Audience></saml:AudienceRestriction>\
+         </saml:Conditions><saml:AttributeStatement>\
+         <saml:Attribute Name=\"email\"><saml:AttributeValue>{email}</saml:AttributeValue></saml:Attribute>\
+         <saml:Attribute Name=\"groups\"><saml:AttributeValue>{group}</saml:AttributeValue></saml:Attribute>\
+         </saml:AttributeStatement></saml:Assertion></samlp:Response>"
+    )
+}
+
+fn saml_signed_query(key_path: &std::path::Path, response_xml: &str, state: &str) -> String {
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(response_xml.as_bytes()).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let saml_response_b64 = base64::engine::general_purpose::STANDARD.encode(compressed);
+
+    let saml_response_enc = urlencode(&saml_response_b64);
+    let relay_state_enc = urlencode(state);
+    let sig_alg_enc = urlencode(SAML_SIG_ALG_RSA_SHA256);
+    let octet = format!(
+        "SAMLResponse={saml_response_enc}&RelayState={relay_state_enc}&SigAlg={sig_alg_enc}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_path = dir.path().join("data.bin");
+    let sig_path = dir.path().join("sig.bin");
+    std::fs::write(&data_path, octet.as_bytes()).unwrap();
+    assert!(std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign"])
+        .arg(key_path)
+        .arg("-out")
+        .arg(&sig_path)
+        .arg(&data_path)
+        .output()
+        .expect("openssl dgst -sign")
+        .status
+        .success());
+    let signature = std::fs::read(&sig_path).unwrap();
+    let signature_enc = urlencode(&base64::engine::general_purpose::STANDARD.encode(signature));
+    format!("SAMLResponse={saml_response_enc}&RelayState={relay_state_enc}&SigAlg={sig_alg_enc}&Signature={signature_enc}")
+}
+
+#[test]
+fn saml_authorize_requires_saml_configuration() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "saml-auth-gate@acme.test",
+        "correct-horse-70",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    // Not configured at all -> 404.
+    assert_eq!(handle_saml_authorize(&console, &tenant_id).status, 404);
+
+    // Configured for OIDC -> the SAML authorize endpoint refuses (wrong kind).
+    handle_admin_sso_config_set(
+        &console,
+        owner_token,
+        sso_config_request("http://127.0.0.1:1"),
+    );
+    assert_eq!(handle_saml_authorize(&console, &tenant_id).status, 422);
+}
+
+#[test]
+fn saml_end_to_end_provisions_user_and_maps_group_to_role() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "saml-owner@acme.test",
+        "correct-horse-71",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let (key_path, cert_pem, _dir) = saml_key_and_cert();
+    let set = handle_admin_sso_config_set(&console, owner_token, saml_config_request(&cert_pem));
+    assert_eq!(set.status, 200, "{:?}", body_json(&set));
+
+    // The authorize endpoint issues a redirect + persists a restart-safe flow.
+    let authorize = handle_saml_authorize(&console, &tenant_id);
+    assert_eq!(authorize.status, 200);
+    assert!(body_json(&authorize)["authorize_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://idp.example/sso?SAMLRequest="));
+
+    // Seed a pending flow with a known state + request_id so the test can sign
+    // a matching Response.
+    let state = "saml-state-token";
+    let request_id = "_saml-req-1";
+    let now = now_unix_seconds() as i64;
+    block_on_sync_bridge(
+        console
+            .repositories
+            .insert_sso_pending_flow(StoredSsoPendingFlow {
+                state: state.into(),
+                tenant_id: tenant_id.clone(),
+                provider_kind: "saml".into(),
+                code_verifier: None,
+                request_id: Some(request_id.into()),
+                created_at_unix: now,
+                expires_at_unix: now + 600,
+            }),
+    )
+    .unwrap();
+
+    let response_xml = saml_response_xml(request_id, "saml-user@acme.test", "Engineering");
+    let query = saml_signed_query(&key_path, &response_xml, state);
+
+    let acs = handle_saml_acs(&console, &query);
+    assert_eq!(acs.status, 200, "{:?}", body_json(&acs));
+    let body = body_json(&acs);
+    assert_eq!(body["user"]["email"], "saml-user@acme.test");
+    // Engineering -> admin via group_role_mapping.
+    assert_eq!(body["tenant"]["role"], "admin");
+    assert!(body["gateway_api_key"].as_str().unwrap().starts_with("fg_"));
+
+    // The state is single-use: replaying it fails closed.
+    assert_eq!(handle_saml_acs(&console, &query).status, 401);
+}
+
+#[test]
+fn saml_acs_rejects_a_forged_signature() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "saml-owner2@acme.test",
+        "correct-horse-72",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    // Configure the tenant with the REAL IdP certificate...
+    let (_real_key, cert_pem, _dir) = saml_key_and_cert();
+    handle_admin_sso_config_set(&console, owner_token, saml_config_request(&cert_pem));
+
+    let state = "saml-state-token-2";
+    let request_id = "_saml-req-2";
+    let now = now_unix_seconds() as i64;
+    block_on_sync_bridge(
+        console
+            .repositories
+            .insert_sso_pending_flow(StoredSsoPendingFlow {
+                state: state.into(),
+                tenant_id: tenant_id.clone(),
+                provider_kind: "saml".into(),
+                code_verifier: None,
+                request_id: Some(request_id.into()),
+                created_at_unix: now,
+                expires_at_unix: now + 600,
+            }),
+    )
+    .unwrap();
+
+    // ...but an attacker signs the (otherwise well-formed) Response with a
+    // DIFFERENT key. The RelayState is intact so the flow is found; the
+    // signature check must then fail closed. No user is provisioned.
+    let (attacker_key, _attacker_cert, _dir2) = saml_key_and_cert();
+    let response_xml = saml_response_xml(request_id, "victim@acme.test", "Engineering");
+    let query = saml_signed_query(&attacker_key, &response_xml, state);
+    let acs = handle_saml_acs(&console, &query);
+    assert_eq!(acs.status, 401);
+
+    assert!(
+        block_on_sync_bridge(
+            console
+                .repositories
+                .get_admin_user_by_email("victim@acme.test")
+        )
+        .unwrap()
+        .is_none(),
+        "a rejected assertion must not provision an account"
     );
 }

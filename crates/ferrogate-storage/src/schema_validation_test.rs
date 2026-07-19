@@ -31,8 +31,8 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 40);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "040_wallet_reservations");
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 41);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "041_tenant_sso_config");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
@@ -49,6 +49,13 @@ fn schema_contract_includes_latest_asset_egress_migration() {
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")
     );
+    // #283: durable per-tenant SSO config + restart-safe pending flows (040).
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (41, '041_tenant_sso_config')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS sso_provider_configs"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS sso_pending_flows"));
+    // OIDC client secrets are persisted only as a secret_ref URI, never plaintext.
+    assert!(POSTGRES_SCHEMA_SQL.contains("oidc_client_secret_ref TEXT"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("saml_idp_certificate TEXT"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));

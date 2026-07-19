@@ -20,7 +20,8 @@ use blake2::{Blake2b512, Digest};
 use ferrogate_core::{TenantContext, WorkspaceScope};
 use ferrogate_storage::{
     RuntimeStorageRepositories, StoredAdminUser, StoredAdminUserMembership,
-    StoredAdminUserRefreshToken, StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace,
+    StoredAdminUserRefreshToken, StoredApiKey, StoredProject, StoredSsoPendingFlow,
+    StoredSsoProviderConfig, StoredTenantAccount, StoredWorkspace,
 };
 use jsonwebtoken::{decode, decode_header, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,12 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+mod saml;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const VIRTUAL_API_KEY_PREFIX_CHARS: usize = 16;
@@ -594,15 +597,9 @@ struct AdminConsoleState {
     repositories: Arc<RuntimeStorageRepositories>,
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
-    /// Per-tenant OIDC SSO configuration (issue #160), set at runtime via
-    /// `POST /v1/admin/team/sso-config`. In-memory only for now (mirrors
-    /// #162's runtime Role/PolicyBinding CRUD): durable persistence is a
-    /// follow-up, not required for the runtime capability itself.
-    sso_configs: Arc<RwLock<HashMap<String, SsoProviderConfig>>>,
-    /// Short-lived state for in-flight `authorize` -> `callback` round
-    /// trips, keyed by the OAuth `state` parameter. Entries are removed on
-    /// first use and expire after 10 minutes (see `handle_sso_callback`).
-    pending_sso_flows: Arc<Mutex<HashMap<String, PendingSsoFlow>>>,
+    /// Resolver for `secret_ref` URIs (issue #283) -- used to fetch an OIDC
+    /// client secret at flow time so it never has to be persisted in plaintext.
+    secret_resolver: Arc<ferrogate_secrets::SecretResolverRegistry>,
 }
 
 impl AdminConsoleState {
@@ -611,8 +608,7 @@ impl AdminConsoleState {
             repositories: config.repositories,
             encoding_key: EncodingKey::from_secret(config.jwt_secret.as_bytes()),
             decoding_key: DecodingKey::from_secret(config.jwt_secret.as_bytes()),
-            sso_configs: Arc::new(RwLock::new(HashMap::new())),
-            pending_sso_flows: Arc::new(Mutex::new(HashMap::new())),
+            secret_resolver: Arc::new(ferrogate_secrets::SecretResolverRegistry::from_env()),
         }
     }
 }
@@ -1076,6 +1072,18 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
                 None => unauthorized("missing bearer token"),
             })
         }
+        ("GET", "/v1/admin/team/sso-config") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_admin_sso_config_get(console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("DELETE", "/v1/admin/team/sso-config") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_admin_sso_config_delete(console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
         ("GET", "/v1/admin/auth/sso/authorize") => {
             with_admin_console(service, |console| match request.query_param("tenant_id") {
                 Some(tenant_id) if !tenant_id.is_empty() => {
@@ -1094,6 +1102,21 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
                 _ => unprocessable("code and state query parameters are required"),
             }
         }),
+        ("GET", "/v1/admin/auth/saml/authorize") => {
+            with_admin_console(service, |console| match request.query_param("tenant_id") {
+                Some(tenant_id) if !tenant_id.is_empty() => {
+                    handle_saml_authorize(console, &tenant_id)
+                }
+                _ => unprocessable("tenant_id query parameter is required"),
+            })
+        }
+        // The IdP delivers the SAML Response over the HTTP-Redirect binding as
+        // `?SAMLResponse=...&RelayState=...&SigAlg=...&Signature=...`. The raw
+        // query string is passed through verbatim so the redirect-binding
+        // signature can be reconstructed over the exact received octets.
+        ("GET", "/v1/admin/auth/saml/acs") => {
+            with_admin_console(service, |console| handle_saml_acs(console, &request.query))
+        }
         _ => HttpResponse::json(
             404,
             json!({
@@ -2582,41 +2605,73 @@ fn default_group_claim() -> String {
     "groups".to_string()
 }
 
-/// Request body for `POST /v1/admin/team/sso-config` (issue #160). Only a
-/// tenant `owner` may set this.
+fn default_provider_kind() -> String {
+    "oidc".to_string()
+}
+
+/// Request body for `POST /v1/admin/team/sso-config` (issue #160, made durable
+/// and SAML-capable in #283). Only a tenant `owner` may set this. The provider
+/// kind (OIDC by default, or SAML) determines which fields are required.
+///
+/// The OIDC client secret is supplied as a ferrogate-secrets `secret_ref`
+/// (`env://...` / `vault://...`), never as a plaintext value -- so it is never
+/// persisted in the control plane in the clear.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SsoConfigRequest {
-    pub issuer: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub redirect_uri: String,
+    #[serde(default = "default_provider_kind")]
+    pub provider_kind: String,
     #[serde(default)]
     pub group_role_mapping: HashMap<String, String>,
     #[serde(default = "default_sso_role")]
     pub default_role: String,
-    /// ID-token claim carrying the caller's IdP group memberships (an
-    /// array of strings), used with `group_role_mapping`. Defaults to
-    /// `"groups"`, the common Okta/Azure AD/Keycloak convention.
+    // --- OIDC ---
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// ferrogate-secrets reference URI for the OIDC client secret. Never a
+    /// plaintext secret.
+    #[serde(default)]
+    pub client_secret_ref: Option<String>,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    /// ID-token claim carrying the caller's IdP group memberships (an array of
+    /// strings), used with `group_role_mapping`. Defaults to `"groups"`, the
+    /// common Okta/Azure AD/Keycloak convention.
     #[serde(default = "default_group_claim")]
     pub group_claim: String,
+    // --- SAML ---
+    #[serde(default)]
+    pub idp_entity_id: Option<String>,
+    #[serde(default)]
+    pub idp_sso_url: Option<String>,
+    /// The IdP's signing certificate (PEM or bare base64 DER).
+    #[serde(default)]
+    pub idp_certificate: Option<String>,
+    #[serde(default)]
+    pub sp_entity_id: Option<String>,
+    #[serde(default)]
+    pub acs_url: Option<String>,
+    #[serde(default)]
+    pub email_attribute: Option<String>,
+    #[serde(default)]
+    pub name_attribute: Option<String>,
+    #[serde(default)]
+    pub groups_attribute: Option<String>,
 }
 
+/// An OIDC configuration resolved from durable storage, with the client
+/// secret still referenced (not yet fetched) -- authorize needs no secret, and
+/// the callback resolves the ref just-in-time.
 #[derive(Debug, Clone)]
-struct SsoProviderConfig {
+struct ResolvedOidcConfig {
     issuer: String,
     client_id: String,
-    client_secret: String,
+    client_secret_ref: String,
     redirect_uri: String,
     group_role_mapping: HashMap<String, String>,
     default_role: String,
     group_claim: String,
-}
-
-#[derive(Debug, Clone)]
-struct PendingSsoFlow {
-    tenant_id: String,
-    code_verifier: String,
-    created_at_unix: i64,
 }
 
 /// An in-flight SSO flow may sit in the browser for a while (IdP login,
@@ -2624,16 +2679,41 @@ struct PendingSsoFlow {
 /// around indefinitely.
 const SSO_FLOW_TTL_SECS: i64 = 600;
 
-fn read_sso_config(console: &AdminConsoleState, tenant_id: &str) -> Option<SsoProviderConfig> {
-    match console.sso_configs.read() {
-        Ok(configs) => configs.get(tenant_id).cloned(),
-        Err(poisoned) => poisoned.into_inner().get(tenant_id).cloned(),
-    }
+/// Reads the durable per-tenant SSO config (#283), returning `None` if none is
+/// configured or the store errored (callers translate `None` to a 404).
+fn read_stored_sso_config(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+) -> Option<StoredSsoProviderConfig> {
+    block_on_sync_bridge(console.repositories.get_sso_provider_config(tenant_id))
+        .ok()
+        .flatten()
 }
 
-/// Configures OIDC SSO for the caller's own tenant (issue #160). Only a
-/// tenant `owner` may do this. Stored in-memory (see `AdminConsoleState`
-/// doc comment) -- rotating/removing it is the same call with new values.
+/// Projects a stored config into the OIDC runtime shape, or `None` if the
+/// tenant is configured for a different provider kind / is missing a required
+/// OIDC field (fail closed).
+fn resolve_oidc_config(stored: &StoredSsoProviderConfig) -> Option<ResolvedOidcConfig> {
+    if stored.provider_kind != "oidc" {
+        return None;
+    }
+    Some(ResolvedOidcConfig {
+        issuer: stored.oidc_issuer.clone()?,
+        client_id: stored.oidc_client_id.clone()?,
+        client_secret_ref: stored.oidc_client_secret_ref.clone()?,
+        redirect_uri: stored.oidc_redirect_uri.clone()?,
+        group_role_mapping: stored.group_role_mapping.clone().into_iter().collect(),
+        default_role: stored.default_role.clone(),
+        group_claim: stored
+            .oidc_group_claim
+            .clone()
+            .unwrap_or_else(default_group_claim),
+    })
+}
+
+/// Configures SSO (OIDC or SAML) for the caller's own tenant (issue #160/#283)
+/// and PERSISTS it durably so it survives a gateway restart. Only a tenant
+/// `owner` may do this; re-posting replaces the config.
 fn handle_admin_sso_config_set(
     console: &AdminConsoleState,
     token: &str,
@@ -2646,35 +2726,232 @@ fn handle_admin_sso_config_set(
     if membership.role != "owner" {
         return forbidden("only a tenant owner can configure SSO");
     }
-    let issuer = payload.issuer.trim().trim_end_matches('/').to_string();
-    let client_id = payload.client_id.trim().to_string();
-    let client_secret = payload.client_secret.trim().to_string();
-    let redirect_uri = payload.redirect_uri.trim().to_string();
-    if issuer.is_empty()
-        || client_id.is_empty()
-        || client_secret.is_empty()
-        || redirect_uri.is_empty()
-    {
-        return unprocessable("issuer, client_id, client_secret, and redirect_uri are required");
-    }
-    let config = SsoProviderConfig {
-        issuer,
-        client_id,
-        client_secret,
-        redirect_uri,
-        group_role_mapping: payload.group_role_mapping,
-        default_role: payload.default_role,
-        group_claim: payload.group_claim,
+    let group_role_mapping: std::collections::BTreeMap<String, String> =
+        payload.group_role_mapping.clone().into_iter().collect();
+    let now = now_unix_seconds() as i64;
+    let existing = read_stored_sso_config(console, &membership.tenant_id);
+    let created_at_unix = existing.map(|config| config.created_at_unix).unwrap_or(now);
+
+    let stored = match payload.provider_kind.as_str() {
+        "oidc" => {
+            let issuer = payload
+                .issuer
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches('/')
+                .to_string();
+            let client_id = payload
+                .client_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let client_secret_ref = payload
+                .client_secret_ref
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let redirect_uri = payload
+                .redirect_uri
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if issuer.is_empty()
+                || client_id.is_empty()
+                || client_secret_ref.is_empty()
+                || redirect_uri.is_empty()
+            {
+                return unprocessable(
+                    "issuer, client_id, client_secret_ref, and redirect_uri are required for oidc",
+                );
+            }
+            // Validate the secret reference parses now, so a misconfiguration
+            // surfaces at config time rather than mid-login.
+            if let Err(error) = ferrogate_secrets::SecretRef::parse(&client_secret_ref) {
+                return unprocessable(&format!(
+                    "client_secret_ref is not a valid secret reference: {error}"
+                ));
+            }
+            StoredSsoProviderConfig {
+                tenant_id: membership.tenant_id.clone(),
+                provider_kind: "oidc".into(),
+                default_role: payload.default_role.clone(),
+                group_role_mapping,
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some(client_id),
+                oidc_client_secret_ref: Some(client_secret_ref),
+                oidc_redirect_uri: Some(redirect_uri),
+                oidc_group_claim: Some(payload.group_claim.clone()),
+                saml_idp_entity_id: None,
+                saml_idp_sso_url: None,
+                saml_idp_certificate: None,
+                saml_sp_entity_id: None,
+                saml_acs_url: None,
+                saml_email_attribute: None,
+                saml_name_attribute: None,
+                saml_groups_attribute: None,
+                created_at_unix,
+                updated_at_unix: now,
+            }
+        }
+        "saml" => {
+            let idp_sso_url = payload
+                .idp_sso_url
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let idp_certificate = payload
+                .idp_certificate
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let sp_entity_id = payload
+                .sp_entity_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let acs_url = payload
+                .acs_url
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if idp_sso_url.is_empty()
+                || idp_certificate.is_empty()
+                || sp_entity_id.is_empty()
+                || acs_url.is_empty()
+            {
+                return unprocessable(
+                    "idp_sso_url, idp_certificate, sp_entity_id, and acs_url are required for saml",
+                );
+            }
+            // Fail closed at config time if the certificate cannot be parsed
+            // into a usable verification key.
+            if let Err(error) = saml::parse_idp_public_key(&idp_certificate) {
+                return unprocessable(&format!(
+                    "idp_certificate is not a usable X.509 certificate: {error}"
+                ));
+            }
+            StoredSsoProviderConfig {
+                tenant_id: membership.tenant_id.clone(),
+                provider_kind: "saml".into(),
+                default_role: payload.default_role.clone(),
+                group_role_mapping,
+                oidc_issuer: None,
+                oidc_client_id: None,
+                oidc_client_secret_ref: None,
+                oidc_redirect_uri: None,
+                oidc_group_claim: None,
+                saml_idp_entity_id: payload
+                    .idp_entity_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                saml_idp_sso_url: Some(idp_sso_url),
+                saml_idp_certificate: Some(idp_certificate),
+                saml_sp_entity_id: Some(sp_entity_id),
+                saml_acs_url: Some(acs_url),
+                saml_email_attribute: payload.email_attribute.clone(),
+                saml_name_attribute: payload.name_attribute.clone(),
+                saml_groups_attribute: payload.groups_attribute.clone(),
+                created_at_unix,
+                updated_at_unix: now,
+            }
+        }
+        other => {
+            return unprocessable(&format!(
+                "unsupported provider_kind {other:?}; expected \"oidc\" or \"saml\""
+            ));
+        }
     };
-    match console.sso_configs.write() {
-        Ok(mut configs) => {
-            configs.insert(membership.tenant_id, config);
-        }
-        Err(poisoned) => {
-            poisoned.into_inner().insert(membership.tenant_id, config);
-        }
+
+    if let Err(error) =
+        block_on_sync_bridge(console.repositories.upsert_sso_provider_config(stored))
+    {
+        return storage_error(&error);
     }
-    HttpResponse::json(200, json!({ "object": "sso_config", "configured": true }))
+    HttpResponse::json(
+        200,
+        json!({
+            "object": "sso_config",
+            "configured": true,
+            "provider_kind": payload.provider_kind,
+        }),
+    )
+}
+
+/// Returns the caller tenant's current SSO configuration with secrets/keys
+/// redacted (issue #283). Only a tenant `owner` may read it.
+fn handle_admin_sso_config_get(console: &AdminConsoleState, token: &str) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can read the SSO configuration");
+    }
+    let Some(config) = read_stored_sso_config(console, &membership.tenant_id) else {
+        return not_found("SSO is not configured for this tenant");
+    };
+    HttpResponse::json(
+        200,
+        json!({
+            "object": "sso_config",
+            "provider_kind": config.provider_kind,
+            "default_role": config.default_role,
+            "group_role_mapping": config.group_role_mapping,
+            "oidc": {
+                "issuer": config.oidc_issuer,
+                "client_id": config.oidc_client_id,
+                // The secret reference is shown (it is a pointer, not the
+                // secret itself); the resolved secret is never returned.
+                "client_secret_ref": config.oidc_client_secret_ref,
+                "redirect_uri": config.oidc_redirect_uri,
+                "group_claim": config.oidc_group_claim,
+            },
+            "saml": {
+                "idp_entity_id": config.saml_idp_entity_id,
+                "idp_sso_url": config.saml_idp_sso_url,
+                "sp_entity_id": config.saml_sp_entity_id,
+                "acs_url": config.saml_acs_url,
+                "email_attribute": config.saml_email_attribute,
+                "name_attribute": config.saml_name_attribute,
+                "groups_attribute": config.saml_groups_attribute,
+                // The certificate is public but bulky; expose only whether one
+                // is configured.
+                "certificate_configured": config.saml_idp_certificate.is_some(),
+            },
+        }),
+    )
+}
+
+/// Removes the caller tenant's SSO configuration (issue #283). Only a tenant
+/// `owner` may do this.
+fn handle_admin_sso_config_delete(console: &AdminConsoleState, token: &str) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can remove the SSO configuration");
+    }
+    match block_on_sync_bridge(
+        console
+            .repositories
+            .delete_sso_provider_config(&membership.tenant_id),
+    ) {
+        Ok(removed) => {
+            HttpResponse::json(200, json!({ "object": "sso_config", "deleted": removed }))
+        }
+        Err(error) => storage_error(&error),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2730,8 +3007,13 @@ fn generate_pkce_pair() -> anyhow::Result<(String, String)> {
 /// than issuing an HTTP redirect itself, so a JSON-API-only client can
 /// drive the flow too.
 fn handle_sso_authorize(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
-    let Some(config) = read_sso_config(console, tenant_id) else {
+    let Some(stored) = read_stored_sso_config(console, tenant_id) else {
         return not_found("SSO is not configured for this tenant");
+    };
+    let Some(config) = resolve_oidc_config(&stored) else {
+        return unprocessable(
+            "this tenant is not configured for OIDC SSO; use the SAML authorize endpoint",
+        );
     };
     let discovery = match fetch_oidc_discovery(&config.issuer) {
         Ok(discovery) => discovery,
@@ -2745,18 +3027,18 @@ fn handle_sso_authorize(console: &AdminConsoleState, tenant_id: &str) -> HttpRes
         Ok(state) => state,
         Err(error) => return internal_error(&error.to_string()),
     };
-    let flow = PendingSsoFlow {
+    let now = now_unix_seconds() as i64;
+    let flow = StoredSsoPendingFlow {
+        state: state.clone(),
         tenant_id: tenant_id.to_string(),
-        code_verifier,
-        created_at_unix: now_unix_seconds() as i64,
+        provider_kind: "oidc".into(),
+        code_verifier: Some(code_verifier),
+        request_id: None,
+        created_at_unix: now,
+        expires_at_unix: now + SSO_FLOW_TTL_SECS,
     };
-    match console.pending_sso_flows.lock() {
-        Ok(mut flows) => {
-            flows.insert(state.clone(), flow);
-        }
-        Err(poisoned) => {
-            poisoned.into_inner().insert(state.clone(), flow);
-        }
+    if let Err(error) = block_on_sync_bridge(console.repositories.insert_sso_pending_flow(flow)) {
+        return storage_error(&error);
     }
     let authorize_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&code_challenge={}&code_challenge_method=S256",
@@ -2786,18 +3068,33 @@ struct OidcTokenResponse {
 ///   login (never overwriting a role an owner set explicitly afterward),
 /// - and issues the same session shape `register`/`login` return.
 fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> HttpResponse {
-    let flow = match console.pending_sso_flows.lock() {
-        Ok(mut flows) => flows.remove(state),
-        Err(poisoned) => poisoned.into_inner().remove(state),
+    let now = now_unix_seconds() as i64;
+    let flow = match block_on_sync_bridge(console.repositories.take_sso_pending_flow(state, now)) {
+        Ok(flow) => flow,
+        Err(error) => return storage_error(&error),
     };
     let Some(flow) = flow else {
-        return unauthorized("unknown or already-used SSO state");
+        return unauthorized("unknown, expired, or already-used SSO state");
     };
-    if now_unix_seconds() as i64 - flow.created_at_unix > SSO_FLOW_TTL_SECS {
-        return unauthorized("SSO flow has expired; please sign in again");
-    }
-    let Some(config) = read_sso_config(console, &flow.tenant_id) else {
+    let Some(code_verifier) = flow.code_verifier.clone() else {
+        return unprocessable("this pending flow is not an OIDC flow");
+    };
+    let Some(stored) = read_stored_sso_config(console, &flow.tenant_id) else {
         return internal_error("SSO configuration was removed mid-flow");
+    };
+    let Some(config) = resolve_oidc_config(&stored) else {
+        return internal_error("SSO configuration is no longer OIDC");
+    };
+    // Resolve the client secret from its reference just-in-time; it is never
+    // persisted in plaintext (#283).
+    let client_secret = match console.secret_resolver.resolve(&config.client_secret_ref) {
+        Ok(Some(secret)) => secret,
+        Ok(None) => {
+            return internal_error("OIDC client_secret_ref did not resolve to a secret");
+        }
+        Err(error) => {
+            return internal_error(&format!("failed to resolve OIDC client secret: {error:#}"));
+        }
     };
     let discovery = match fetch_oidc_discovery(&config.issuer) {
         Ok(discovery) => discovery,
@@ -2809,8 +3106,8 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         urlencode(code),
         urlencode(&config.redirect_uri),
         urlencode(&config.client_id),
-        urlencode(&config.client_secret),
-        urlencode(&flow.code_verifier),
+        urlencode(&client_secret),
+        urlencode(&code_verifier),
     );
     let token_response_body = match ferrogate_secrets::http_post(
         &discovery.token_endpoint,
@@ -2891,28 +3188,53 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
                 .collect()
         })
         .unwrap_or_default();
+    complete_sso_login(
+        console,
+        &flow.tenant_id,
+        &email,
+        &display_name,
+        &groups,
+        &config.group_role_mapping,
+        &config.default_role,
+    )
+}
+
+/// Shared tail of an OIDC or SAML login once a verified `email`, display name,
+/// and IdP group list have been established (issue #283). Maps groups to a
+/// tenant role, JIT-provisions the admin user + membership on first login
+/// (never overwriting a role an owner set later), and issues the same session
+/// shape `register`/`login` return.
+#[allow(clippy::too_many_arguments)]
+fn complete_sso_login(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    email: &str,
+    display_name: &str,
+    groups: &[String],
+    group_role_mapping: &HashMap<String, String>,
+    default_role: &str,
+) -> HttpResponse {
     let mapped_role = groups
         .iter()
-        .find_map(|group| config.group_role_mapping.get(group).cloned())
-        .unwrap_or(config.default_role);
+        .find_map(|group| group_role_mapping.get(group).cloned())
+        .unwrap_or_else(|| default_role.to_string());
 
-    let existing = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(&email))
-    {
+    let existing = match block_on_sync_bridge(console.repositories.get_admin_user_by_email(email)) {
         Ok(existing) => existing,
         Err(error) => return storage_error(&error),
     };
     let user = match existing {
         Some(user) => {
             // Cross-tenant account-takeover guard: SSO trust is per-tenant (each
-            // tenant owner freely configures its own IdP `issuer`), but admin
-            // accounts are keyed globally by email. Without this check a tenant
-            // owner running their own IdP could assert a VICTIM's email and this
+            // tenant owner freely configures its own IdP), but admin accounts
+            // are keyed globally by email. Without this check a tenant owner
+            // running their own IdP could assert a VICTIM's email and this
             // callback would mint a session/refresh-token bound to the victim's
             // global account. Only allow SSO to sign in a pre-existing account
-            // that is ALREADY a member of the flow's tenant (provisioned here via
+            // that is ALREADY a member of the flow's tenant (provisioned via
             // the normal invite/team flow); a brand-new email is JIT-created
             // below and belongs only to this tenant.
-            if membership_role_in_tenant(console, &flow.tenant_id, &user.id).is_none() {
+            if membership_role_in_tenant(console, tenant_id, &user.id).is_none() {
                 return unauthorized(
                     "this account is not provisioned for single sign-on in this tenant",
                 );
@@ -2927,9 +3249,9 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
             let now = now_unix_seconds() as i64;
             let user = StoredAdminUser {
                 id: next_id("user"),
-                email: email.clone(),
+                email: email.to_string(),
                 password_hash,
-                display_name: display_name.clone(),
+                display_name: display_name.to_string(),
                 superadmin: false,
                 created_at_unix: now,
                 updated_at_unix: now,
@@ -2948,16 +3270,16 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         return unauthorized("this account has been disabled");
     }
 
-    // Only set a role on first join -- never let a later SSO login
-    // silently override a role an owner explicitly changed afterward via
-    // the team-management API.
-    let effective_role = match membership_role_in_tenant(console, &flow.tenant_id, &user.id) {
+    // Only set a role on first join -- never let a later SSO login silently
+    // override a role an owner explicitly changed afterward via the
+    // team-management API.
+    let effective_role = match membership_role_in_tenant(console, tenant_id, &user.id) {
         Some(role) => role,
         None => {
             let membership = StoredAdminUserMembership {
                 id: next_id("membership"),
                 user_id: user.id.clone(),
-                tenant_id: flow.tenant_id.clone(),
+                tenant_id: tenant_id.to_string(),
                 role: mapped_role.clone(),
                 created_at_unix: now_unix_seconds() as i64,
             };
@@ -2973,26 +3295,22 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
     };
 
     let tenant_account =
-        match block_on_sync_bridge(console.repositories.get_tenant_account(&flow.tenant_id)) {
+        match block_on_sync_bridge(console.repositories.get_tenant_account(tenant_id)) {
             Ok(Some(account)) => account,
             Ok(None) => return internal_error("tenant account no longer exists"),
             Err(error) => return storage_error(&error),
         };
-    let workspace = match resolve_default_workspace(console, &flow.tenant_id) {
+    let workspace = match resolve_default_workspace(console, tenant_id) {
         Ok(Some(workspace)) => workspace,
         Ok(None) => return internal_error("no workspace found for this tenant"),
         Err(error) => return storage_error(&error),
     };
-    let gateway_api_key = match provision_gateway_api_key(
-        console,
-        &workspace.id,
-        &workspace.project_id,
-        &flow.tenant_id,
-    ) {
-        Ok(secret) => secret,
-        Err(error) => return internal_error(&error.to_string()),
-    };
-    match issue_session(console, &user.id, &email, &flow.tenant_id, &effective_role) {
+    let gateway_api_key =
+        match provision_gateway_api_key(console, &workspace.id, &workspace.project_id, tenant_id) {
+            Ok(secret) => secret,
+            Err(error) => return internal_error(&error.to_string()),
+        };
+    match issue_session(console, &user.id, email, tenant_id, &effective_role) {
         Ok((access_token, refresh_token)) => HttpResponse::json(
             200,
             AdminSessionResponse {
@@ -3001,7 +3319,7 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
                 expires_in: ADMIN_SESSION_ACCESS_TOKEN_TTL_SECS,
                 user: AdminUserView {
                     id: user.id,
-                    email,
+                    email: email.to_string(),
                     display_name: user.display_name,
                 },
                 tenant: AdminTenantView {
@@ -3015,6 +3333,150 @@ fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> 
         Err(error) => internal_error(&error.to_string()),
     }
 }
+
+/// Starts a SAML 2.0 SP-initiated login for `tenant_id` (issue #283) using the
+/// HTTP-Redirect binding: build a (deflated, base64, url-encoded)
+/// `AuthnRequest`, persist a restart-safe pending flow keyed by an opaque
+/// `state` (carried as `RelayState`), and return the IdP redirect URL. Like
+/// the OIDC authorize endpoint it is unauthenticated (the browser isn't logged
+/// in yet) and returns JSON rather than a 302 so a JSON-only client can drive
+/// it too.
+fn handle_saml_authorize(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
+    let Some(stored) = read_stored_sso_config(console, tenant_id) else {
+        return not_found("SSO is not configured for this tenant");
+    };
+    if stored.provider_kind != "saml" {
+        return unprocessable(
+            "this tenant is not configured for SAML SSO; use the OIDC authorize endpoint",
+        );
+    }
+    let (Some(idp_sso_url), Some(sp_entity_id), Some(acs_url)) = (
+        stored.saml_idp_sso_url.clone(),
+        stored.saml_sp_entity_id.clone(),
+        stored.saml_acs_url.clone(),
+    ) else {
+        return internal_error("SAML configuration is incomplete");
+    };
+    let state = match generate_random_hex(24) {
+        Ok(state) => state,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    let request_id = format!(
+        "_{}",
+        match generate_random_hex(20) {
+            Ok(value) => value,
+            Err(error) => return internal_error(&error.to_string()),
+        }
+    );
+    let redirect_url = match saml::build_authn_request_redirect(
+        &idp_sso_url,
+        &acs_url,
+        &sp_entity_id,
+        &request_id,
+        &state,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return internal_error(&format!("failed to build SAML AuthnRequest: {error:#}"))
+        }
+    };
+    let now = now_unix_seconds() as i64;
+    let flow = StoredSsoPendingFlow {
+        state: state.clone(),
+        tenant_id: tenant_id.to_string(),
+        provider_kind: "saml".into(),
+        code_verifier: None,
+        request_id: Some(request_id),
+        created_at_unix: now,
+        expires_at_unix: now + SSO_FLOW_TTL_SECS,
+    };
+    if let Err(error) = block_on_sync_bridge(console.repositories.insert_sso_pending_flow(flow)) {
+        return storage_error(&error);
+    }
+    HttpResponse::json(
+        200,
+        json!({ "authorize_url": redirect_url, "state": state }),
+    )
+}
+
+/// SAML 2.0 assertion consumer service (issue #283). Receives the IdP's signed
+/// Response over the HTTP-Redirect binding, and FAILS CLOSED on any of:
+/// missing/invalid redirect-binding signature, unknown/expired flow, status !=
+/// Success, issuer/audience mismatch, clock-skew-adjusted validity window, or a
+/// missing usable email. `raw_query` is the verbatim request query string, used
+/// to reconstruct the exact signed octet string.
+fn handle_saml_acs(console: &AdminConsoleState, raw_query: &str) -> HttpResponse {
+    let params = saml::RedirectBindingParams::parse(raw_query);
+    let Some(state) = params
+        .relay_state
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return unprocessable("missing RelayState");
+    };
+    let now = now_unix_seconds() as i64;
+    let flow = match block_on_sync_bridge(console.repositories.take_sso_pending_flow(state, now)) {
+        Ok(flow) => flow,
+        Err(error) => return storage_error(&error),
+    };
+    let Some(flow) = flow else {
+        return unauthorized("unknown, expired, or already-used SAML state");
+    };
+    if flow.provider_kind != "saml" {
+        return unprocessable("this pending flow is not a SAML flow");
+    }
+    let Some(stored) = read_stored_sso_config(console, &flow.tenant_id) else {
+        return internal_error("SAML configuration was removed mid-flow");
+    };
+    if stored.provider_kind != "saml" {
+        return internal_error("SSO configuration is no longer SAML");
+    }
+    let Some(certificate) = stored.saml_idp_certificate.as_deref() else {
+        return internal_error("SAML configuration is missing the IdP certificate");
+    };
+    // 1. Verify the redirect-binding signature over the exact received octets,
+    //    against the configured IdP certificate. Fail closed if absent/invalid.
+    if let Err(error) = saml::verify_redirect_signature(&params, certificate) {
+        return unauthorized(&format!("SAML signature verification failed: {error}"));
+    }
+    // 2. Inflate + parse the now-authenticated Response.
+    let Some(saml_response) = params.saml_response.as_deref() else {
+        return unprocessable("missing SAMLResponse");
+    };
+    let assertion = match saml::parse_and_validate_response(
+        saml_response,
+        &saml::AssertionExpectations {
+            sp_entity_id: stored.saml_sp_entity_id.as_deref().unwrap_or_default(),
+            idp_entity_id: stored.saml_idp_entity_id.as_deref(),
+            in_response_to: flow.request_id.as_deref(),
+            email_attribute: stored.saml_email_attribute.as_deref(),
+            name_attribute: stored.saml_name_attribute.as_deref(),
+            groups_attribute: stored.saml_groups_attribute.as_deref(),
+            now_unix: now,
+            clock_skew_secs: SAML_CLOCK_SKEW_SECS,
+        },
+    ) {
+        Ok(assertion) => assertion,
+        Err(error) => return unauthorized(&format!("SAML assertion rejected: {error}")),
+    };
+
+    let group_role_mapping: HashMap<String, String> =
+        stored.group_role_mapping.clone().into_iter().collect();
+    complete_sso_login(
+        console,
+        &flow.tenant_id,
+        &assertion.email,
+        &assertion.display_name,
+        &assertion.groups,
+        &group_role_mapping,
+        &stored.default_role,
+    )
+}
+
+/// Permitted clock skew (either direction) when checking SAML assertion
+/// `NotBefore`/`NotOnOrAfter` conditions -- IdP and SP clocks are rarely
+/// perfectly aligned.
+const SAML_CLOCK_SKEW_SECS: i64 = 300;
 
 fn issue_session(
     console: &AdminConsoleState,

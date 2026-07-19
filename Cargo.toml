@@ -61,6 +61,10 @@ chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 croner = "3"
 deadpool-postgres = "0.14.1"
+# Inflate the DEFLATE-compressed SAML `SAMLResponse` payload delivered over the
+# HTTP-Redirect binding (#283). Already resolved transitively; declared here
+# for direct use in ferrogate-auth's SAML SP flow.
+flate2 = "1"
 # Asymmetric signatures for signed policy-snapshot verification (#206). Ed25519
 # lets the control plane sign snapshots with a private key the data plane never
 # holds and rotate keys by key_id; a shared secret would let any verifier forge.
@@ -85,7 +89,18 @@ matchit = "0.8"
 # the audited 0.8.0 source while the path patch below applies the upstream
 # prometheus 0.14 dependency fix without pulling unreleased Pingora code.
 pingora = { version = "=0.8.0", features = ["proxy", "rustls"] }
+# Streaming XML reader for parsing SAML 2.0 responses/assertions (#283). Pure
+# Rust, no native dependencies -- deliberately chosen over the maintained
+# `samael` SAML crate, which pulls in native libxml2 + openssl (xmlsec) and
+# would be a heavy build/runtime burden. The SAML message is authenticated by
+# the HTTP-Redirect binding's query-string RSA signature BEFORE we parse it, so
+# parsing operates on already-verified bytes.
+quick-xml = "0.37"
 redis = "0.25"
+# RSA-SHA256 signature verification for the SAML HTTP-Redirect binding
+# signature (#283), verified against the IdP's X.509 certificate. Already
+# resolved (rustls uses it); declared here for direct use.
+ring = "0.17"
 native-tls = "0.2"
 postgres-native-tls = "0.5"
 rcgen = "0.14.7"

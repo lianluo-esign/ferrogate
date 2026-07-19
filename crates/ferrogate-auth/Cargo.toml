@@ -24,14 +24,18 @@ clap.workspace = true
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
+flate2.workspace = true
 jsonwebtoken.workspace = true
+quick-xml.workspace = true
 rand_core = { version = "0.6", features = ["getrandom"] }
+ring.workspace = true
 rustls = { workspace = true, features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

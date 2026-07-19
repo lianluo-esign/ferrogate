@@ -1974,6 +1974,40 @@ CREATE TABLE IF NOT EXISTS wallet_reservations (
     -- settlement id IS the reservation id -- a 1:1, exact-amount mapping, which
     -- also makes settle idempotent through the wallet_settlements primary key.
     settlement_id TEXT,
+-- Migration 041 (#283): durable per-tenant SSO configuration + restart-safe
+-- pending-flow state. Before this, per-tenant OIDC config lived only in the
+-- auth service's process memory (lost on restart, unmanageable per tenant at
+-- runtime) and there was no SAML. `sso_provider_configs` holds one config per
+-- tenant for EITHER OIDC or SAML (`provider_kind`); OIDC client secrets are
+-- NEVER stored in plaintext -- only a `secret_ref` URI resolved through
+-- ferrogate-secrets at flow time is persisted. `sso_pending_flows` makes the
+-- short-lived authorize->callback round trip survive a restart (and lets a
+-- multi-instance deployment complete a flow on a different instance than the
+-- one that started it). No index is added over a migration-added column, so
+-- the #254 ordering rule is trivially satisfied.
+CREATE TABLE IF NOT EXISTS sso_provider_configs (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    provider_kind TEXT NOT NULL CHECK (provider_kind IN ('oidc', 'saml')),
+    default_role TEXT NOT NULL DEFAULT 'member',
+    group_role_mapping_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- OIDC (Authorization Code + PKCE). `oidc_client_secret_ref` is a
+    -- ferrogate-secrets URI (env://... / vault://...), never a plaintext
+    -- secret.
+    oidc_issuer TEXT,
+    oidc_client_id TEXT,
+    oidc_client_secret_ref TEXT,
+    oidc_redirect_uri TEXT,
+    oidc_group_claim TEXT NOT NULL DEFAULT 'groups',
+    -- SAML 2.0 SP (HTTP-Redirect binding, query-string signature verified
+    -- against the IdP's X.509 certificate).
+    saml_idp_entity_id TEXT,
+    saml_idp_sso_url TEXT,
+    saml_idp_certificate TEXT,
+    saml_sp_entity_id TEXT,
+    saml_acs_url TEXT,
+    saml_email_attribute TEXT,
+    saml_name_attribute TEXT,
+    saml_groups_attribute TEXT,
     created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
     updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
 );
@@ -1991,4 +2025,27 @@ CREATE INDEX IF NOT EXISTS idx_wallet_reservations_active_expiry
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (40, '040_wallet_reservations')
+-- Short-lived (default 10 min) state for an in-flight SSO authorize->callback
+-- round trip, keyed by the opaque `state`/RelayState token. Made durable
+-- (#283) so a restart mid-login, or a callback that lands on a different
+-- gateway instance, still completes. Entries are consumed (deleted) on first
+-- use and pruned once expired.
+CREATE TABLE IF NOT EXISTS sso_pending_flows (
+    state TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    -- OIDC PKCE code_verifier (null for SAML).
+    code_verifier TEXT,
+    -- SAML AuthnRequest ID we generated, echoed back as InResponseTo (null for
+    -- OIDC).
+    request_id TEXT,
+    created_at_unix BIGINT NOT NULL,
+    expires_at_unix BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sso_pending_flows_expiry
+    ON sso_pending_flows(expires_at_unix);
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (41, '041_tenant_sso_config')
 ON CONFLICT (version) DO NOTHING;

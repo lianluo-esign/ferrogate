@@ -514,8 +514,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 40;
-const POSTGRES_SCHEMA_NAME: &str = "040_wallet_reservations";
+const POSTGRES_SCHEMA_VERSION: u64 = 41;
+const POSTGRES_SCHEMA_NAME: &str = "041_tenant_sso_config";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1167,6 +1167,10 @@ pub struct RuntimeControlPlaneState {
     admin_users: InMemoryRepository<StoredAdminUser>,
     admin_user_memberships: InMemoryRepository<StoredAdminUserMembership>,
     admin_user_refresh_tokens: InMemoryRepository<StoredAdminUserRefreshToken>,
+    /// Per-tenant SSO configuration keyed by `tenant_id` (#283).
+    sso_provider_configs: InMemoryRepository<StoredSsoProviderConfig>,
+    /// In-flight SSO authorize->callback state keyed by the `state` token (#283).
+    sso_pending_flows: InMemoryRepository<StoredSsoPendingFlow>,
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     plans: InMemoryRepository<StoredPlan>,
     assets: InMemoryRepository<StoredAsset>,
@@ -2619,6 +2623,217 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(affected > 0)
+    }
+
+    async fn upsert_sso_provider_config(
+        &self,
+        config: &StoredSsoProviderConfig,
+    ) -> Result<(), StorageError> {
+        let operation = self.admin_user_operation("upsert sso provider config");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let group_role_mapping_json = serde_json::to_string(&config.group_role_mapping)
+            .map_err(|error| StorageError::Serialization(error.to_string()))?;
+        transaction
+            .execute(
+                "INSERT INTO sso_provider_configs \
+                 (tenant_id, provider_kind, default_role, group_role_mapping_json, \
+                  oidc_issuer, oidc_client_id, oidc_client_secret_ref, oidc_redirect_uri, \
+                  oidc_group_claim, saml_idp_entity_id, saml_idp_sso_url, saml_idp_certificate, \
+                  saml_sp_entity_id, saml_acs_url, saml_email_attribute, saml_name_attribute, \
+                  saml_groups_attribute, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+                         $15, $16, $17, $18, $19) \
+                 ON CONFLICT (tenant_id) DO UPDATE SET \
+                 provider_kind = EXCLUDED.provider_kind, default_role = EXCLUDED.default_role, \
+                 group_role_mapping_json = EXCLUDED.group_role_mapping_json, \
+                 oidc_issuer = EXCLUDED.oidc_issuer, oidc_client_id = EXCLUDED.oidc_client_id, \
+                 oidc_client_secret_ref = EXCLUDED.oidc_client_secret_ref, \
+                 oidc_redirect_uri = EXCLUDED.oidc_redirect_uri, \
+                 oidc_group_claim = EXCLUDED.oidc_group_claim, \
+                 saml_idp_entity_id = EXCLUDED.saml_idp_entity_id, \
+                 saml_idp_sso_url = EXCLUDED.saml_idp_sso_url, \
+                 saml_idp_certificate = EXCLUDED.saml_idp_certificate, \
+                 saml_sp_entity_id = EXCLUDED.saml_sp_entity_id, \
+                 saml_acs_url = EXCLUDED.saml_acs_url, \
+                 saml_email_attribute = EXCLUDED.saml_email_attribute, \
+                 saml_name_attribute = EXCLUDED.saml_name_attribute, \
+                 saml_groups_attribute = EXCLUDED.saml_groups_attribute, \
+                 updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &config.tenant_id,
+                    &config.provider_kind,
+                    &config.default_role,
+                    &group_role_mapping_json,
+                    &config.oidc_issuer,
+                    &config.oidc_client_id,
+                    &config.oidc_client_secret_ref,
+                    &config.oidc_redirect_uri,
+                    &config.oidc_group_claim,
+                    &config.saml_idp_entity_id,
+                    &config.saml_idp_sso_url,
+                    &config.saml_idp_certificate,
+                    &config.saml_sp_entity_id,
+                    &config.saml_acs_url,
+                    &config.saml_email_attribute,
+                    &config.saml_name_attribute,
+                    &config.saml_groups_attribute,
+                    &config.created_at_unix,
+                    &config.updated_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
+    }
+
+    async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
+        let operation = self.admin_user_operation("get sso provider config");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_opt(
+                "SELECT tenant_id, provider_kind, default_role, group_role_mapping_json::text, \
+                 oidc_issuer, oidc_client_id, oidc_client_secret_ref, oidc_redirect_uri, \
+                 oidc_group_claim, saml_idp_entity_id, saml_idp_sso_url, saml_idp_certificate, \
+                 saml_sp_entity_id, saml_acs_url, saml_email_attribute, saml_name_attribute, \
+                 saml_groups_attribute, created_at_unix, updated_at_unix \
+                 FROM sso_provider_configs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        row.as_ref().map(sso_provider_config_from_row).transpose()
+    }
+
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        let operation = self.admin_user_operation("delete sso provider config");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute(
+                "DELETE FROM sso_provider_configs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected > 0)
+    }
+
+    async fn insert_sso_pending_flow(
+        &self,
+        flow: &StoredSsoPendingFlow,
+    ) -> Result<(), StorageError> {
+        let operation = self.admin_user_operation("insert sso pending flow");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO sso_pending_flows \
+                 (state, tenant_id, provider_kind, code_verifier, request_id, created_at_unix, \
+                  expires_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT (state) DO NOTHING",
+                &[
+                    &flow.state,
+                    &flow.tenant_id,
+                    &flow.provider_kind,
+                    &flow.code_verifier,
+                    &flow.request_id,
+                    &flow.created_at_unix,
+                    &flow.expires_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
+    }
+
+    /// Deletes the pending flow row and returns it iff it existed AND had not
+    /// yet expired, so a callback can consume its state exactly once. Also
+    /// prunes any other expired rows opportunistically.
+    async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
+        let operation = self.admin_user_operation("take sso pending flow");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        // Consume the flow (delete-returning) so it can be used at most once,
+        // even under concurrent callbacks.
+        let row = transaction
+            .query_opt(
+                "DELETE FROM sso_pending_flows WHERE state = $1 \
+                 RETURNING state, tenant_id, provider_kind, code_verifier, request_id, \
+                 created_at_unix, expires_at_unix",
+                &[&state],
+            )
+            .await
+            .map_err(postgres_error)?;
+        // Opportunistic expiry prune, independent of the consumed row.
+        transaction
+            .execute(
+                "DELETE FROM sso_pending_flows WHERE expires_at_unix <= $1",
+                &[&now_unix],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        let flow = row.as_ref().map(sso_pending_flow_from_row);
+        Ok(flow.filter(|flow| flow.expires_at_unix > now_unix))
     }
 
     async fn upsert_admin_user_refresh_token(
@@ -7686,6 +7901,47 @@ fn admin_user_refresh_token_from_row(row: &PostgresRow) -> StoredAdminUserRefres
     }
 }
 
+fn sso_provider_config_from_row(
+    row: &PostgresRow,
+) -> Result<StoredSsoProviderConfig, StorageError> {
+    let group_role_mapping_json = row.get::<_, String>(3);
+    let group_role_mapping = serde_json::from_str(&group_role_mapping_json)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    Ok(StoredSsoProviderConfig {
+        tenant_id: row.get::<_, String>(0),
+        provider_kind: row.get::<_, String>(1),
+        default_role: row.get::<_, String>(2),
+        group_role_mapping,
+        oidc_issuer: row.get::<_, Option<String>>(4),
+        oidc_client_id: row.get::<_, Option<String>>(5),
+        oidc_client_secret_ref: row.get::<_, Option<String>>(6),
+        oidc_redirect_uri: row.get::<_, Option<String>>(7),
+        oidc_group_claim: row.get::<_, Option<String>>(8),
+        saml_idp_entity_id: row.get::<_, Option<String>>(9),
+        saml_idp_sso_url: row.get::<_, Option<String>>(10),
+        saml_idp_certificate: row.get::<_, Option<String>>(11),
+        saml_sp_entity_id: row.get::<_, Option<String>>(12),
+        saml_acs_url: row.get::<_, Option<String>>(13),
+        saml_email_attribute: row.get::<_, Option<String>>(14),
+        saml_name_attribute: row.get::<_, Option<String>>(15),
+        saml_groups_attribute: row.get::<_, Option<String>>(16),
+        created_at_unix: row.get::<_, i64>(17),
+        updated_at_unix: row.get::<_, i64>(18),
+    })
+}
+
+fn sso_pending_flow_from_row(row: &PostgresRow) -> StoredSsoPendingFlow {
+    StoredSsoPendingFlow {
+        state: row.get::<_, String>(0),
+        tenant_id: row.get::<_, String>(1),
+        provider_kind: row.get::<_, String>(2),
+        code_verifier: row.get::<_, Option<String>>(3),
+        request_id: row.get::<_, Option<String>>(4),
+        created_at_unix: row.get::<_, i64>(5),
+        expires_at_unix: row.get::<_, i64>(6),
+    }
+}
+
 fn api_key_from_row(row: &PostgresRow) -> Result<StoredApiKey, StorageError> {
     let id = row.get::<_, String>(0);
     let workspace_id = row.get::<_, String>(1);
@@ -8759,6 +9015,8 @@ impl RuntimeControlPlaneState {
             admin_users: InMemoryRepository::new(),
             admin_user_memberships: InMemoryRepository::new(),
             admin_user_refresh_tokens: InMemoryRepository::new(),
+            sso_provider_configs: InMemoryRepository::new(),
+            sso_pending_flows: InMemoryRepository::new(),
             quota_policies: InMemoryRepository::new(),
             plans,
             assets: InMemoryRepository::new(),
@@ -9112,6 +9370,44 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_workspace(&mut self, id: &str) -> bool {
         self.workspaces.remove(id).is_some()
+    }
+
+    pub fn upsert_sso_provider_config(&mut self, config: StoredSsoProviderConfig) {
+        self.sso_provider_configs
+            .insert(config.tenant_id.clone(), config);
+    }
+
+    pub fn get_sso_provider_config(&self, tenant_id: &str) -> Option<StoredSsoProviderConfig> {
+        self.sso_provider_configs.get(tenant_id)
+    }
+
+    pub fn delete_sso_provider_config(&mut self, tenant_id: &str) -> bool {
+        self.sso_provider_configs.remove(tenant_id).is_some()
+    }
+
+    pub fn insert_sso_pending_flow(&mut self, flow: StoredSsoPendingFlow) {
+        self.sso_pending_flows.insert(flow.state.clone(), flow);
+    }
+
+    /// Atomically consumes (removes and returns) a pending SSO flow by its
+    /// `state` token, opportunistically pruning any expired flows first so the
+    /// in-memory store cannot grow without bound.
+    pub fn take_sso_pending_flow(
+        &mut self,
+        state: &str,
+        now_unix: i64,
+    ) -> Option<StoredSsoPendingFlow> {
+        let expired: Vec<String> = self
+            .sso_pending_flows
+            .list()
+            .into_iter()
+            .filter(|flow| flow.expires_at_unix <= now_unix)
+            .map(|flow| flow.state)
+            .collect();
+        for stale in expired {
+            self.sso_pending_flows.remove(&stale);
+        }
+        self.sso_pending_flows.remove(state)
     }
 
     pub fn upsert_quota_policy(&mut self, policy: StoredQuotaPolicy) {
@@ -10054,6 +10350,80 @@ pub struct StoredAdminUserRefreshToken {
     pub expires_at_unix: i64,
     #[serde(default)]
     pub revoked_at_unix: Option<i64>,
+}
+
+/// Durable per-tenant single-sign-on configuration for the admin console
+/// (issue #283). Exactly one config per tenant, for EITHER an OIDC or a SAML
+/// identity provider (`provider_kind`). Before this existed the auth service
+/// kept OIDC config in process memory only (lost on restart, unmanageable per
+/// tenant at runtime) and had no SAML.
+///
+/// Security note: an OIDC client secret is NEVER stored here in plaintext.
+/// `oidc_client_secret_ref` holds a ferrogate-secrets reference URI
+/// (`env://...` / `vault://...`) resolved at flow time, so a durable-storage
+/// read can never itself leak the confidential client credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSsoProviderConfig {
+    pub tenant_id: String,
+    /// `"oidc"` or `"saml"`.
+    pub provider_kind: String,
+    pub default_role: String,
+    /// IdP group/role name -> tenant role. Persisted as JSONB.
+    #[serde(default)]
+    pub group_role_mapping: std::collections::BTreeMap<String, String>,
+    // --- OIDC ---
+    #[serde(default)]
+    pub oidc_issuer: Option<String>,
+    #[serde(default)]
+    pub oidc_client_id: Option<String>,
+    /// ferrogate-secrets reference URI for the client secret; never plaintext.
+    #[serde(default)]
+    pub oidc_client_secret_ref: Option<String>,
+    #[serde(default)]
+    pub oidc_redirect_uri: Option<String>,
+    #[serde(default)]
+    pub oidc_group_claim: Option<String>,
+    // --- SAML ---
+    #[serde(default)]
+    pub saml_idp_entity_id: Option<String>,
+    #[serde(default)]
+    pub saml_idp_sso_url: Option<String>,
+    /// The IdP signing certificate, PEM or bare-base64 DER, used to verify the
+    /// SAML response signature. Fail-closed if absent/unparseable.
+    #[serde(default)]
+    pub saml_idp_certificate: Option<String>,
+    #[serde(default)]
+    pub saml_sp_entity_id: Option<String>,
+    #[serde(default)]
+    pub saml_acs_url: Option<String>,
+    #[serde(default)]
+    pub saml_email_attribute: Option<String>,
+    #[serde(default)]
+    pub saml_name_attribute: Option<String>,
+    #[serde(default)]
+    pub saml_groups_attribute: Option<String>,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+/// Restart-safe state for an in-flight SSO authorize->callback round trip
+/// (issue #283), keyed by the opaque `state`/RelayState token. Consumed
+/// (deleted) on first use; pruned once expired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSsoPendingFlow {
+    pub state: String,
+    pub tenant_id: String,
+    pub provider_kind: String,
+    /// OIDC PKCE code_verifier (`None` for SAML).
+    #[serde(default)]
+    pub code_verifier: Option<String>,
+    /// SAML AuthnRequest ID echoed back as `InResponseTo` (`None` for OIDC).
+    #[serde(default)]
+    pub request_id: Option<String>,
+    pub created_at_unix: i64,
+    pub expires_at_unix: i64,
 }
 
 /// A scope in the tenant -> project -> workspace -> key quota hierarchy.
@@ -11474,6 +11844,90 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .delete_admin_user_membership(user_id, tenant_id)
                     .await
+            }
+        }
+    }
+
+    /// Persists (creates or replaces) the per-tenant SSO configuration (#283).
+    pub async fn upsert_sso_provider_config(
+        &self,
+        config: StoredSsoProviderConfig,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_sso_provider_config(config);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_sso_provider_config(&config).await
+            }
+        }
+    }
+
+    /// Reads the per-tenant SSO configuration, if any (#283).
+    pub async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_sso_provider_config(tenant_id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_sso_provider_config(tenant_id).await
+            }
+        }
+    }
+
+    /// Removes the per-tenant SSO configuration (#283). Returns `true` if one
+    /// existed.
+    pub async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_sso_provider_config(tenant_id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_sso_provider_config(tenant_id).await
+            }
+        }
+    }
+
+    /// Records an in-flight SSO authorize->callback flow (#283).
+    pub async fn insert_sso_pending_flow(
+        &self,
+        flow: StoredSsoPendingFlow,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.insert_sso_pending_flow(flow);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.insert_sso_pending_flow(&flow).await
+            }
+        }
+    }
+
+    /// Consumes (removes and returns) a pending SSO flow by its `state` token,
+    /// returning `None` if it is unknown or already expired (#283).
+    pub async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.take_sso_pending_flow(state, now_unix))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.take_sso_pending_flow(state, now_unix).await
             }
         }
     }
@@ -16692,5 +17146,105 @@ mod tests {
         assert!(api_key.scopes.is_empty());
         assert_eq!(api_key.created_at_unix, 0);
         assert_eq!(api_key.revoked_at_unix, None);
+    }
+
+    fn in_memory_repositories() -> RuntimeStorageRepositories {
+        RuntimeStorageRepositories::new(
+            RuntimeStorageBackend::in_memory(vec![StorageProviderKind::Memory]),
+            RuntimeControlPlaneState::new(),
+            0,
+            0,
+        )
+    }
+
+    #[test]
+    fn sso_provider_config_persist_read_delete_roundtrip() {
+        let repositories = in_memory_repositories();
+        let mut group_role_mapping = std::collections::BTreeMap::new();
+        group_role_mapping.insert("Engineering".to_string(), "admin".to_string());
+        let config = StoredSsoProviderConfig {
+            tenant_id: "tenant-1".into(),
+            provider_kind: "saml".into(),
+            default_role: "member".into(),
+            group_role_mapping: group_role_mapping.clone(),
+            oidc_issuer: None,
+            oidc_client_id: None,
+            oidc_client_secret_ref: None,
+            oidc_redirect_uri: None,
+            oidc_group_claim: None,
+            saml_idp_entity_id: Some("https://idp.example/entity".into()),
+            saml_idp_sso_url: Some("https://idp.example/sso".into()),
+            saml_idp_certificate: Some("PEM-DATA".into()),
+            saml_sp_entity_id: Some("sp-entity".into()),
+            saml_acs_url: Some("https://sp.example/acs".into()),
+            saml_email_attribute: Some("email".into()),
+            saml_name_attribute: Some("displayName".into()),
+            saml_groups_attribute: Some("groups".into()),
+            created_at_unix: 1_700_000_000,
+            updated_at_unix: 1_700_000_000,
+        };
+
+        block_on(repositories.upsert_sso_provider_config(config.clone())).unwrap();
+        let read = block_on(repositories.get_sso_provider_config("tenant-1"))
+            .unwrap()
+            .expect("config persisted");
+        assert_eq!(read, config);
+        assert_eq!(read.group_role_mapping, group_role_mapping);
+
+        // Re-upsert replaces (one config per tenant).
+        let mut updated = config.clone();
+        updated.provider_kind = "oidc".into();
+        updated.oidc_issuer = Some("https://issuer.example".into());
+        block_on(repositories.upsert_sso_provider_config(updated.clone())).unwrap();
+        let reread = block_on(repositories.get_sso_provider_config("tenant-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reread.provider_kind, "oidc");
+
+        assert!(block_on(repositories.delete_sso_provider_config("tenant-1")).unwrap());
+        assert!(block_on(repositories.get_sso_provider_config("tenant-1"))
+            .unwrap()
+            .is_none());
+        // Deleting again reports nothing removed.
+        assert!(!block_on(repositories.delete_sso_provider_config("tenant-1")).unwrap());
+    }
+
+    #[test]
+    fn sso_pending_flow_is_consumed_once_and_expires() {
+        let repositories = in_memory_repositories();
+        let flow = StoredSsoPendingFlow {
+            state: "state-abc".into(),
+            tenant_id: "tenant-1".into(),
+            provider_kind: "oidc".into(),
+            code_verifier: Some("verifier".into()),
+            request_id: None,
+            created_at_unix: 1_000,
+            expires_at_unix: 2_000,
+        };
+        block_on(repositories.insert_sso_pending_flow(flow.clone())).unwrap();
+
+        // Consumed exactly once.
+        let taken = block_on(repositories.take_sso_pending_flow("state-abc", 1_500))
+            .unwrap()
+            .expect("flow present before expiry");
+        assert_eq!(taken, flow);
+        assert!(
+            block_on(repositories.take_sso_pending_flow("state-abc", 1_500))
+                .unwrap()
+                .is_none()
+        );
+
+        // An expired flow is not returned (and is pruned).
+        let expired = StoredSsoPendingFlow {
+            state: "state-expired".into(),
+            expires_at_unix: 2_000,
+            ..flow.clone()
+        };
+        block_on(repositories.insert_sso_pending_flow(expired)).unwrap();
+        assert!(
+            block_on(repositories.take_sso_pending_flow("state-expired", 5_000))
+                .unwrap()
+                .is_none()
+        );
     }
 }

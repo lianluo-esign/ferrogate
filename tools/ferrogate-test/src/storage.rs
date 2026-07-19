@@ -1118,6 +1118,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "agent_schedule_fires",
         // #281 (migration 40): durable wallet reserve/hold primitive.
         "wallet_reservations",
+        // #283 (migration 41): durable per-tenant SSO config + restart-safe
+        // pending-flow state.
+        "sso_provider_configs",
+        "sso_pending_flows",
     ];
     for table in expected_tables {
         let count = postgres_scalar(&format!(
@@ -1271,6 +1275,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_mcp_oauth_flows_pending_subject",
         // #232 (migration 34): tenant-scoped refresh-token revocation path.
         "idx_admin_user_refresh_tokens_user_tenant",
+        // #283 (migration 40): SSO pending-flow expiry prune index.
+        "idx_sso_pending_flows_expiry",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -1286,10 +1292,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 40",
+         FROM {}.storage_schema_migrations WHERE version = 41",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "40:040_wallet_reservations" {
+    if migration_version.trim() != "41:041_tenant_sso_config" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
