@@ -95,10 +95,13 @@ pub use managed_worker::{
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_mtls::{
     build_self_hosted_worker_client_config, connect_self_hosted_worker_client,
-    SelfHostedMtlsConnection, SelfHostedMtlsError, SelfHostedMtlsServer, SelfHostedMtlsTrustAnchor,
+    IssuedSelfHostedWorkerCert, SelfHostedCertRevocationList, SelfHostedMtlsAdmissionError,
+    SelfHostedMtlsCertIssuer, SelfHostedMtlsConnection, SelfHostedMtlsError,
+    SelfHostedMtlsIngressAdmission, SelfHostedMtlsServer, SelfHostedMtlsTrustAnchor,
     SelfHostedTransportToken, SelfHostedTransportTokenIssuer, SelfHostedTransportTokenStore,
-    SelfHostedWorkerCertBinding, VerifiedMutualTls, DEFAULT_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS,
-    MAX_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS, SELF_HOSTED_WORKER_SPIFFE_PREFIX,
+    SelfHostedWorkerCertBinding, VerifiedMutualTls, DEFAULT_SELF_HOSTED_CLIENT_CERT_TTL_SECS,
+    DEFAULT_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS, MAX_SELF_HOSTED_TRANSPORT_TOKEN_TTL_SECS,
+    SELF_HOSTED_WORKER_SPIFFE_PREFIX,
 };
 pub use self_hosted_worker::{
     generate_transport_token_secret, production_mtls_transport_implemented,

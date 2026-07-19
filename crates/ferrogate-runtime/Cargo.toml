@@ -23,6 +23,13 @@ ferrogate-core = { path = "../ferrogate-core" }
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
+# Control-plane client-certificate issuance for self-hosted workers (issue #249):
+# mint the SPIFFE-4-tuple leaf cert signed by the configured issuing CA at worker
+# registration. Promoted from a dev-dep now that cert minting runs in non-test
+# code. `pem` is enabled so issued material can be handed to the worker as PEM.
+rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
+# Convert unix-second validity bounds into X.509 notBefore/notAfter (issue #249).
+time.workspace = true
 # Verified mutual-TLS transport for self-hosted workers (issue #243). rustls
 # terminates the handshake and validates the client-cert chain against a single
 # configured anchor; the `ring` provider is selected explicitly so no ambient
@@ -36,9 +43,6 @@ subtle.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
-# Generate a test CA + client/server leaf certs for the mTLS conformance tests
-# (issue #243) -- no external PKI required.
-rcgen.workspace = true
 tempfile.workspace = true
 
 [features]

@@ -30,13 +30,17 @@
 //!   supports rotation with atomic invalidation of the prior token (T3, T4).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     io::{Read, Write},
     sync::Arc,
 };
 
+use rcgen::{
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, Issuer, KeyPair, KeyUsagePurpose, SanType,
+    SerialNumber,
+};
 use rustls::{
     crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
@@ -45,9 +49,13 @@ use rustls::{
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use time::OffsetDateTime;
 use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
 
-use crate::self_hosted_worker::{generate_transport_token_secret, SelfHostedWorkerIdentity};
+use crate::self_hosted_worker::{
+    generate_transport_token_secret, SelfHostedTransportAdmissionError, SelfHostedTransportChannel,
+    SelfHostedTransportPolicy, SelfHostedWorkerIdentity,
+};
 
 /// Canonical SPIFFE-style identity prefix that binds a self-hosted worker leaf
 /// certificate to its 4-tuple. The full URI SAN is
@@ -85,6 +93,9 @@ pub enum SelfHostedMtlsError {
     /// A transport token was rejected (unknown, expired, wrong secret, or bound
     /// to a different certificate).
     TokenRejected(String),
+    /// The configured issuing CA could not mint a client/server certificate
+    /// (bad CA material, malformed 4-tuple, or an invalid validity window).
+    CertIssuance(String),
 }
 
 impl fmt::Display for SelfHostedMtlsError {
@@ -130,6 +141,12 @@ impl fmt::Display for SelfHostedMtlsError {
                 write!(
                     formatter,
                     "self-hosted worker transport token rejected: {message}"
+                )
+            }
+            Self::CertIssuance(message) => {
+                write!(
+                    formatter,
+                    "self-hosted worker certificate issuance failed: {message}"
                 )
             }
         }
@@ -777,6 +794,548 @@ pub fn connect_self_hosted_worker_client(
     })
 }
 
+/// Default validity (seconds) for a minted self-hosted worker client cert. Certs
+/// are deliberately short-lived so revocation is primarily expiry-driven and a
+/// stolen cert's blast radius is bounded; the explicit CRL
+/// ([`SelfHostedCertRevocationList`]) covers early compromise on top of this.
+pub const DEFAULT_SELF_HOSTED_CLIENT_CERT_TTL_SECS: u64 = 24 * 3600;
+
+/// Small backdating of a minted cert's `notBefore` to absorb minor clock skew
+/// between the issuing control plane and the terminating gateway.
+const SELF_HOSTED_CLIENT_CERT_NOT_BEFORE_SKEW_SECS: u64 = 300;
+
+/// A freshly minted self-hosted worker leaf certificate plus its private key.
+///
+/// The control plane returns this to the worker operator **exactly once** at
+/// registration (alongside the transport `token_secret`); the private key is
+/// never persisted server-side. Only the [`fingerprint`](Self::fingerprint) (and
+/// optionally the [`serial_hex`](Self::serial_hex)) is retained by the control
+/// plane so the cert can later be revoked.
+#[derive(Debug, Clone)]
+pub struct IssuedSelfHostedWorkerCert {
+    binding: SelfHostedWorkerCertBinding,
+    certificate_pem: String,
+    certificate_der: Vec<u8>,
+    private_key_pkcs8_pem: String,
+    private_key_pkcs8_der: Vec<u8>,
+    fingerprint: String,
+    serial_hex: String,
+    not_before_unix: u64,
+    not_after_unix: u64,
+}
+
+impl IssuedSelfHostedWorkerCert {
+    /// The 4-tuple this cert binds to.
+    pub fn binding(&self) -> &SelfHostedWorkerCertBinding {
+        &self.binding
+    }
+
+    /// The SPIFFE URI SAN encoded in the leaf cert.
+    pub fn spiffe_id(&self) -> String {
+        self.binding.spiffe_uri()
+    }
+
+    /// PEM-encoded leaf certificate (handed to the worker).
+    pub fn certificate_pem(&self) -> &str {
+        &self.certificate_pem
+    }
+
+    /// DER-encoded leaf certificate.
+    pub fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
+    }
+
+    /// PEM-encoded PKCS#8 private key (handed to the worker, never stored).
+    pub fn private_key_pkcs8_pem(&self) -> &str {
+        &self.private_key_pkcs8_pem
+    }
+
+    /// DER-encoded PKCS#8 private key.
+    pub fn private_key_pkcs8_der(&self) -> &[u8] {
+        &self.private_key_pkcs8_der
+    }
+
+    /// SHA-256 fingerprint (lowercase hex) of the leaf cert DER. This is the same
+    /// value [`VerifiedMutualTls::cert_fingerprint`] reports for the presented
+    /// cert, so a fingerprint recorded at issuance matches the verified channel
+    /// and can be used for revocation.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Hex-encoded certificate serial number.
+    pub fn serial_hex(&self) -> &str {
+        &self.serial_hex
+    }
+
+    pub fn not_before_unix(&self) -> u64 {
+        self.not_before_unix
+    }
+
+    pub fn not_after_unix(&self) -> u64 {
+        self.not_after_unix
+    }
+}
+
+/// The single configured issuing CA that mints self-hosted worker certificates.
+///
+/// This is the control-plane counterpart to [`SelfHostedMtlsTrustAnchor`]: the
+/// anchor *verifies* presented certs, this issuer *mints* them. A deployment
+/// configures one issuing CA; [`trust_anchor`](Self::trust_anchor) produces the
+/// matching verifier anchor so the gateway trusts exactly what this issuer signs
+/// and nothing else.
+#[derive(Clone)]
+pub struct SelfHostedMtlsCertIssuer {
+    issuer: Arc<Issuer<'static, KeyPair>>,
+    ca_cert_der: Vec<u8>,
+    default_ttl_secs: u64,
+}
+
+impl SelfHostedMtlsCertIssuer {
+    /// Load a configured issuing CA from PEM (CA certificate + its private key).
+    ///
+    /// Fail-closed on any parse error so a misconfigured CA never silently
+    /// degrades to issuing unusable or untrusted material.
+    pub fn from_ca_pem(
+        ca_certificate_pem: &str,
+        ca_private_key_pem: &str,
+        default_ttl_secs: u64,
+    ) -> Result<Self, SelfHostedMtlsError> {
+        let ttl = validate_cert_ttl(default_ttl_secs)?;
+        // Reuse the anchor's single-cert PEM discipline to recover the CA DER and
+        // reject a bundle carrying more than one certificate.
+        let ca_cert_der = single_certificate_der_from_pem(ca_certificate_pem)?;
+        let ca_key = KeyPair::from_pem(ca_private_key_pem).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("issuing CA private key is invalid: {error}"))
+        })?;
+        let issuer = Issuer::from_ca_cert_pem(ca_certificate_pem, ca_key).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!(
+                "issuing CA certificate could not be loaded: {error}"
+            ))
+        })?;
+        Ok(Self {
+            issuer: Arc::new(issuer),
+            ca_cert_der,
+            default_ttl_secs: ttl,
+        })
+    }
+
+    /// Generate a fresh, self-signed issuing CA. Intended for tests and local
+    /// bootstrap; production deployments configure a managed CA via
+    /// [`from_ca_pem`](Self::from_ca_pem).
+    pub fn generate_self_signed(
+        common_name: &str,
+        default_ttl_secs: u64,
+    ) -> Result<Self, SelfHostedMtlsError> {
+        let ttl = validate_cert_ttl(default_ttl_secs)?;
+        let ca_key = KeyPair::generate().map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("issuing CA key generation failed: {error}"))
+        })?;
+        let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("issuing CA parameters invalid: {error}"))
+        })?;
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        let ca_cert = params.self_signed(&ca_key).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("issuing CA self-sign failed: {error}"))
+        })?;
+        let ca_cert_der = ca_cert.der().to_vec();
+        Ok(Self {
+            issuer: Arc::new(Issuer::new(params, ca_key)),
+            ca_cert_der,
+            default_ttl_secs: ttl,
+        })
+    }
+
+    /// The verifier trust anchor matching this issuer's CA. The gateway's mTLS
+    /// terminator built from this anchor trusts exactly the certs this issuer
+    /// mints.
+    pub fn trust_anchor(&self) -> Result<SelfHostedMtlsTrustAnchor, SelfHostedMtlsError> {
+        SelfHostedMtlsTrustAnchor::from_der(self.ca_cert_der.clone())
+    }
+
+    pub fn default_ttl_secs(&self) -> u64 {
+        self.default_ttl_secs
+    }
+
+    /// Mint a client certificate bound to `binding`'s SPIFFE 4-tuple, valid from
+    /// (roughly) `now_unix` for the issuer's default TTL. The leaf carries the
+    /// `clientAuth` EKU and the SPIFFE URI SAN the verifier requires.
+    pub fn issue_client_cert(
+        &self,
+        binding: &SelfHostedWorkerCertBinding,
+        now_unix: u64,
+    ) -> Result<IssuedSelfHostedWorkerCert, SelfHostedMtlsError> {
+        self.issue_client_cert_with_ttl(binding, now_unix, self.default_ttl_secs)
+    }
+
+    /// Mint a client certificate with an explicit TTL (seconds).
+    pub fn issue_client_cert_with_ttl(
+        &self,
+        binding: &SelfHostedWorkerCertBinding,
+        now_unix: u64,
+        ttl_secs: u64,
+    ) -> Result<IssuedSelfHostedWorkerCert, SelfHostedMtlsError> {
+        let ttl = validate_cert_ttl(ttl_secs)?;
+        let spiffe_uri = binding.spiffe_uri();
+        let sans = SanType::URI(
+            rcgen::string::Ia5String::try_from(spiffe_uri.clone()).map_err(|error| {
+                SelfHostedMtlsError::CertIssuance(format!(
+                    "SPIFFE identity {spiffe_uri} is not a valid URI SAN: {error}"
+                ))
+            })?,
+        );
+
+        let not_before_unix = now_unix.saturating_sub(SELF_HOSTED_CLIENT_CERT_NOT_BEFORE_SKEW_SECS);
+        let not_after_unix = now_unix.saturating_add(ttl);
+        let leaf_key = KeyPair::generate().map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("leaf key generation failed: {error}"))
+        })?;
+        let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("leaf parameters invalid: {error}"))
+        })?;
+        params.subject_alt_names.push(sans);
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.not_before = unix_to_offset_datetime(not_before_unix)?;
+        params.not_after = unix_to_offset_datetime(not_after_unix)?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, &binding.worker_id);
+        let serial = random_serial();
+        params.serial_number = Some(SerialNumber::from_slice(&serial));
+
+        let cert = params.signed_by(&leaf_key, &self.issuer).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("leaf signing failed: {error}"))
+        })?;
+        let certificate_der = cert.der().to_vec();
+        let fingerprint = sha256_hex(&certificate_der);
+        Ok(IssuedSelfHostedWorkerCert {
+            binding: binding.clone(),
+            certificate_pem: cert.pem(),
+            certificate_der,
+            private_key_pkcs8_pem: leaf_key.serialize_pem(),
+            private_key_pkcs8_der: leaf_key.serialize_der(),
+            fingerprint,
+            serial_hex: bytes_to_hex(&serial),
+            not_before_unix,
+            not_after_unix,
+        })
+    }
+
+    /// Mint a **server** certificate for the gateway's mTLS terminator (the
+    /// gateway identity the worker's client validates), carrying the `serverAuth`
+    /// EKU and the given DNS SANs. Returns `(leaf_der, pkcs8_key_der)`.
+    pub fn issue_server_cert(
+        &self,
+        dns_names: Vec<String>,
+        now_unix: u64,
+        ttl_secs: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>), SelfHostedMtlsError> {
+        let ttl = validate_cert_ttl(ttl_secs)?;
+        let key = KeyPair::generate().map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("server key generation failed: {error}"))
+        })?;
+        let mut params = CertificateParams::new(dns_names).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("server parameters invalid: {error}"))
+        })?;
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.not_before = unix_to_offset_datetime(
+            now_unix.saturating_sub(SELF_HOSTED_CLIENT_CERT_NOT_BEFORE_SKEW_SECS),
+        )?;
+        params.not_after = unix_to_offset_datetime(now_unix.saturating_add(ttl))?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "ferrogate-self-hosted-gateway");
+        let cert = params.signed_by(&key, &self.issuer).map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("server leaf signing failed: {error}"))
+        })?;
+        Ok((cert.der().to_vec(), key.serialize_der()))
+    }
+}
+
+impl fmt::Debug for SelfHostedMtlsCertIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SelfHostedMtlsCertIssuer")
+            .field("default_ttl_secs", &self.default_ttl_secs)
+            .field("ca_cert_der_len", &self.ca_cert_der.len())
+            .finish()
+    }
+}
+
+fn validate_cert_ttl(ttl_secs: u64) -> Result<u64, SelfHostedMtlsError> {
+    if ttl_secs == 0 {
+        return Err(SelfHostedMtlsError::CertIssuance(
+            "certificate TTL must be greater than zero".to_string(),
+        ));
+    }
+    Ok(ttl_secs)
+}
+
+/// Recover a single certificate DER from a PEM document, rejecting zero or
+/// more-than-one certificate (mirrors [`SelfHostedMtlsTrustAnchor::from_pem`]).
+fn single_certificate_der_from_pem(pem: &str) -> Result<Vec<u8>, SelfHostedMtlsError> {
+    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let mut certs = Vec::new();
+    for entry in rustls_pemfile::certs(&mut reader) {
+        let cert = entry.map_err(|error| {
+            SelfHostedMtlsError::CertIssuance(format!("issuing CA PEM is not valid: {error}"))
+        })?;
+        certs.push(cert);
+    }
+    if certs.len() != 1 {
+        return Err(SelfHostedMtlsError::CertIssuance(format!(
+            "issuing CA PEM must carry exactly one certificate; found {}",
+            certs.len()
+        )));
+    }
+    Ok(certs.remove(0).to_vec())
+}
+
+fn unix_to_offset_datetime(unix: u64) -> Result<OffsetDateTime, SelfHostedMtlsError> {
+    OffsetDateTime::from_unix_timestamp(unix as i64).map_err(|error| {
+        SelfHostedMtlsError::CertIssuance(format!(
+            "validity bound {unix} is not a valid time: {error}"
+        ))
+    })
+}
+
+fn random_serial() -> [u8; 16] {
+    let mut serial = [0_u8; 16];
+    getrandom::getrandom(&mut serial)
+        .expect("OS CSPRNG must be available to mint a self-hosted worker certificate serial");
+    // Ensure the high bit is clear so the DER INTEGER stays positive.
+    serial[0] &= 0x7f;
+    // Avoid an all-zero leading byte producing a degenerate serial.
+    if serial[0] == 0 {
+        serial[0] = 0x01;
+    }
+    serial
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// A control-plane certificate revocation list (CRL-style): an explicit set of
+/// revoked leaf fingerprints and revoked worker identities, checked at mTLS
+/// admission in addition to expiry-driven invalidation (mitigates T4).
+///
+/// A cert is revoked if either its SHA-256 fingerprint was revoked directly, or
+/// the worker it binds to (tenant/workspace/worker) was deactivated. The list is
+/// held in memory; a deployment hydrates it from durable storage via
+/// [`with_revoked`](Self::with_revoked) / the `revoke_*` methods.
+#[derive(Debug, Default, Clone)]
+pub struct SelfHostedCertRevocationList {
+    fingerprints: BTreeSet<String>,
+    workers: BTreeSet<(String, String, String)>,
+}
+
+impl SelfHostedCertRevocationList {
+    /// An empty revocation list (nothing revoked).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Hydrate a revocation list from a set of persisted fingerprints (e.g. loaded
+    /// from durable control-plane storage on gateway start).
+    pub fn with_revoked<I, S>(fingerprints: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            fingerprints: fingerprints
+                .into_iter()
+                .map(|value| normalize_fingerprint(&value.into()))
+                .collect(),
+            workers: BTreeSet::new(),
+        }
+    }
+
+    /// Revoke a specific leaf certificate by its SHA-256 fingerprint.
+    pub fn revoke_fingerprint(&mut self, fingerprint: &str) {
+        self.fingerprints.insert(normalize_fingerprint(fingerprint));
+    }
+
+    /// Revoke every certificate bound to a worker (worker deactivation): any cert
+    /// carrying this 4-tuple's tenant/workspace/worker is refused regardless of
+    /// its fingerprint.
+    pub fn revoke_worker(&mut self, tenant_id: &str, workspace_id: &str, worker_id: &str) {
+        self.workers.insert((
+            tenant_id.to_string(),
+            workspace_id.to_string(),
+            worker_id.to_string(),
+        ));
+    }
+
+    /// Lift a fingerprint revocation (e.g. cert re-issued). Returns whether it was
+    /// present.
+    pub fn unrevoke_fingerprint(&mut self, fingerprint: &str) -> bool {
+        self.fingerprints
+            .remove(&normalize_fingerprint(fingerprint))
+    }
+
+    /// Whether the verified channel's certificate is revoked (by fingerprint or by
+    /// worker deactivation).
+    pub fn is_revoked(&self, verified: &VerifiedMutualTls) -> bool {
+        self.revocation_reason(verified).is_some()
+    }
+
+    /// The reason a verified channel is refused by the CRL, if any.
+    pub fn revocation_reason(&self, verified: &VerifiedMutualTls) -> Option<String> {
+        if self
+            .fingerprints
+            .contains(&normalize_fingerprint(verified.cert_fingerprint()))
+        {
+            return Some(format!(
+                "certificate fingerprint {} is revoked",
+                verified.cert_fingerprint()
+            ));
+        }
+        let binding = verified.binding();
+        let worker_key = (
+            binding.tenant_id.clone(),
+            binding.workspace_id.clone(),
+            binding.worker_id.clone(),
+        );
+        if self.workers.contains(&worker_key) {
+            return Some(format!(
+                "worker {}/{}/{} is deactivated; its certificates are revoked",
+                binding.tenant_id, binding.workspace_id, binding.worker_id
+            ));
+        }
+        None
+    }
+
+    /// Number of directly-revoked fingerprints.
+    pub fn revoked_fingerprint_count(&self) -> usize {
+        self.fingerprints.len()
+    }
+
+    /// Number of deactivated workers.
+    pub fn revoked_worker_count(&self) -> usize {
+        self.workers.len()
+    }
+}
+
+fn normalize_fingerprint(fingerprint: &str) -> String {
+    fingerprint.trim().to_ascii_lowercase()
+}
+
+/// Why the verified-mTLS ingress admission seam refused a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfHostedMtlsAdmissionError {
+    /// The transport posture policy refused the observed channel (e.g. a
+    /// marker/AEAD downgrade under the production posture).
+    Policy(SelfHostedTransportAdmissionError),
+    /// The presented certificate is on the revocation list.
+    Revoked(String),
+    /// The certificate's 4-tuple binding did not match the enclosed request
+    /// identity (cross-worker/cross-tenant reuse).
+    IdentityBinding(SelfHostedMtlsError),
+}
+
+impl fmt::Display for SelfHostedMtlsAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Policy(error) => write!(formatter, "{error}"),
+            Self::Revoked(message) => {
+                write!(
+                    formatter,
+                    "self-hosted worker certificate revoked: {message}"
+                )
+            }
+            Self::IdentityBinding(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl Error for SelfHostedMtlsAdmissionError {}
+
+/// The verified-mTLS ingress admission seam.
+///
+/// This binds the three server-side security decisions the design requires into
+/// one place: (1) the transport **posture** must admit a verified channel
+/// (rejecting marker/AEAD downgrades under production posture), (2) the presented
+/// certificate must not be **revoked**, and (3) the certificate's 4-tuple must
+/// match the **enclosed request identity**. A production deployment feeds the
+/// `VerifiedMutualTls` proof produced by [`SelfHostedMtlsServer::accept`] and the
+/// enclosed identity envelope into [`admit`](Self::admit); everything the gateway
+/// then trusts about the channel is a verified fact, not a header claim.
+///
+/// Binding this seam onto the concrete production ingress socket (so
+/// `SelfHostedMtlsServer::accept` runs on the real listener rather than an
+/// in-process test socket) is the remaining deployment step tracked by
+/// `TODO(#249)`; the seam itself is exercised end-to-end over a real rustls
+/// handshake in `self_hosted_mtls_issuance_test.rs`.
+#[derive(Debug, Clone, Default)]
+pub struct SelfHostedMtlsIngressAdmission {
+    policy: SelfHostedTransportPolicy,
+    revocation: SelfHostedCertRevocationList,
+}
+
+impl SelfHostedMtlsIngressAdmission {
+    pub fn new(
+        policy: SelfHostedTransportPolicy,
+        revocation: SelfHostedCertRevocationList,
+    ) -> Self {
+        Self { policy, revocation }
+    }
+
+    pub fn policy(&self) -> SelfHostedTransportPolicy {
+        self.policy
+    }
+
+    pub fn revocation(&self) -> &SelfHostedCertRevocationList {
+        &self.revocation
+    }
+
+    pub fn revocation_mut(&mut self) -> &mut SelfHostedCertRevocationList {
+        &mut self.revocation
+    }
+
+    /// Admit (or refuse) a request that arrived on a verified mutual-TLS channel
+    /// carrying `identity` as its enclosed request identity envelope.
+    pub fn admit(
+        &self,
+        verified: &VerifiedMutualTls,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<(), SelfHostedMtlsAdmissionError> {
+        // 1. Posture: the verified channel must be admissible under the policy.
+        self.policy
+            .admit(SelfHostedTransportChannel::VerifiedMutualTls(
+                verified.clone(),
+            ))
+            .map_err(SelfHostedMtlsAdmissionError::Policy)?;
+        // 2. Revocation (CRL): refuse a revoked cert / deactivated worker.
+        if let Some(reason) = self.revocation.revocation_reason(verified) {
+            return Err(SelfHostedMtlsAdmissionError::Revoked(reason));
+        }
+        // 3. Identity binding: the cert must authenticate exactly this worker.
+        verified
+            .authorize_identity(identity)
+            .map_err(SelfHostedMtlsAdmissionError::IdentityBinding)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "self_hosted_mtls_conformance_test.rs"]
 mod self_hosted_mtls_conformance_test;
+
+#[cfg(test)]
+#[path = "self_hosted_mtls_issuance_test.rs"]
+mod self_hosted_mtls_issuance_test;

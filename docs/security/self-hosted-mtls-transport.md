@@ -186,9 +186,10 @@ gateway can only construct from something it actually verified:
   production admission requires it (`SelfHostedTransportPolicy::admit`).
 - `production_mtls_transport_implemented()` flipped → `true`, backed by green
   conformance tests.
-- Remaining (deployment): binding the terminator onto a concrete production
-  ingress socket + control-plane cert issuance at registration; CRL/OCSP-style
-  revocation list (currently expiry-driven only).
+- Remaining after Phase 2: control-plane cert issuance at registration + a
+  CRL-style revocation list + the admission seam — all landed in Phase 4 (issue
+  #249, below). The only piece still open is binding the terminator onto the
+  concrete production pingora ingress socket (`TODO(#249)`, deployment-only).
 
 **Phase 3 — transport-token issuance + rotation (LANDED, `self_hosted_mtls.rs`).**
 - `SelfHostedTransportTokenIssuer` mints post-handshake short-TTL tokens bound to
@@ -198,6 +199,60 @@ gateway can only construct from something it actually verified:
   atomic invalidation of the prior token, refuses rotation presenting a different
   certificate, and supports immediate `revoke` on cert revoke / worker
   deactivate. Server-clock expiry throughout.
+
+**Phase 4 — control-plane cert issuance + CRL + admission seam (LANDED, issue
+#249).** These are the deployment-integration pieces #243 left open. What landed:
+- **`SelfHostedMtlsCertIssuer`** (`self_hosted_mtls.rs`) mints a SPIFFE-4-tuple
+  leaf cert (URI SAN + `clientAuth` EKU, server-clock `notBefore`/`notAfter`,
+  random serial) signed by the configured issuing CA. `from_ca_pem` loads a
+  managed CA (fail-closed on bad material); `generate_self_signed` is the
+  test/local bootstrap; `issue_server_cert` mints the gateway terminator's own
+  server identity. The recorded leaf **fingerprint == the SHA-256 the verifier
+  reports**, so it round-trips for revocation.
+- **Control-plane issuance at registration** (`state_agent_runtime.rs`): when a
+  self-hosted worker issuing CA is configured
+  (`FERROGATE_SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM[_PATH]` +
+  `..._KEY_PEM[_PATH]`, optional `..._CERT_TTL_SECS`), worker registration
+  (and identity rotation) mints the client cert bound to the worker's 4-tuple
+  and returns it **exactly once** in the registration/rotation response
+  (`client_certificate`), alongside `transport_token_secret`. The private key is
+  never persisted; only the fingerprint is surfaced for revocation. No CA
+  configured ⇒ the field is absent and the deployment stays on the pre-production
+  marker/AEAD posture.
+- **CRL-style revocation** (`SelfHostedCertRevocationList`): an explicit set of
+  revoked leaf fingerprints plus revoked worker identities
+  (tenant/workspace/worker for worker deactivation). Checked at admission on top
+  of expiry-driven invalidation (mitigates T4).
+- **Verified-mTLS ingress admission seam** (`SelfHostedMtlsIngressAdmission`):
+  binds the three server-side decisions into one place — (1) the transport
+  **posture** must admit a `VerifiedMutualTls` channel (marker/AEAD downgrades
+  rejected under production posture), (2) the presented cert must not be
+  **revoked**, (3) the cert 4-tuple must equal the **enclosed request identity**.
+  It consumes the `VerifiedMutualTls` proof from `SelfHostedMtlsServer::accept`.
+- **Tests** (`self_hosted_mtls_issuance_test.rs`, real rustls handshakes with
+  issuer-minted certs): issued cert admitted for its worker / rejected
+  cross-worker; cert from a different issuing CA rejected at the handshake;
+  revoked-fingerprint and deactivated-worker rejected at admission;
+  production-posture admission accepts the verified channel and rejects the
+  marker/AEAD downgrade; issuer-from-PEM round-trip; fail-closed on bad CA
+  material. CLI tests cover the registration mint binding + a distinct
+  cross-worker cert.
+
+Remaining — **deployment-only** (`TODO(#249)`): binding this admission seam onto
+the concrete production **pingora ingress socket**. Today the gateway self-hosted
+worker transport arrives as HTTP over the pingora proxy socket and the observed
+channel is derived from the `x-ferrogate-transport-security` header
+(`observed_channel()`), so under production posture every request fails closed
+(no `VerifiedMutualTls` is ever produced on that path). Wiring the real listener
+means terminating the rustls mutual-TLS handshake at the ingress
+(`SelfHostedMtlsServer::accept` on the accepted socket), threading the resulting
+`VerifiedMutualTls` into `handle_self_hosted_worker_transport`, and hydrating the
+`SelfHostedCertRevocationList` from durable storage. The **capability** for all of
+this is implemented and tested in-process; only the socket/PKI-operator wiring
+(which needs a real TLS ingress endpoint, not available in the CI/sandbox) is
+deferred. Durable persistence of revoked fingerprints (a schema-pinned table) is
+part of that same deployment step; the current CRL is in-memory and hydratable
+via `SelfHostedCertRevocationList::with_revoked`.
 
 ## 7. Conformance test list
 

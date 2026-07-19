@@ -355,6 +355,35 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
     /// at registration. Never present on the worker record surfaced by
     /// GET/list -- the worker operator must capture it here.
     pub(crate) transport_token_secret: String,
+    /// The verified-mTLS client certificate bound to the worker's SPIFFE 4-tuple,
+    /// minted by the configured issuing CA and returned exactly once (issue #249).
+    /// `None` when no self-hosted worker issuing CA is configured (the deployment
+    /// runs the pre-production marker/AEAD posture); present when a CA is
+    /// configured so the operator can install it on the worker for production
+    /// mutual-TLS admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_certificate: Option<AdminSelfHostedWorkerClientCertificate>,
+}
+
+/// A freshly-minted self-hosted worker client certificate, returned exactly once
+/// (at registration or identity rotation). The private key is never persisted
+/// server-side; only the fingerprint is retained for revocation (issue #249).
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerClientCertificate {
+    /// SPIFFE URI SAN the leaf binds to
+    /// (`spiffe://ferrogate/self-hosted/{tenant}/{workspace}/{worker}/{token}`).
+    pub(crate) spiffe_id: String,
+    /// PEM-encoded leaf certificate.
+    pub(crate) certificate_pem: String,
+    /// PEM-encoded PKCS#8 private key. Returned once; never stored server-side.
+    pub(crate) private_key_pem: String,
+    /// SHA-256 fingerprint (lowercase hex) of the leaf cert DER, retained by the
+    /// control plane for revocation.
+    pub(crate) fingerprint: String,
+    /// Hex-encoded certificate serial number.
+    pub(crate) serial: String,
+    /// Server-clock `notAfter` (unix seconds) of the leaf certificate.
+    pub(crate) not_after_unix: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,6 +400,12 @@ pub(crate) struct AdminSelfHostedWorkerRotateResponse {
     pub(crate) worker: AdminSelfHostedWorkerRecord,
     /// The freshly-issued transport secret, returned exactly once on rotation.
     pub(crate) transport_token_secret: String,
+    /// A fresh verified-mTLS client certificate bound to the rotated 4-tuple,
+    /// returned exactly once (issue #249). `None` when no issuing CA is
+    /// configured. Rotation changes the SPIFFE `token_id` segment, so a new cert
+    /// is minted to match; the previous cert should be revoked by the operator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_certificate: Option<AdminSelfHostedWorkerClientCertificate>,
     pub(crate) previous_identity_fingerprint: String,
     pub(crate) previous_identity_expires_at_unix: Option<u64>,
     pub(crate) rotated_at_unix: Option<u64>,

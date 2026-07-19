@@ -101,6 +101,10 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2.6"
 tempfile = "3.10"
+# Convert unix-second validity bounds into X.509 notBefore/notAfter when the
+# control plane mints self-hosted worker client certificates (issue #249).
+# Already resolved transitively via rcgen; declared here for direct use.
+time = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = "0.7.18"
 toml = "0.8"

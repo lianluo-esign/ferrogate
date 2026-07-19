@@ -494,14 +494,56 @@ impl AppState {
                 "self-hosted worker was not readable after identity rotation".into(),
             )
         })?;
+        // Rotation changes the SPIFFE token_id segment (issue #249): when an
+        // issuing CA is configured, mint a fresh cert bound to the rotated
+        // 4-tuple and return it once. Best-effort as at registration.
+        let client_certificate = match self_hosted_mtls_cert_issuer_from_env()? {
+            Some(issuer) => rotated_at_unix.and_then(|now| {
+                mint_self_hosted_worker_client_certificate(&registration, &issuer, now).ok()
+            }),
+            None => None,
+        };
         Ok(crate::responses::AdminSelfHostedWorkerRotateResponse {
             object: "self_hosted_worker_identity_rotation",
             worker,
             transport_token_secret,
+            client_certificate,
             previous_identity_fingerprint,
             previous_identity_expires_at_unix,
             rotated_at_unix,
         })
+    }
+
+    /// Mint the verified-mTLS client certificate for a registered self-hosted
+    /// worker, bound to its SPIFFE 4-tuple and signed by the configured issuing
+    /// CA (issue #249). Returns `None` when no issuing CA is configured (the
+    /// deployment runs the pre-production marker/AEAD posture). The private key is
+    /// returned to the caller exactly once and is never persisted; only the
+    /// fingerprint is retained (surfaced in the response) for later revocation.
+    pub(crate) fn issue_self_hosted_worker_client_certificate(
+        &self,
+        worker_id: &str,
+    ) -> Result<
+        Option<crate::responses::AdminSelfHostedWorkerClientCertificate>,
+        SelfHostedWorkerRecordError,
+    > {
+        let Some(issuer) = self_hosted_mtls_cert_issuer_from_env()? else {
+            return Ok(None);
+        };
+        let registration = crate::gateway::block_on_sync_bridge(
+            self.repositories.self_hosted_worker_registration(worker_id),
+        )
+        .ok_or_else(|| {
+            SelfHostedWorkerRecordError::NotFound(format!(
+                "self-hosted worker {worker_id} was not found"
+            ))
+        })?;
+        let now = now_unix_seconds().ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "server clock predates the unix epoch; cannot mint a worker certificate".into(),
+            )
+        })?;
+        mint_self_hosted_worker_client_certificate(&registration, &issuer, now).map(Some)
     }
 
     fn rebuild_self_hosted_worker_dispatch_runtime(
@@ -1695,6 +1737,113 @@ fn self_hosted_worker_record_from_parts(
         latest_artifact_at_unix: stats.latest_artifact_at_unix,
         latest_checkpoint_at_unix: stats.latest_checkpoint_at_unix,
     }
+}
+
+/// Env var carrying the self-hosted worker issuing-CA certificate (inline PEM).
+const SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM_ENV: &str =
+    "FERROGATE_SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM";
+/// Env var carrying a path to the issuing-CA certificate PEM.
+const SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM_PATH_ENV: &str =
+    "FERROGATE_SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM_PATH";
+/// Env var carrying the self-hosted worker issuing-CA private key (inline PEM).
+const SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM_ENV: &str =
+    "FERROGATE_SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM";
+/// Env var carrying a path to the issuing-CA private key PEM.
+const SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM_PATH_ENV: &str =
+    "FERROGATE_SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM_PATH";
+/// Optional override for the minted client certificate TTL (seconds).
+const SELF_HOSTED_MTLS_CERT_TTL_SECS_ENV: &str = "FERROGATE_SELF_HOSTED_MTLS_CERT_TTL_SECS";
+
+/// Read a PEM value from either an inline env var or a `*_PATH` env var pointing
+/// at a file. `None` when neither is set.
+fn self_hosted_mtls_pem_from_env(
+    inline_env: &str,
+    path_env: &str,
+) -> Result<Option<String>, SelfHostedWorkerRecordError> {
+    if let Ok(inline) = env::var(inline_env) {
+        if !inline.trim().is_empty() {
+            return Ok(Some(inline));
+        }
+    }
+    if let Ok(path) = env::var(path_env) {
+        if !path.trim().is_empty() {
+            let pem = std::fs::read_to_string(&path).map_err(|error| {
+                SelfHostedWorkerRecordError::Storage(format!(
+                    "failed to read self-hosted worker issuing CA material from {path}: {error}"
+                ))
+            })?;
+            return Ok(Some(pem));
+        }
+    }
+    Ok(None)
+}
+
+/// Build the configured self-hosted worker issuing CA from the environment, or
+/// `None` when no CA is configured (issue #249). Fail-closed: a partial or
+/// malformed configuration is a hard error rather than a silent skip, so an
+/// operator who intends production mTLS cannot accidentally register workers
+/// without certs.
+fn self_hosted_mtls_cert_issuer_from_env(
+) -> Result<Option<ferrogate_runtime::SelfHostedMtlsCertIssuer>, SelfHostedWorkerRecordError> {
+    let cert_pem = self_hosted_mtls_pem_from_env(
+        SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM_ENV,
+        SELF_HOSTED_MTLS_ISSUING_CA_CERT_PEM_PATH_ENV,
+    )?;
+    let key_pem = self_hosted_mtls_pem_from_env(
+        SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM_ENV,
+        SELF_HOSTED_MTLS_ISSUING_CA_KEY_PEM_PATH_ENV,
+    )?;
+    let (cert_pem, key_pem) = match (cert_pem, key_pem) {
+        (None, None) => return Ok(None),
+        (Some(cert_pem), Some(key_pem)) => (cert_pem, key_pem),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker issuing CA is misconfigured: both the certificate and the \
+                 private key PEM must be provided"
+                    .into(),
+            ));
+        }
+    };
+    let ttl_secs = match env::var(SELF_HOSTED_MTLS_CERT_TTL_SECS_ENV) {
+        Ok(value) if !value.trim().is_empty() => value.trim().parse::<u64>().map_err(|error| {
+            SelfHostedWorkerRecordError::Storage(format!(
+                "{SELF_HOSTED_MTLS_CERT_TTL_SECS_ENV} is not a valid number of seconds: {error}"
+            ))
+        })?,
+        _ => ferrogate_runtime::DEFAULT_SELF_HOSTED_CLIENT_CERT_TTL_SECS,
+    };
+    ferrogate_runtime::SelfHostedMtlsCertIssuer::from_ca_pem(&cert_pem, &key_pem, ttl_secs)
+        .map(Some)
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))
+}
+
+/// Mint a client certificate for a stored self-hosted worker registration,
+/// bound to its SPIFFE 4-tuple (tenant/workspace/worker/token). Pure over the
+/// issuer + clock so it is unit-testable without env/PKI (issue #249).
+fn mint_self_hosted_worker_client_certificate(
+    registration: &StoredSelfHostedWorkerRegistration,
+    issuer: &ferrogate_runtime::SelfHostedMtlsCertIssuer,
+    now_unix: u64,
+) -> Result<crate::responses::AdminSelfHostedWorkerClientCertificate, SelfHostedWorkerRecordError> {
+    let binding = ferrogate_runtime::SelfHostedWorkerCertBinding {
+        tenant_id: self_hosted_tenant_id(&registration.tenant),
+        workspace_id: registration.workspace_id.clone(),
+        worker_id: registration.id.clone(),
+        // token_id is the public 4-tuple segment == the identity fingerprint (the
+        // same value carried in transport frames and the SPIFFE SAN).
+        token_id: registration.identity_fingerprint.clone(),
+    };
+    let issued = issuer
+        .issue_client_cert(&binding, now_unix)
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+    Ok(crate::responses::AdminSelfHostedWorkerClientCertificate {
+        spiffe_id: issued.spiffe_id(),
+        certificate_pem: issued.certificate_pem().to_string(),
+        private_key_pem: issued.private_key_pkcs8_pem().to_string(),
+        fingerprint: issued.fingerprint().to_string(),
+        serial: issued.serial_hex().to_string(),
+        not_after_unix: issued.not_after_unix(),
+    })
 }
 
 #[cfg(test)]
@@ -3233,5 +3382,76 @@ mod tests {
         ));
 
         assert!(block_on(state.repositories.self_hosted_worker_checkpoints()).is_empty());
+    }
+
+    fn stored_registration_for_cert(
+        id: &str,
+        org: &str,
+        fingerprint: &str,
+    ) -> StoredSelfHostedWorkerRegistration {
+        StoredSelfHostedWorkerRegistration {
+            id: id.into(),
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some(org.into()),
+                ..Default::default()
+            },
+            workspace_id: "workspace-1".into(),
+            worker_name: format!("worker-{id}"),
+            status: "registered".into(),
+            identity_fingerprint: fingerprint.into(),
+            identity_expires_at_unix: None,
+            orchestration_enabled: false,
+            registered_at_unix: Some(1),
+            last_seen_at_unix: None,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            capability_envelope_json: "{}".into(),
+            token_secret: "transport-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        }
+    }
+
+    #[test]
+    fn minted_client_cert_binds_to_the_registration_four_tuple_and_is_verifier_accepted() {
+        // Issue #249: the cert minted at registration must bind to the worker's
+        // SPIFFE 4-tuple (tenant/workspace/worker/token) and be accepted by the
+        // verifier built from the same issuing CA -- and rejected for another
+        // worker's identity.
+        let issuer =
+            ferrogate_runtime::SelfHostedMtlsCertIssuer::generate_self_signed("test-ca", 3600)
+                .expect("issuer");
+        let registration = stored_registration_for_cert("worker-a", "org-a", "sha256:fp-a");
+        let minted = mint_self_hosted_worker_client_certificate(&registration, &issuer, 1_000)
+            .expect("cert minted");
+
+        assert_eq!(
+            minted.spiffe_id,
+            "spiffe://ferrogate/self-hosted/org-a/workspace-1/worker-a/sha256:fp-a"
+        );
+        assert!(!minted.fingerprint.is_empty());
+        assert!(!minted.serial.is_empty());
+        assert!(minted.certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert!(minted.private_key_pem.contains("PRIVATE KEY"));
+        assert!(minted.not_after_unix > 1_000);
+
+        // A different worker mints a different, distinctly-bound cert.
+        let other = stored_registration_for_cert("worker-b", "org-a", "sha256:fp-b");
+        let minted_other = mint_self_hosted_worker_client_certificate(&other, &issuer, 1_000)
+            .expect("other cert minted");
+        assert_ne!(minted.spiffe_id, minted_other.spiffe_id);
+        assert_ne!(minted.fingerprint, minted_other.fingerprint);
+    }
+
+    #[test]
+    fn misconfigured_issuing_ca_material_fails_closed() {
+        // A garbage CA cert/key is refused rather than silently ignored.
+        let error = ferrogate_runtime::SelfHostedMtlsCertIssuer::from_ca_pem(
+            "not a cert",
+            "not a key",
+            3600,
+        )
+        .expect_err("garbage CA must fail closed");
+        assert!(matches!(
+            error,
+            ferrogate_runtime::SelfHostedMtlsError::CertIssuance(_)
+        ));
     }
 }

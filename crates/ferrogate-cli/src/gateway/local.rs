@@ -4826,8 +4826,13 @@ impl FerroGateway {
             .await;
         };
         // Downgrade protection: when the production posture is required, reject
-        // the marker/AEAD paths before dispatching. Verified-mTLS admission is
-        // not implemented yet (documented Phase 2), so this fails closed.
+        // the marker/AEAD paths before dispatching. The verified-mTLS admission
+        // seam (SelfHostedMtlsIngressAdmission, issue #249) is implemented and
+        // tested in ferrogate-runtime, but binding it onto this pingora ingress
+        // socket -- terminating the rustls handshake here and threading the
+        // resulting VerifiedMutualTls channel in -- is deployment-only wiring
+        // (TODO(#249)). Until then this header-derived channel never yields a
+        // VerifiedMutualTls, so production posture fails closed on every request.
         if let Err(error) =
             self_hosted_transport_policy().admit(transport_security.observed_channel())
         {
@@ -5655,10 +5660,21 @@ impl FerroGateway {
                                 worker.worker_name, worker.workspace_id
                             ),
                         ));
+                        // Control-plane client-cert issuance (issue #249): when a
+                        // self-hosted worker issuing CA is configured, mint the
+                        // SPIFFE-4-tuple client cert alongside the transport
+                        // secret and return it once. Best-effort: the worker is
+                        // already registered in storage; a mint failure surfaces
+                        // as an absent `client_certificate` the operator can
+                        // detect rather than failing the whole registration.
+                        let client_certificate = state
+                            .issue_self_hosted_worker_client_certificate(&worker.id)
+                            .unwrap_or_default();
                         let body = AdminSelfHostedWorkerRegistrationResponse {
                             object: "self_hosted_worker",
                             worker,
                             transport_token_secret,
+                            client_certificate,
                         };
                         write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id)
                             .await
