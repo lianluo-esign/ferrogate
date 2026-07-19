@@ -74,3 +74,36 @@ fn schema_contract_defines_the_signed_snapshot_replay_floor_table() {
     assert!(POSTGRES_SCHEMA_SQL.contains("last_accepted_revision BIGINT NOT NULL"));
     assert!(POSTGRES_SCHEMA_SQL.contains("PRIMARY KEY (tenant_id, deployment_id)"));
 }
+
+#[test]
+fn upgrade_indexes_come_after_the_migration_that_adds_their_column() {
+    // #254: on an UPGRADE the table already exists (CREATE TABLE IF NOT EXISTS is a
+    // no-op), so a `CREATE INDEX ... (col)` over a column added by a later
+    // `ALTER TABLE ... ADD COLUMN col` fails "column does not exist" and aborts
+    // initialize_schema. The ADD COLUMN must therefore appear BEFORE any index that
+    // references that migration-added column. Regression guard for the two cases
+    // that broke migrating a real ferrogate_control that predated these columns.
+    let cases = [
+        (
+            "ADD COLUMN IF NOT EXISTS organization_id TEXT NOT NULL DEFAULT ''",
+            "idx_usage_metadata_rollups_org_key",
+        ),
+        (
+            "ADD COLUMN IF NOT EXISTS identity_expires_at_unix BIGINT",
+            "idx_self_hosted_worker_registrations_identity_expiry",
+        ),
+    ];
+    for (add_column, index_name) in cases {
+        let add_at = POSTGRES_SCHEMA_SQL
+            .find(add_column)
+            .unwrap_or_else(|| panic!("schema must contain `{add_column}`"));
+        let index_at = POSTGRES_SCHEMA_SQL
+            .find(index_name)
+            .unwrap_or_else(|| panic!("schema must contain index `{index_name}`"));
+        assert!(
+            add_at < index_at,
+            "`{add_column}` (@{add_at}) must precede index `{index_name}` (@{index_at}) so the \
+             upgrade path does not build the index over a not-yet-existent column (#254)",
+        );
+    }
+}
