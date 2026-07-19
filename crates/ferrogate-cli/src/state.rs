@@ -2869,6 +2869,12 @@ struct GatewayMetricsAccumulator {
     /// Requests rejected pre-authentication for exceeding
     /// `network_access.unauthenticated_rate_limit_per_minute` (issue #166).
     network_access_rate_limited_total: u64,
+    /// #263: asset versions scanned by the lifecycle retention/GC sweeper.
+    asset_lifecycle_scanned_total: u64,
+    /// #263: asset versions + unreferenced blobs pruned/collected.
+    asset_lifecycle_pruned_total: u64,
+    /// #263: lifecycle prune/GC delete operations that failed.
+    asset_lifecycle_failed_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -3312,7 +3318,20 @@ impl GatewayMetricsAccumulator {
             mcp_method_totals: self.mcp_method_totals.values().cloned().collect(),
             network_access_denied_total: self.network_access_denied_total,
             network_access_rate_limited_total: self.network_access_rate_limited_total,
+            asset_lifecycle_scanned_total: self.asset_lifecycle_scanned_total,
+            asset_lifecycle_pruned_total: self.asset_lifecycle_pruned_total,
+            asset_lifecycle_failed_total: self.asset_lifecycle_failed_total,
         }
+    }
+
+    /// #263: fold one lifecycle sweep's counts into the cumulative metrics.
+    fn record_asset_lifecycle_sweep(&mut self, scanned: u64, pruned: u64, failed: u64) {
+        self.asset_lifecycle_scanned_total =
+            self.asset_lifecycle_scanned_total.saturating_add(scanned);
+        self.asset_lifecycle_pruned_total =
+            self.asset_lifecycle_pruned_total.saturating_add(pruned);
+        self.asset_lifecycle_failed_total =
+            self.asset_lifecycle_failed_total.saturating_add(failed);
     }
 }
 
@@ -6455,6 +6474,9 @@ mod state_agent_runtime;
 mod state_guardrail_evidence;
 #[path = "state_scheduler.rs"]
 mod state_scheduler;
+// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
+#[path = "state_asset_lifecycle.rs"]
+mod state_asset_lifecycle;
 
 #[cfg(test)]
 mod tests {

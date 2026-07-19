@@ -200,6 +200,8 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _external_action_authorizer = start_external_action_authorizer_if_configured(&state);
     let _billing_outbox_sweeper = start_billing_outbox_sweeper(&state);
     let _agent_schedule_sweeper = start_agent_schedule_sweeper(&state);
+    // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
+    let _asset_lifecycle_sweeper = start_asset_lifecycle_sweeper(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -480,6 +482,55 @@ fn start_agent_schedule_sweeper(state: &SharedAppState) -> AgentScheduleSweeperH
         }
     });
     AgentScheduleSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that prunes stale asset versions and garbage-collects
+/// unreferenced bucket blobs (issue #263).
+struct AssetLifecycleSweeperHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for AssetLifecycleSweeperHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the asset lifecycle tick loop, unconditionally, exactly like
+/// `start_billing_outbox_sweeper` / `start_agent_schedule_sweeper` (issue
+/// #144): `sweep_asset_lifecycle_once` re-reads `state.current()` and no-ops
+/// when `asset_lifecycle.enabled = false`, so enabling it later via the admin
+/// hot config-reload path starts sweeping on the next tick with no restart. The
+/// tick interval is re-read each iteration so a reload also takes effect live.
+/// Deletes are idempotent, so this loop is safe to run on every gateway
+/// instance concurrently.
+fn start_asset_lifecycle_sweeper(state: &SharedAppState) -> AssetLifecycleSweeperHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let current = state.current();
+            let tick_secs = current
+                .config
+                .asset_lifecycle
+                .tick_interval_secs
+                .clamp(1, 86_400);
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            block_on_sync_bridge(state.current().sweep_asset_lifecycle_once());
+        }
+    });
+    AssetLifecycleSweeperHandle {
         stop,
         handle: Some(handle),
     }

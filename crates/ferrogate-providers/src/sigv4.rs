@@ -70,7 +70,7 @@ pub struct SignedHeaders {
 /// `application/json` POST bodies, so callers don't need to keep every
 /// header they send in sync with what's signed.
 pub fn sign(request: &SigningRequest<'_>, credentials: &AwsCredentials) -> SignedHeaders {
-    sign_internal(request, credentials, false)
+    sign_internal(request, credentials, false, "")
 }
 
 /// Same as [`sign`], but also signs and returns a literal
@@ -82,13 +82,47 @@ pub fn sign_with_content_hash_header(
     request: &SigningRequest<'_>,
     credentials: &AwsCredentials,
 ) -> SignedHeaders {
-    sign_internal(request, credentials, true)
+    sign_internal(request, credentials, true, "")
+}
+
+/// Same as [`sign_with_content_hash_header`], but folds a pre-built canonical
+/// query string into the signature -- required for S3 collection operations
+/// like `ListObjectsV2` (`GET /{bucket}?list-type=2&...`, the #263 GC reconcile
+/// pass), whose query parameters are part of the canonical request. The caller
+/// must pass the query already canonicalized: parameters sorted by encoded key,
+/// each key/value RFC3986-encoded, joined with `&` (use
+/// [`canonical_query_string`]). Object PUT/GET/DELETE keep using the no-query
+/// [`sign_with_content_hash_header`].
+pub fn sign_with_content_hash_header_and_query(
+    request: &SigningRequest<'_>,
+    credentials: &AwsCredentials,
+    canonical_query: &str,
+) -> SignedHeaders {
+    sign_internal(request, credentials, true, canonical_query)
+}
+
+/// Builds an S3 SigV4 canonical query string from raw `(key, value)` pairs:
+/// each side RFC3986-encoded, then the pairs sorted by encoded key and joined
+/// with `&`. Shared by the collection-listing signer (#263) so callers don't
+/// re-derive the exact canonicalization the signature depends on.
+pub fn canonical_query_string(params: &[(&str, &str)]) -> String {
+    let mut encoded: Vec<(String, String)> = params
+        .iter()
+        .map(|(name, value)| (percent_encode_query(name), percent_encode_query(value)))
+        .collect();
+    encoded.sort();
+    encoded
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn sign_internal(
     request: &SigningRequest<'_>,
     credentials: &AwsCredentials,
     include_content_hash_header: bool,
+    canonical_query: &str,
 ) -> SignedHeaders {
     let (amz_date, date_stamp) = format_timestamps(request.timestamp_unix);
     let credential_scope = format!(
@@ -112,10 +146,9 @@ fn sign_internal(
         )
     };
     let canonical_request = format!(
-        "{}\n{}\n{}\n{canonical_headers}\n{signed_header_names}\n{hashed_payload}",
+        "{}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{hashed_payload}",
         request.method,
         canonical_uri(request.path),
-        "", // Neither Bedrock nor S3 object PUT/GET/DELETE need a query string here.
     );
 
     let string_to_sign = format!(

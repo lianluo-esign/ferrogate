@@ -859,6 +859,9 @@ impl AppState {
                 mcp_method_totals: Vec::new(),
                 network_access_denied_total: 0,
                 network_access_rate_limited_total: 0,
+                asset_lifecycle_scanned_total: 0,
+                asset_lifecycle_pruned_total: 0,
+                asset_lifecycle_failed_total: 0,
             });
         let pool = self.repositories.postgres_pool_metrics_snapshot();
         snapshot.postgres_pool_acquire_total = pool.acquire_total;

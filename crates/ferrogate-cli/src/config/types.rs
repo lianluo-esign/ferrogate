@@ -83,6 +83,9 @@ pub(crate) struct Config {
     pub(crate) asset_bucket: AssetBucketConfig,
     #[serde(default)]
     pub(crate) scheduler: SchedulerConfig,
+    /// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
+    #[serde(default)]
+    pub(crate) asset_lifecycle: AssetLifecycleConfig,
     /// #262: asset-egress (download bandwidth) rate in USD per GB used to
     /// settle per-download metering events. `None` (the default) leaves
     /// egress metered + audited but unpriced (cost_usd = None, no wallet
@@ -137,6 +140,87 @@ impl Default for SchedulerConfig {
             tick_interval_secs: default_scheduler_tick_interval_secs(),
             max_catchup_fires: default_scheduler_max_catchup_fires(),
             default_timezone: default_scheduler_default_timezone(),
+        }
+    }
+}
+
+/// Asset lifecycle sweeper (issue #263): background version-retention pruning
+/// and unreferenced-blob garbage collection. `enabled = false` (the default) is
+/// a complete no-op -- the tick loop is always spawned (like the billing outbox
+/// and scheduler sweepers) and `sweep_asset_lifecycle_once` re-reads
+/// `state.current()`, so enabling it via `/admin/v1/config/reload` needs no
+/// restart. Deletion is guarded three ways: `dry_run = true` (the default when
+/// enabled) only reports what WOULD be pruned/collected; a channel-pinned or
+/// still-within-grace version is never pruned; and GC only deletes a bucket
+/// object no `stored_assets` row references, after `gc_grace_secs`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct AssetLifecycleConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Seconds between reconcile passes. Default 3600 (hourly) -- lifecycle is
+    /// housekeeping, not a hot path.
+    #[serde(default = "default_asset_lifecycle_tick_interval_secs")]
+    pub(crate) tick_interval_secs: u64,
+    /// Report-only mode: log/audit what would be pruned or GC'd without
+    /// deleting anything. Defaults to `true` so enabling the sweeper is
+    /// observably safe until the operator opts into live deletes.
+    #[serde(default = "default_asset_lifecycle_dry_run")]
+    pub(crate) dry_run: bool,
+    /// Tenant/plan default: keep the newest N versions of every asset line that
+    /// has no more specific `retention_policies` row. `None` disables the
+    /// count-based default.
+    #[serde(default)]
+    pub(crate) default_keep_last_n: Option<u64>,
+    /// Tenant/plan default max-age (seconds) for versions without a specific
+    /// policy. `None` disables the age-based default.
+    #[serde(default)]
+    pub(crate) default_max_age_secs: Option<i64>,
+    /// Retention grace window (seconds): never prune a version younger than
+    /// this, even when a rule selects it. Default 86400 (1 day).
+    #[serde(default = "default_asset_lifecycle_grace_secs")]
+    pub(crate) retention_min_age_secs: i64,
+    /// Whether unreferenced-blob GC runs. Requires a configured `[asset_bucket]`
+    /// -- inline-only deployments have no blobs to collect. Default false.
+    #[serde(default)]
+    pub(crate) gc_enabled: bool,
+    /// GC grace window (seconds): an unreferenced bucket object younger than
+    /// this is kept (it may be an in-flight presigned commit). Default 86400.
+    #[serde(default = "default_asset_lifecycle_grace_secs")]
+    pub(crate) gc_grace_secs: i64,
+    /// Upper bound on blob deletes per GC pass so one tick can never issue an
+    /// unbounded number of bucket DELETEs. Default 100.
+    #[serde(default = "default_asset_lifecycle_max_gc_deletes")]
+    pub(crate) max_gc_deletes_per_tick: usize,
+}
+
+fn default_asset_lifecycle_tick_interval_secs() -> u64 {
+    3_600
+}
+
+fn default_asset_lifecycle_grace_secs() -> i64 {
+    86_400
+}
+
+fn default_asset_lifecycle_max_gc_deletes() -> usize {
+    100
+}
+
+fn default_asset_lifecycle_dry_run() -> bool {
+    true
+}
+
+impl Default for AssetLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval_secs: default_asset_lifecycle_tick_interval_secs(),
+            dry_run: true,
+            default_keep_last_n: None,
+            default_max_age_secs: None,
+            retention_min_age_secs: default_asset_lifecycle_grace_secs(),
+            gc_enabled: false,
+            gc_grace_secs: default_asset_lifecycle_grace_secs(),
+            max_gc_deletes_per_tick: default_asset_lifecycle_max_gc_deletes(),
         }
     }
 }
@@ -2089,6 +2173,7 @@ impl Default for Config {
             network_access: NetworkAccessConfig::default(),
             asset_bucket: AssetBucketConfig::default(),
             scheduler: SchedulerConfig::default(),
+            asset_lifecycle: AssetLifecycleConfig::default(),
             asset_egress_price_per_gb: None,
         }
     }

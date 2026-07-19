@@ -389,6 +389,15 @@ pub struct GatewayMetricsSnapshot {
     /// Requests rejected pre-authentication for exceeding
     /// `network_access.unauthenticated_rate_limit_per_minute` (issue #166).
     pub network_access_rate_limited_total: u64,
+    /// Asset versions scanned by the lifecycle retention/GC sweeper (issue
+    /// #263).
+    pub asset_lifecycle_scanned_total: u64,
+    /// Asset versions + unreferenced blobs pruned/collected by the lifecycle
+    /// sweeper (issue #263). In `dry_run` mode this stays 0 (nothing deleted).
+    pub asset_lifecycle_pruned_total: u64,
+    /// Lifecycle prune/GC operations that failed (a bucket or registry delete
+    /// error), so an operator can alert on a stuck sweeper (issue #263).
+    pub asset_lifecycle_failed_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -764,6 +773,38 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_network_access_rate_limited_total {}\n",
         snapshot.network_access_rate_limited_total
+    ));
+
+    // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
+    push_help(
+        &mut output,
+        "ferrogate_asset_lifecycle_scanned_total",
+        "Total asset versions scanned by the lifecycle retention/GC sweeper.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_lifecycle_scanned_total {}\n",
+        snapshot.asset_lifecycle_scanned_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_lifecycle_pruned_total",
+        "Total asset versions and unreferenced blobs pruned/collected by the lifecycle sweeper.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_lifecycle_pruned_total {}\n",
+        snapshot.asset_lifecycle_pruned_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_lifecycle_failed_total",
+        "Total lifecycle prune/GC delete operations that failed.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_lifecycle_failed_total {}\n",
+        snapshot.asset_lifecycle_failed_total
     ));
 
     push_help(

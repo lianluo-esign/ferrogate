@@ -1124,6 +1124,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "sso_pending_flows",
         // #279 (migration 42): workflow-graph-level execution budgets.
         "workflow_run_budgets",
+        // #263 (migration 43): generalizable retention-policy rule shape.
+        "retention_policies",
     ];
     for table in expected_tables {
         let count = postgres_scalar(&format!(
@@ -1281,6 +1283,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_sso_pending_flows_expiry",
         // #279 (migration 42): per-tenant workflow-run budget admin listing.
         "idx_workflow_run_budgets_tenant",
+        // #263 (migration 43): per-(tenant, resource_type) retention lookup.
+        "idx_retention_policies_tenant_resource",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -1296,10 +1300,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 42",
+         FROM {}.storage_schema_migrations WHERE version = 43",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "42:042_workflow_run_budgets" {
+    if migration_version.trim() != "43:043_retention_policies" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 

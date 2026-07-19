@@ -164,6 +164,75 @@ impl AssetBucketClient {
         Ok(Some(size))
     }
 
+    /// Lists every object in the bucket (following continuation tokens) as
+    /// `(key, last_modified_unix)` pairs -- the #263 unreferenced-blob GC
+    /// reconcile pass compares these against the registry's `storage_uri`s.
+    /// Signs a `ListObjectsV2` (`GET /{bucket}?list-type=2&...`) with the query
+    /// folded into the SigV4 signature (unlike object PUT/GET/DELETE, whose
+    /// query is empty). The `LastModified` timestamp is parsed to unix seconds;
+    /// an unparseable one yields `0`, which the GC planner treats as
+    /// too-new-to-delete (fail-safe KEEP).
+    pub(crate) async fn list_objects(
+        &self,
+    ) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = format!("/{}", self.config.bucket);
+        let client = provider_http_client()?;
+        let mut objects = Vec::new();
+        let mut continuation_token: Option<String> = None;
+        // Bound the pagination loop so a pathological bucket can never spin
+        // forever; 1000 keys/page * 1000 pages is 1M objects per pass.
+        for _ in 0..1_000 {
+            let mut params: Vec<(&str, &str)> = vec![("list-type", "2")];
+            if let Some(token) = continuation_token.as_deref() {
+                params.push(("continuation-token", token));
+            }
+            let canonical_query = ferrogate_providers::sigv4_canonical_query_string(&params);
+            let timestamp_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let signed = ferrogate_providers::sign_sigv4_with_content_hash_header_and_query(
+                &SigningRequest {
+                    method: "GET",
+                    path: &path,
+                    host: &host,
+                    region: &self.config.region,
+                    service: "s3",
+                    body: b"",
+                    timestamp_unix,
+                },
+                &AwsCredentials {
+                    access_key_id: self.config.access_key_id.clone(),
+                    secret_access_key: self.config.secret_access_key.clone(),
+                    session_token: None,
+                },
+                &canonical_query,
+            );
+            let mut request = client
+                .get(format!("{scheme}://{host}{path}?{canonical_query}"))
+                .header("host", host.clone())
+                .header("x-amz-date", signed.x_amz_date.clone())
+                .header("authorization", signed.authorization.clone());
+            if let Some(content_sha256) = &signed.x_amz_content_sha256 {
+                request = request.header("x-amz-content-sha256", content_sha256.clone());
+            }
+            let response = request.send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("asset bucket LIST failed (HTTP {status}): {text}");
+            }
+            let body = response.text().await?;
+            objects.extend(parse_list_objects_v2(&body));
+            match next_continuation_token(&body) {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            }
+        }
+        Ok(objects)
+    }
+
     /// Issues a short-TTL SigV4 query-string presigned upload URL (issue
     /// #259). The holder streams the object bytes straight to the bucket
     /// with a plain `PUT` (no auth headers), bypassing the gateway hot
@@ -270,6 +339,82 @@ impl AssetBucketClient {
         }
         Ok((scheme, host.to_string()))
     }
+}
+
+/// Extracts `<Contents>` entries from a `ListObjectsV2` XML body as
+/// `(Key, last_modified_unix)`. Deliberately a tiny, dependency-free tag
+/// scanner rather than a full XML parser: the S3 `ListObjectsV2` shape is
+/// fixed and shallow, and every other externally-facing adapter here parses
+/// only the fields it needs. An entry missing/holding an unparseable
+/// `LastModified` gets `0`, which the GC planner treats as unknown-age =>
+/// KEEP (fail-safe).
+fn parse_list_objects_v2(xml: &str) -> Vec<ferrogate_storage::BucketObject> {
+    let mut objects = Vec::new();
+    for contents in extract_tags(xml, "Contents") {
+        let Some(key) = extract_tag(&contents, "Key") else {
+            continue;
+        };
+        let last_modified_unix = extract_tag(&contents, "LastModified")
+            .and_then(|value| parse_rfc3339_unix(&value))
+            .unwrap_or(0);
+        objects.push(ferrogate_storage::BucketObject {
+            key,
+            last_modified_unix,
+        });
+    }
+    objects
+}
+
+/// The truncation continuation token, present only when the listing is paged.
+fn next_continuation_token(xml: &str) -> Option<String> {
+    let truncated = extract_tag(xml, "IsTruncated")
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !truncated {
+        return None;
+    }
+    extract_tag(xml, "NextContinuationToken").filter(|token| !token.is_empty())
+}
+
+fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml_unescape(&xml[start..end]))
+}
+
+fn extract_tags(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(rel_start) = xml[cursor..].find(&open) {
+        let start = cursor + rel_start + open.len();
+        let Some(rel_end) = xml[start..].find(&close) else {
+            break;
+        };
+        let end = start + rel_end;
+        out.push(xml[start..end].to_string());
+        cursor = end + close.len();
+    }
+    out
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+/// Parses an S3 `LastModified` RFC3339/ISO-8601 timestamp to unix seconds.
+fn parse_rfc3339_unix(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|datetime| datetime.timestamp())
 }
 
 #[cfg(test)]
@@ -498,6 +643,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(size, None);
+    }
+
+    #[tokio::test]
+    async fn list_objects_parses_signed_list_v2_contents() {
+        // #263: a ListObjectsV2 XML body maps to (key, last_modified_unix)
+        // pairs; the request is a signed GET carrying the list-type=2 query.
+        let xml = "<?xml version=\"1.0\"?><ListBucketResult>\
+            <IsTruncated>false</IsTruncated>\
+            <Contents><Key>t1:cli_tool:rg:1.0.0</Key>\
+            <LastModified>2026-07-19T12:00:00.000Z</LastModified></Contents>\
+            <Contents><Key>t1:cli_tool:orphan:9.9.9</Key>\
+            <LastModified>2020-01-01T00:00:00Z</LastModified></Contents>\
+            </ListBucketResult>";
+        let (endpoint, captured) = spawn_bucket_mock("200 OK", xml.as_bytes());
+        let bucket = client(endpoint);
+
+        let objects = bucket.list_objects().await.unwrap();
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].key, "t1:cli_tool:rg:1.0.0");
+        assert_eq!(objects[0].last_modified_unix, 1_784_462_400);
+        assert_eq!(objects[1].key, "t1:cli_tool:orphan:9.9.9");
+        assert_eq!(objects[1].last_modified_unix, 1_577_836_800);
+
+        let request = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "GET");
+        assert!(request.path.starts_with("/ferrogate-assets?"));
+        assert!(request.path.contains("list-type=2"));
+        assert!(request.has_authorization);
+    }
+
+    #[test]
+    fn parse_list_objects_v2_defaults_unparseable_timestamps_to_zero() {
+        let xml = "<Contents><Key>k</Key><LastModified>not-a-date</LastModified></Contents>";
+        let objects = parse_list_objects_v2(xml);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].key, "k");
+        assert_eq!(objects[0].last_modified_unix, 0);
+    }
+
+    #[test]
+    fn next_continuation_token_only_when_truncated() {
+        let truncated =
+            "<IsTruncated>true</IsTruncated><NextContinuationToken>abc</NextContinuationToken>";
+        assert_eq!(next_continuation_token(truncated), Some("abc".to_string()));
+        let done =
+            "<IsTruncated>false</IsTruncated><NextContinuationToken>abc</NextContinuationToken>";
+        assert_eq!(next_continuation_token(done), None);
     }
 
     #[test]

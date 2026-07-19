@@ -244,6 +244,14 @@ pub use workflow_budget::{
     WORKFLOW_RUN_BUDGET_EXHAUSTED,
 };
 
+// #263: asset lifecycle engine (version retention + unreferenced-blob GC).
+mod asset_lifecycle;
+pub use asset_lifecycle::{
+    pinned_versions, plan_blob_gc, plan_version_retention, retention_policy_id, BucketObject,
+    RetentionPlan, RetentionPolicy, RetentionPruneTarget, StoredRetentionPolicy,
+    RETENTION_RESOURCE_ASSET, RETENTION_SCOPE_DEFAULT,
+};
+
 mod guardrail_evidence;
 use guardrail_evidence::StoredGuardrailEvidence;
 pub use guardrail_evidence::{
@@ -521,8 +529,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 42;
-const POSTGRES_SCHEMA_NAME: &str = "042_workflow_run_budgets";
+const POSTGRES_SCHEMA_VERSION: u64 = 43;
+const POSTGRES_SCHEMA_NAME: &str = "043_retention_policies";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1211,6 +1219,9 @@ pub struct RuntimeControlPlaneState {
     /// Durable per-workflow-run execution budgets keyed by
     /// `workflow_run_budget_id(workflow_id, version, run_id)` (#279).
     workflow_run_budgets: InMemoryRepository<StoredWorkflowRunBudget>,
+    /// Generalizable retention rules keyed by
+    /// `retention_policy_id(tenant_id, resource_type, scope)` (#263).
+    retention_policies: InMemoryRepository<StoredRetentionPolicy>,
 }
 
 struct PostgresControlPlaneStore {
@@ -3881,6 +3892,136 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(affected > 0)
+    }
+
+    // #263: asset lifecycle -- retention policies + whole-table reconcile scans
+    // for the lifecycle sweeper.
+
+    async fn upsert_retention_policy(
+        &self,
+        policy: &StoredRetentionPolicy,
+    ) -> Result<(), StorageError> {
+        let keep_last_n = policy.keep_last_n.map(saturating_i64);
+        let operation = self.asset_operation("upsert retention policy");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO retention_policies \
+                 (id, tenant_id, resource_type, scope, keep_last_n, max_age_secs, \
+                  min_age_secs, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 keep_last_n = EXCLUDED.keep_last_n, max_age_secs = EXCLUDED.max_age_secs, \
+                 min_age_secs = EXCLUDED.min_age_secs, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &policy.id,
+                    &policy.tenant_id,
+                    &policy.resource_type,
+                    &policy.scope,
+                    &keep_last_n,
+                    &policy.max_age_secs,
+                    &policy.min_age_secs,
+                    &policy.created_at_unix,
+                    &policy.updated_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
+    }
+
+    async fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
+        let operation = self.asset_operation("list retention policies");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                "SELECT id, tenant_id, resource_type, scope, keep_last_n, max_age_secs, \
+                 min_age_secs, created_at_unix, updated_at_unix \
+                 FROM retention_policies WHERE tenant_id = $1 AND resource_type = $2 \
+                 ORDER BY scope ASC",
+                &[&tenant_id, &resource_type],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(retention_policy_from_row).collect())
+    }
+
+    async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
+        let operation = self.asset_operation("list all assets");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                 storage_uri, variant, yanked \
+                 FROM stored_assets ORDER BY tenant_id ASC, asset_type ASC, name ASC, version ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(asset_from_row).collect())
+    }
+
+    async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        let operation = self.asset_operation("list all asset channels");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                "SELECT id, tenant_id, asset_type, name, channel, version, updated_at_unix \
+                 FROM asset_channels ORDER BY tenant_id ASC, asset_type ASC, name ASC",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(asset_channel_from_row).collect())
     }
 
     fn usage_rollup_operation(&self, name: &'static str) -> StorageOperation {
@@ -7398,6 +7539,7 @@ where
         "agent_schedules",
         "agent_schedule_fires",
         "workflow_run_budgets",
+        "retention_policies",
     ];
     for table in TABLES {
         let exists = client
@@ -8090,6 +8232,24 @@ fn asset_channel_from_row(row: &PostgresRow) -> StoredAssetChannel {
         channel: row.get::<_, String>(4),
         version: row.get::<_, String>(5),
         updated_at_unix: row.get::<_, i64>(6),
+    }
+}
+
+fn retention_policy_from_row(row: &PostgresRow) -> StoredRetentionPolicy {
+    StoredRetentionPolicy {
+        id: row.get::<_, String>(0),
+        tenant_id: row.get::<_, String>(1),
+        resource_type: row.get::<_, String>(2),
+        scope: row.get::<_, String>(3),
+        // #263: keep_last_n is stored as a nullable BIGINT; a negative value
+        // would be nonsensical, so clamp to a non-negative count.
+        keep_last_n: row
+            .get::<_, Option<i64>>(4)
+            .map(|value| value.max(0) as u64),
+        max_age_secs: row.get::<_, Option<i64>>(5),
+        min_age_secs: row.get::<_, i64>(6),
+        created_at_unix: row.get::<_, i64>(7),
+        updated_at_unix: row.get::<_, i64>(8),
     }
 }
 
@@ -9053,6 +9213,7 @@ impl RuntimeControlPlaneState {
             agent_schedules: InMemoryRepository::new(),
             agent_schedule_fires: InMemoryRepository::new(),
             workflow_run_budgets: InMemoryRepository::new(),
+            retention_policies: InMemoryRepository::new(),
         }
     }
 
@@ -9504,6 +9665,41 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_asset_channel(&mut self, id: &str) -> bool {
         self.asset_channels.remove(id).is_some()
+    }
+
+    // #263: asset lifecycle -- retention policies + reconcile scans.
+
+    pub fn upsert_retention_policy(&mut self, policy: StoredRetentionPolicy) {
+        self.retention_policies.insert(policy.id.clone(), policy);
+    }
+
+    pub fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Vec<StoredRetentionPolicy> {
+        self.retention_policies
+            .list()
+            .into_iter()
+            .filter(|policy| policy.tenant_id == tenant_id && policy.resource_type == resource_type)
+            .collect()
+    }
+
+    pub fn delete_retention_policy(&mut self, id: &str) -> bool {
+        self.retention_policies.remove(id).is_some()
+    }
+
+    /// Every asset row across every tenant. The lifecycle sweeper (#263) groups
+    /// these by `{tenant, asset_type, name}` for retention and derives the GC
+    /// referenced-key set from their `storage_uri`s.
+    pub fn list_all_assets(&self) -> Vec<StoredAsset> {
+        self.assets.list()
+    }
+
+    /// Every channel pointer across every tenant, so the sweeper (#263) can
+    /// determine which versions are channel-pinned (never pruned).
+    pub fn list_all_asset_channels(&self) -> Vec<StoredAssetChannel> {
+        self.asset_channels.list()
     }
 
     /// In-memory counterpart of `increment_usage_monthly_rollups` (Postgres):
@@ -12373,6 +12569,74 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_asset_channel(id).await
+            }
+        }
+    }
+
+    // #263: asset lifecycle -- retention policies + whole-registry reconcile
+    // scans the lifecycle sweeper drives.
+
+    pub async fn upsert_retention_policy(
+        &self,
+        policy: StoredRetentionPolicy,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_retention_policy(policy);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_retention_policy(&policy).await
+            }
+        }
+    }
+
+    pub async fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| {
+                    control_plane.list_retention_policies(tenant_id, resource_type)
+                })
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_retention_policies(tenant_id, resource_type)
+                    .await
+            }
+        }
+    }
+
+    /// Every asset row across every tenant, for the lifecycle sweeper's
+    /// retention grouping + GC referenced-key derivation (#263).
+    pub async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_all_assets())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_all_assets().await
+            }
+        }
+    }
+
+    /// Every channel pointer across every tenant, so the sweeper knows which
+    /// versions are channel-pinned (never pruned) (#263).
+    pub async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_all_asset_channels())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_all_asset_channels().await
             }
         }
     }

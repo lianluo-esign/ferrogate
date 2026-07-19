@@ -2091,3 +2091,37 @@ CREATE INDEX IF NOT EXISTS idx_workflow_run_budgets_tenant
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (42, '042_workflow_run_budgets')
 ON CONFLICT (version) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Migration 043 (#263): asset lifecycle -- version retention policies + GC.
+-- `retention_policies` is deliberately NOT hard-coded to assets: it is the
+-- generalizable retention-rule shape the epic (#175 follow-on) wants to reuse
+-- for request_logs/audit_events/metering TTL later (all unbounded today). A row
+-- expresses "for `resource_type` under `scope`, keep the newest `keep_last_n`
+-- and/or anything younger than `max_age_secs`; never touch anything younger
+-- than `min_age_secs` (the safety grace window)". For assets, `resource_type` is
+-- 'asset' and `scope` is either '*' (the tenant/plan default) or an exact
+-- '{asset_type}/{name}'. The pruning engine (see ferrogate-storage
+-- asset_lifecycle.rs) additionally never prunes a channel-pinned version, and
+-- the unreferenced-blob GC only deletes a bucket object no stored_assets row
+-- points at, after the grace window -- fail-safe: on any doubt, KEEP.
+CREATE TABLE IF NOT EXISTS retention_policies (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '*',
+    keep_last_n BIGINT,
+    max_age_secs BIGINT,
+    min_age_secs BIGINT NOT NULL DEFAULT 0,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+-- The lifecycle sweeper resolves policies per tenant + resource_type, so the
+-- listing index matches that access path.
+CREATE INDEX IF NOT EXISTS idx_retention_policies_tenant_resource
+    ON retention_policies(tenant_id, resource_type);
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (43, '043_retention_policies')
+ON CONFLICT (version) DO NOTHING;

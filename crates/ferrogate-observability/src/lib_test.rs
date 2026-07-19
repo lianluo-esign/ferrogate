@@ -168,6 +168,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         }],
         network_access_denied_total: 3,
         network_access_rate_limited_total: 4,
+        asset_lifecycle_scanned_total: 7,
+        asset_lifecycle_pruned_total: 5,
+        asset_lifecycle_failed_total: 1,
     };
 
     let text = render_prometheus_text(&snapshot);
@@ -187,6 +190,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_guardrail_policy_cas_conflicts_total 2"));
     assert!(text.contains("ferrogate_network_access_denied_total 3"));
     assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
+    assert!(text.contains("ferrogate_asset_lifecycle_scanned_total 7"));
+    assert!(text.contains("ferrogate_asset_lifecycle_pruned_total 5"));
+    assert!(text.contains("ferrogate_asset_lifecycle_failed_total 1"));
     assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
     assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
     assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));
