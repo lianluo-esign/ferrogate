@@ -1118,10 +1118,12 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "agent_schedule_fires",
         // #281 (migration 40): durable wallet reserve/hold primitive.
         "wallet_reservations",
-        // #283 (migration 41): durable per-tenant SSO config + restart-safe
+        // #283 (migration 42): durable per-tenant SSO config + restart-safe
         // pending-flow state.
         "sso_provider_configs",
         "sso_pending_flows",
+        // #279 (migration 42): workflow-graph-level execution budgets.
+        "workflow_run_budgets",
     ];
     for table in expected_tables {
         let count = postgres_scalar(&format!(
@@ -1277,6 +1279,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_admin_user_refresh_tokens_user_tenant",
         // #283 (migration 40): SSO pending-flow expiry prune index.
         "idx_sso_pending_flows_expiry",
+        // #279 (migration 42): per-tenant workflow-run budget admin listing.
+        "idx_workflow_run_budgets_tenant",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -1292,10 +1296,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 41",
+         FROM {}.storage_schema_migrations WHERE version = 42",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "41:041_tenant_sso_config" {
+    if migration_version.trim() != "42:042_workflow_run_budgets" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1926,7 +1930,7 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 40);
+                assert_eq!(body["storage"]["schema"]["version"], 41);
                 assert_eq!(body["storage"]["schema"]["name"], "040_wallet_reservations");
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]

@@ -21,14 +21,18 @@ use serde_json::Value;
 use crate::{
     auth::{authenticate, AuthContext},
     config::{
-        AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider,
+        AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider, AgentWorkflowNode,
         AgentWorkflowNodeKind, AgentWorkflowPolicy,
     },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AppState},
 };
-use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
+use ferrogate_policy::{resolve_workflow_budget_envelope, WorkflowBudgetCaps};
+use ferrogate_storage::{
+    workflow_run_budget_id, StoredAgentRun, StoredAgentRunEvent, WorkflowBudgetDebit,
+    WorkflowRunBudgetCaps,
+};
 
 use super::{
     body::read_request_body,
@@ -374,6 +378,23 @@ impl FerroGateway {
             started_at_unix: Some(started_at_unix),
             completed_at_unix: Some(now_unix_seconds()),
         });
+        // #279: debit this completed step's spend against the run's durable
+        // graph-level budget. Tool-call count is what this gateway layer
+        // observes; token/cost dimensions accrue where they are metered. An
+        // `Exceeded` outcome flips the run to `exhausted`, so the NEXT step is
+        // denied fail-closed at `agent_workflow_use`; here we emit the auditable
+        // lifecycle event marking the budget stop.
+        if let Some(workflow_use) = workflow_use.as_ref() {
+            debit_workflow_budget_after_step(
+                &state,
+                ctx,
+                &auth,
+                workflow_use,
+                &run_id,
+                outcome.tool_results.len() as i64,
+            );
+        }
+
         let response = AgentRunCreateResponse {
             object: "agent_run",
             id: outcome.run_id,
@@ -631,6 +652,51 @@ fn agent_workflow_use(
             }
         }
     }
+    // #279: open the run's durable, graph-level execution budget (idempotent)
+    // and deny fail-closed when a prior step already exhausted it OR this step's
+    // declared tool calls would breach the CUMULATIVE tool-call budget. The
+    // per-request `max_tool_calls` gate above bounds one request only; this is
+    // the run-spanning envelope the workflow graph is governed by.
+    let envelope = resolve_workflow_budget_envelope(
+        workflow_graph_budget_caps(workflow),
+        workflow_node_budget_caps(node),
+    );
+    if !envelope.is_unbounded() {
+        let now_unix = now_unix_seconds() as i64;
+        let tenant_id = auth.organization_id.clone().unwrap_or_default();
+        let caps = WorkflowRunBudgetCaps {
+            cost_budget_credits: envelope.cost_budget_credits,
+            token_budget: envelope.token_budget,
+            tool_call_budget: envelope.tool_call_budget,
+            // The wall-clock ceiling stays enforced by the `timeout_millis` gate
+            // above; leaving the budget deadline unset avoids double-enforcement.
+            wall_clock_deadline_unix: None,
+        };
+        if let Some(budget) = state.open_workflow_run_budget(
+            &workflow.id,
+            workflow.version,
+            run_id,
+            &tenant_id,
+            caps,
+            now_unix,
+        ) {
+            let declared_tool_calls = request.tool_calls.len() as i64;
+            if let Err(denial) = ferrogate_policy::preflight_workflow_budget(
+                &budget,
+                0,
+                0,
+                declared_tool_calls,
+                now_unix,
+            ) {
+                return Err((
+                    StatusCode::PAYMENT_REQUIRED,
+                    "workflow_budget_exceeded",
+                    denial.message,
+                ));
+            }
+        }
+    }
+
     Ok(Some(AgentWorkflowUse {
         id: workflow.id.clone(),
         version: workflow.version,
@@ -640,6 +706,87 @@ fn agent_workflow_use(
         // against the tool that is actually dispatched at runtime.
         node_tool: node.tool.clone(),
     }))
+}
+
+/// #279: the workflow graph's execution-budget caps from config. Cost has no
+/// config knob yet (the durable ledger + policy support it and are unit-tested);
+/// the wall-clock ceiling is enforced by the separate `timeout_millis` gate.
+fn workflow_graph_budget_caps(workflow: &AgentWorkflowPolicy) -> WorkflowBudgetCaps {
+    WorkflowBudgetCaps {
+        cost_budget_credits: None,
+        token_budget: workflow.token_budget.map(|budget| budget as i64),
+        tool_call_budget: workflow.max_tool_calls.map(|limit| limit as i64),
+        wall_clock_millis: None,
+    }
+}
+
+/// #279: a node's execution-budget caps -- composed (min-across) with the graph
+/// caps so a node may tighten but never widen the run's envelope.
+fn workflow_node_budget_caps(node: &AgentWorkflowNode) -> WorkflowBudgetCaps {
+    WorkflowBudgetCaps {
+        cost_budget_credits: None,
+        token_budget: node.token_budget.map(|budget| budget as i64),
+        tool_call_budget: None,
+        wall_clock_millis: None,
+    }
+}
+
+/// #279: debit one completed step against the run's durable graph-level budget
+/// and, if the debit exhausts it, emit the auditable lifecycle event (timeline +
+/// admin audit) marking the budget stop. A no-op for unbounded runs (no budget
+/// row) and for debits that still fit.
+fn debit_workflow_budget_after_step(
+    state: &AppState,
+    ctx: &ProxyContext,
+    auth: &AuthContext,
+    workflow_use: &AgentWorkflowUse,
+    run_id: &str,
+    tool_calls: i64,
+) {
+    let now_unix = now_unix_seconds() as i64;
+    let id = workflow_run_budget_id(&workflow_use.id, workflow_use.version, run_id);
+    let Some(WorkflowBudgetDebit::Exceeded { dimension, .. }) =
+        state.debit_workflow_run_budget(&id, 0, 0, tool_calls, now_unix)
+    else {
+        return;
+    };
+    let message = format!(
+        "agent run {run_id} stopped: workflow {}@{} execution budget exhausted on the {} dimension",
+        workflow_use.id,
+        workflow_use.version,
+        dimension.as_str()
+    );
+    state.record_agent_run_event(stored_timeline_event(
+        TimelineEventContext::new(
+            ctx.request_id.clone(),
+            ctx.trace_id.clone(),
+            auth.tenant_context(),
+            0,
+        ),
+        TimelineEventRecord {
+            id: format!(
+                "agent-budget:{run_id}:{}:{}",
+                dimension.as_str(),
+                ctx.request_id
+            ),
+            run_id: run_id.to_string(),
+            kind: "run_budget_exhausted".to_string(),
+            target: format!("agent_run:{run_id}"),
+            outcome: "stopped".to_string(),
+            tool_call_id: None,
+            message: Some(message.clone()),
+        },
+    ));
+    state.record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
+        ctx,
+        auth,
+        agent_run_id: Some(run_id.to_string()),
+        workflow_use: Some(workflow_use),
+        action: "agent.run_budget_exhausted",
+        target: "agent_run",
+        outcome: "stopped",
+        message,
+    }));
 }
 
 /// Fail-closed enforcement of a workflow node's declared tool allowlist against
@@ -1417,6 +1564,38 @@ mod tests {
             denial.contains("allowed_tool") && denial.contains("other_tool"),
             "denial must name both the restricted tool and the rejected tool, got: {denial}"
         );
+    }
+
+    #[test]
+    fn workflow_run_budget_wiring_accumulates_across_steps_and_stops_fail_closed() {
+        // #279: the AppState wrappers drive the durable ledger through the real
+        // block_on_sync_bridge -> repositories path. A tool-call budget of 2
+        // accumulates across steps and stops the run fail-closed on the third.
+        let state = AppState::new(crate::config::Config::default());
+        let caps = WorkflowRunBudgetCaps {
+            tool_call_budget: Some(2),
+            ..WorkflowRunBudgetCaps::default()
+        };
+        let budget = state
+            .open_workflow_run_budget("wf", 1, "run-budget", "tenant-1", caps, 1)
+            .expect("budget opens on the in-memory backend");
+        assert_eq!(budget.tool_call_budget, Some(2));
+
+        for _ in 0..2 {
+            assert!(matches!(
+                state.debit_workflow_run_budget(&budget.id, 0, 0, 1, 2),
+                Some(WorkflowBudgetDebit::Applied(_))
+            ));
+        }
+        // The third step exceeds the cumulative tool-call budget -> fail closed.
+        assert!(matches!(
+            state.debit_workflow_run_budget(&budget.id, 0, 0, 1, 3),
+            Some(WorkflowBudgetDebit::Exceeded { .. })
+        ));
+        // Debiting a run with no budget row (unbounded run) is a silent no-op.
+        assert!(state
+            .debit_workflow_run_budget("no-such-run", 0, 0, 1, 4)
+            .is_none());
     }
 
     #[test]

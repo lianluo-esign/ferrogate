@@ -2049,3 +2049,45 @@ CREATE INDEX IF NOT EXISTS idx_sso_pending_flows_expiry
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (41, '041_tenant_sso_config')
 ON CONFLICT (version) DO NOTHING;
+
+-- #279: workflow-graph-level execution budgets for multi-step agent runs.
+-- Per-request quota/limits (quota_policies, workflow max_tool_calls) govern one
+-- HTTP request only; a multi-step agent run (a workflow graph identified by
+-- workflow_id@version + run_id) had no cumulative envelope spanning every step's
+-- provider calls + tool executions. `workflow_run_budgets` is the durable, per-
+-- run ledger: an envelope (cost credits / tokens / tool-call count / wall-clock
+-- deadline) is reserved once at run start and each step debits against it. A
+-- debit that would breach ANY capped dimension is rejected fail-closed WITHOUT
+-- applying the spend, and flips `status` to 'exhausted' so subsequent steps are
+-- denied immediately; a top-up raises the caps and flips it back to 'active'
+-- (the resumable-after-top-up path). Debits serialize on the row (SELECT ...
+-- FOR UPDATE in the storage layer), so N concurrent steps against a tool-call
+-- budget of K let exactly K through -- no overspend, the same no-oversell
+-- property #281's wallet reservations provide. A NULL cap means that dimension
+-- is unbounded; spent_* columns accumulate monotonically per dimension.
+CREATE TABLE IF NOT EXISTS workflow_run_budgets (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    workflow_version BIGINT NOT NULL,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    cost_budget_credits BIGINT,
+    token_budget BIGINT,
+    tool_call_budget BIGINT,
+    wall_clock_deadline_unix BIGINT,
+    spent_credits BIGINT NOT NULL DEFAULT 0,
+    spent_tokens BIGINT NOT NULL DEFAULT 0,
+    spent_tool_calls BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+-- The admin per-tenant budget listing filters by tenant_id; the run lookup
+-- (open/debit/topup) is by the primary key, so no separate run_id index.
+CREATE INDEX IF NOT EXISTS idx_workflow_run_budgets_tenant
+    ON workflow_run_budgets(tenant_id);
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (42, '042_workflow_run_budgets')
+ON CONFLICT (version) DO NOTHING;

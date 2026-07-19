@@ -1391,6 +1391,68 @@ impl AppState {
         }
     }
 
+    /// #279: idempotently opens a workflow run's durable, graph-level execution
+    /// budget (token/tool-call/cost/wall-clock envelope) so each step debits
+    /// against it. Returns the current envelope (existing or freshly opened), or
+    /// `None` on a storage error -- a budget-store outage must not itself break
+    /// every workflow run, so the caller treats `None` as "no budget decision
+    /// available" and proceeds, matching the additive/opt-in wallet pattern.
+    /// Sync (bridged like `record_agent_run`) because its caller,
+    /// `agent_workflow_use`, is sync.
+    pub(crate) fn open_workflow_run_budget(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        run_id: &str,
+        tenant_id: &str,
+        caps: ferrogate_storage::WorkflowRunBudgetCaps,
+        now_unix: i64,
+    ) -> Option<ferrogate_storage::StoredWorkflowRunBudget> {
+        match crate::gateway::block_on_sync_bridge(self.repositories.open_workflow_run_budget(
+            workflow_id,
+            workflow_version,
+            run_id,
+            tenant_id,
+            caps,
+            now_unix,
+        )) {
+            Ok(budget) => Some(budget),
+            Err(error) => {
+                warn!("failed to open workflow run budget: {error}");
+                None
+            }
+        }
+    }
+
+    /// #279: atomically debits one completed step's spend against a run's
+    /// envelope. Returns the debit outcome, or `None` when the run has no budget
+    /// row (unbounded run) or on a storage error. Fail-closed enforcement of the
+    /// resulting `Exceeded` is the caller's responsibility (it records the
+    /// lifecycle event and denies the next step at open time).
+    pub(crate) fn debit_workflow_run_budget(
+        &self,
+        id: &str,
+        cost_credits: i64,
+        tokens: i64,
+        tool_calls: i64,
+        now_unix: i64,
+    ) -> Option<ferrogate_storage::WorkflowBudgetDebit> {
+        match crate::gateway::block_on_sync_bridge(self.repositories.debit_workflow_run_budget(
+            id,
+            cost_credits,
+            tokens,
+            tool_calls,
+            now_unix,
+        )) {
+            Ok(debit) => Some(debit),
+            Err(ferrogate_storage::StorageError::NotFound(_)) => None,
+            Err(error) => {
+                warn!("failed to debit workflow run budget: {error}");
+                None
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn record_managed_worker_lifecycle(
         &self,

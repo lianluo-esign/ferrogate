@@ -237,6 +237,13 @@ pub use wallet::{
     WALLET_RESERVATION_SETTLED,
 };
 
+mod workflow_budget;
+pub use workflow_budget::{
+    workflow_run_budget_id, StoredWorkflowRunBudget, WorkflowBudgetDebit, WorkflowBudgetDimension,
+    WorkflowRunBudgetCaps, WORKFLOW_BUDGET_EXCEEDED_CODE, WORKFLOW_RUN_BUDGET_ACTIVE,
+    WORKFLOW_RUN_BUDGET_EXHAUSTED,
+};
+
 mod guardrail_evidence;
 use guardrail_evidence::StoredGuardrailEvidence;
 pub use guardrail_evidence::{
@@ -514,8 +521,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 41;
-const POSTGRES_SCHEMA_NAME: &str = "041_tenant_sso_config";
+const POSTGRES_SCHEMA_VERSION: u64 = 42;
+const POSTGRES_SCHEMA_NAME: &str = "042_workflow_run_budgets";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1201,6 +1208,9 @@ pub struct RuntimeControlPlaneState {
     agent_schedules: InMemoryRepository<StoredAgentSchedule>,
     /// Idempotent fire-history ledger keyed by `fire_id` (#246).
     agent_schedule_fires: InMemoryRepository<StoredAgentScheduleFire>,
+    /// Durable per-workflow-run execution budgets keyed by
+    /// `workflow_run_budget_id(workflow_id, version, run_id)` (#279).
+    workflow_run_budgets: InMemoryRepository<StoredWorkflowRunBudget>,
 }
 
 struct PostgresControlPlaneStore {
@@ -7387,6 +7397,7 @@ where
         "payment_methods",
         "agent_schedules",
         "agent_schedule_fires",
+        "workflow_run_budgets",
     ];
     for table in TABLES {
         let exists = client
@@ -9041,6 +9052,7 @@ impl RuntimeControlPlaneState {
             snapshot_replay_floors: InMemoryRepository::new(),
             agent_schedules: InMemoryRepository::new(),
             agent_schedule_fires: InMemoryRepository::new(),
+            workflow_run_budgets: InMemoryRepository::new(),
         }
     }
 
@@ -16744,6 +16756,257 @@ mod tests {
             600,
             "a replayed settlement id must not double-credit the wallet"
         );
+    }
+
+    fn workflow_budget_repositories() -> RuntimeStorageRepositories {
+        RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10)
+    }
+
+    #[test]
+    fn workflow_run_budget_accumulates_spend_across_steps_and_fails_closed_on_exhaustion() {
+        // #279 acceptance: a run with a cost ceiling accumulates spend across
+        // steps and stops BEFORE exceeding it; the breach is fail-closed (no
+        // spend applied) with a distinct dimension.
+        let repositories = workflow_budget_repositories();
+        let budget = block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-1",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                cost_budget_credits: Some(100),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            1,
+        ))
+        .unwrap();
+        let id = budget.id.clone();
+
+        // Two steps accumulate to 80 credits.
+        for _ in 0..2 {
+            assert!(matches!(
+                block_on(repositories.debit_workflow_run_budget(&id, 40, 0, 0, 2)).unwrap(),
+                WorkflowBudgetDebit::Applied(_)
+            ));
+        }
+        let budget = block_on(repositories.get_workflow_run_budget(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.spent_credits, 80);
+        assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_ACTIVE);
+
+        // A third step (30) would take the run to 110 > 100 -> fail closed on
+        // cost, WITHOUT applying the 30, and the run flips to exhausted.
+        match block_on(repositories.debit_workflow_run_budget(&id, 30, 0, 0, 3)).unwrap() {
+            WorkflowBudgetDebit::Exceeded { dimension, budget } => {
+                assert_eq!(dimension, WorkflowBudgetDimension::Cost);
+                assert_eq!(dimension.denial_code(), "workflow_budget_exceeded:cost");
+                assert_eq!(budget.spent_credits, 80, "denied spend must not be applied");
+                assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_EXHAUSTED);
+            }
+            other => panic!("expected Exceeded, got {other:?}"),
+        }
+
+        // Every further step is denied while exhausted, even a zero-cost one.
+        assert!(matches!(
+            block_on(repositories.debit_workflow_run_budget(&id, 0, 0, 0, 4)).unwrap(),
+            WorkflowBudgetDebit::Exceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_run_budget_is_resumable_after_a_topup() {
+        // #279 acceptance: after a budget-exhaustion stop, a top-up raises the
+        // cap and reactivates the run so it resumes.
+        let repositories = workflow_budget_repositories();
+        let id = workflow_run_budget_id("wf", 1, "run-2");
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-2",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                cost_budget_credits: Some(100),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            1,
+        ))
+        .unwrap();
+        block_on(repositories.debit_workflow_run_budget(&id, 100, 0, 0, 2)).unwrap();
+        // Exhaust it.
+        assert!(matches!(
+            block_on(repositories.debit_workflow_run_budget(&id, 1, 0, 0, 3)).unwrap(),
+            WorkflowBudgetDebit::Exceeded { .. }
+        ));
+
+        // Top up by 50 credits -> cap 150, status active again.
+        let topped =
+            block_on(repositories.topup_workflow_run_budget(&id, 50, 0, 0, None, 4)).unwrap();
+        assert_eq!(topped.cost_budget_credits, Some(150));
+        assert_eq!(topped.status, WORKFLOW_RUN_BUDGET_ACTIVE);
+
+        // The run resumes: a 30-credit step now fits (100 + 30 = 130 <= 150).
+        match block_on(repositories.debit_workflow_run_budget(&id, 30, 0, 0, 5)).unwrap() {
+            WorkflowBudgetDebit::Applied(budget) => assert_eq!(budget.spent_credits, 130),
+            other => panic!("expected Applied after top-up, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_run_budget_open_is_idempotent_and_fixes_caps_at_first_open() {
+        let repositories = workflow_budget_repositories();
+        let first = block_on(repositories.open_workflow_run_budget(
+            "wf",
+            2,
+            "run-3",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                tool_call_budget: Some(5),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            1,
+        ))
+        .unwrap();
+        // Re-opening with DIFFERENT caps returns the original envelope unchanged
+        // -- a later step can't widen (or narrow) an in-flight run's ceiling.
+        let second = block_on(repositories.open_workflow_run_budget(
+            "wf",
+            2,
+            "run-3",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                tool_call_budget: Some(999),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            2,
+        ))
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second.tool_call_budget, Some(5));
+    }
+
+    #[test]
+    fn workflow_run_budget_wall_clock_deadline_denies_after_expiry() {
+        let repositories = workflow_budget_repositories();
+        let id = workflow_run_budget_id("wf", 1, "run-clock");
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-clock",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                wall_clock_deadline_unix: Some(50),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            1,
+        ))
+        .unwrap();
+        // A step before the deadline is fine.
+        assert!(matches!(
+            block_on(repositories.debit_workflow_run_budget(&id, 0, 0, 0, 49)).unwrap(),
+            WorkflowBudgetDebit::Applied(_)
+        ));
+        // At/after the deadline the run stops on the wall-clock dimension.
+        match block_on(repositories.debit_workflow_run_budget(&id, 0, 0, 0, 50)).unwrap() {
+            WorkflowBudgetDebit::Exceeded { dimension, .. } => {
+                assert_eq!(dimension, WorkflowBudgetDimension::WallClock);
+            }
+            other => panic!("expected wall-clock Exceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_workflow_budget_debits_cannot_overspend() {
+        // #279 core correctness property (mirrors #281's wallet no-oversell): N
+        // parallel single-tool-call debits against a tool-call budget of K let
+        // exactly K through -- serialized on the row, no overspend.
+        use std::sync::{Arc, Barrier};
+
+        let repositories = Arc::new(workflow_budget_repositories());
+        let id = workflow_run_budget_id("wf", 1, "run-race");
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-race",
+            "tenant-1",
+            WorkflowRunBudgetCaps {
+                tool_call_budget: Some(9),
+                ..WorkflowRunBudgetCaps::default()
+            },
+            1,
+        ))
+        .unwrap();
+
+        let threads = 10usize; // 10 x 1 tool call, but only 9 budgeted.
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            let id = id.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                block_on(repositories.debit_workflow_run_budget(&id, 0, 0, 1, 2))
+            }));
+        }
+        let mut applied = 0;
+        let mut exceeded = 0;
+        for handle in handles {
+            match handle.join().unwrap().unwrap() {
+                WorkflowBudgetDebit::Applied(_) => applied += 1,
+                WorkflowBudgetDebit::Exceeded { .. } => exceeded += 1,
+            }
+        }
+        assert_eq!(applied, 9, "exactly the budgeted tool calls may succeed");
+        assert_eq!(exceeded, 1, "the overspend attempt must be rejected");
+        let budget = block_on(repositories.get_workflow_run_budget(&id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            budget.spent_tool_calls, 9,
+            "spent tool calls must never exceed the budget"
+        );
+    }
+
+    #[test]
+    fn workflow_run_budgets_are_listed_per_tenant_newest_first() {
+        let repositories = workflow_budget_repositories();
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-a",
+            "tenant-x",
+            WorkflowRunBudgetCaps::default(),
+            10,
+        ))
+        .unwrap();
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-b",
+            "tenant-x",
+            WorkflowRunBudgetCaps::default(),
+            20,
+        ))
+        .unwrap();
+        block_on(repositories.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-c",
+            "tenant-y",
+            WorkflowRunBudgetCaps::default(),
+            30,
+        ))
+        .unwrap();
+        let listed = block_on(repositories.list_workflow_run_budgets("tenant-x")).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].run_id, "run-b", "newest first");
+        assert_eq!(listed[1].run_id, "run-a");
+        // Debiting an unknown run is a NotFound, never a silent no-op.
+        assert!(matches!(
+            block_on(repositories.debit_workflow_run_budget("nope", 1, 0, 0, 1)),
+            Err(StorageError::NotFound(_))
+        ));
     }
 
     fn wallet_repositories_with_balance(tenant: &str, balance: i64) -> RuntimeStorageRepositories {

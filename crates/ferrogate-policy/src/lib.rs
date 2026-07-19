@@ -7,9 +7,16 @@
 //! Policy decision boundaries.
 
 mod quota;
+mod workflow_budget;
 
 use ferrogate_core::{RequestContext, TenantContext};
 pub use quota::{resolve_effective_quota, EffectiveQuota, QuotaScopeChain, QuotaScopeSelector};
+pub use workflow_budget::{
+    evaluate_node_dispatch, preflight_workflow_budget, resolve_workflow_budget_envelope,
+    WorkflowBudgetCaps, WorkflowBudgetDenial, WorkflowNodeDispatchDenial,
+    WorkflowNodeDispatchPolicy, WORKFLOW_NODE_MODEL_NOT_ALLOWED_CODE,
+    WORKFLOW_NODE_PROVIDER_NOT_ALLOWED_CODE,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
