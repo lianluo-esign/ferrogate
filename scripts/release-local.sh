@@ -39,11 +39,19 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TAG" ] || { echo "ERROR: --tag <vYYYY.MM.DD> required" >&2; exit 2; }
-command -v docker >/dev/null || { echo "ERROR: docker not found on this host" >&2; exit 1; }
 
 IMAGE="ghcr.io/${OWNER}/ferrogate"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# Engine selection: prefer a real container daemon (reference Dockerfile, glibc);
+# on a no-sudo/no-daemon host fall back to the musl-static + crane path, which
+# needs neither root nor a runtime. See scripts/build-image-crane.sh.
+ENGINE="docker"
+if ! command -v docker >/dev/null; then
+  ENGINE="crane"
+  echo "NOTE: docker not found -> using no-daemon musl+crane image path (scripts/build-image-crane.sh)."
+fi
 
 echo "== 1/5 local gate =="
 if [ "$SKIP_TESTS" = "true" ]; then
@@ -61,21 +69,35 @@ else
   ./target/release/ferrogate-test ci
 fi
 
-echo "== 2/5 docker build =="
-# --provenance / --sbom off here; SBOM is produced explicitly in step 4.
-docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
-
-echo "== 3/5 push to GHCR =="
-if [ "$DO_PUSH" = "true" ]; then
-  # gh auth token -> GHCR login (or set CR_PAT and: echo "$CR_PAT" | docker login ghcr.io -u <user> --password-stdin)
-  gh auth token | docker login ghcr.io -u "${OWNER}" --password-stdin
-  docker push "${IMAGE}:${TAG}"
-  docker push "${IMAGE}:latest"
-  DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${TAG}" | sed 's/.*@//')"
-  echo "   published digest: ${DIGEST}"
+if [ "$ENGINE" = "crane" ]; then
+  # No-daemon path: musl-static build + crane assemble + push. Handles its own
+  # build/stage/push (and GHCR_TOKEN / write:packages requirement).
+  echo "== 2-3/5 musl+crane image build =="
+  CRANE_ARGS=(--tag "$TAG" --owner "$OWNER")
+  [ "$DO_PUSH" = "true" ] && CRANE_ARGS+=(--push)
+  "$ROOT/scripts/build-image-crane.sh" "${CRANE_ARGS[@]}"
+  if [ "$DO_PUSH" = "true" ]; then
+    DIGEST="$(crane digest "${IMAGE}:${TAG}" 2>/dev/null || echo "sha256:UNKNOWN")"
+  else
+    DIGEST="sha256:LOCAL-DRY-RUN"
+  fi
 else
-  echo "   (dry-run: pass --push to actually push to GHCR)"
-  DIGEST="sha256:LOCAL-DRY-RUN"
+  echo "== 2/5 docker build =="
+  # --provenance / --sbom off here; SBOM is produced explicitly in step 4.
+  docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+
+  echo "== 3/5 push to GHCR =="
+  if [ "$DO_PUSH" = "true" ]; then
+    # gh auth token -> GHCR login (or set CR_PAT and: echo "$CR_PAT" | docker login ghcr.io -u <user> --password-stdin)
+    gh auth token | docker login ghcr.io -u "${OWNER}" --password-stdin
+    docker push "${IMAGE}:${TAG}"
+    docker push "${IMAGE}:latest"
+    DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${TAG}" | sed 's/.*@//')"
+    echo "   published digest: ${DIGEST}"
+  else
+    echo "   (dry-run: pass --push to actually push to GHCR)"
+    DIGEST="sha256:LOCAL-DRY-RUN"
+  fi
 fi
 
 echo "== 4/5 SBOM + sign =="
