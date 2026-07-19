@@ -527,6 +527,35 @@ impl PostgresControlPlaneStore {
         rows.iter().map(schedule_from_row).collect()
     }
 
+    pub(super) async fn list_all_agent_schedules(
+        &self,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        let operation = self.agent_schedule_operation("list all agent schedules");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                &format!(
+                    "SELECT {SCHEDULE_COLUMNS} FROM agent_schedules \
+                     ORDER BY tenant_id ASC, workspace_id ASC, name ASC"
+                ),
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        rows.iter().map(schedule_from_row).collect()
+    }
+
     pub(super) async fn delete_agent_schedule(
         &self,
         schedule_id: &str,
@@ -691,6 +720,17 @@ impl RuntimeControlPlaneState {
         schedules
     }
 
+    pub(super) fn list_all_agent_schedules(&self) -> Vec<StoredAgentSchedule> {
+        let mut schedules: Vec<_> = self.agent_schedules.list().into_iter().collect();
+        schedules.sort_by(|a, b| {
+            a.tenant_id
+                .cmp(&b.tenant_id)
+                .then_with(|| a.workspace_id.cmp(&b.workspace_id))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        schedules
+    }
+
     pub(super) fn delete_agent_schedule(&mut self, schedule_id: &str) -> bool {
         self.agent_schedules.remove(schedule_id).is_some()
     }
@@ -805,6 +845,22 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .list_agent_schedules(tenant_id, workspace_id)
                     .await
+            }
+        }
+    }
+
+    /// Lists every agent schedule across all tenants (platform-operator admin
+    /// list). Tenant-scoped callers use [`Self::list_agent_schedules`] instead.
+    pub async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map_err(|_| {
+                    StorageError::Runtime("agent schedule repository lock poisoned".into())
+                })?
+                .list_all_agent_schedules()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_all_agent_schedules().await
             }
         }
     }

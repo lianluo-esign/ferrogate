@@ -287,6 +287,14 @@
       "group": "admin_agent_workflow"
     },
     {
+      "pattern": "/admin/v1/agent-schedules",
+      "group": "admin_agent_schedule"
+    },
+    {
+      "pattern": "/admin/v1/agent-schedules/{*rest}",
+      "group": "admin_agent_schedule"
+    },
+    {
       "pattern": "/admin/v1/api-keys",
       "group": "admin_api_key"
     },
@@ -1397,6 +1405,94 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules",
+      "method": "get",
+      "operation_id": "listAdminAgentSchedules",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules",
+      "method": "post",
+      "operation_id": "createAdminAgentSchedule",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}",
+      "method": "get",
+      "operation_id": "getAdminAgentSchedule",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}",
+      "method": "put",
+      "operation_id": "putAdminAgentSchedule",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}",
+      "method": "patch",
+      "operation_id": "patchAdminAgentSchedule",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}",
+      "method": "delete",
+      "operation_id": "deleteAdminAgentSchedule",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}/run-now",
+      "method": "post",
+      "operation_id": "runAdminAgentScheduleNow",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/agent-schedules/{id}/fires",
+      "method": "get",
+      "operation_id": "listAdminAgentScheduleFires",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
       },
       "rbac_action": null
     },

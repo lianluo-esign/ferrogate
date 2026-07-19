@@ -89,9 +89,7 @@ impl AppState {
                         schedule,
                         slot,
                         now,
-                        ScheduleFireOutcome::SkippedOverlap,
-                        None,
-                        Some("previous dispatch still in flight"),
+                        ScheduleFireResult::skipped_overlap("previous dispatch still in flight"),
                     )
                     .await;
                     self.advance_schedule_past_now(schedule, slot, now).await;
@@ -100,76 +98,110 @@ impl AppState {
             }
         }
 
+        // Execute the schedule's target action (enqueue a self-hosted dispatch
+        // or create an agent run), then claim the fire slot idempotently and
+        // advance regardless of the action's outcome so a failing target still
+        // fast-forwards past the slot instead of re-firing it every tick.
+        let result = self.dispatch_schedule_target(schedule, slot, now).await;
+        self.record_fire(schedule, slot, now, result).await;
+        self.advance_schedule_past_now(schedule, slot, now).await;
+    }
+
+    /// Execute a schedule's target action for one `(schedule, slot)` fire and
+    /// report what happened, WITHOUT recording the fire or advancing the
+    /// schedule (the caller owns those). Shared by the tick loop
+    /// ([`Self::fire_due_schedule`]) and the manual `run-now` admin trigger
+    /// ([`Self::run_agent_schedule_now`]) so both target kinds behave
+    /// identically on either path.
+    async fn dispatch_schedule_target(
+        &self,
+        schedule: &StoredAgentSchedule,
+        slot: i64,
+        now: i64,
+    ) -> ScheduleFireResult {
         match schedule.target_kind {
             ScheduleTargetKind::SelfHostedDispatch => {
                 let dispatch = match build_self_hosted_dispatch(schedule, slot, now) {
                     Ok(dispatch) => dispatch,
-                    Err(message) => {
-                        self.record_fire(
-                            schedule,
-                            slot,
-                            now,
-                            ScheduleFireOutcome::Error,
-                            None,
-                            Some(&message),
-                        )
-                        .await;
-                        self.advance_schedule_past_now(schedule, slot, now).await;
-                        return;
-                    }
+                    Err(message) => return ScheduleFireResult::error(message),
                 };
                 let dispatch_id = dispatch.dispatch_id.clone();
-                // Enqueue FIRST (idempotent on the deterministic id), then claim
-                // the fire slot. If a peer instance already enqueued the same
-                // dispatch it is deduped; if a peer already claimed the fire
-                // row, our claim loses and we simply advance -- either way the
-                // slot yields exactly one dispatch.
+                // Enqueue FIRST (idempotent on the deterministic id), then the
+                // caller claims the fire slot. If a peer instance already
+                // enqueued the same dispatch it is deduped; if a peer already
+                // claimed the fire row, that claim loses -- either way the slot
+                // yields exactly one dispatch.
                 if let Err(error) = self.enqueue_scheduled_self_hosted_dispatch(dispatch) {
                     warn!(
                         schedule_id = %schedule.schedule_id,
                         error = %error,
                         "scheduler: failed to enqueue self-hosted dispatch"
                     );
-                    self.record_fire(
-                        schedule,
-                        slot,
-                        now,
-                        ScheduleFireOutcome::Error,
-                        None,
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                    self.advance_schedule_past_now(schedule, slot, now).await;
-                    return;
+                    return ScheduleFireResult::error(error.to_string());
                 }
-                self.record_fire(
-                    schedule,
-                    slot,
-                    now,
-                    ScheduleFireOutcome::Dispatched,
-                    Some(dispatch_id),
-                    None,
-                )
-                .await;
-                self.advance_schedule_past_now(schedule, slot, now).await;
+                ScheduleFireResult::dispatched_run(None, Some(dispatch_id))
             }
             ScheduleTargetKind::AgentRun => {
-                // TODO(#246): wire the managed/synchronous `handle_agent_run_create`
-                // path. The self-hosted dispatch target is the fully-supported
-                // trigger today; record the attempt so the gap is observable
-                // rather than silently dropped.
-                self.record_fire(
-                    schedule,
-                    slot,
-                    now,
-                    ScheduleFireOutcome::Error,
-                    None,
-                    Some("agent_run target kind is not yet wired (TODO #246)"),
-                )
-                .await;
-                self.advance_schedule_past_now(schedule, slot, now).await;
+                // Create an agent-run record through the same durable seam the
+                // synchronous `POST /v1/agent-runs` create path uses
+                // (`record_agent_run` -> `repositories.upsert_agent_run`). The
+                // scheduler is a control-plane trigger, so it registers the run
+                // (status `running`) and records the linked run id; the managed
+                // runtime drives the run to completion out of band.
+                let run = build_scheduled_agent_run(schedule, slot, now, &self.config);
+                let run_id = run.id.clone();
+                if let Err(error) = self.repositories.upsert_agent_run(run).await {
+                    warn!(
+                        schedule_id = %schedule.schedule_id,
+                        error = %error,
+                        "scheduler: failed to create scheduled agent run"
+                    );
+                    return ScheduleFireResult::error(error.to_string());
+                }
+                ScheduleFireResult::dispatched_run(Some(run_id), None)
             }
         }
+    }
+
+    /// Manual `run-now` trigger for the admin API (#251). Executes the
+    /// schedule's target immediately -- regardless of `enabled`, next-fire, or
+    /// catch-up/overlap policy -- and records a dedicated fire-history row so
+    /// the manual trigger is observable. Does NOT advance `next_fire_at`: a
+    /// manual run is an ad-hoc extra fire, not a replacement for the schedule's
+    /// own cadence.
+    pub(crate) async fn run_agent_schedule_now(
+        &self,
+        schedule: &StoredAgentSchedule,
+    ) -> Result<StoredAgentScheduleFire, StorageError> {
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        let result = self.dispatch_schedule_target(schedule, now, now).await;
+        let fire = StoredAgentScheduleFire {
+            // A `manual:` prefix keeps a run-now fire id distinct from the
+            // scheduler's deterministic per-slot id for the same second.
+            fire_id: format!(
+                "manual:{}",
+                agent_schedule_fire_id(&schedule.schedule_id, now)
+            ),
+            schedule_id: schedule.schedule_id.clone(),
+            scheduled_fire_at_unix: now,
+            fired_at_unix: now,
+            node_id: Some(self.cluster_identity_node_id()),
+            outcome: result.outcome,
+            dispatch_id: result.dispatch_id,
+            run_id: result.run_id,
+            detail: Some(
+                result
+                    .detail
+                    .unwrap_or_else(|| "manual run-now trigger".to_string()),
+            ),
+        };
+        // Best-effort ledger write: a UNIQUE collision with a scheduled fire
+        // for the same second is harmless (the target action already ran); the
+        // caller still gets the fire record it should report.
+        self.repositories
+            .insert_agent_schedule_fire(fire.clone())
+            .await?;
+        Ok(fire)
     }
 
     /// Idempotently record a fire-history row for `(schedule, slot)`. The insert
@@ -180,9 +212,7 @@ impl AppState {
         schedule: &StoredAgentSchedule,
         slot: i64,
         now: i64,
-        outcome: ScheduleFireOutcome,
-        dispatch_id: Option<String>,
-        detail: Option<&str>,
+        result: ScheduleFireResult,
     ) {
         let fire = StoredAgentScheduleFire {
             fire_id: agent_schedule_fire_id(&schedule.schedule_id, slot),
@@ -190,10 +220,10 @@ impl AppState {
             scheduled_fire_at_unix: slot,
             fired_at_unix: now,
             node_id: Some(self.cluster_identity_node_id()),
-            outcome,
-            dispatch_id,
-            run_id: None,
-            detail: detail.map(str::to_string),
+            outcome: result.outcome,
+            dispatch_id: result.dispatch_id,
+            run_id: result.run_id,
+            detail: result.detail,
         };
         if let Err(error) = self.repositories.insert_agent_schedule_fire(fire).await {
             warn!(
@@ -278,6 +308,58 @@ impl AppState {
         self.cluster_status().node_id
     }
 
+    // --- Admin API surface (#251). Thin async wrappers over the durable
+    // agent-schedule repositories so the gateway handlers (which cannot reach
+    // the private `repositories` field) drive CRUD + fire history without a
+    // config reload -- schedules are pure control-plane storage, not config. ---
+
+    pub(crate) async fn admin_list_agent_schedules(
+        &self,
+        tenant_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        self.repositories
+            .list_agent_schedules(tenant_id, workspace_id)
+            .await
+    }
+
+    pub(crate) async fn admin_list_all_agent_schedules(
+        &self,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        self.repositories.list_all_agent_schedules().await
+    }
+
+    pub(crate) async fn admin_get_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError> {
+        self.repositories.get_agent_schedule(schedule_id).await
+    }
+
+    pub(crate) async fn admin_upsert_agent_schedule(
+        &self,
+        schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError> {
+        self.repositories.upsert_agent_schedule(schedule).await
+    }
+
+    pub(crate) async fn admin_delete_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.repositories.delete_agent_schedule(schedule_id).await
+    }
+
+    pub(crate) async fn admin_list_agent_schedule_fires(
+        &self,
+        schedule_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
+        self.repositories
+            .list_agent_schedule_fires(schedule_id, limit)
+            .await
+    }
+
     /// Enqueue a schedule-originated dispatch into the self-hosted lease queue
     /// and write it through to durable storage, mirroring the poll/ack handlers.
     /// Idempotent on the dispatch id.
@@ -305,6 +387,85 @@ impl AppState {
             Ok(runtime) => runtime.dispatch_unacked(dispatch_id),
             Err(poisoned) => poisoned.into_inner().dispatch_unacked(dispatch_id),
         }
+    }
+}
+
+/// The result of executing a schedule's target action for one fire, before it
+/// is committed to the fire-history ledger. Exactly one of `dispatch_id` /
+/// `run_id` is set on success (per target kind); `detail` carries the failure
+/// reason on an error outcome.
+struct ScheduleFireResult {
+    outcome: ScheduleFireOutcome,
+    dispatch_id: Option<String>,
+    run_id: Option<String>,
+    detail: Option<String>,
+}
+
+impl ScheduleFireResult {
+    fn dispatched_run(run_id: Option<String>, dispatch_id: Option<String>) -> Self {
+        Self {
+            outcome: ScheduleFireOutcome::Dispatched,
+            dispatch_id,
+            run_id,
+            detail: None,
+        }
+    }
+
+    fn error(detail: impl Into<String>) -> Self {
+        Self {
+            outcome: ScheduleFireOutcome::Error,
+            dispatch_id: None,
+            run_id: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn skipped_overlap(detail: impl Into<String>) -> Self {
+        Self {
+            outcome: ScheduleFireOutcome::SkippedOverlap,
+            dispatch_id: None,
+            run_id: None,
+            detail: Some(detail.into()),
+        }
+    }
+}
+
+/// The provider label recorded on a scheduled agent run, mirroring the
+/// synchronous create path's `agent_provider_name` so scheduled and
+/// interactively-created runs are attributed to the same provider.
+fn scheduled_agent_run_provider(config: &Config) -> &'static str {
+    match config.agent_runtime.provider {
+        crate::config::AgentRuntimeProvider::ManagedWorker => "ferrogate.agent-worker",
+        crate::config::AgentRuntimeProvider::External => "ferrogate.external",
+    }
+}
+
+/// Build the `StoredAgentRun` a schedule creates when it fires an `agent_run`
+/// target. The run id is deterministic per `(schedule, slot)` so a peer
+/// instance racing the same slot upserts the SAME row rather than creating a
+/// duplicate run.
+fn build_scheduled_agent_run(
+    schedule: &StoredAgentSchedule,
+    slot: i64,
+    now: i64,
+    config: &Config,
+) -> StoredAgentRun {
+    let run_id = format!("schedule-run-{}-{slot}", schedule.schedule_id);
+    StoredAgentRun {
+        id: run_id.clone(),
+        request_id: format!("schedule:{}:{slot}", schedule.schedule_id),
+        trace_id: None,
+        tenant: ferrogate_core::TenantContext {
+            organization_id: Some(schedule.tenant_id.clone()),
+            workspace_id: Some(schedule.workspace_id.clone()),
+            ..Default::default()
+        },
+        status: "running".to_string(),
+        provider: scheduled_agent_run_provider(config).to_string(),
+        turns_executed: 0,
+        output_recorded: false,
+        started_at_unix: Some(now.max(0) as u64),
+        completed_at_unix: None,
     }
 }
 
@@ -468,6 +629,64 @@ mod tests {
             .filter(|fire| fire.scheduled_fire_at_unix == now)
             .count();
         assert_eq!(slot_fires, 1, "the due slot fires at most once");
+    }
+
+    #[test]
+    fn agent_run_target_creates_a_run_and_records_dispatched() {
+        let state = AppState::new(scheduler_enabled_config());
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        let mut schedule = interval_schedule("run-sched", now);
+        schedule.target_kind = ScheduleTargetKind::AgentRun;
+        schedule.target_json = "{}".into();
+        crate::gateway::block_on_sync_bridge(state.repositories.upsert_agent_schedule(schedule))
+            .expect("seed schedule");
+
+        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+
+        // The fire is recorded as dispatched and linked to a created run id (not
+        // a self-hosted dispatch id).
+        let fires = crate::gateway::block_on_sync_bridge(
+            state
+                .repositories
+                .list_agent_schedule_fires("run-sched", 10),
+        )
+        .expect("list fires");
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].outcome, ScheduleFireOutcome::Dispatched);
+        assert!(
+            fires[0].dispatch_id.is_none(),
+            "agent_run records no dispatch"
+        );
+        let run_id = fires[0].run_id.clone().expect("run id linked");
+        assert_eq!(run_id, format!("schedule-run-run-sched-{now}"));
+
+        // The agent run was created through the shared record_agent_run seam.
+        let run = state.agent_run_record(&run_id).expect("run persisted");
+        assert_eq!(run.status, "running");
+        assert_eq!(run.tenant.organization_id.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn run_now_triggers_immediately_and_records_a_manual_fire() {
+        let state = AppState::new(scheduler_enabled_config());
+        // A far-future next_fire so the tick loop would never fire it; run-now
+        // must trigger regardless.
+        let schedule = interval_schedule("manual-sched", i64::MAX / 2);
+        crate::gateway::block_on_sync_bridge(
+            state.repositories.upsert_agent_schedule(schedule.clone()),
+        )
+        .expect("seed schedule");
+
+        let fire = crate::gateway::block_on_sync_bridge(state.run_agent_schedule_now(&schedule))
+            .expect("run-now succeeds");
+        assert_eq!(fire.outcome, ScheduleFireOutcome::Dispatched);
+        assert!(
+            fire.fire_id.starts_with("manual:"),
+            "run-now fire id is namespaced: {}",
+            fire.fire_id
+        );
+        let dispatch_id = fire.dispatch_id.clone().expect("dispatch linked");
+        assert!(state.self_hosted_dispatch_unacked(&dispatch_id));
     }
 
     #[test]

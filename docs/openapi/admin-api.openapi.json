@@ -3978,6 +3978,392 @@
         }
       }
     },
+    "/admin/v1/agent-schedules": {
+      "get": {
+        "operationId": "listAdminAgentSchedules",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List time-based agent schedules (tenant/workspace scoped).",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent schedule list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createAdminAgentSchedule",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a time-based agent schedule.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAgentScheduleMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent schedule created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/agent-schedules/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAdminAgentSchedule",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one agent schedule by id.",
+        "responses": {
+          "200": {
+            "description": "Agent schedule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "put": {
+        "operationId": "putAdminAgentSchedule",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace an agent schedule by id.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAgentScheduleMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent schedule replaced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminAgentSchedule",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Partially update an agent schedule by id (e.g. pause/resume via enabled).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAgentScheduleMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent schedule updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminAgentSchedule",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete an agent schedule by id.",
+        "responses": {
+          "200": {
+            "description": "Agent schedule deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/agent-schedules/{id}/run-now": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "runAdminAgentScheduleNow",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Trigger an agent schedule immediately, regardless of its cadence.",
+        "responses": {
+          "202": {
+            "description": "Manual fire recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleRunNowResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/agent-schedules/{id}/fires": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "listAdminAgentScheduleFires",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List the fire history (newest first) for an agent schedule.",
+        "responses": {
+          "200": {
+            "description": "Agent schedule fire history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentScheduleFireList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/prompt-templates": {
       "get": {
         "operationId": "listAdminPromptTemplates",
@@ -14398,6 +14784,329 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AdminAgentWorkflow"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentSchedule": {
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "tenant_id",
+          "workspace_id",
+          "name",
+          "enabled",
+          "spec_kind",
+          "timezone",
+          "target_kind",
+          "target",
+          "overlap_policy",
+          "catchup_policy",
+          "jitter_secs",
+          "created_at_unix",
+          "updated_at_unix",
+          "revision"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_schedule"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "spec_kind": {
+            "type": "string",
+            "enum": [
+              "cron",
+              "interval"
+            ]
+          },
+          "cron_expr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "interval_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "self_hosted_dispatch",
+              "agent_run"
+            ]
+          },
+          "target": {},
+          "overlap_policy": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "allow"
+            ]
+          },
+          "catchup_policy": {
+            "type": "string",
+            "enum": [
+              "skip_missed",
+              "fire_once"
+            ]
+          },
+          "jitter_secs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_fire_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_fire_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleFire": {
+        "type": "object",
+        "required": [
+          "object",
+          "fire_id",
+          "schedule_id",
+          "scheduled_fire_at_unix",
+          "fired_at_unix",
+          "outcome"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_schedule_fire"
+          },
+          "fire_id": {
+            "type": "string"
+          },
+          "schedule_id": {
+            "type": "string"
+          },
+          "scheduled_fire_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "fired_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "dispatched",
+              "skipped_overlap",
+              "skipped_disabled",
+              "error"
+            ]
+          },
+          "dispatch_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "spec_kind": {
+            "type": "string",
+            "enum": [
+              "cron",
+              "interval"
+            ]
+          },
+          "cron_expr": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "interval_secs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "self_hosted_dispatch",
+              "agent_run"
+            ]
+          },
+          "target": {
+            "type": "object"
+          },
+          "overlap_policy": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "allow"
+            ]
+          },
+          "catchup_policy": {
+            "type": "string",
+            "enum": [
+              "skip_missed",
+              "fire_once"
+            ]
+          },
+          "jitter_secs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "agent_schedule"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_schedule"
+          },
+          "agent_schedule": {
+            "$ref": "#/components/schemas/AdminAgentSchedule"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleRunNowResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "fire"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_schedule_fire"
+          },
+          "fire": {
+            "$ref": "#/components/schemas/AdminAgentScheduleFire"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentSchedule"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentScheduleFireList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentScheduleFire"
             }
           }
         },

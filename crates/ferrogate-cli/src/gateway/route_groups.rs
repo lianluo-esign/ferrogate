@@ -51,6 +51,7 @@ pub(super) enum RouteGroup {
     AdminModel,
     AdminGatewayConfig,
     AdminAgentWorkflow,
+    AdminAgentSchedule,
     AdminApiKey,
     AdminPolicy,
     GuardrailPolicy,
@@ -87,6 +88,7 @@ impl RouteGroup {
             "admin_model" => Self::AdminModel,
             "admin_gateway_config" => Self::AdminGatewayConfig,
             "admin_agent_workflow" => Self::AdminAgentWorkflow,
+            "admin_agent_schedule" => Self::AdminAgentSchedule,
             "admin_api_key" => Self::AdminApiKey,
             "admin_policy" => Self::AdminPolicy,
             "guardrail_policy" => Self::GuardrailPolicy,
@@ -154,6 +156,10 @@ impl FerroGateway {
             }
             RouteGroup::AdminAgentWorkflow => {
                 self.try_admin_agent_workflow_routes(session, ctx, req)
+                    .await
+            }
+            RouteGroup::AdminAgentSchedule => {
+                self.try_admin_agent_schedule_routes(session, ctx, req)
                     .await
             }
             RouteGroup::AdminApiKey => self.try_admin_api_key_routes(session, ctx, req).await,
@@ -651,6 +657,29 @@ impl FerroGateway {
         {
             self.handle_admin_agent_workflows(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_admin_agent_schedule_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/agent-schedules"
+            || req.path.starts_with("/admin/v1/agent-schedules/")
+        {
+            self.handle_admin_agent_schedules(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)
