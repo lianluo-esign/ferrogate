@@ -1032,7 +1032,7 @@ fn build_embeddings_request_plan(
         });
     }
 
-    let estimated_usage = estimate_embeddings_usage(&body_json);
+    let estimated_usage = estimate_embeddings_usage(&body_json, &request.model);
     let routes =
         state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
     // Fail closed (mirrors chat.rs's #173 region behavior): a region-constrained
@@ -1144,15 +1144,15 @@ fn set_canonical_provider_header(request: &mut ProviderHttpRequest, name: &str, 
 /// OpenAI accepts -- a flat integer array of token ids, or an array of such
 /// arrays for a batch -- which a char-only count estimated at 0, letting a
 /// caller bypass the token-budget / TPM / prepaid-wallet gates entirely.
-fn estimate_embeddings_usage(body: &serde_json::Value) -> BillingTokenUsage {
-    let prompt_tokens = estimate_embeddings_input_tokens(body.get("input"));
+fn estimate_embeddings_usage(body: &serde_json::Value, model: &str) -> BillingTokenUsage {
+    let prompt_tokens = estimate_embeddings_input_tokens(model, body.get("input"));
     BillingTokenUsage::new(prompt_tokens, 0, prompt_tokens)
 }
 
-fn estimate_embeddings_input_tokens(input: Option<&serde_json::Value>) -> u64 {
+fn estimate_embeddings_input_tokens(model: &str, input: Option<&serde_json::Value>) -> u64 {
     let tokens = match input {
         Some(value @ (serde_json::Value::String(_) | serde_json::Value::Array(_))) => {
-            embeddings_element_tokens(value)
+            embeddings_element_tokens(model, value)
         }
         _ => 0,
     };
@@ -1166,14 +1166,19 @@ fn estimate_embeddings_input_tokens(input: Option<&serde_json::Value>) -> u64 {
     }
 }
 
-/// Token estimate for one `input` element: text contributes chars/4 tokens; a
-/// pre-tokenized id (a JSON number) is one token; an array is summed
+/// Token estimate for one `input` element: text is counted with the local BPE
+/// tokenizer when the model has one (issue #282), else the chars/4 heuristic; a
+/// pre-tokenized id (a JSON number) is already one token; an array is summed
 /// element-wise (a batch of strings, or a single/batch pre-tokenized input).
-fn embeddings_element_tokens(element: &serde_json::Value) -> u64 {
+fn embeddings_element_tokens(model: &str, element: &serde_json::Value) -> u64 {
     match element {
-        serde_json::Value::String(text) => (text.chars().count() as u64).saturating_add(3) / 4,
+        serde_json::Value::String(text) => crate::tokenizer::count_tokens(model, text)
+            .unwrap_or_else(|| (text.chars().count() as u64).saturating_add(3) / 4),
         serde_json::Value::Number(_) => 1,
-        serde_json::Value::Array(items) => items.iter().map(embeddings_element_tokens).sum(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| embeddings_element_tokens(model, item))
+            .sum(),
         _ => 0,
     }
 }

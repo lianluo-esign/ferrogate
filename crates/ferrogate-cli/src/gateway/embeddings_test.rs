@@ -13,7 +13,7 @@ fn estimates_prompt_tokens_for_a_single_string_input() {
         "input": "hello world"
     });
 
-    let usage = estimate_embeddings_usage(&body);
+    let usage = estimate_embeddings_usage(&body, "fast-embed");
 
     assert!(usage.prompt_tokens >= 1);
     assert_eq!(usage.completion_tokens, 0);
@@ -28,8 +28,8 @@ fn estimates_prompt_tokens_across_a_batch_input() {
         "input": ["hello world", "hello world"]
     });
 
-    let single_usage = estimate_embeddings_usage(&single);
-    let batch_usage = estimate_embeddings_usage(&batch);
+    let single_usage = estimate_embeddings_usage(&single, "fast-embed");
+    let batch_usage = estimate_embeddings_usage(&batch, "fast-embed");
 
     assert_eq!(batch_usage.prompt_tokens, single_usage.prompt_tokens * 2);
 }
@@ -41,21 +41,27 @@ fn pre_tokenized_integer_input_estimates_non_zero_tokens() {
     // prepaid-wallet gates engage -- the char-only count silently returned 0,
     // a single-request free-inference / budget & wallet-overdraft bypass.
     let flat = serde_json::json!({"model": "fast-embed", "input": [1, 2, 3, 4, 5]});
-    assert_eq!(estimate_embeddings_usage(&flat).prompt_tokens, 5);
+    assert_eq!(
+        estimate_embeddings_usage(&flat, "fast-embed").prompt_tokens,
+        5
+    );
 
     let batch = serde_json::json!({"model": "fast-embed", "input": [[1, 2, 3], [4, 5]]});
-    assert_eq!(estimate_embeddings_usage(&batch).prompt_tokens, 5);
+    assert_eq!(
+        estimate_embeddings_usage(&batch, "fast-embed").prompt_tokens,
+        5
+    );
 }
 
 #[test]
 fn missing_or_empty_input_estimates_zero_tokens() {
-    assert_eq!(estimate_embeddings_input_tokens(None), 0);
+    assert_eq!(estimate_embeddings_input_tokens("fast-embed", None), 0);
     assert_eq!(
-        estimate_embeddings_input_tokens(Some(&serde_json::json!([]))),
+        estimate_embeddings_input_tokens("fast-embed", Some(&serde_json::json!([]))),
         0
     );
     assert_eq!(
-        estimate_embeddings_input_tokens(Some(&serde_json::json!(""))),
+        estimate_embeddings_input_tokens("fast-embed", Some(&serde_json::json!(""))),
         0
     );
 }

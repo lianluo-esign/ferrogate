@@ -29,6 +29,7 @@ mod service_storage;
 mod state;
 mod storage;
 mod telemetry;
+mod tokenizer;
 
 use anyhow::Result as AnyResult;
 use clap::Parser;

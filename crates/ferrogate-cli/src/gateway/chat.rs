@@ -2732,7 +2732,7 @@ fn build_ai_request_plan(
         }));
     }
 
-    let estimated_usage = estimate_chat_completion_usage(&body_json);
+    let estimated_usage = estimate_chat_completion_usage(&body_json, &request.model);
     let routes =
         state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
     // Fail closed (issue #173): a region-constrained tenant with zero
@@ -3397,8 +3397,8 @@ fn set_canonical_provider_header(request: &mut ProviderHttpRequest, name: &str, 
     });
 }
 
-fn estimate_chat_completion_usage(body: &serde_json::Value) -> BillingTokenUsage {
-    let prompt_tokens = estimate_prompt_tokens(body);
+fn estimate_chat_completion_usage(body: &serde_json::Value, model: &str) -> BillingTokenUsage {
+    let prompt_tokens = estimate_prompt_tokens(body, model);
     let completion_tokens = requested_completion_tokens(body)
         .unwrap_or(DEFAULT_COMPLETION_TOKEN_RESERVATION)
         .saturating_mul(requested_choice_count(body));
@@ -3409,10 +3409,56 @@ fn estimate_chat_completion_usage(body: &serde_json::Value) -> BillingTokenUsage
     )
 }
 
-fn estimate_prompt_tokens(body: &serde_json::Value) -> u64 {
-    let chars = prompt_character_count(body, None) as u64;
-    let text_tokens = chars.saturating_add(3) / 4;
+/// Pre-dispatch prompt-token estimate. Prefers a local BPE count (issue #282)
+/// for model families with a bundled tokenizer, falling back to the `chars/4`
+/// heuristic for models without one. The per-message structural overhead is
+/// added in both cases (it approximates the ChatML role/format tokens the BPE
+/// text count does not include).
+fn estimate_prompt_tokens(body: &serde_json::Value, model: &str) -> u64 {
+    let text_tokens = match crate::tokenizer::count_tokens(model, &collect_prompt_text(body, None))
+    {
+        Some(tokens) => tokens,
+        None => {
+            let chars = prompt_character_count(body, None) as u64;
+            chars.saturating_add(3) / 4
+        }
+    };
     text_tokens.saturating_add(message_overhead_tokens(body))
+}
+
+/// Concatenate the prompt-bearing text of a request body (newline-separated so
+/// BPE tokens don't merge across field boundaries), mirroring the field filter
+/// of [`prompt_character_count`] so the tokenizer sees exactly the text the
+/// heuristic would have measured.
+fn collect_prompt_text(value: &serde_json::Value, key: Option<&str>) -> String {
+    let mut out = String::new();
+    append_prompt_text(value, key, &mut out);
+    out
+}
+
+fn append_prompt_text(value: &serde_json::Value, key: Option<&str>, out: &mut String) {
+    if key.is_some_and(is_non_prompt_request_field) {
+        return;
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                append_prompt_text(item, None, out);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                append_prompt_text(value, Some(key), out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn prompt_character_count(value: &serde_json::Value, key: Option<&str>) -> usize {
@@ -3530,7 +3576,7 @@ mod tests {
             "n": 2
         });
 
-        let usage = estimate_chat_completion_usage(&body);
+        let usage = estimate_chat_completion_usage(&body, "fast-chat");
 
         assert_eq!(usage.completion_tokens, 14);
         assert!(usage.prompt_tokens >= 7);
@@ -3540,6 +3586,40 @@ mod tests {
         );
     }
 
+    // Issue #282: for a model with a local tokenizer the pre-request prompt
+    // estimate is the real BPE count (plus per-message overhead), not chars/4.
+    // The BPE count for this natural-language prompt is strictly below the
+    // chars/4 upper bound the unknown-model path would have reserved.
+    #[test]
+    fn known_model_prompt_estimate_uses_the_local_tokenizer() {
+        let content = "The quick brown fox jumps over the lazy dog.";
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 16,
+        });
+
+        let bpe_usage = estimate_chat_completion_usage(&body, "gpt-4o");
+        let heuristic_usage = estimate_chat_completion_usage(&body, "unknown-model");
+
+        // Same structural overhead (1 message * 4) applies to both paths, so the
+        // difference is purely the prompt text: BPE is tighter than chars/4.
+        assert!(
+            bpe_usage.prompt_tokens < heuristic_usage.prompt_tokens,
+            "bpe prompt {} should be tighter than heuristic prompt {}",
+            bpe_usage.prompt_tokens,
+            heuristic_usage.prompt_tokens,
+        );
+        // The prompt side is exactly the BPE count over the collected prompt
+        // text (role + content, matching the heuristic's field filter) plus the
+        // single-message ChatML overhead (1 * 4) -- i.e. the tokenizer path ran.
+        let expected_prompt =
+            crate::tokenizer::count_tokens("gpt-4o", &collect_prompt_text(&body, None))
+                .expect("gpt-4o has a local encoding")
+                + 4;
+        assert_eq!(bpe_usage.prompt_tokens, expected_prompt);
+    }
+
     #[test]
     fn reserves_default_completion_tokens_when_unbounded() {
         let body = serde_json::json!({
@@ -3547,7 +3627,7 @@ mod tests {
             "messages": []
         });
 
-        let usage = estimate_chat_completion_usage(&body);
+        let usage = estimate_chat_completion_usage(&body, "fast-chat");
 
         assert_eq!(
             usage.completion_tokens,

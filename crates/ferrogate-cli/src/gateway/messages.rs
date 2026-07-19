@@ -1261,7 +1261,7 @@ fn build_messages_request_plan(
         });
     }
 
-    let estimated_usage = estimate_messages_usage(&chat_body);
+    let estimated_usage = estimate_messages_usage(&chat_body, &request.model);
     let routes =
         state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
     if routes.is_empty() && !auth.region_allowlist.is_empty() {
@@ -1365,17 +1365,25 @@ fn set_canonical_provider_header(request: &mut ProviderHttpRequest, name: &str, 
     });
 }
 
-/// Heuristic prompt/completion estimate over the translated chat body so the
-/// budget / TPM / prepaid-wallet gates engage before dispatch (mirrors
-/// `chat.rs::estimate_chat_completion_usage`).
-fn estimate_messages_usage(chat_body: &serde_json::Value) -> BillingTokenUsage {
-    let prompt_chars = prompt_character_count(chat_body.get("messages"));
+/// Prompt/completion estimate over the translated chat body so the budget /
+/// TPM / prepaid-wallet gates engage before dispatch (mirrors
+/// `chat.rs::estimate_chat_completion_usage`). The prompt side prefers a local
+/// BPE count for model families with a bundled tokenizer (issue #282) and falls
+/// back to the `chars/4` heuristic otherwise.
+fn estimate_messages_usage(chat_body: &serde_json::Value, model: &str) -> BillingTokenUsage {
     let message_overhead = chat_body
         .get("messages")
         .and_then(serde_json::Value::as_array)
         .map(|messages| messages.len() as u64 * 4)
         .unwrap_or_default();
-    let prompt_tokens = (prompt_chars.saturating_add(3) / 4).saturating_add(message_overhead);
+    let text_tokens = match crate::tokenizer::count_tokens(
+        model,
+        &collect_prompt_text(chat_body.get("messages")),
+    ) {
+        Some(tokens) => tokens,
+        None => prompt_character_count(chat_body.get("messages")).saturating_add(3) / 4,
+    };
+    let prompt_tokens = text_tokens.saturating_add(message_overhead);
     let completion_tokens = chat_body
         .get("max_tokens")
         .and_then(serde_json::Value::as_u64)
@@ -1400,6 +1408,36 @@ fn prompt_character_count(value: Option<&serde_json::Value>) -> u64 {
             .map(|(_, value)| prompt_character_count(Some(value)))
             .sum(),
         _ => 0,
+    }
+}
+
+/// Newline-separated prompt text mirroring [`prompt_character_count`]'s field
+/// filter, so the BPE tokenizer measures exactly the text the heuristic would.
+fn collect_prompt_text(value: Option<&serde_json::Value>) -> String {
+    let mut out = String::new();
+    append_prompt_text(value, &mut out);
+    out
+}
+
+fn append_prompt_text(value: Option<&serde_json::Value>, out: &mut String) {
+    match value {
+        Some(serde_json::Value::String(text)) => {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+        Some(serde_json::Value::Array(items)) => {
+            for item in items {
+                append_prompt_text(Some(item), out);
+            }
+        }
+        Some(serde_json::Value::Object(object)) => {
+            for (_, value) in object.iter().filter(|(key, _)| key.as_str() != "type") {
+                append_prompt_text(Some(value), out);
+            }
+        }
+        _ => {}
     }
 }
 

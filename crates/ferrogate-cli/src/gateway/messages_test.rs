@@ -186,7 +186,7 @@ fn estimate_messages_usage_is_non_zero_for_a_prompt() {
         "messages": [{ "role": "user", "content": "hello world" }]
     });
 
-    let usage = estimate_messages_usage(&chat_body);
+    let usage = estimate_messages_usage(&chat_body, "claude-logical");
 
     assert!(usage.prompt_tokens > 0);
     assert_eq!(usage.completion_tokens, 32);
@@ -194,6 +194,35 @@ fn estimate_messages_usage_is_non_zero_for_a_prompt() {
         usage.total_tokens,
         usage.prompt_tokens + usage.completion_tokens
     );
+}
+
+// Issue #282: a Claude model resolves to the cl100k proxy tokenizer, so the
+// prompt side is the real BPE count plus per-message overhead -- not chars/4.
+#[test]
+fn estimate_messages_usage_uses_the_local_tokenizer_for_claude() {
+    let content = "The quick brown fox jumps over the lazy dog.";
+    let chat_body = serde_json::json!({
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 32,
+        "messages": [{ "role": "user", "content": content }]
+    });
+
+    let bpe = estimate_messages_usage(&chat_body, "claude-3-5-sonnet-20241022");
+    let heuristic = estimate_messages_usage(&chat_body, "opaque-alias");
+
+    assert!(
+        bpe.prompt_tokens < heuristic.prompt_tokens,
+        "bpe prompt {} should be tighter than heuristic prompt {}",
+        bpe.prompt_tokens,
+        heuristic.prompt_tokens,
+    );
+    let expected = crate::tokenizer::count_tokens(
+        "claude-3-5-sonnet-20241022",
+        &collect_prompt_text(chat_body.get("messages")),
+    )
+    .expect("claude maps to the cl100k proxy")
+        + 4;
+    assert_eq!(bpe.prompt_tokens, expected);
 }
 
 #[test]

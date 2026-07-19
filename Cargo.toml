@@ -120,6 +120,14 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2.6"
 tempfile = "3.10"
+# Local BPE tokenizer for accurate PRE-request token estimation (#282): drives
+# the pre-dispatch TPM/budget/wallet reservation and lowest-cost route ranking.
+# Vocab tables (cl100k_base / o200k_base) are embedded in the crate and loaded
+# lazily via the `*_singleton()` accessors -- no network at build or run time.
+# Trade-off: the embedded BPE tables add a few MB to the binary; acceptable for
+# the accuracy win over char/4, and provider-reported usage remains
+# authoritative at settlement so the tokenizer never affects final billing.
+tiktoken-rs = "0.12"
 # Convert unix-second validity bounds into X.509 notBefore/notAfter when the
 # control plane mints self-hosted worker client certificates (issue #249).
 # Already resolved transitively via rcgen; declared here for direct use.
