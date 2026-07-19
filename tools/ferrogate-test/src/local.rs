@@ -32,6 +32,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// #264: drain a child's piped stderr (best-effort) so a start failure can be
+/// reported with the child's own diagnostics. Empty when stderr was not piped.
+fn drain_child_stderr(child: &mut Child) -> String {
+    use std::io::Read as _;
+    child
+        .stderr
+        .take()
+        .map(|mut stderr| {
+            let mut buffer = String::new();
+            let _ = stderr.read_to_string(&mut buffer);
+            buffer
+        })
+        .unwrap_or_default()
+}
+
+/// Format drained child stderr as a bail-message suffix: the last few non-empty
+/// lines, or nothing when stderr was empty/unpiped.
+fn format_child_stderr(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let tail: Vec<&str> = trimmed.lines().rev().take(20).collect();
+    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    format!("\n--- child stderr ---\n{tail}")
+}
+
 pub(crate) struct AuthHarness {
     _dir: tempfile::TempDir,
     pub(crate) auth_addr: String,
@@ -59,7 +86,9 @@ impl AuthHarness {
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // #264: pipe stderr so an exit-before-readiness surfaces the child's
+            // own error (drained into the bail) instead of a bare exit status.
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to start {}", ferrogate_auth_bin.display()))?;
 
@@ -77,7 +106,11 @@ impl AuthHarness {
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(20) {
             if let Some(status) = self.auth.try_wait()? {
-                bail!("ferrogate-auth process exited before readiness check: {status}");
+                let stderr = drain_child_stderr(&mut self.auth); // #264
+                bail!(
+                    "ferrogate-auth process exited before readiness check: {status}{}",
+                    format_child_stderr(&stderr)
+                );
             }
             match http_request_addr(&self.auth_addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(()),
@@ -200,11 +233,15 @@ impl BillingHarness {
             .args(["--token", crate::constants::BILLING_SERVICE_TOKEN])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
+            // #264: pipe stderr so a start failure is self-diagnosing. On an
+            // exit-before-readiness the child's stderr is drained into the bail
+            // message instead of being silently discarded (the old default),
+            // unless FERROGATE_TEST_DEBUG_STDERR=1 asks to stream it live.
             .stderr(
                 if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
                     Stdio::inherit()
                 } else {
-                    Stdio::null()
+                    Stdio::piped()
                 },
             );
         if let Some((dsn, schema, tls_mode)) = supabase {
@@ -235,7 +272,14 @@ impl BillingHarness {
         let mut last = String::new();
         while started.elapsed() < readiness_timeout {
             if let Some(status) = self.billing.try_wait()? {
-                bail!("ferrogate-billing process exited before readiness check: {status}");
+                // #264: surface the child's own error instead of just its exit
+                // status, so a failed billing start is diagnosable without
+                // re-running under FERROGATE_TEST_DEBUG_STDERR.
+                let stderr = drain_child_stderr(&mut self.billing);
+                bail!(
+                    "ferrogate-billing process exited before readiness check: {status}{}",
+                    format_child_stderr(&stderr)
+                );
             }
             match http_request_addr(&self.billing_addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(()),
@@ -469,7 +513,11 @@ impl LocalHarness {
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(20) {
             if let Some(status) = self.gateway.try_wait()? {
-                bail!("ferrogate process exited before readiness check: {status}");
+                let stderr = drain_child_stderr(&mut self.gateway); // #264
+                bail!(
+                    "ferrogate process exited before readiness check: {status}{}",
+                    format_child_stderr(&stderr)
+                );
             }
             match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(()),
