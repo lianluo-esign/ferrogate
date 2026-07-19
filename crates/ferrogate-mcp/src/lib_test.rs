@@ -734,6 +734,156 @@ fn post_http_json_rejects_untrusted_https_certificate_by_default() {
     let _ = handle.join();
 }
 
+// -- issue #277: 2026-07-28 negotiation + Mcp-Method/Mcp-Name routing ---
+
+#[test]
+fn negotiate_protocol_version_matrix_prefers_new_and_honours_legacy() {
+    // Server-side ingress negotiation (old->new and new->new both resolve to a
+    // mutually supported version; anything unknown negotiates down to newest).
+    assert_eq!(negotiate_protocol_version(Some("2026-07-28")), "2026-07-28");
+    assert_eq!(negotiate_protocol_version(Some("2025-06-18")), "2025-06-18");
+    assert_eq!(negotiate_protocol_version(None), "2026-07-28");
+    assert_eq!(negotiate_protocol_version(Some("2099-01-01")), "2026-07-28");
+}
+
+#[test]
+fn resolve_negotiated_version_matrix_adopts_server_choice_or_falls_back() {
+    // Client-side: adopt the server's echoed version when supported, else fall
+    // back to the previous stable revision.
+    assert_eq!(resolve_negotiated_version(Some("2026-07-28")), "2026-07-28");
+    assert_eq!(resolve_negotiated_version(Some("2025-06-18")), "2025-06-18");
+    assert_eq!(resolve_negotiated_version(None), "2025-06-18");
+    assert_eq!(resolve_negotiated_version(Some("2099-01-01")), "2025-06-18");
+    assert!(is_supported_protocol_version("2026-07-28"));
+    assert!(!is_supported_protocol_version("2099-01-01"));
+}
+
+#[test]
+fn verify_routing_headers_accepts_matching_or_absent_and_rejects_mismatch() {
+    // Absent headers (pre-2026-07-28 client) always pass.
+    assert!(verify_routing_headers(None, None, "tools/call", Some("srv-search")).is_ok());
+    // Matching headers pass.
+    assert!(verify_routing_headers(
+        Some("tools/call"),
+        Some("srv-search"),
+        "tools/call",
+        Some("srv-search"),
+    )
+    .is_ok());
+    // Method mismatch fails closed.
+    let method_error = verify_routing_headers(Some("tools/list"), None, "tools/call", Some("x"))
+        .expect_err("method mismatch must fail");
+    assert_eq!(method_error.header, "Mcp-Method");
+    // Name mismatch fails closed.
+    let name_error = verify_routing_headers(
+        Some("tools/call"),
+        Some("srv-evil"),
+        "tools/call",
+        Some("srv-search"),
+    )
+    .expect_err("name mismatch must fail");
+    assert_eq!(name_error.header, "Mcp-Name");
+}
+
+/// Runs a single request against a throwaway plain-HTTP server that captures
+/// the raw request and replies with `reply_body`. Returns the captured request.
+fn capture_one_http_request(addr_reply: &str, client_call: impl FnOnce(String)) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let reply = addr_reply.to_string();
+    let handle = thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = Read::read(&mut tcp, &mut chunk).unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..n]);
+            if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            reply.len(),
+            reply
+        );
+        tcp.write_all(response.as_bytes()).unwrap();
+        tcp.flush().unwrap();
+        String::from_utf8_lossy(&received).to_string()
+    });
+    client_call(format!("http://{addr}/mcp"));
+    handle.join().unwrap()
+}
+
+#[test]
+fn streamable_http_emits_mcp_method_and_name_headers_on_tools_call() {
+    let request = capture_one_http_request(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":false}}"#,
+        |endpoint| {
+            let mut config = test_config("github");
+            config.url = Some(endpoint);
+            let mut client = HttpMcpClient::new(&config).unwrap();
+            client
+                .call_tool("search", json!({"q": "x"}), &McpDispatchHeaders::empty())
+                .unwrap();
+        },
+    );
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        lower.contains("mcp-method: tools/call"),
+        "request: {request}"
+    );
+    assert!(lower.contains("mcp-name: search"), "request: {request}");
+}
+
+#[test]
+fn http_client_adopts_2026_07_28_when_server_echoes_it() {
+    let mut negotiated = String::new();
+    let request = capture_one_http_request(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28"}}"#,
+        |endpoint| {
+            let mut config = test_config("srv");
+            config.url = Some(endpoint);
+            let mut client = HttpMcpClient::new(&config).unwrap();
+            client.initialize().unwrap();
+            negotiated = client.protocol_version().to_string();
+        },
+    );
+    // Outbound initialize advertises the new revision...
+    assert!(request.contains("2026-07-28"), "request: {request}");
+    // ...and the client adopts the server's echoed version.
+    assert_eq!(negotiated, "2026-07-28");
+}
+
+#[test]
+fn http_client_falls_back_when_server_pins_or_omits_protocol_version() {
+    let mut pinned = String::new();
+    capture_one_http_request(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}"#,
+        |endpoint| {
+            let mut config = test_config("srv");
+            config.url = Some(endpoint);
+            let mut client = HttpMcpClient::new(&config).unwrap();
+            client.initialize().unwrap();
+            pinned = client.protocol_version().to_string();
+        },
+    );
+    assert_eq!(pinned, "2025-06-18");
+
+    let mut omitted = String::new();
+    capture_one_http_request(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, |endpoint| {
+        let mut config = test_config("srv");
+        config.url = Some(endpoint);
+        let mut client = HttpMcpClient::new(&config).unwrap();
+        client.initialize().unwrap();
+        omitted = client.protocol_version().to_string();
+    });
+    assert_eq!(omitted, "2025-06-18");
+}
+
 #[test]
 fn post_http_json_parses_sse_formatted_response_over_plain_http() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

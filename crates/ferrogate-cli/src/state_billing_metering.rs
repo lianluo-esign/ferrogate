@@ -497,6 +497,15 @@ impl AppState {
         }
     }
 
+    /// Record a per-operation MCP ingress request keyed by the `Mcp-Method` /
+    /// `Mcp-Name` routing headers (issue #277). `name` is empty for methods
+    /// that carry no target.
+    pub(crate) fn record_mcp_method_request(&self, method: &str, name: &str) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_mcp_method_request(method, name);
+        }
+    }
+
     fn record_billing_metrics(&self, event: &BillingEvent) {
         if let Ok(mut metrics) = self.metrics.lock() {
             metrics.record_billing_event(event);
@@ -733,6 +742,7 @@ impl AppState {
                 postgres_pool_acquire_wait_micros_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
+                mcp_method_totals: Vec::new(),
                 network_access_denied_total: 0,
                 network_access_rate_limited_total: 0,
             });

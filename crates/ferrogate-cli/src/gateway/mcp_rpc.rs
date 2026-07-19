@@ -89,7 +89,7 @@ pub(super) async fn handle_request(
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
     match rpc.method.as_str() {
-        "initialize" => result(rpc.id, initialize_result()),
+        "initialize" => result(rpc.id, initialize_result(&rpc.params)),
         "ping" => result(rpc.id, json!({})),
         "resources/list" => resources_list(state, ctx, auth, rpc.id).await,
         "resources/read" => resources_read(state, ctx, auth, rpc.id, &rpc.params).await,
@@ -140,9 +140,15 @@ pub(super) fn error(
     }
 }
 
-fn initialize_result() -> Value {
+fn initialize_result(params: &Value) -> Value {
+    // Negotiate the protocol revision (issue #277): honour a client that speaks
+    // 2026-07-28, otherwise fall back to 2025-06-18. Both are accepted on the
+    // ingress.
+    let protocol_version = ferrogate_mcp::negotiate_protocol_version(
+        params.get("protocolVersion").and_then(Value::as_str),
+    );
     json!({
-        "protocolVersion": "2025-06-18",
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
                 "listChanged": false

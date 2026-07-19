@@ -60,7 +60,8 @@ use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
 };
 use ferrogate_observability::{
-    GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric, TokenMetricTotals,
+    GatewayMetricsSnapshot, McpMethodMetricTotal, ModelProviderMetricTotal, RequestStatusMetric,
+    TokenMetricTotals,
 };
 use ferrogate_policy::{
     resolve_effective_quota, BasicPolicyEngine, EffectiveQuota, PolicyDecision, PolicyEngine,
@@ -2840,6 +2841,7 @@ struct GatewayMetricsAccumulator {
     billing_report_enqueue_failure_total: u64,
     token_totals: TokenMetricTotals,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
+    mcp_method_totals: BTreeMap<(String, String), McpMethodMetricTotal>,
     tool_call_total: u64,
     tool_latency_ms_total: u64,
     mcp_identity_resolution_total: u64,
@@ -3177,6 +3179,19 @@ impl GatewayMetricsAccumulator {
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
     }
 
+    fn record_mcp_method_request(&mut self, method: &str, name: &str) {
+        let key = (method.to_string(), name.to_string());
+        let total = self
+            .mcp_method_totals
+            .entry(key)
+            .or_insert_with(|| McpMethodMetricTotal {
+                method: method.to_string(),
+                name: name.to_string(),
+                requests: 0,
+            });
+        total.requests = total.requests.saturating_add(1);
+    }
+
     fn record_mcp_identity_resolution(&mut self, allowed: bool) {
         self.mcp_identity_resolution_total = self.mcp_identity_resolution_total.saturating_add(1);
         if !allowed {
@@ -3279,6 +3294,7 @@ impl GatewayMetricsAccumulator {
             postgres_pool_acquire_wait_micros_total: 0,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
+            mcp_method_totals: self.mcp_method_totals.values().cloned().collect(),
             network_access_denied_total: self.network_access_denied_total,
             network_access_rate_limited_total: self.network_access_rate_limited_total,
         }

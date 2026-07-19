@@ -160,6 +160,11 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
             requests: 1,
             total_tokens: 8,
         }],
+        mcp_method_totals: vec![McpMethodMetricTotal {
+            method: "tools/call".into(),
+            name: "srv-search".into(),
+            requests: 3,
+        }],
         network_access_denied_total: 3,
         network_access_rate_limited_total: 4,
     };
@@ -199,6 +204,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains(
         "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"
     ));
+    assert!(
+        text.contains("ferrogate_mcp_requests_total{method=\"tools/call\",name=\"srv-search\"} 3")
+    );
 }
 
 #[test]

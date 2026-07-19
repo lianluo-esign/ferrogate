@@ -182,3 +182,22 @@ fn resources_read_rejects_bad_uri_and_missing_asset() {
         .unwrap()
         .contains("no asset"));
 }
+
+#[test]
+fn initialize_negotiates_new_protocol_version_when_client_speaks_it() {
+    let value = initialize_result(&serde_json::json!({"protocolVersion": "2026-07-28"}));
+    assert_eq!(value["protocolVersion"], "2026-07-28");
+    assert_eq!(value["serverInfo"]["name"], "ferrogate");
+}
+
+#[test]
+fn initialize_falls_back_to_legacy_protocol_version_for_old_client() {
+    let value = initialize_result(&serde_json::json!({"protocolVersion": "2025-06-18"}));
+    assert_eq!(value["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn initialize_defaults_to_new_version_when_client_omits_protocol_version() {
+    let value = initialize_result(&serde_json::json!({}));
+    assert_eq!(value["protocolVersion"], "2026-07-28");
+}

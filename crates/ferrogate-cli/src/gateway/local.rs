@@ -2805,6 +2805,18 @@ impl FerroGateway {
             .await;
         }
 
+        // 2026-07-28 routing headers (issue #277). Read before the body so the
+        // per-operation metric and (below) the fail-closed body/header
+        // consistency check can key on them without trusting the body.
+        let header_method = headers
+            .get(ferrogate_mcp::MCP_METHOD_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let header_name = headers
+            .get(ferrogate_mcp::MCP_NAME_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -2866,6 +2878,43 @@ impl FerroGateway {
                 .await;
             }
         };
+        // Fail closed (issue #277): if a Streamable-HTTP client advertised a
+        // routing header, it MUST agree with the JSON-RPC body. Otherwise a
+        // caller could be scope-gated / rate-limited / metered as one operation
+        // while the body executes another. Audited with the authenticated
+        // tenant so the mismatch is attributable.
+        let body_name = (rpc.method == "tools/call")
+            .then(|| rpc.params.get("name").and_then(serde_json::Value::as_str))
+            .flatten();
+        if let Err(mismatch) = ferrogate_mcp::verify_routing_headers(
+            header_method.as_deref(),
+            header_name.as_deref(),
+            &rpc.method,
+            body_name,
+        ) {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "mcp.routing_header_mismatch",
+                "mcp",
+                "rejected",
+                mismatch.to_string(),
+            ));
+            let response = mcp_rpc::error(
+                rpc.id,
+                -32600,
+                format!("MCP routing header mismatch: {mismatch}"),
+            );
+            return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+        }
+
+        // Header-based per-tool Prometheus metric (issue #277): prefer the
+        // routing headers, falling back to the JSON-RPC body for pre-2026-07-28
+        // clients that omit them.
+        let metric_method = header_method.as_deref().unwrap_or(rpc.method.as_str());
+        let metric_name = header_name.as_deref().or(body_name).unwrap_or_default();
+        state.record_mcp_method_request(metric_method, metric_name);
+
         let skill_context = match resolve_visible_skill_context(&state, &auth, &headers) {
             Ok(context) => context,
             Err(error) => {

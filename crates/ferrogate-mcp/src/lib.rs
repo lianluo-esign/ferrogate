@@ -40,6 +40,108 @@ pub const DEFAULT_MAX_RECONNECT_ATTEMPTS: u32 = 5;
 pub const DEFAULT_MIN_RECONNECT_BACKOFF_SECS: u64 = 1;
 pub const DEFAULT_MAX_RECONNECT_BACKOFF_SECS: u64 = 30;
 
+/// MCP protocol revision FerroGate prefers to negotiate: 2026-07-28, the
+/// gateway-friendly "stateless core" revision that adds the `Mcp-Method` /
+/// `Mcp-Name` Streamable-HTTP routing headers (issue #277).
+pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+/// Previous stable revision FerroGate falls back to when a peer does not speak
+/// 2026-07-28.
+pub const MCP_PROTOCOL_VERSION_FALLBACK: &str = "2025-06-18";
+/// Protocol versions FerroGate can speak, newest first.
+pub const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
+    &[MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION_FALLBACK];
+
+/// Streamable-HTTP routing header carrying the JSON-RPC method (2026-07-28).
+/// Lets gateways/load-balancers route, scope-gate, rate-limit, and meter per
+/// operation without parsing the request body.
+pub const MCP_METHOD_HEADER: &str = "mcp-method";
+/// Streamable-HTTP routing header carrying the operation target name — for
+/// `tools/call` this is the tool name.
+pub const MCP_NAME_HEADER: &str = "mcp-name";
+
+/// Returns true when `version` is a protocol revision FerroGate can speak.
+pub fn is_supported_protocol_version(version: &str) -> bool {
+    SUPPORTED_MCP_PROTOCOL_VERSIONS.contains(&version)
+}
+
+/// Server-side version negotiation for the `/v1/mcp` ingress: given the
+/// `protocolVersion` a client requested in `initialize`, pick the version
+/// FerroGate will actually speak. An exactly-supported request is honoured;
+/// anything else (omitted, unknown, or newer) negotiates down to the newest
+/// version FerroGate speaks so an unrecognised client still gets a usable
+/// protocol rather than a hard failure.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(version) if version == MCP_PROTOCOL_VERSION_FALLBACK => MCP_PROTOCOL_VERSION_FALLBACK,
+        _ => MCP_PROTOCOL_VERSION,
+    }
+}
+
+/// Client-side: resolve the version to use after an upstream `initialize`
+/// echoes its chosen `protocolVersion`. The server's choice is honoured when
+/// supported; if it is omitted or unknown FerroGate falls back to the previous
+/// stable revision so tool calls still proceed.
+pub fn resolve_negotiated_version(server_version: Option<&str>) -> &'static str {
+    match server_version {
+        Some(version) if version == MCP_PROTOCOL_VERSION => MCP_PROTOCOL_VERSION,
+        _ => MCP_PROTOCOL_VERSION_FALLBACK,
+    }
+}
+
+/// Mismatch between a Streamable-HTTP routing header and the JSON-RPC body it
+/// claims to describe. The ingress fails such a request closed (issue #277) so
+/// a caller cannot be scope-gated / rate-limited / metered as one operation
+/// while the body executes another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingHeaderMismatch {
+    pub header: &'static str,
+    pub header_value: String,
+    pub body_value: String,
+}
+
+impl std::fmt::Display for RoutingHeaderMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} header {:?} does not match request body value {:?}",
+            self.header, self.header_value, self.body_value
+        )
+    }
+}
+
+/// Verify the optional `Mcp-Method` / `Mcp-Name` routing headers against the
+/// parsed JSON-RPC body. The headers are optional — a pre-2026-07-28 client
+/// omits them — but when present they MUST agree with the body, else the
+/// request is rejected. `body_name` is the `tools/call` target name (`None`
+/// for methods that carry no name).
+pub fn verify_routing_headers(
+    header_method: Option<&str>,
+    header_name: Option<&str>,
+    body_method: &str,
+    body_name: Option<&str>,
+) -> Result<(), RoutingHeaderMismatch> {
+    if let Some(header_method) = header_method {
+        if header_method != body_method {
+            return Err(RoutingHeaderMismatch {
+                header: "Mcp-Method",
+                header_value: header_method.to_string(),
+                body_value: body_method.to_string(),
+            });
+        }
+    }
+    if let Some(header_name) = header_name {
+        let body_name = body_name.unwrap_or_default();
+        if header_name != body_name {
+            return Err(RoutingHeaderMismatch {
+                header: "Mcp-Name",
+                header_value: header_name.to_string(),
+                body_value: body_name.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTransport {
@@ -186,6 +288,9 @@ pub struct McpServerStatus {
     pub last_error: Option<String>,
     pub last_connected_at_unix: Option<u64>,
     pub next_reconnect_backoff_secs: u64,
+    /// MCP protocol revision negotiated with this upstream (issue #277).
+    /// `None` while disconnected.
+    pub protocol_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -495,6 +600,10 @@ impl McpSession {
             last_error: self.last_error.clone(),
             last_connected_at_unix: self.last_connected_at_unix,
             next_reconnect_backoff_secs: self.next_reconnect_backoff_secs,
+            protocol_version: self
+                .client
+                .as_ref()
+                .map(|client| client.protocol_version().to_string()),
         }
     }
 
@@ -672,6 +781,16 @@ impl McpClient {
             Self::Stdio(client) => Some(Arc::clone(&client.child)),
         }
     }
+
+    fn protocol_version(&self) -> &str {
+        match self {
+            Self::Http(client) => client.protocol_version(),
+            // Stdio always sends the 2026-07-28 `initialize` but does not carry
+            // the Streamable-HTTP routing headers; report the negotiated value
+            // it defaults to.
+            Self::Stdio(_) => MCP_PROTOCOL_VERSION_FALLBACK,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -682,6 +801,10 @@ struct HttpMcpClient {
     tls: McpTlsConfig,
     transport: McpTransport,
     next_id: u64,
+    /// Protocol revision negotiated with this upstream in `initialize`
+    /// (issue #277). Starts at the fallback and is upgraded to 2026-07-28 when
+    /// the server echoes it.
+    protocol_version: String,
 }
 
 impl HttpMcpClient {
@@ -698,6 +821,7 @@ impl HttpMcpClient {
             tls: config.tls.clone(),
             transport: config.transport.clone(),
             next_id: 1,
+            protocol_version: MCP_PROTOCOL_VERSION_FALLBACK.to_string(),
         })
     }
 
@@ -708,20 +832,27 @@ impl HttpMcpClient {
             "id": id,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "ferrogate", "version": env!("CARGO_PKG_VERSION")}
             }
         });
-        let response = self.post_json(&body)?;
+        let response = self.post_rpc(&body, &McpDispatchHeaders::empty(), "initialize", None)?;
         ensure_no_jsonrpc_error(&response)?;
+        self.protocol_version = resolve_negotiated_version(
+            response
+                .get("result")
+                .and_then(|result| result.get("protocolVersion"))
+                .and_then(Value::as_str),
+        )
+        .to_string();
         Ok(())
     }
 
     fn list_tools(&mut self) -> AnyResult<Vec<ToolDef>> {
         let id = self.next_jsonrpc_id();
         let body = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}});
-        let response = self.post_json(&body)?;
+        let response = self.post_rpc(&body, &McpDispatchHeaders::empty(), "tools/list", None)?;
         parse_tools_list(&response)
     }
 
@@ -740,7 +871,7 @@ impl HttpMcpClient {
             "params": params
         });
         let response = self
-            .post_json_with_headers(&body, identity_headers)
+            .post_rpc(&body, identity_headers, "tools/call", Some(name))
             .map_err(|error| error.to_string())?;
         parse_call_result(&response).map_err(|error| error.to_string())
     }
@@ -748,20 +879,33 @@ impl HttpMcpClient {
     fn ping(&mut self) -> AnyResult<()> {
         let id = self.next_jsonrpc_id();
         let body = json!({"jsonrpc": "2.0", "id": id, "method": "ping", "params": {}});
-        let response = self.post_json(&body)?;
+        let response = self.post_rpc(&body, &McpDispatchHeaders::empty(), "ping", None)?;
         ensure_no_jsonrpc_error(&response)
     }
 
-    fn post_json(&self, body: &Value) -> AnyResult<Value> {
-        self.post_json_with_headers(body, &McpDispatchHeaders::empty())
+    /// The 2026-07-28 `Mcp-Method` / `Mcp-Name` routing headers for an outbound
+    /// request. Defined for Streamable HTTP only, so other transports emit
+    /// nothing.
+    fn routing_headers(&self, method: &str, name: Option<&str>) -> Vec<(String, String)> {
+        if self.transport != McpTransport::StreamableHttp {
+            return Vec::new();
+        }
+        let mut headers = vec![(MCP_METHOD_HEADER.to_string(), method.to_string())];
+        if let Some(name) = name {
+            headers.push((MCP_NAME_HEADER.to_string(), name.to_string()));
+        }
+        headers
     }
 
-    fn post_json_with_headers(
+    fn post_rpc(
         &self,
         body: &Value,
         identity_headers: &McpDispatchHeaders,
+        method: &str,
+        name: Option<&str>,
     ) -> AnyResult<Value> {
         let mut headers = self.headers.clone();
+        headers.extend(self.routing_headers(method, name));
         headers.extend(identity_headers.0.iter().cloned());
         post_http_json(
             &self.endpoint,
@@ -777,6 +921,10 @@ impl HttpMcpClient {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         id
+    }
+
+    fn protocol_version(&self) -> &str {
+        &self.protocol_version
     }
 }
 
@@ -824,7 +972,7 @@ impl StdioMcpClient {
             "id": id,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "ferrogate", "version": env!("CARGO_PKG_VERSION")}
             }

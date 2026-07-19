@@ -145,6 +145,118 @@ fn mcp_json_rpc_tools_call_is_blocked_by_managed_action_guardrail() {
     gateway.wait().unwrap();
 }
 
+/// Issue #277 fail-closed proof: a `tools/call` whose body method disagrees with
+/// the inbound `Mcp-Method` routing header must be rejected before execution and
+/// audited, so a caller cannot be scope-gated / rate-limited / metered as one
+/// operation while the body runs another. A matching header is NOT rejected as a
+/// mismatch (it proceeds to normal handling).
+#[test]
+fn mcp_json_rpc_rejects_routing_header_method_mismatch_and_audits_it() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, mismatch_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    // Body says tools/call, header says tools/list: fail closed.
+    let mismatched = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+            "Mcp-Method: tools/list",
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "local-echo", "arguments": {} }
+        })
+        .to_string(),
+    ));
+    assert!(
+        mismatched.get("result").is_none(),
+        "a routing-header mismatch must not return a result: {mismatched}"
+    );
+    let message = mismatched["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("routing header mismatch"),
+        "the JSON-RPC error must attribute the routing-header mismatch: {mismatched}"
+    );
+
+    // The rejection is audited on the governed seam.
+    let audit_events = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events?limit=200",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit_events["data"].as_array().unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event["action"] == "mcp.routing_header_mismatch" && event["outcome"] == "rejected"
+        }),
+        "missing routing-header mismatch audit evidence: {audit_events}"
+    );
+
+    // A matching header is not treated as a mismatch (it proceeds to normal
+    // handling; the tool is simply not registered here).
+    let matched = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+            "Mcp-Method: tools/call",
+            "Mcp-Name: local-echo",
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "local-echo", "arguments": {} }
+        })
+        .to_string(),
+    ));
+    let matched_message = matched["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !matched_message.contains("routing header mismatch"),
+        "a matching routing header must not be rejected as a mismatch: {matched}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+/// Minimal gateway config for the routing-header mismatch test: a client with
+/// tools scopes and an admin for reading audit evidence. No MCP servers are
+/// needed because the mismatch is rejected before any tool executes.
+fn mismatch_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.read", "tools.execute"]
+"#
+    )
+}
+
 /// Invoke a tool through the native MCP JSON-RPC transport (`POST /v1/mcp`,
 /// method `tools/call`) and return the parsed JSON-RPC response envelope.
 fn tools_call(gateway_addr: &str, name: &str, arguments: Value) -> Value {

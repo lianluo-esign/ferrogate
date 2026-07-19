@@ -376,6 +376,10 @@ pub struct GatewayMetricsSnapshot {
     pub postgres_pool_acquire_wait_micros_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
+    /// Per-operation MCP ingress counts keyed by the `Mcp-Method`/`Mcp-Name`
+    /// routing headers (falling back to the JSON-RPC body), so operators can
+    /// route/alert per MCP method and tool without parsing bodies (issue #277).
+    pub mcp_method_totals: Vec<McpMethodMetricTotal>,
     /// Requests rejected pre-authentication for not matching a configured
     /// `network_access.ip_allowlist` (issue #166).
     pub network_access_denied_total: u64,
@@ -403,6 +407,15 @@ pub struct ModelProviderMetricTotal {
     pub provider: String,
     pub requests: u64,
     pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpMethodMetricTotal {
+    pub method: String,
+    /// Operation target (tool name for `tools/call`); empty for methods that
+    /// carry no name.
+    pub name: String,
+    pub requests: u64,
 }
 
 pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
@@ -792,6 +805,21 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         output.push_str(&format!(
             "ferrogate_model_provider_tokens_total{{logical_model=\"{logical_model}\",provider=\"{provider}\"}} {}\n",
             total.total_tokens
+        ));
+    }
+
+    push_help(
+        &mut output,
+        "ferrogate_mcp_requests_total",
+        "MCP ingress requests grouped by Mcp-Method routing header and target name.",
+        "counter",
+    );
+    for total in &snapshot.mcp_method_totals {
+        let method = escape_label_value(&total.method);
+        let name = escape_label_value(&total.name);
+        output.push_str(&format!(
+            "ferrogate_mcp_requests_total{{method=\"{method}\",name=\"{name}\"}} {}\n",
+            total.requests
         ));
     }
 
