@@ -234,6 +234,7 @@ impl Config {
             network_access: crate::config::NetworkAccessConfig::default(),
             asset_bucket: crate::config::AssetBucketConfig::default(),
             scheduler: crate::config::SchedulerConfig::default(),
+            asset_egress_price_per_gb: None,
         }
     }
 

@@ -20,6 +20,8 @@ fn policy(scope_type: QuotaScopeKind) -> StoredQuotaPolicy {
         enabled: true,
         created_at_unix: 1,
         updated_at_unix: 1,
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: None,
     }
 }
 

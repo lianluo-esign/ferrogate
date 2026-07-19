@@ -93,6 +93,19 @@ pub struct EffectiveQuota {
     pub monthly_budget_usd: Option<f64>,
     pub monthly_budget_scope: Option<QuotaScopeSelector>,
     pub asset_storage_quota_bytes: Option<u64>,
+    /// #262 (egress governance): tightest monthly egress/download byte budget
+    /// across the chain, resolved with the same `min`-across-the-chain rule as
+    /// `rpm_limit`/`monthly_budget_usd` (nearest scope overrides but can never
+    /// exceed an ancestor's cap). `None` means no egress budget applies.
+    pub monthly_egress_bytes_budget: Option<u64>,
+    /// The scope whose `monthly_egress_bytes_budget` won the chain's `min`, so a
+    /// caller can key the cumulative-egress counter on the winning scope's
+    /// [`QuotaScopeSelector::counter_key`] exactly like the token/budget dims.
+    pub monthly_egress_bytes_scope: Option<QuotaScopeSelector>,
+    /// #262: tightest per-minute asset-download request cap across the chain,
+    /// the download-side analogue of `rpm_limit`.
+    pub download_rpm_limit: Option<u64>,
+    pub download_rpm_limit_scope: Option<QuotaScopeSelector>,
     pub denied_by: Option<QuotaScopeKind>,
 }
 
@@ -181,6 +194,22 @@ pub fn resolve_effective_quota(
             policy.scope_type,
             &policy.scope_id,
         );
+        // #262: egress byte budget + download RPM merge exactly like rpm/tpm
+        // (min-across-the-chain, ties to the most specific scope).
+        update_min_u64_scope(
+            &mut effective.monthly_egress_bytes_budget,
+            &mut effective.monthly_egress_bytes_scope,
+            policy.monthly_egress_bytes_budget,
+            policy.scope_type,
+            &policy.scope_id,
+        );
+        update_min_u64_scope(
+            &mut effective.download_rpm_limit,
+            &mut effective.download_rpm_limit_scope,
+            policy.download_rpm_limit,
+            policy.scope_type,
+            &policy.scope_id,
+        );
         if policy.scope_type == QuotaScopeKind::Tenant {
             effective.asset_storage_quota_bytes = policy.asset_storage_quota_bytes;
         }
@@ -212,6 +241,21 @@ pub fn resolve_effective_quota(
             if let Some(budget) = plan.default_monthly_budget_usd {
                 effective.monthly_budget_usd = Some(budget);
                 effective.monthly_budget_scope = plan_scope.clone();
+            }
+        }
+        // #262: egress budget + download RPM take the plan floor only when no
+        // explicit scope policy set them, keyed on the tenant scope (a plan is
+        // a tenant-wide default bundle), mirroring rpm/tpm/budget above.
+        if effective.monthly_egress_bytes_budget.is_none() {
+            if let Some(budget) = plan.default_monthly_egress_bytes_budget {
+                effective.monthly_egress_bytes_budget = Some(budget);
+                effective.monthly_egress_bytes_scope = plan_scope.clone();
+            }
+        }
+        if effective.download_rpm_limit.is_none() {
+            if let Some(rpm) = plan.default_download_rpm_limit {
+                effective.download_rpm_limit = Some(rpm);
+                effective.download_rpm_limit_scope = plan_scope.clone();
             }
         }
         effective.asset_storage_quota_bytes = effective
@@ -286,6 +330,35 @@ mod tests {
             enabled,
             created_at_unix: 1,
             updated_at_unix: 1,
+            monthly_egress_bytes_budget: None,
+            download_rpm_limit: None,
+        }
+    }
+
+    /// Builder for an egress-dimension-only policy (#262): rpm/tpm/budget stay
+    /// unset so a test exercises just the egress byte budget + download RPM
+    /// merge without interference from the token dimensions.
+    fn egress_policy(
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        monthly_egress_bytes_budget: Option<u64>,
+        download_rpm_limit: Option<u64>,
+    ) -> StoredQuotaPolicy {
+        StoredQuotaPolicy {
+            id: format!("{}:{scope_id}", scope_type.as_str()),
+            scope_type,
+            scope_id: scope_id.to_string(),
+            model_allowlist: Vec::new(),
+            rpm_limit: None,
+            tpm_limit: None,
+            monthly_budget_usd: None,
+            asset_storage_quota_bytes: None,
+            alert_threshold_pcts: Vec::new(),
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            monthly_egress_bytes_budget,
+            download_rpm_limit,
         }
     }
 
@@ -736,6 +809,8 @@ mod tests {
             asset_hosting_enabled: true,
             default_asset_storage_quota_bytes: Some(1_000_000),
             extension_tools_enabled: true,
+            default_monthly_egress_bytes_budget: Some(5_000_000),
+            default_download_rpm_limit: Some(120),
         }
     }
 
@@ -791,6 +866,106 @@ mod tests {
         assert_eq!(quota.tpm_limit, Some(100_000));
         assert!(quota.allows_model("fast-chat"));
         assert!(!quota.allows_model("vision"));
+    }
+
+    #[test]
+    fn egress_budget_and_download_rpm_follow_min_across_the_chain() {
+        // Tenant sets a loose egress budget; the workspace tightens it below
+        // the tenant cap and must win. Download RPM binds independently at the
+        // key. (#262)
+        let policies = vec![
+            egress_policy(QuotaScopeKind::Tenant, "t1", Some(10_000_000), Some(600)),
+            egress_policy(QuotaScopeKind::Workspace, "w1", Some(2_000_000), None),
+            egress_policy(QuotaScopeKind::Key, "k1", None, Some(30)),
+        ];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: Some("w1"),
+                key_id: Some("k1"),
+            },
+            lookup_from(policies),
+            None,
+        );
+        assert_eq!(quota.monthly_egress_bytes_budget, Some(2_000_000));
+        assert_eq!(
+            quota.monthly_egress_bytes_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Workspace, "w1"))
+        );
+        assert_eq!(quota.download_rpm_limit, Some(30));
+        assert_eq!(
+            quota.download_rpm_limit_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Key, "k1"))
+        );
+    }
+
+    #[test]
+    fn a_workspace_cannot_raise_the_egress_budget_above_the_tenant_ceiling() {
+        // Workspace tries to widen the tenant's 1MB egress cap to 9MB; the
+        // min-across-the-chain rule clamps it back to the tenant ceiling. (#262)
+        let policies = vec![
+            egress_policy(QuotaScopeKind::Tenant, "t1", Some(1_000_000), None),
+            egress_policy(QuotaScopeKind::Workspace, "w1", Some(9_000_000), None),
+        ];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: Some("w1"),
+                key_id: None,
+            },
+            lookup_from(policies),
+            None,
+        );
+        assert_eq!(quota.monthly_egress_bytes_budget, Some(1_000_000));
+        assert_eq!(
+            quota.monthly_egress_bytes_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1"))
+        );
+    }
+
+    #[test]
+    fn plan_egress_floors_apply_only_when_no_explicit_policy_sets_them() {
+        let plan = sample_plan();
+        // No explicit policy: plan floors apply, keyed on the tenant scope.
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: Some("k1"),
+            },
+            lookup_from(vec![]),
+            Some(&plan),
+        );
+        assert_eq!(quota.monthly_egress_bytes_budget, Some(5_000_000));
+        assert_eq!(quota.download_rpm_limit, Some(120));
+        assert_eq!(
+            quota.monthly_egress_bytes_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1"))
+        );
+
+        // An explicit tenant egress budget overrides the plan floor for that
+        // dimension; the download-RPM floor (untouched by any policy) survives.
+        let policies = vec![egress_policy(
+            QuotaScopeKind::Tenant,
+            "t1",
+            Some(250_000),
+            None,
+        )];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(policies),
+            Some(&plan),
+        );
+        assert_eq!(quota.monthly_egress_bytes_budget, Some(250_000));
+        assert_eq!(quota.download_rpm_limit, Some(120));
     }
 
     #[test]

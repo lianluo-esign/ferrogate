@@ -83,6 +83,14 @@ pub(crate) struct Config {
     pub(crate) asset_bucket: AssetBucketConfig,
     #[serde(default)]
     pub(crate) scheduler: SchedulerConfig,
+    /// #262: asset-egress (download bandwidth) rate in USD per GB used to
+    /// settle per-download metering events. `None` (the default) leaves
+    /// egress metered + audited but unpriced (cost_usd = None, no wallet
+    /// debit) -- exactly how an unpriced model is metered but not charged --
+    /// so this is purely additive for a deployment that hasn't opted into
+    /// egress billing. Mirrors `PriceBook.egress_price_per_gb`.
+    #[serde(default)]
+    pub(crate) asset_egress_price_per_gb: Option<f64>,
 }
 
 /// Time-based agent schedule triggers (#246). The scheduler is a control-plane
@@ -2064,6 +2072,7 @@ impl Default for Config {
             network_access: NetworkAccessConfig::default(),
             asset_bucket: AssetBucketConfig::default(),
             scheduler: SchedulerConfig::default(),
+            asset_egress_price_per_gb: None,
         }
     }
 }

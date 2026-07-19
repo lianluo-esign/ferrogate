@@ -1925,4 +1925,26 @@ $$;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (38, '038_asset_registry_semantics')
+-- Migration 039 (#262): asset egress (download bandwidth) governance. Adds a
+-- monthly egress byte budget + per-minute download RPM cap to both the
+-- per-scope quota_policies and the tenant-wide plans defaults, mirroring the
+-- existing monthly_budget_usd / rpm_limit dimensions. Unlike
+-- asset_storage_quota_bytes, egress governance is NOT tenant-only: a
+-- workspace/key may carry a tighter egress cap that resolve_effective_quota
+-- folds `min`-across-the-chain, so no scope-restriction CHECK is added. Added
+-- via ALTER ... ADD COLUMN IF NOT EXISTS so the migration stays idempotent
+-- against already-provisioned tables; no index is added (lookups are by the
+-- already-indexed (scope_type, scope_id)).
+ALTER TABLE quota_policies
+    ADD COLUMN IF NOT EXISTS monthly_egress_bytes_budget BIGINT;
+ALTER TABLE quota_policies
+    ADD COLUMN IF NOT EXISTS download_rpm_limit BIGINT;
+
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS default_monthly_egress_bytes_budget BIGINT;
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS default_download_rpm_limit BIGINT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (39, '039_asset_egress_quota')
 ON CONFLICT (version) DO NOTHING;

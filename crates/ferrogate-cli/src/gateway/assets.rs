@@ -639,6 +639,33 @@ impl FerroGateway {
             extra_headers.push(("x-ferrogate-asset-yanked", "true".to_string()));
         }
 
+        // #262 egress quota: fail-closed deny gate (monthly egress byte budget +
+        // download RPM) before serving, using the resolved object size.
+        if let Some((code, message)) =
+            super::asset_egress::asset_egress_quota_denial(&state, &auth, selected.size_bytes)
+        {
+            return write_json_error(
+                session,
+                StatusCode::TOO_MANY_REQUESTS,
+                code,
+                message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+        // #262 egress metering: meter the download bytes through the existing
+        // billing outbox + wallet-debit path and emit the pull audit event.
+        super::asset_egress::record_asset_egress(
+            &state,
+            ctx,
+            &auth,
+            asset_type,
+            name,
+            &resolved.version,
+            selected.size_bytes,
+        )
+        .await;
+
         self.write_asset_body(session, ctx, selected.clone(), &extra_headers)
             .await
     }

@@ -23,6 +23,8 @@ fn policy(scope_type: QuotaScopeKind, scope_id: &str, bytes: u64) -> StoredQuota
         enabled: true,
         created_at_unix: 1,
         updated_at_unix: 1,
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: None,
     }
 }
 
@@ -79,6 +81,8 @@ fn explicit_scope_value_replaces_the_plan_default() {
         extension_tools_enabled: false,
         created_at_unix: 1,
         updated_at_unix: 1,
+        default_monthly_egress_bytes_budget: None,
+        default_download_rpm_limit: None,
     };
     assert_eq!(
         resolve(Vec::new(), Some(&plan)).asset_storage_quota_bytes,

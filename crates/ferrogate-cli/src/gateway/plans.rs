@@ -248,6 +248,8 @@ impl FerroGateway {
             asset_hosting_enabled: payload.asset_hosting_enabled.unwrap_or(false),
             default_asset_storage_quota_bytes: payload.default_asset_storage_quota_bytes,
             extension_tools_enabled: payload.extension_tools_enabled.unwrap_or(false),
+            default_monthly_egress_bytes_budget: payload.default_monthly_egress_bytes_budget,
+            default_download_rpm_limit: payload.default_download_rpm_limit,
             created_at_unix: now,
             updated_at_unix: now,
         };
@@ -325,6 +327,8 @@ impl FerroGateway {
                 asset_hosting_enabled: false,
                 default_asset_storage_quota_bytes: None,
                 extension_tools_enabled: false,
+                default_monthly_egress_bytes_budget: None,
+                default_download_rpm_limit: None,
                 created_at_unix: now,
                 updated_at_unix: now,
             });
@@ -354,6 +358,12 @@ impl FerroGateway {
                 extension_tools_enabled: payload
                     .extension_tools_enabled
                     .unwrap_or(existing.extension_tools_enabled),
+                default_monthly_egress_bytes_budget: payload
+                    .default_monthly_egress_bytes_budget
+                    .or(existing.default_monthly_egress_bytes_budget),
+                default_download_rpm_limit: payload
+                    .default_download_rpm_limit
+                    .or(existing.default_download_rpm_limit),
                 created_at_unix,
                 updated_at_unix: now,
             }
@@ -372,6 +382,8 @@ impl FerroGateway {
                 asset_hosting_enabled: payload.asset_hosting_enabled.unwrap_or(false),
                 default_asset_storage_quota_bytes: payload.default_asset_storage_quota_bytes,
                 extension_tools_enabled: payload.extension_tools_enabled.unwrap_or(false),
+                default_monthly_egress_bytes_budget: payload.default_monthly_egress_bytes_budget,
+                default_download_rpm_limit: payload.default_download_rpm_limit,
                 created_at_unix,
                 updated_at_unix: now,
             }
@@ -472,6 +484,8 @@ fn admin_plan(plan: &StoredPlan) -> AdminPlan {
         asset_hosting_enabled: plan.asset_hosting_enabled,
         default_asset_storage_quota_bytes: plan.default_asset_storage_quota_bytes,
         extension_tools_enabled: plan.extension_tools_enabled,
+        default_monthly_egress_bytes_budget: plan.default_monthly_egress_bytes_budget,
+        default_download_rpm_limit: plan.default_download_rpm_limit,
         created_at_unix: plan.created_at_unix,
         updated_at_unix: plan.updated_at_unix,
     }

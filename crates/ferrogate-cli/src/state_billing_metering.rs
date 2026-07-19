@@ -574,6 +574,125 @@ impl AppState {
         }
     }
 
+    /// #262: settle and record one asset-download (egress) metering event
+    /// through the SAME durable metering + billing-outbox + wallet path token
+    /// usage flows through, so egress charges land in the ledger and draw down
+    /// a prepaid wallet unchanged. `bytes` is the served object size. The event
+    /// carries zero token usage and a dedicated `asset_egress:*` logical model
+    /// so egress is a first-class, separately-attributable billing dimension.
+    /// `cost_usd` comes from the configured per-GB egress rate; when egress is
+    /// unpriced (`asset_egress_price_per_gb = None`) the event is still metered
+    /// and audited but carries no cost and never debits the wallet -- exactly
+    /// how an unpriced model is metered but not charged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_asset_egress_event(
+        &self,
+        request_id: &str,
+        trace_id: Option<&str>,
+        tenant: &ferrogate_core::TenantContext,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        bytes: u64,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        let cost_usd = self
+            .asset_egress_price_per_gb()
+            .map(|price_per_gb| ferrogate_billing::pricing::egress_cost_usd(price_per_gb, bytes));
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("asset_type".to_string(), asset_type.to_string());
+        metadata.insert("asset_name".to_string(), name.to_string());
+        metadata.insert("asset_version".to_string(), version.to_string());
+        metadata.insert("asset_egress_bytes".to_string(), bytes.to_string());
+
+        let mut event = BillingEvent {
+            request_id: request_id.to_string(),
+            trace_id: trace_id.map(str::to_string),
+            provider_attempt: ProviderAttempt::for_request(request_id, 0),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
+            tenant: tenant.clone(),
+            logical_model: format!("asset_egress:{asset_type}/{name}"),
+            provider: "asset_egress".to_string(),
+            provider_model: version.to_string(),
+            usage: BillingTokenUsage::new(0, 0, 0),
+            usage_source: BillingUsageSource::GatewayEstimate,
+            status_code: 200,
+            occurred_at_unix: now_unix_seconds(),
+            cost_usd,
+            latency_ms: None,
+            metadata,
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
+        };
+        let settlement_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+        let wallet_debit = match cost_usd {
+            Some(cost_usd) => {
+                self.debit_wallet_for_settled_cost(tenant, cost_usd, &settlement_id)
+                    .await
+            }
+            None => None,
+        };
+        event.wallet_delta_credits = wallet_debit.as_ref().map(|outcome| outcome.delta_credits);
+        event.wallet_balance_after_credits = wallet_debit
+            .as_ref()
+            .map(|outcome| outcome.balance_after_credits);
+
+        // Same durable outbox path token usage uses so an egress charge
+        // survives a billing outage or gateway restart, idempotent on the
+        // ledger entry id.
+        let recorded = if self.billing_reporter.is_some() {
+            let entry_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+            let now = now_unix_seconds().unwrap_or_default() as i64;
+            let outcome = self
+                .repositories
+                .append_billing_event_with_outbox_enqueue(event.clone(), &entry_id, now)
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist asset egress event: {error}"),
+                    )
+                })?;
+            if let Some(error) = outcome.enqueue_error {
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_billing_report_enqueue_failure();
+                }
+                warn!(
+                    request_id = %event.request_id,
+                    error = %error,
+                    "failed to enqueue asset egress billing report for durable delivery"
+                );
+            }
+            outcome.recorded
+        } else {
+            self.repositories
+                .append_billing_event(event.clone())
+                .await
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist asset egress event: {error}"),
+                    )
+                })?
+        };
+        if !recorded {
+            return Ok(());
+        }
+        self.metering_events.record(event.clone())?;
+        self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event.clone());
+        }
+        // Egress spend counts toward the tenant's monthly budget/alert tiers
+        // just like token spend.
+        self.dispatch_budget_threshold_alerts(tenant).await;
+        Ok(())
+    }
+
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
         let mut snapshot = self
             .metrics

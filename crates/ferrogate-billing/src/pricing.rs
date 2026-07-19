@@ -24,10 +24,27 @@ use crate::ModelPrice;
 /// Default credit granularity: 1 USD == 1_000_000 credits (1 credit == 1 micro-USD).
 pub const DEFAULT_CREDITS_PER_USD: f64 = 1_000_000.0;
 
+/// Bytes in one billed gigabyte for egress metering (#262). Uses the decimal
+/// GB (10^9) that bandwidth/CDN rate cards are quoted in, not the binary GiB,
+/// so a `$/GB` egress rate matches how object-storage and CDN egress is sold.
+pub const BYTES_PER_BILLED_GB: f64 = 1_000_000_000.0;
+
+/// A conservative default asset-egress rate ($/GB) seeded into
+/// [`PriceBook::with_default_rate_card`] (#262), in the ballpark of commodity
+/// object-storage/CDN egress. A deployment overrides it via configuration.
+pub const DEFAULT_EGRESS_PRICE_PER_GB: f64 = 0.09;
+
 const WILDCARD: &str = "*";
 
 fn default_credits_per_usd() -> f64 {
     DEFAULT_CREDITS_PER_USD
+}
+
+/// Settled USD cost of transferring `bytes` of asset egress at `price_per_gb`
+/// (#262). Shared by [`PriceBook::egress_cost_usd`] and the gateway's
+/// per-download metering so the two can never drift on the GB divisor.
+pub fn egress_cost_usd(price_per_gb: f64, bytes: u64) -> f64 {
+    bytes as f64 / BYTES_PER_BILLED_GB * price_per_gb
 }
 
 /// A single rate-card rule. `provider` and `model` may be the literal `"*"`
@@ -59,6 +76,13 @@ pub struct PriceBook {
     /// Credits charged per settled USD. `credits = total_cost_usd * credits_per_usd`.
     #[serde(default = "default_credits_per_usd")]
     pub credits_per_usd: f64,
+    /// Asset-egress (download bandwidth) rate in USD per GB (#262), the
+    /// non-token billing dimension the asset-hosting surface settles against.
+    /// `None` means egress is unpriced, so an egress metering event carries no
+    /// cost and the ledger/wallet are untouched -- exactly like an unpriced
+    /// model, fail-open on charge rather than fabricating a cost.
+    #[serde(default)]
+    pub egress_price_per_gb: Option<f64>,
 }
 
 impl Default for PriceBook {
@@ -66,6 +90,7 @@ impl Default for PriceBook {
         Self {
             entries: Vec::new(),
             credits_per_usd: DEFAULT_CREDITS_PER_USD,
+            egress_price_per_gb: None,
         }
     }
 }
@@ -75,7 +100,22 @@ impl PriceBook {
         Self {
             entries,
             credits_per_usd: DEFAULT_CREDITS_PER_USD,
+            egress_price_per_gb: None,
         }
+    }
+
+    /// Set the asset-egress rate (USD per GB) for this rate card (#262).
+    pub fn with_egress_price_per_gb(mut self, egress_price_per_gb: f64) -> Self {
+        self.egress_price_per_gb = Some(egress_price_per_gb);
+        self
+    }
+
+    /// Settled USD cost of `bytes` of asset egress under this rate card (#262),
+    /// or `None` when egress is unpriced so the caller can fail closed on the
+    /// charge (no fabricated zero cost), mirroring [`Self::price_for`].
+    pub fn egress_cost_usd(&self, bytes: u64) -> Option<f64> {
+        self.egress_price_per_gb
+            .map(|price_per_gb| egress_cost_usd(price_per_gb, bytes))
     }
 
     pub fn with_credits_per_usd(mut self, credits_per_usd: f64) -> Self {
@@ -163,7 +203,7 @@ impl PriceBook {
             PriceEntry::new("*", "deepseek-chat", ModelPrice::usd(0.27, 1.10)),
             PriceEntry::new("*", "deepseek-reasoner", ModelPrice::usd(0.55, 2.19)),
         ];
-        Self::new(entries)
+        Self::new(entries).with_egress_price_per_gb(DEFAULT_EGRESS_PRICE_PER_GB)
     }
 }
 

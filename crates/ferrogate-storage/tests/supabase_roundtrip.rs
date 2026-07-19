@@ -559,6 +559,8 @@ fn quota_policy_round_trips_through_real_supabase() {
         enabled: true,
         created_at_unix: 1,
         updated_at_unix: 1,
+        monthly_egress_bytes_budget: Some(1_073_741_824),
+        download_rpm_limit: Some(120),
     }))
     .expect("quota policy upsert must succeed");
 
@@ -577,6 +579,8 @@ fn quota_policy_round_trips_through_real_supabase() {
         enabled: false,
         created_at_unix: 1,
         updated_at_unix: 2,
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: None,
     }))
     .expect("quota policy re-upsert must succeed");
 
@@ -591,6 +595,10 @@ fn quota_policy_round_trips_through_real_supabase() {
     assert_eq!(policy.tpm_limit, None);
     assert_eq!(policy.monthly_budget_usd, None);
     assert_eq!(policy.asset_storage_quota_bytes, Some(52_428_800));
+    // #262: the second upsert reset both egress columns to NULL, proving they
+    // survive the Postgres roundtrip (were Some on the first write).
+    assert_eq!(policy.monthly_egress_bytes_budget, None);
+    assert_eq!(policy.download_rpm_limit, None);
     assert!(!policy.enabled);
     assert_eq!(policy.model_allowlist, vec!["fast-chat"]);
     assert_eq!(block_on(reopened.list_quota_policies()).unwrap().len(), 1);

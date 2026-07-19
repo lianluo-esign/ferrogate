@@ -874,6 +874,8 @@ mod tests {
             enabled: true,
             created_at_unix: 1,
             updated_at_unix: 1,
+            monthly_egress_bytes_budget: None,
+            download_rpm_limit: None,
         }))
         .unwrap();
 
@@ -972,6 +974,8 @@ mod tests {
             enabled: true,
             created_at_unix: 1,
             updated_at_unix: 1,
+            monthly_egress_bytes_budget: None,
+            download_rpm_limit: None,
         }))
         .unwrap();
 

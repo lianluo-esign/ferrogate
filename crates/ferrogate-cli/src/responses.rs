@@ -1021,6 +1021,9 @@ pub(crate) struct AdminPlan {
     pub(crate) asset_hosting_enabled: bool,
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
     pub(crate) extension_tools_enabled: bool,
+    /// #262: tenant-wide default monthly egress byte budget / download RPM.
+    pub(crate) default_monthly_egress_bytes_budget: Option<u64>,
+    pub(crate) default_download_rpm_limit: Option<u64>,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
 }
@@ -1057,6 +1060,10 @@ pub(crate) struct AdminPlanMutation {
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) extension_tools_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) default_monthly_egress_bytes_budget: Option<u64>,
+    #[serde(default)]
+    pub(crate) default_download_rpm_limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1336,6 +1343,10 @@ pub(crate) struct AdminQuotaPolicy {
     /// (issue #170) -- distinct from the unconditional 100% hard-deny in
     /// `AppState::monthly_budget_exceeded`.
     pub(crate) alert_threshold_pcts: Vec<u8>,
+    /// #262: per-scope monthly egress byte budget / download RPM cap, merged
+    /// `min`-across-the-chain like `rpm_limit`/`monthly_budget_usd`.
+    pub(crate) monthly_egress_bytes_budget: Option<u64>,
+    pub(crate) download_rpm_limit: Option<u64>,
     pub(crate) enabled: bool,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
@@ -1359,6 +1370,10 @@ pub(crate) struct AdminQuotaPolicyMutation {
     pub(crate) asset_storage_quota_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) alert_threshold_pcts: Option<Vec<u8>>,
+    #[serde(default)]
+    pub(crate) monthly_egress_bytes_budget: Option<u64>,
+    #[serde(default)]
+    pub(crate) download_rpm_limit: Option<u64>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
 }

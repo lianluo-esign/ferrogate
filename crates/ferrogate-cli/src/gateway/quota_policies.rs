@@ -546,6 +546,16 @@ impl FerroGateway {
                     .unwrap_or_else(|| existing.as_ref().is_none_or(|existing| existing.enabled)),
                 created_at_unix,
                 updated_at_unix: now,
+                monthly_egress_bytes_budget: payload.monthly_egress_bytes_budget.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.monthly_egress_bytes_budget)
+                }),
+                download_rpm_limit: payload.download_rpm_limit.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.download_rpm_limit)
+                }),
             }
         } else {
             StoredQuotaPolicy {
@@ -565,6 +575,8 @@ impl FerroGateway {
                 enabled: payload.enabled.unwrap_or(true),
                 created_at_unix,
                 updated_at_unix: now,
+                monthly_egress_bytes_budget: payload.monthly_egress_bytes_budget,
+                download_rpm_limit: payload.download_rpm_limit,
             }
         };
         let target = format!("{}/{scope_id}", scope_type.as_str());
@@ -646,6 +658,8 @@ fn admin_quota_policy(policy: &StoredQuotaPolicy) -> AdminQuotaPolicy {
         monthly_budget_usd: policy.monthly_budget_usd,
         asset_storage_quota_bytes: policy.asset_storage_quota_bytes,
         alert_threshold_pcts: policy.alert_threshold_pcts.clone(),
+        monthly_egress_bytes_budget: policy.monthly_egress_bytes_budget,
+        download_rpm_limit: policy.download_rpm_limit,
         enabled: policy.enabled,
         created_at_unix: policy.created_at_unix,
         updated_at_unix: policy.updated_at_unix,

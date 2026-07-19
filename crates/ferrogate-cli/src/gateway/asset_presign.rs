@@ -570,6 +570,20 @@ impl FerroGateway {
             format!("issued a {ttl}s presigned download URL for asset {id}"),
         ));
 
+        // #262 egress metering: the presigned direct path bills at URL issuance
+        // using the object size, since the bytes leave the bucket directly and
+        // never traverse the gateway hot path.
+        super::asset_egress::record_asset_egress(
+            &state,
+            ctx,
+            &auth,
+            asset_type,
+            name,
+            version,
+            asset.size_bytes,
+        )
+        .await;
+
         // sha256 is returned alongside the URL so the agent can verify the
         // bytes it fetched directly from the bucket.
         let body = PresignDownloadResponse {

@@ -1342,6 +1342,14 @@ pub(crate) struct AppState {
     provider_routing_metrics: Arc<Mutex<ProviderRoutingMetrics>>,
     cluster_counters: Arc<ClusterCounterBackend>,
     metering_events: Arc<InMemoryBillingEventSink>,
+    /// #262: cumulative asset-egress bytes served in the current calendar
+    /// month, keyed by the winning egress-quota scope's counter key. Backs the
+    /// monthly egress byte-budget deny in the asset pull path (the byte-budget
+    /// analogue of the per-minute `cluster_counters` download-RPM window). Held
+    /// process-local (like the `Local` cluster-counter backend) -- sufficient
+    /// for single-node deployments and the fail-closed deny gate; a Redis-
+    /// backed cross-node aggregate can layer on later without changing callers.
+    asset_egress_month_counters: Arc<Mutex<HashMap<String, AssetEgressMonthWindow>>>,
     metering_exporter: Option<Arc<MeteringExporter>>,
     billing_reporter: Option<Arc<BillingReporter>>,
     repositories: Arc<RuntimeStorageRepositories>,
@@ -4248,6 +4256,7 @@ impl AppState {
             metering_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
                 analytics.billing_event_retention_records,
             )),
+            asset_egress_month_counters: Arc::new(Mutex::new(HashMap::new())),
             metering_exporter,
             billing_reporter,
             durable_api_key_authenticator: Arc::new(
@@ -4924,6 +4933,66 @@ struct ProviderCircuitState {
 struct ProviderCircuitSnapshot {
     consecutive_failures: u32,
     open: bool,
+}
+
+/// #262: a calendar-month accumulator of asset-egress bytes for one quota
+/// scope. Resets when the observed `period_month` (`YYYY-MM`) rolls over, the
+/// month-granularity analogue of [`ApiKeyRequestWindow`]'s 60s window.
+#[derive(Debug, Default, Clone)]
+struct AssetEgressMonthWindow {
+    period_month: String,
+    bytes_used: u64,
+}
+
+impl AssetEgressMonthWindow {
+    /// Bytes already served this month, treating a stale (rolled-over) window
+    /// as zero without mutating it (the read side of the deny gate).
+    fn bytes_used_for(&self, period_month: &str) -> u64 {
+        if self.period_month == period_month {
+            self.bytes_used
+        } else {
+            0
+        }
+    }
+}
+
+impl AppState {
+    /// #262: configured asset-egress rate (USD per GB), or `None` when egress
+    /// is metered but unpriced. Mirrors `PriceBook.egress_price_per_gb`.
+    pub(crate) fn asset_egress_price_per_gb(&self) -> Option<f64> {
+        self.config.asset_egress_price_per_gb
+    }
+
+    /// #262: cumulative asset-egress bytes served this calendar month for the
+    /// given quota-scope counter key (the winning egress-budget scope's
+    /// [`ferrogate_policy::QuotaScopeSelector::counter_key`]).
+    pub(crate) fn asset_egress_bytes_used(&self, scope_counter_key: &str) -> u64 {
+        let period_month = self.current_period_month();
+        self.asset_egress_month_counters
+            .lock()
+            .ok()
+            .and_then(|counters| {
+                counters
+                    .get(scope_counter_key)
+                    .map(|window| window.bytes_used_for(&period_month))
+            })
+            .unwrap_or(0)
+    }
+
+    /// #262: add `bytes` to the current month's egress accumulator for the
+    /// scope, rolling the window over on a new month. Best-effort: a poisoned
+    /// lock silently no-ops, matching the local cluster-counter posture.
+    pub(crate) fn record_asset_egress_bytes(&self, scope_counter_key: &str, bytes: u64) {
+        let period_month = self.current_period_month();
+        if let Ok(mut counters) = self.asset_egress_month_counters.lock() {
+            let window = counters.entry(scope_counter_key.to_string()).or_default();
+            if window.period_month != period_month {
+                window.period_month = period_month;
+                window.bytes_used = 0;
+            }
+            window.bytes_used = window.bytes_used.saturating_add(bytes);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
