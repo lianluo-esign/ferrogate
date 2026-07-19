@@ -30,9 +30,9 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 // `AsyncPostgresPool::new` (`pg_config.connect_timeout` / `tcp_user_timeout`).)
 
 #[test]
-fn schema_contract_includes_latest_agent_schedules_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 37);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "037_agent_schedules");
+fn schema_contract_includes_latest_asset_registry_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 38);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "038_asset_registry_semantics");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
@@ -40,9 +40,36 @@ fn schema_contract_includes_latest_agent_schedules_migration() {
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (35, '035_agent_run_audit_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (36, '036_control_plane_replay_floors')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (37, '037_agent_schedules')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (38, '038_asset_registry_semantics')"));
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
     ));
+}
+
+#[test]
+fn schema_contract_defines_the_asset_registry_tables() {
+    // #260: platform/arch variants + cargo-style yank on stored_assets, plus
+    // mutable channel pointers. The variant-widened UNIQUE lets one logical
+    // version carry several per-triple artifacts.
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS asset_channels"));
+    assert!(
+        POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS variant TEXT NOT NULL DEFAULT ''")
+    );
+    assert!(POSTGRES_SCHEMA_SQL
+        .contains("ADD COLUMN IF NOT EXISTS yanked BOOLEAN NOT NULL DEFAULT FALSE"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("UNIQUE (tenant_id, asset_type, name, version, variant)"));
+    // #254: the constraint over the migration-added `variant` column must come
+    // after the ADD COLUMN in the SQL text, never before.
+    let add_variant = POSTGRES_SCHEMA_SQL
+        .find("ADD COLUMN IF NOT EXISTS variant TEXT")
+        .expect("variant ADD COLUMN present");
+    let add_constraint = POSTGRES_SCHEMA_SQL
+        .find("stored_assets_tenant_type_name_version_variant_key")
+        .expect("variant-widened UNIQUE present");
+    assert!(
+        add_variant < add_constraint,
+        "the variant-widened UNIQUE must come after its ADD COLUMN"
+    );
 }
 
 #[test]

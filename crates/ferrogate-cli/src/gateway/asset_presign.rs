@@ -442,6 +442,8 @@ impl FerroGateway {
             size_bytes: actual_size,
             content: Vec::new(),
             storage_uri: Some(id.clone()),
+            variant: String::new(),
+            yanked: false,
             created_at_unix,
             updated_at_unix: now,
         };

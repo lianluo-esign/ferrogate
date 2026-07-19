@@ -512,8 +512,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 37;
-const POSTGRES_SCHEMA_NAME: &str = "037_agent_schedules";
+const POSTGRES_SCHEMA_VERSION: u64 = 38;
+const POSTGRES_SCHEMA_NAME: &str = "038_asset_registry_semantics";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1168,6 +1168,8 @@ pub struct RuntimeControlPlaneState {
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     plans: InMemoryRepository<StoredPlan>,
     assets: InMemoryRepository<StoredAsset>,
+    /// Mutable channel pointers keyed by `asset_channel_id` (#260).
+    asset_channels: InMemoryRepository<StoredAssetChannel>,
     permissions: InMemoryRepository<StoredPermission>,
     roles: InMemoryRepository<StoredRole>,
     tenant_role_bindings: InMemoryRepository<StoredTenantRoleBinding>,
@@ -3409,13 +3411,13 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO stored_assets \
                  (id, tenant_id, project_id, asset_type, name, version, content_type, \
                   content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                  storage_uri) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+                  storage_uri, variant, yanked) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
                  ON CONFLICT (id) DO UPDATE SET \
                  content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, \
                  size_bytes = EXCLUDED.size_bytes, content = EXCLUDED.content, \
                  updated_at_unix = EXCLUDED.updated_at_unix, \
-                 storage_uri = EXCLUDED.storage_uri",
+                 storage_uri = EXCLUDED.storage_uri, yanked = EXCLUDED.yanked",
                 &[
                     &asset.id,
                     &asset.tenant_id,
@@ -3430,6 +3432,8 @@ impl PostgresControlPlaneStore {
                     &asset.created_at_unix,
                     &asset.updated_at_unix,
                     &asset.storage_uri,
+                    &asset.variant,
+                    &asset.yanked,
                 ],
             )
             .await
@@ -3458,7 +3462,7 @@ impl PostgresControlPlaneStore {
             .query_opt(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                  content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                 storage_uri \
+                 storage_uri, variant, yanked \
                  FROM stored_assets WHERE id = $1",
                 &[&id],
             )
@@ -3493,7 +3497,7 @@ impl PostgresControlPlaneStore {
                 .query(
                     "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                          content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                         storage_uri \
+                         storage_uri, variant, yanked \
                          FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
                          ORDER BY name ASC, version ASC",
                     &[&tenant_id, &asset_type],
@@ -3504,7 +3508,7 @@ impl PostgresControlPlaneStore {
                 .query(
                     "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                          content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                         storage_uri \
+                         storage_uri, variant, yanked \
                          FROM stored_assets WHERE tenant_id = $1 \
                          ORDER BY asset_type ASC, name ASC, version ASC",
                     &[&tenant_id],
@@ -3534,6 +3538,95 @@ impl PostgresControlPlaneStore {
         }
         let affected = transaction
             .execute("DELETE FROM stored_assets WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected > 0)
+    }
+
+    async fn upsert_asset_channel(&self, channel: &StoredAssetChannel) -> Result<(), StorageError> {
+        let operation = self.asset_operation("upsert asset channel");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO asset_channels \
+                 (id, tenant_id, asset_type, name, channel, version, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 version = EXCLUDED.version, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &channel.id,
+                    &channel.tenant_id,
+                    &channel.asset_type,
+                    &channel.name,
+                    &channel.channel,
+                    &channel.version,
+                    &channel.updated_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(())
+    }
+
+    async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        let operation = self.asset_operation("list asset channels");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                "SELECT id, tenant_id, asset_type, name, channel, version, updated_at_unix \
+                 FROM asset_channels \
+                 WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 \
+                 ORDER BY channel ASC",
+                &[&tenant_id, &asset_type, &name],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(asset_channel_from_row).collect())
+    }
+
+    async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.asset_operation("delete asset channel");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute("DELETE FROM asset_channels WHERE id = $1", &[&id])
             .await
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
@@ -7686,6 +7779,20 @@ fn asset_from_row(row: &PostgresRow) -> StoredAsset {
         created_at_unix: row.get::<_, i64>(10),
         updated_at_unix: row.get::<_, i64>(11),
         storage_uri: row.get::<_, Option<String>>(12),
+        variant: row.get::<_, String>(13),
+        yanked: row.get::<_, bool>(14),
+    }
+}
+
+fn asset_channel_from_row(row: &PostgresRow) -> StoredAssetChannel {
+    StoredAssetChannel {
+        id: row.get::<_, String>(0),
+        tenant_id: row.get::<_, String>(1),
+        asset_type: row.get::<_, String>(2),
+        name: row.get::<_, String>(3),
+        channel: row.get::<_, String>(4),
+        version: row.get::<_, String>(5),
+        updated_at_unix: row.get::<_, i64>(6),
     }
 }
 
@@ -8625,6 +8732,7 @@ impl RuntimeControlPlaneState {
             quota_policies: InMemoryRepository::new(),
             plans,
             assets: InMemoryRepository::new(),
+            asset_channels: InMemoryRepository::new(),
             permissions: InMemoryRepository::new(),
             roles: InMemoryRepository::new(),
             tenant_role_bindings: InMemoryRepository::new(),
@@ -9032,6 +9140,31 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_asset(&mut self, id: &str) -> bool {
         self.assets.remove(id).is_some()
+    }
+
+    pub fn upsert_asset_channel(&mut self, channel: StoredAssetChannel) {
+        self.asset_channels.insert(channel.id.clone(), channel);
+    }
+
+    pub fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Vec<StoredAssetChannel> {
+        self.asset_channels
+            .list()
+            .into_iter()
+            .filter(|channel| {
+                channel.tenant_id == tenant_id
+                    && channel.asset_type == asset_type
+                    && channel.name == name
+            })
+            .collect()
+    }
+
+    pub fn delete_asset_channel(&mut self, id: &str) -> bool {
+        self.asset_channels.remove(id).is_some()
     }
 
     /// In-memory counterpart of `increment_usage_monthly_rollups` (Postgres):
@@ -9702,6 +9835,20 @@ pub struct StoredAsset {
     /// inline path).
     #[serde(default)]
     pub storage_uri: Option<String>,
+    /// Platform/arch variant key for this artifact (issue #260), e.g.
+    /// `linux-x86_64` / `darwin-arm64`. Empty string is the default
+    /// "no-variant" artifact -- one logical `{name}/{version}` can carry
+    /// multiple rows, one per variant, each with its own hash/size. Part of
+    /// the row identity (`stored_asset_variant_id`), so it is never mutated
+    /// on an upsert.
+    #[serde(default)]
+    pub variant: String,
+    /// Yank flag (issue #260, cargo semantics): a yanked version is skipped
+    /// by channel and semver-range resolution but still resolvable by exact
+    /// `{name}/{version}` pull (with a deprecation warning). The bytes are
+    /// retained -- yank is not delete.
+    #[serde(default)]
+    pub yanked: bool,
     #[serde(default)]
     pub created_at_unix: i64,
     #[serde(default)]
@@ -9712,6 +9859,46 @@ pub struct StoredAsset {
 /// `(tenant_id, asset_type, name, version)`, mirroring [`quota_policy_id`].
 pub fn stored_asset_id(tenant_id: &str, asset_type: &str, name: &str, version: &str) -> String {
     format!("{tenant_id}:{asset_type}:{name}:{version}")
+}
+
+/// Variant-aware asset id (issue #260). Falls back to the historical
+/// [`stored_asset_id`] shape for the default (empty) variant so pre-#260 rows
+/// keep their ids, and appends `:v:{variant}` for platform/arch variants so
+/// several variants of one `{name}/{version}` coexist under distinct ids.
+pub fn stored_asset_variant_id(
+    tenant_id: &str,
+    asset_type: &str,
+    name: &str,
+    version: &str,
+    variant: &str,
+) -> String {
+    if variant.is_empty() {
+        stored_asset_id(tenant_id, asset_type, name, version)
+    } else {
+        format!("{tenant_id}:{asset_type}:{name}:{version}:v:{variant}")
+    }
+}
+
+/// A mutable channel pointer (issue #260): `latest` / `stable` / `canary` or
+/// a free-form tag per `{tenant}/{asset_type}/{name}`, resolved to a concrete
+/// version at pull time. Moving a tag is an upsert; the move is audited by the
+/// gateway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAssetChannel {
+    pub id: String,
+    pub tenant_id: String,
+    pub asset_type: String,
+    pub name: String,
+    pub channel: String,
+    pub version: String,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+/// Deterministic id for a channel pointer, idempotent per
+/// `(tenant_id, asset_type, name, channel)`.
+pub fn asset_channel_id(tenant_id: &str, asset_type: &str, name: &str, channel: &str) -> String {
+    format!("{tenant_id}:{asset_type}:{name}:{channel}")
 }
 
 /// SHA-256 content hash, hex-encoded. Computed by the caller when an asset
@@ -11613,6 +11800,56 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_asset(id).await
+            }
+        }
+    }
+
+    /// Creates or moves a channel pointer (issue #260). Idempotent per
+    /// `(tenant, asset_type, name, channel)`; the caller audits the move.
+    pub async fn upsert_asset_channel(
+        &self,
+        channel: StoredAssetChannel,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_asset_channel(channel);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_asset_channel(&channel).await
+            }
+        }
+    }
+
+    pub async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_asset_channels(tenant_id, asset_type, name))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_asset_channels(tenant_id, asset_type, name)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_asset_channel(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_asset_channel(id).await
             }
         }
     }
@@ -15023,6 +15260,75 @@ mod tests {
             block_on(target.self_hosted_run_dispatches())[0].required_capabilities,
             vec!["shell".to_string()]
         );
+    }
+
+    #[test]
+    fn asset_variants_and_channels_roundtrip_in_memory() {
+        // #260: two platform variants of one logical version coexist as
+        // distinct rows, and channel pointers create/move/delete idempotently.
+        let repos =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let linux = StoredAsset {
+            id: stored_asset_variant_id("t", "cli_tool", "rg", "1.0.0", "linux-x86_64"),
+            tenant_id: "t".into(),
+            project_id: None,
+            asset_type: "cli_tool".into(),
+            name: "rg".into(),
+            version: "1.0.0".into(),
+            content_type: "application/octet-stream".into(),
+            content_hash: "a".into(),
+            size_bytes: 1,
+            content: vec![1],
+            storage_uri: None,
+            variant: "linux-x86_64".into(),
+            yanked: false,
+            created_at_unix: 0,
+            updated_at_unix: 0,
+        };
+        let darwin = StoredAsset {
+            id: stored_asset_variant_id("t", "cli_tool", "rg", "1.0.0", "darwin-arm64"),
+            variant: "darwin-arm64".into(),
+            content_hash: "b".into(),
+            ..linux.clone()
+        };
+        block_on(repos.upsert_asset(linux.clone())).unwrap();
+        block_on(repos.upsert_asset(darwin)).unwrap();
+        assert_eq!(
+            block_on(repos.list_assets("t", Some("cli_tool")))
+                .unwrap()
+                .len(),
+            2,
+            "both platform variants must persist as distinct rows"
+        );
+
+        let channel = StoredAssetChannel {
+            id: asset_channel_id("t", "cli_tool", "rg", "latest"),
+            tenant_id: "t".into(),
+            asset_type: "cli_tool".into(),
+            name: "rg".into(),
+            channel: "latest".into(),
+            version: "1.0.0".into(),
+            updated_at_unix: 5,
+        };
+        block_on(repos.upsert_asset_channel(channel.clone())).unwrap();
+        // Moving the pointer updates in place, not appends.
+        let moved = StoredAssetChannel {
+            version: "1.1.0".into(),
+            updated_at_unix: 6,
+            ..channel
+        };
+        block_on(repos.upsert_asset_channel(moved)).unwrap();
+        let channels = block_on(repos.list_asset_channels("t", "cli_tool", "rg")).unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].version, "1.1.0");
+
+        assert!(block_on(
+            repos.delete_asset_channel(&asset_channel_id("t", "cli_tool", "rg", "latest"))
+        )
+        .unwrap());
+        assert!(block_on(repos.list_asset_channels("t", "cli_tool", "rg"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

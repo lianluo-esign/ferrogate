@@ -10,6 +10,7 @@ mod api_contract;
 pub(crate) mod asset_bucket;
 mod asset_presign;
 mod asset_publish_gate;
+mod asset_registry;
 mod asset_scan;
 mod asset_security;
 mod asset_signature;

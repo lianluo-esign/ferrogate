@@ -1878,3 +1878,51 @@ CREATE INDEX IF NOT EXISTS idx_agent_schedule_fires_history
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (37, '037_agent_schedules')
 ON CONFLICT (version) DO NOTHING;
+
+-- Issue #260: artifact-registry semantics for hosted assets. Adds
+-- platform/arch variants (`variant`) and cargo-style `yank` to stored_assets,
+-- widens the logical-version uniqueness to include the variant so one
+-- `{name}/{version}` can carry several per-triple artifacts, and introduces
+-- `asset_channels` (mutable `latest`/`stable`/`canary` + free-form tag
+-- pointers) resolved to a concrete version at pull time. Gated so the
+-- destructive UNIQUE-constraint swap runs exactly once.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (38, '038_asset_registry_semantics')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE stored_assets
+            ADD COLUMN IF NOT EXISTS variant TEXT NOT NULL DEFAULT '';
+        ALTER TABLE stored_assets
+            ADD COLUMN IF NOT EXISTS yanked BOOLEAN NOT NULL DEFAULT FALSE;
+        -- The logical version is now unique per platform/arch variant, not per
+        -- bare version. Swap the auto-named pre-#260 constraint for the wider
+        -- one. This ADD CONSTRAINT runs after the ADD COLUMN above (see #254:
+        -- an index/constraint over a migration-added column must follow the
+        -- ADD COLUMN in the same gated block).
+        ALTER TABLE stored_assets
+            DROP CONSTRAINT IF EXISTS stored_assets_tenant_id_asset_type_name_version_key;
+        ALTER TABLE stored_assets
+            ADD CONSTRAINT stored_assets_tenant_type_name_version_variant_key
+            UNIQUE (tenant_id, asset_type, name, version, variant);
+
+        CREATE TABLE IF NOT EXISTS asset_channels (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            version TEXT NOT NULL,
+            updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+            UNIQUE (tenant_id, asset_type, name, channel)
+        );
+        CREATE INDEX IF NOT EXISTS idx_asset_channels_lookup
+            ON asset_channels(tenant_id, asset_type, name);
+    END IF;
+END
+$$;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (38, '038_asset_registry_semantics')
+ON CONFLICT (version) DO NOTHING;

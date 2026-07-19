@@ -35,8 +35,9 @@ fn execute_push(args: AssetsPushArgs) -> AnyResult<()> {
         .content_type
         .unwrap_or_else(|| guess_content_type(&args.path));
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
+    let query = build_query(&[("platform", &args.platform), ("channel", &args.channel)]);
     let path = format!(
-        "/v1/assets/{}/{}/{}",
+        "/v1/assets/{}/{}/{}{query}",
         args.asset_type, args.name, args.version
     );
     let response = send_request(
@@ -52,8 +53,9 @@ fn execute_push(args: AssetsPushArgs) -> AnyResult<()> {
 
 fn execute_pull(args: AssetsIdentityArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
+    let query = build_query(&[("platform", &args.platform)]);
     let path = format!(
-        "/v1/assets/{}/{}/{}",
+        "/v1/assets/{}/{}/{}{query}",
         args.asset_type, args.name, args.version
     );
     let response = send_request(&endpoint, "GET", &path, &args.connection.api_key, None, &[])?;
@@ -91,8 +93,9 @@ fn execute_list(args: AssetsListArgs) -> AnyResult<()> {
 
 fn execute_delete(args: AssetsIdentityArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
+    let query = build_query(&[("platform", &args.platform)]);
     let path = format!(
-        "/v1/assets/{}/{}/{}",
+        "/v1/assets/{}/{}/{}{query}",
         args.asset_type, args.name, args.version
     );
     let response = send_request(
@@ -104,6 +107,20 @@ fn execute_delete(args: AssetsIdentityArgs) -> AnyResult<()> {
         &[],
     )?;
     print_json_or_raise(&response, "delete")
+}
+
+/// Assemble a `?a=b&c=d` query string from the set `Some` options, or an empty
+/// string when none are set (#260 `--platform`/`--channel`).
+fn build_query(params: &[(&str, &Option<String>)]) -> String {
+    let parts: Vec<String> = params
+        .iter()
+        .filter_map(|(key, value)| value.as_ref().map(|value| format!("{key}={value}")))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
 }
 
 pub(crate) fn print_json_or_raise(response: &RawHttpResponse, action: &str) -> AnyResult<()> {

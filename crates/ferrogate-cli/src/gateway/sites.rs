@@ -471,6 +471,8 @@ impl FerroGateway {
                 size_bytes: content.len() as u64,
                 content: stored_content,
                 storage_uri,
+                variant: String::new(),
+                yanked: false,
                 created_at_unix,
                 updated_at_unix: now,
             };
@@ -600,6 +602,8 @@ impl FerroGateway {
             size_bytes: body.len() as u64,
             content: body,
             storage_uri: None,
+            variant: String::new(),
+            yanked: false,
             created_at_unix: manifest.created_at_unix.min(now),
             updated_at_unix: now,
         };

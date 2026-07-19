@@ -833,8 +833,15 @@ impl FerroGateway {
             return Ok(true);
         }
         if req.path == "/v1/assets" || req.path.starts_with("/v1/assets/") {
-            self.handle_assets(session, ctx, &req.headers, &req.method, &req.path)
-                .await?;
+            self.handle_assets(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)

@@ -78,6 +78,32 @@ impl AppState {
         Ok(self.repositories.delete_asset(id).await?)
     }
 
+    /// Creates or moves a channel pointer (`latest`/`stable`/`canary` or a
+    /// free-form tag) for `{asset_type}/{name}` (issue #260). The caller
+    /// audits the move via the admin audit-event path.
+    pub(crate) async fn upsert_asset_channel(
+        &self,
+        channel: ferrogate_storage::StoredAssetChannel,
+    ) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_asset_channel(channel).await?)
+    }
+
+    pub(crate) async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<ferrogate_storage::StoredAssetChannel>> {
+        Ok(self
+            .repositories
+            .list_asset_channels(tenant_id, asset_type, name)
+            .await?)
+    }
+
+    pub(crate) async fn delete_asset_channel(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_asset_channel(id).await?)
+    }
+
     /// Cumulative stored bytes for a tenant across all asset types, used to
     /// enforce `StoredPlan::default_asset_storage_quota_bytes` at push time.
     pub(crate) async fn tenant_asset_storage_bytes_used(

@@ -1398,6 +1398,55 @@ pub(crate) struct AssetMutationResponse {
     pub(crate) asset: AssetSummary,
 }
 
+// --- Artifact registry semantics (issue #260) ---
+
+/// One channel pointer (`latest`/`stable`/`canary` or a free-form tag) and the
+/// concrete version it currently resolves to.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetChannelSummary {
+    pub(crate) channel: String,
+    pub(crate) version: String,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetChannelMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) asset_type: String,
+    pub(crate) name: String,
+    pub(crate) channel: AssetChannelSummary,
+}
+
+/// One platform/arch artifact of a logical version, with its own hash/size.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetManifestVariant {
+    pub(crate) variant: String,
+    pub(crate) content_type: String,
+    pub(crate) content_hash: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) storage_backed: bool,
+}
+
+/// One logical version, its yank state, and every platform/arch variant it
+/// carries.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetManifestVersion {
+    pub(crate) version: String,
+    pub(crate) yanked: bool,
+    pub(crate) variants: Vec<AssetManifestVariant>,
+}
+
+/// The single self-serve document an agent needs: every version, channel, and
+/// variant (with hashes) for one `{asset_type}/{name}` (issue #260).
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetManifest {
+    pub(crate) object: &'static str,
+    pub(crate) asset_type: String,
+    pub(crate) name: String,
+    pub(crate) channels: Vec<AssetChannelSummary>,
+    pub(crate) versions: Vec<AssetManifestVersion>,
+}
+
 // --- Tenant-level RBAC entitlements (issue #182) ---
 
 #[derive(Debug, Serialize)]
@@ -1913,6 +1962,35 @@ pub(crate) async fn write_cacheable_response(
             Ok(StatusCode::OK)
         }
     }
+}
+
+/// Raw-body response with extra caller-supplied headers (issue #260): the
+/// asset pull path uses this to attach resolution metadata
+/// (`x-ferrogate-asset-*`) and, for an exact pull of a yanked version, a
+/// `warning` deprecation header, while otherwise matching
+/// [`write_raw_response`] byte-for-byte.
+pub(crate) async fn write_raw_response_with_headers(
+    session: &mut Session,
+    status: StatusCode,
+    content_type: &str,
+    body: Bytes,
+    request_id: &str,
+    extra_headers: &[(&'static str, String)],
+) -> PingoraResult<()> {
+    let mut response = ResponseHeader::build(status, Some(4 + extra_headers.len()))?;
+    response.insert_header(header::CONTENT_TYPE, content_type)?;
+    response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    for (name, value) in extra_headers {
+        response.insert_header(*name, value)?;
+    }
+    apply_cors_headers(&mut response)?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
 }
 
 pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(

@@ -312,6 +312,14 @@ pub(crate) struct AssetsPushArgs {
     /// Content-Type header to record; guessed from the file extension when omitted.
     #[arg(long)]
     pub(crate) content_type: Option<String>,
+    /// Platform/arch variant (target triple), e.g. linux-x86_64 (#260). One
+    /// logical version can carry several per-platform artifacts.
+    #[arg(long)]
+    pub(crate) platform: Option<String>,
+    /// Also point this channel (latest/stable/canary or a free-form tag) at
+    /// the pushed version (#260).
+    #[arg(long)]
+    pub(crate) channel: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -324,9 +332,13 @@ pub(crate) struct AssetsIdentityArgs {
     /// Asset name.
     #[arg(long)]
     pub(crate) name: String,
-    /// Asset version.
+    /// Exact version, a channel (latest/stable/canary/tag), or a semver range
+    /// (`^1.2`, `~2.0`) to resolve at pull time (#260).
     #[arg(long)]
     pub(crate) version: String,
+    /// Platform/arch variant (target triple) to select on pull (#260).
+    #[arg(long)]
+    pub(crate) platform: Option<String>,
     /// Output file for `pull` (defaults to stdout when omitted or `-`).
     #[arg(long)]
     pub(crate) output: Option<PathBuf>,

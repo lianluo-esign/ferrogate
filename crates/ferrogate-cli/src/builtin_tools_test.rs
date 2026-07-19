@@ -80,6 +80,8 @@ fn seed_asset(
         size_bytes: content.len() as u64,
         content: content.to_vec(),
         storage_uri: None,
+        variant: String::new(),
+        yanked: false,
         created_at_unix: 1,
         updated_at_unix: 1,
     };
@@ -127,6 +129,8 @@ fn resource_descriptor_exposes_uri_and_fingerprint_metadata() {
         size_bytes: content.len() as u64,
         content: content.to_vec(),
         storage_uri: None,
+        variant: String::new(),
+        yanked: false,
         created_at_unix: 1,
         updated_at_unix: 1,
     };
@@ -180,6 +184,8 @@ fn blank_asset() -> StoredAsset {
         size_bytes: 0,
         content: Vec::new(),
         storage_uri: None,
+        variant: String::new(),
+        yanked: false,
         created_at_unix: 1,
         updated_at_unix: 1,
     }
