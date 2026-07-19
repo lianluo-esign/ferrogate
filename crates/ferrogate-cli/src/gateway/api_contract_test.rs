@@ -47,6 +47,16 @@ fn mcp_contract_maps_supported_json_rpc_methods_to_scopes() {
         discriminator.map.get("tools/call").map(String::as_str),
         Some("tools.execute")
     );
+    // Asset resource ingress (issue #257): reuses the asset-read scope so a key
+    // without `assets.read` is rejected at the ingress, never masked as empty.
+    assert_eq!(
+        discriminator.map.get("resources/list").map(String::as_str),
+        Some("assets.read")
+    );
+    assert_eq!(
+        discriminator.map.get("resources/read").map(String::as_str),
+        Some("assets.read")
+    );
 }
 
 #[test]

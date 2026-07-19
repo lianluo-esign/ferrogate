@@ -3738,6 +3738,11 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(body["result"]["instructions"]
                 .as_str()
                 .is_some_and(|instructions| instructions.contains("governed MCP gateway")));
+            // Issue #257: the asset resource surface is advertised alongside tools.
+            assert!(
+                body["result"]["capabilities"]["resources"].is_object(),
+                "initialize must advertise the resources capability: {body}"
+            );
             Ok(())
         },
     )?;
@@ -3761,6 +3766,49 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_mcp_tool_present(&body, "http-search", "Search the harness MCP upstream")?;
             assert_mcp_tool_present(&body, "stdio-search", "Blocking stdio search")?;
+            // Issue #257: the built-in fetch_asset tool is advertised to an
+            // assets.read key alongside the MCP-upstream tools.
+            assert!(
+                body["result"]["tools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().any(|tool| {
+                        tool["name"] == "builtin.fetch_asset"
+                            && tool["inputSchema"]["type"] == "object"
+                    })),
+                "builtin.fetch_asset must be advertised in tools/list: {body}"
+            );
+            Ok(())
+        },
+    )?;
+    // Issue #257: the asset resource ingress. The client holds assets.read and a
+    // tenant, so resources/list succeeds (empty for this asset-less tenant -- an
+    // ENTITLED empty list, not a masked 403) and resources/read of an unknown
+    // asset fails closed with an invalid-params error.
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":20,"method":"resources/list","params":{}}"#,
+        200,
+        |body| {
+            assert!(
+                body["result"]["resources"].is_array(),
+                "resources/list must return a resources array: {body}"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":21,"method":"resources/read","params":{"uri":"asset://cli_tool/absent/9.9.9"}}"#,
+        200,
+        |body| {
+            assert_eq!(body["error"]["code"], -32602);
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no asset")));
             Ok(())
         },
     )?;

@@ -11,6 +11,7 @@ mod auth;
 mod billing;
 mod billing_client;
 mod budget_alerts;
+mod builtin_tools;
 mod cli;
 mod config;
 mod dashboard;

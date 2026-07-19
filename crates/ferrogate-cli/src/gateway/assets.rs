@@ -25,6 +25,7 @@ use crate::{
         write_json_response, AdminDeleteResponse, AdminList, AssetCacheHeaders,
         AssetMutationResponse, AssetSummary,
     },
+    state::AssetReadError,
 };
 
 /// Default `Cache-Control` for authenticated `/v1/assets/*` pulls (issue
@@ -456,29 +457,12 @@ impl FerroGateway {
             .await;
         };
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
-        match state.get_asset(&id).await {
-            Ok(Some(asset)) => {
-                // Bucket-backed storage (issue #176): the real bytes live
-                // in the bucket, not `asset.content` (which is empty for
-                // these rows) -- fetch them before the same integrity
-                // re-verification every asset read already does.
-                let content = match self.load_asset_content(&asset).await {
-                    Ok(content) => content,
-                    Err(error) => return error.write(session, &ctx.request_id).await,
-                };
-                // Re-verify content integrity on every read (#176/#179):
-                // a mismatch means storage-layer corruption or tampering,
-                // not a client error, so fail closed rather than serve it.
-                if sha256_hex(&content) != asset.content_hash {
-                    return write_json_error(
-                        session,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "asset_integrity_check_failed",
-                        "stored asset content hash does not match recorded hash",
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
+        // Bucket resolution and per-read sha256 re-verification (#176/#179) live
+        // in `AppState::read_asset_content` (#257), shared with the MCP
+        // `resources/read` ingress and the `fetch_asset` built-in tool so every
+        // asset-read surface fails closed identically.
+        match state.read_asset_content(&id).await {
+            Ok((asset, content)) => {
                 // HTTP caching semantics (issue #258): strong ETag from the
                 // stored sha256, Last-Modified, Cache-Control, and Range/304/206
                 // handling shared with the static-site serve mode.
@@ -499,7 +483,7 @@ impl FerroGateway {
                 .await?;
                 Ok(())
             }
-            Ok(None) => {
+            Err(AssetReadError::NotFound) => {
                 write_json_error(
                     session,
                     StatusCode::NOT_FOUND,
@@ -509,12 +493,32 @@ impl FerroGateway {
                 )
                 .await
             }
-            Err(error) => {
+            Err(AssetReadError::Integrity) => {
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "asset_integrity_check_failed",
+                    "stored asset content hash does not match recorded hash",
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(AssetReadError::BucketUnavailable(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(AssetReadError::Storage(message)) => {
                 write_json_error(
                     session,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "storage_unavailable",
-                    error.to_string(),
+                    message,
                     &ctx.request_id,
                 )
                 .await

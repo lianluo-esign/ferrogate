@@ -80,6 +80,10 @@ impl AppState {
             .into_iter()
             .find(|tool| tool.name == name)
             .or_else(|| self.mcp_registered_tool_by_name(name))
+            // Built-in gateway tools (issue #257, e.g. `fetch_asset`) are
+            // resolvable by the governed chokepoint's allowlist check exactly
+            // like extension and MCP tools.
+            .or_else(|| crate::builtin_tools::builtin_tool_by_name(name))
     }
 
     pub(crate) fn tool_approvals(&self) -> Vec<ToolApprovalRecord> {

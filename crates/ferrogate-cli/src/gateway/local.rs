@@ -98,6 +98,11 @@ const SELF_HOSTED_REQUIRE_PRODUCTION_MTLS_ENV: &str =
 pub(super) enum ToolExecuteBackend {
     Extension,
     Mcp,
+    /// A built-in gateway tool (issue #257, e.g. `fetch_asset`) executed
+    /// in-process. It still flows through `execute_tool_request_with_governance`
+    /// so it inherits the same approval gate, managed-action guardrails, and
+    /// audit trail as every other tool backend.
+    Builtin,
 }
 
 /// Shared plan/RBAC entitlement gate for tool execution (issue #182,
@@ -133,6 +138,11 @@ pub(super) async fn tool_execution_entitlement_denial(
         &str,
         &str,
     ) = match backend {
+        // Built-in tools carry no StoredPlan feature flag: `fetch_asset`
+        // reuses the asset-read authz (scope `assets.read` + tenant scoping),
+        // enforced inside the tool itself exactly as `handle_asset_pull` does,
+        // so there is no separate plan/permission entitlement to deny here.
+        ToolExecuteBackend::Builtin => return None,
         ToolExecuteBackend::Mcp => (
             |plan| plan.mcp_enabled,
             "mcp.execute",
@@ -3275,7 +3285,7 @@ impl FerroGateway {
         // an Extension tool is a Tool-class action, an MCP tool an Mcp-class one.
         let guardrail_tenant = auth.tenant_context();
         let (guardrail_class, guardrail_target) = match backend {
-            ToolExecuteBackend::Extension => {
+            ToolExecuteBackend::Extension | ToolExecuteBackend::Builtin => {
                 (ManagedActionClass::Tool, format!("tool:{}", request.name))
             }
             ToolExecuteBackend::Mcp => (
@@ -3461,6 +3471,10 @@ impl FerroGateway {
                         auth.tenant_context(),
                         auth.api_key_id.as_deref(),
                     )
+                    .await
+            }
+            ToolExecuteBackend::Builtin => {
+                crate::builtin_tools::execute_fetch_asset(&state, auth, &request, &ctx.request_id)
                     .await
             }
             ToolExecuteBackend::Mcp => {
@@ -9381,6 +9395,11 @@ pub(super) fn validate_skill_tool_capability(
         });
     };
     let allowed = match backend {
+        // A built-in gateway tool (issue #257) is a skill capability only when
+        // the package explicitly declares it as a Tool capability by name.
+        ToolExecuteBackend::Builtin => package.capabilities.iter().any(|capability| {
+            capability.kind == SkillPackageCapabilityKind::Tool && capability.id == tool_name
+        }),
         ToolExecuteBackend::Extension => {
             package.capabilities.iter().any(|capability| {
                 capability.kind == SkillPackageCapabilityKind::Tool && capability.id == tool_name

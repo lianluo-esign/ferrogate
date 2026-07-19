@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
 
+use ferrogate_storage::stored_asset_id;
+
 use crate::{
     auth::AuthContext,
     extensions::ToolExecutionRequest,
     gateway::ProxyContext,
-    state::{AdminAuditEventDraft, AppState},
+    state::{AdminAuditEventDraft, AppState, AssetReadError},
 };
 
 use super::local::{
@@ -20,6 +22,11 @@ use super::local::{
     ToolExecuteBackend, ToolExecutionContext,
 };
 use super::FerroGateway;
+
+/// JSON-RPC application error code for an asset request from a key with no
+/// tenant attribution -- the `resources/*` analogue of the REST
+/// `tenant_required` 403 that `handle_asset_list` / `handle_asset_pull` return.
+const ASSET_TENANT_REQUIRED_CODE: i64 = -32003;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
@@ -84,6 +91,8 @@ pub(super) async fn handle_request(
     match rpc.method.as_str() {
         "initialize" => result(rpc.id, initialize_result()),
         "ping" => result(rpc.id, json!({})),
+        "resources/list" => resources_list(state, ctx, auth, rpc.id).await,
+        "resources/read" => resources_read(state, ctx, auth, rpc.id, &rpc.params).await,
         "tools/list" => tools_list(state, ctx, auth, skill_context, rpc.id),
         "tools/call" => {
             tools_call(
@@ -137,6 +146,10 @@ fn initialize_result() -> Value {
         "capabilities": {
             "tools": {
                 "listChanged": false
+            },
+            "resources": {
+                "subscribe": false,
+                "listChanged": false
             }
         },
         "instructions": "Use FerroGate as a governed MCP gateway. Follow the server's auth, policy, approval, and billing rules for all tool calls.",
@@ -154,11 +167,18 @@ fn tools_list(
     skill_context: Option<&SkillExecutionContext>,
     id: Option<Value>,
 ) -> McpJsonRpcResponse {
-    let tools = state.mcp_tools_for(
+    let mut tools = state.mcp_tools_for(
         &auth.tenant_context(),
         auth.api_key_id.as_deref(),
         Some("/v1/mcp"),
     );
+    // Built-in gateway tools (issue #257): expose `fetch_asset` to tool-only MCP
+    // clients, but only advertise it to keys that can actually use it -- i.e.
+    // those holding the same `assets.read` scope the tool enforces at execution.
+    // A key without it would otherwise see a tool every call denies.
+    if auth.has_scope(crate::builtin_tools::ASSET_READ_SCOPE) {
+        tools.extend(crate::builtin_tools::builtin_tools());
+    }
     state.record_admin_audit_event(audit_event(
         ctx,
         auth,
@@ -188,6 +208,132 @@ fn tools_list(
     )
 }
 
+/// `resources/list`: enumerate the tenant's hosted assets as MCP resources
+/// (issue #257). Visibility reuses the EXACT authz of `handle_asset_list`: the
+/// method->scope contract maps `resources/list` to `assets.read`, so a key
+/// lacking that scope is rejected at the ingress before dispatch (a JSON-RPC/
+/// HTTP error, never an empty list masking a 403); tenant scoping is applied
+/// here identically. Each asset maps to `asset://{asset_type}/{name}/{version}`
+/// with its content_type, size, and sha256 metadata.
+async fn resources_list(
+    state: &AppState,
+    ctx: &ProxyContext,
+    auth: &AuthContext,
+    id: Option<Value>,
+) -> McpJsonRpcResponse {
+    let Some(tenant_id) = auth.organization_id.clone() else {
+        return error(
+            id,
+            ASSET_TENANT_REQUIRED_CODE,
+            "assets require a tenant-attributed API key",
+        );
+    };
+    match state.list_assets(&tenant_id, None).await {
+        Ok(assets) => {
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                None,
+                "resource.list",
+                "mcp",
+                "success",
+                format!(
+                    "listed {} asset resources through native MCP endpoint",
+                    assets.len()
+                ),
+            ));
+            result(
+                id,
+                json!({
+                    "resources": assets
+                        .iter()
+                        .map(crate::builtin_tools::asset_resource_descriptor)
+                        .collect::<Vec<_>>()
+                }),
+            )
+        }
+        Err(storage_error) => error(
+            id,
+            -32000,
+            format!("asset storage unavailable: {storage_error}"),
+        ),
+    }
+}
+
+/// `resources/read`: return a hosted asset's verified content by its
+/// `asset://{asset_type}/{name}/{version}` URI (issue #257). Reuses the EXACT
+/// authz + bucket-resolution + sha256 re-verification of `handle_asset_pull`
+/// (via `AppState::read_asset_content`). Content is inlined as `text` (textual
+/// mime types) or base64 `blob`; the stored sha256 travels in `_meta` so the
+/// caller can re-verify the fingerprint. Inline is acceptable under the 10MB
+/// asset cap for this slice.
+async fn resources_read(
+    state: &AppState,
+    ctx: &ProxyContext,
+    auth: &AuthContext,
+    id: Option<Value>,
+    params: &Value,
+) -> McpJsonRpcResponse {
+    let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+        return error(id, -32602, "resources/read params.uri is required");
+    };
+    let Some((asset_type, name, version)) = crate::builtin_tools::parse_asset_uri(uri) else {
+        return error(
+            id,
+            -32602,
+            format!(
+                "unsupported resource uri {uri}; expected asset://{{asset_type}}/{{name}}/{{version}}"
+            ),
+        );
+    };
+    let Some(tenant_id) = auth.organization_id.clone() else {
+        return error(
+            id,
+            ASSET_TENANT_REQUIRED_CODE,
+            "assets require a tenant-attributed API key",
+        );
+    };
+    let asset_id = stored_asset_id(&tenant_id, &asset_type, &name, &version);
+    match state.read_asset_content(&asset_id).await {
+        Ok((asset, content)) => {
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                None,
+                "resource.read",
+                crate::builtin_tools::asset_uri(&asset.asset_type, &asset.name, &asset.version),
+                "success",
+                format!(
+                    "read asset resource {} ({} bytes)",
+                    asset.id, asset.size_bytes
+                ),
+            ));
+            result(
+                id,
+                json!({
+                    "contents": [
+                        crate::builtin_tools::asset_resource_content_entry(&asset, &content)
+                    ]
+                }),
+            )
+        }
+        Err(AssetReadError::NotFound) => error(
+            id,
+            -32602,
+            format!("no asset at {asset_type}/{name}/{version}"),
+        ),
+        Err(AssetReadError::Integrity) => error(
+            id,
+            -32000,
+            "stored asset content hash does not match recorded hash",
+        ),
+        Err(AssetReadError::BucketUnavailable(message)) => error(id, -32002, message),
+        Err(AssetReadError::Storage(message)) => {
+            error(id, -32000, format!("asset storage unavailable: {message}"))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn tools_call(
     gateway: &FerroGateway,
@@ -199,21 +345,32 @@ async fn tools_call(
     id: Option<Value>,
     params: &Value,
 ) -> McpJsonRpcResponse {
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return error(id, -32602, "tools/call params.name is required");
+    };
+    // Built-in gateway tools (issue #257, e.g. `fetch_asset`) execute through the
+    // same governed chokepoint but on the Builtin backend; everything else is an
+    // MCP tool. The backend choice steers the entitlement gate, skill-capability
+    // check, and guardrail class below.
+    let backend = if crate::builtin_tools::is_builtin_tool(name) {
+        ToolExecuteBackend::Builtin
+    } else {
+        ToolExecuteBackend::Mcp
+    };
+
     // Plan/RBAC entitlement gate (issues #182/#183): this JSON-RPC
     // transport executes the exact same MCP tools as `POST
     // /v1/mcp/tool/execute`, discovered by a follow-up audit to be a
     // third call site that bypassed the gate those two REST endpoints
     // both enforce. See `tool_execution_entitlement_denial`'s doc
-    // comment.
+    // comment. The Builtin backend carries no plan flag (asset-read authz
+    // is enforced inside the tool), so this returns without denial for it.
     if let Some((error_code, error_message)) =
-        tool_execution_entitlement_denial(state, auth, ToolExecuteBackend::Mcp).await
+        tool_execution_entitlement_denial(state, auth, backend).await
     {
         return error(id, mcp_error_code(error_code), error_message.to_string());
     }
 
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
-        return error(id, -32602, "tools/call params.name is required");
-    };
     let arguments = params
         .get("arguments")
         .cloned()
@@ -225,12 +382,9 @@ async fn tools_call(
         session_id: None,
     };
     if let Some(skill_context) = skill_context {
-        if let Err(error_response) = validate_skill_tool_capability(
-            state,
-            skill_context,
-            ToolExecuteBackend::Mcp,
-            &request.name,
-        ) {
+        if let Err(error_response) =
+            validate_skill_tool_capability(state, skill_context, backend, &request.name)
+        {
             let audit_target = tool_audit_details(&request.name)
                 .map(|(server_name, tool_name)| tool_audit_target(&server_name, &tool_name))
                 .unwrap_or_else(|| request.name.clone());
@@ -274,13 +428,7 @@ async fn tools_call(
         ..ToolExecutionContext::default()
     };
     match gateway
-        .execute_tool_request_with_governance(
-            ctx,
-            auth,
-            execution,
-            request,
-            ToolExecuteBackend::Mcp,
-        )
+        .execute_tool_request_with_governance(ctx, auth, execution, request, backend)
         .await
     {
         Ok(response) => {

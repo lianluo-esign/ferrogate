@@ -6321,6 +6321,7 @@ mod state_mcp_identity;
 
 #[path = "state_assets.rs"]
 mod state_assets;
+pub(crate) use state_assets::AssetReadError;
 
 #[path = "state_rbac.rs"]
 mod state_rbac;
