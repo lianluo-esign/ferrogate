@@ -788,17 +788,49 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
         schema: Some(schema.to_string()),
         search_path: Vec::new(),
     };
+    // Guard against the leak class that #237/#250 hardened and that #253 found
+    // already sitting in the live `public` schema: initialize_schema must not
+    // create ANY control-plane table in `public`. `public` may already carry a
+    // stale duplicate (historical, pre-pinning), so we assert the DELTA is zero
+    // across this init rather than an absolute count -- a NEW leak still fails.
+    let public_probe_tables = [
+        "control_plane_resources",
+        "control_plane_replay_floors",
+        "storage_schema_migrations",
+        "agent_schedules",
+        "agent_schedule_fires",
+    ];
+    let public_probe_sql = format!(
+        "SELECT COUNT(*)::BIGINT FROM information_schema.tables \
+         WHERE table_schema = 'public' AND table_name IN ({})",
+        public_probe_tables
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let public_before = count_rows(&dsn, &public_probe_sql);
+
     // initialize_schema = true (the auto-migration path under test) and
     // validate_schema = true (validation must resolve the configured schema).
     let repositories = RuntimeStorageRepositories::postgres_for_migration(config, true, true)
         .expect("schema initialization + validation against the configured schema");
     drop(repositories);
 
-    // Migration 1's most fundamental table and migration 36's newest table
-    // must both exist in the CONFIGURED schema.
+    let public_after = count_rows(&dsn, &public_probe_sql);
+    assert_eq!(
+        public_before, public_after,
+        "initialize_schema must not create control-plane tables in `public` \
+         (before={public_before}, after={public_after}); it must pin the configured schema {schema}",
+    );
+
+    // Migration 1's most fundamental table plus the current head's newest tables
+    // (037_agent_schedules) must all exist in the CONFIGURED schema.
     for table in [
         "control_plane_resources",
         "control_plane_replay_floors",
+        "agent_schedules",
+        "agent_schedule_fires",
         "storage_schema_migrations",
     ] {
         assert_eq!(
@@ -815,17 +847,17 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
     }
 
     // The migration ledger inside the configured schema must record the
-    // current head (36 / 036_control_plane_replay_floors).
+    // current head (37 / 037_agent_schedules).
     assert_eq!(
         count_rows(
             &dsn,
             &format!(
                 "SELECT COUNT(*)::BIGINT FROM \"{schema}\".storage_schema_migrations \
-                 WHERE version = 36 AND name = '036_control_plane_replay_floors'"
+                 WHERE version = 37 AND name = '037_agent_schedules'"
             )
         ),
         1,
-        "the configured schema's migration ledger must record head 36",
+        "the configured schema's migration ledger must record head 37",
     );
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.
