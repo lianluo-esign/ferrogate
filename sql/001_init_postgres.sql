@@ -1925,6 +1925,8 @@ $$;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (38, '038_asset_registry_semantics')
+ON CONFLICT (version) DO NOTHING;
+
 -- Migration 039 (#262): asset egress (download bandwidth) governance. Adds a
 -- monthly egress byte budget + per-minute download RPM cap to both the
 -- per-scope quota_policies and the tenant-wide plans defaults, mirroring the
