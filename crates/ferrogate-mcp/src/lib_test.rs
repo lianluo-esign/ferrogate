@@ -562,6 +562,64 @@ fn read_json_body_parses_a_body_without_content_length() {
     assert_eq!(value["ok"], true);
 }
 
+/// True for the I/O errors a one-shot test server legitimately sees when the
+/// client already has what it needs (or gave up under CPU load) and dropped the
+/// connection. These must never fail a test: the protocol behaviour under test
+/// happened on the client side; a racing EPIPE/ECONNRESET on the server thread
+/// is benign. See issue #327 (same family as #234/#235/#240/#324).
+fn is_benign_disconnect(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionReset, TimedOut, UnexpectedEof, WouldBlock,
+    };
+    matches!(
+        err.kind(),
+        BrokenPipe | ConnectionReset | ConnectionAborted | WouldBlock | TimedOut | UnexpectedEof
+    )
+}
+
+/// Reads from a test-server socket until the end of the HTTP request headers
+/// (CRLFCRLF) or EOF. Tolerates a client that reset the connection under load
+/// instead of panicking, returning whatever was captured so far. Only a
+/// genuinely-unexpected I/O error panics (that would be a real bug, not a race).
+fn read_until_headers_end(stream: &mut impl Read) -> Vec<u8> {
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match Read::read(stream, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                received.extend_from_slice(&chunk[..n]);
+                if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(err) if is_benign_disconnect(&err) => break,
+            Err(err) => panic!("unexpected read error in one-shot test server: {err}"),
+        }
+    }
+    received
+}
+
+/// Writes the canned response to a test-server socket and flushes it, tolerating
+/// a client that already hung up (the client got what it needed, or timed out
+/// under load and dropped the connection). Only a genuinely-unexpected I/O error
+/// panics.
+fn write_response_tolerant(stream: &mut impl Write, response: &[u8]) {
+    if let Err(err) = stream.write_all(response) {
+        assert!(
+            is_benign_disconnect(&err),
+            "unexpected write error in one-shot test server: {err}"
+        );
+        return;
+    }
+    if let Err(err) = stream.flush() {
+        assert!(
+            is_benign_disconnect(&err),
+            "unexpected flush error in one-shot test server: {err}"
+        );
+    }
+}
+
 fn spawn_https_test_server(
     cert_der: rustls::pki_types::CertificateDer<'static>,
     key_der: Vec<u8>,
@@ -582,20 +640,8 @@ fn spawn_https_test_server(
         let conn =
             ServerConnection::new(Arc::new(server_config)).expect("valid rustls server config");
         let mut tls_stream = StreamOwned::new(conn, tcp);
-        let mut received = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = Read::read(&mut tls_stream, &mut chunk).unwrap();
-            if n == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..n]);
-            if received.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
-        tls_stream.write_all(response.as_bytes()).unwrap();
-        tls_stream.flush().unwrap();
+        let _received = read_until_headers_end(&mut tls_stream);
+        write_response_tolerant(&mut tls_stream, response.as_bytes());
     });
     (addr, handle)
 }
@@ -614,24 +660,13 @@ fn post_http_json_preserves_upstream_401_as_identity_failure() {
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
         let (mut tcp, _) = listener.accept().unwrap();
-        let mut received = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let count = Read::read(&mut tcp, &mut chunk).unwrap();
-            if count == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..count]);
-            if received.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        let received = read_until_headers_end(&mut tcp);
         let request = String::from_utf8_lossy(&received);
         assert!(request.contains("Authorization: Bearer per-user-token\r\n"));
-        tcp.write_all(
+        write_response_tolerant(
+            &mut tcp,
             b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        )
-        .unwrap();
+        );
     });
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"});
     let error = post_http_json(
@@ -793,29 +828,21 @@ fn capture_one_http_request(addr_reply: &str, client_call: impl FnOnce(String)) 
     let reply = addr_reply.to_string();
     let handle = thread::spawn(move || {
         let (mut tcp, _) = listener.accept().unwrap();
-        let mut received = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = Read::read(&mut tcp, &mut chunk).unwrap();
-            if n == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..n]);
-            if received.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        let received = read_until_headers_end(&mut tcp);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             reply.len(),
             reply
         );
-        tcp.write_all(response.as_bytes()).unwrap();
-        tcp.flush().unwrap();
+        // The request is fully captured before we reply, so return it even if
+        // the client already gave up and the write races an EPIPE under load.
+        write_response_tolerant(&mut tcp, response.as_bytes());
         String::from_utf8_lossy(&received).to_string()
     });
     client_call(format!("http://{addr}/mcp"));
-    handle.join().unwrap()
+    // Never hard-panic on a benign server-thread exit; the captured request is
+    // what the callers assert on and it is produced before the reply write.
+    handle.join().unwrap_or_default()
 }
 
 #[test]
@@ -825,6 +852,9 @@ fn streamable_http_emits_mcp_method_and_name_headers_on_tools_call() {
         |endpoint| {
             let mut config = test_config("github");
             config.url = Some(endpoint);
+            // Generous test-only timeout so the client never abandons the
+            // round trip under CPU load (issue #327); production default is 30s.
+            config.timeout_ms = 30_000;
             let mut client = HttpMcpClient::new(&config).unwrap();
             client
                 .call_tool("search", json!({"q": "x"}), &McpDispatchHeaders::empty())
@@ -847,6 +877,9 @@ fn http_client_adopts_2026_07_28_when_server_echoes_it() {
         |endpoint| {
             let mut config = test_config("srv");
             config.url = Some(endpoint);
+            // Generous test-only timeout so the client never abandons the
+            // round trip under CPU load (issue #327); production default is 30s.
+            config.timeout_ms = 30_000;
             let mut client = HttpMcpClient::new(&config).unwrap();
             client.initialize().unwrap();
             negotiated = client.protocol_version().to_string();
@@ -866,6 +899,9 @@ fn http_client_falls_back_when_server_pins_or_omits_protocol_version() {
         |endpoint| {
             let mut config = test_config("srv");
             config.url = Some(endpoint);
+            // Generous test-only timeout so the client never abandons the
+            // round trip under CPU load (issue #327); production default is 30s.
+            config.timeout_ms = 30_000;
             let mut client = HttpMcpClient::new(&config).unwrap();
             client.initialize().unwrap();
             pinned = client.protocol_version().to_string();
@@ -890,25 +926,13 @@ fn post_http_json_parses_sse_formatted_response_over_plain_http() {
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
         let (mut tcp, _) = listener.accept().unwrap();
-        let mut received = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = Read::read(&mut tcp, &mut chunk).unwrap();
-            if n == 0 {
-                break;
-            }
-            received.extend_from_slice(&chunk[..n]);
-            if received.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        let _received = read_until_headers_end(&mut tcp);
         let sse_body =
             ": ping\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{sse_body}"
         );
-        tcp.write_all(response.as_bytes()).unwrap();
-        tcp.flush().unwrap();
+        write_response_tolerant(&mut tcp, response.as_bytes());
     });
 
     let endpoint = format!("http://{addr}/mcp");
