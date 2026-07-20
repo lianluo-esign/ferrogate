@@ -1976,6 +1976,10 @@ CREATE TABLE IF NOT EXISTS wallet_reservations (
     -- settlement id IS the reservation id -- a 1:1, exact-amount mapping, which
     -- also makes settle idempotent through the wallet_settlements primary key.
     settlement_id TEXT,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
 -- Migration 041 (#283): durable per-tenant SSO configuration + restart-safe
 -- pending-flow state. Before this, per-tenant OIDC config lived only in the
 -- auth service's process memory (lost on restart, unmanageable per tenant at
@@ -2027,6 +2031,8 @@ CREATE INDEX IF NOT EXISTS idx_wallet_reservations_active_expiry
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (40, '040_wallet_reservations')
+ON CONFLICT (version) DO NOTHING;
+
 -- Short-lived (default 10 min) state for an in-flight SSO authorize->callback
 -- round trip, keyed by the opaque `state`/RelayState token. Made durable
 -- (#283) so a restart mid-login, or a callback that lands on a different
