@@ -49,6 +49,7 @@ fn audit_event(id: &str) -> StoredAuditEvent {
         outcome: "rejected".into(),
         message: "storage deadline".into(),
         occurred_at_unix: Some(1),
+        parent_action_fingerprint: None,
     }
 }
 

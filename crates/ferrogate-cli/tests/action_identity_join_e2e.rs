@@ -25,7 +25,7 @@ use ferrogate_guardrails::{
     PolicyRevision, PolicyScopeSelector, PolicyStreamingMode,
 };
 use serde_json::{json, Value};
-use support::{free_addr, http_request, start_gateway, wait_for_gateway};
+use support::{free_addr, http_request, spawn_provider_upstream, start_gateway, wait_for_gateway};
 
 /// Issue #306 acceptance: a require-approval guardrail on a live stdio MCP
 /// tool. The one flagged `tools/call`:
@@ -240,6 +240,217 @@ fn governed_mcp_action_evidence_joins_on_one_action_fingerprint() {
     gateway.wait().unwrap();
 }
 
+/// Issue #307 acceptance: downstream handoff propagation. ONE governed MCP
+/// action (same require-approval gate as the previous test) is the PARENT; a
+/// subsequent A2A exchange declares that parent via
+/// `x-ferrogate-parent-action-fingerprint`. Proves over a real gateway that:
+/// 1. a malformed declared parent is a 400 and persists nothing,
+/// 2. the child A2A request-log row carries the parent fingerprint and the
+///    gateway re-stamps the header on its outbound (egress) forward,
+/// 3. investigating the PARENT walks parent → child: its
+///    `action_correlations` group lists the child's request id,
+/// 4. investigating the CHILD surfaces its `parent_action_fingerprint` and
+///    the parent-keyed correlation group to pivot on,
+/// 5. an absent-parent A2A exchange records NULL explicitly — no parent field
+///    on its evidence, and it never appears as anyone's child.
+#[test]
+fn downstream_a2a_exchange_carries_the_parent_action_identity() {
+    let arguments = json!({ "message": "please GOVERNME downstream" });
+    let parent_fingerprint =
+        ferrogate_runtime::canonical_mcp_target("local", "echo", &arguments.to_string(), false)
+            .expect("the MCP call has a canonical capability target")
+            .fingerprint();
+
+    // A stub A2A upstream: exactly two forwarded exchanges (declared-parent +
+    // absent-parent; the malformed-header request must never reach it).
+    let (upstream_addr, upstream) = spawn_provider_upstream(
+        2,
+        r#"{"parts":[{"kind":"text","text":"downstream reply"}]}"#,
+    );
+
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("stdio_mcp.py");
+    write_stdio_mcp_script(&script);
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        handoff_config(&gateway_addr, &script, &upstream_addr),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    wait_for_tool(&gateway_addr, "local-echo");
+    provision_guardrail_policy(
+        &gateway_addr,
+        "mcp-approval-gate",
+        mcp_guardrail_require_approval_policy("mcp-approval-gate", "GOVERNME"),
+    );
+
+    // --- The PARENT governed action: approval-gated MCP tools/call. ---
+    let gateway_for_call = gateway_addr.clone();
+    let call_arguments = arguments.clone();
+    let call = thread::spawn(move || tools_call(&gateway_for_call, "local-echo", call_arguments));
+    let pending = wait_for_pending_approval(&gateway_addr);
+    assert_eq!(pending["action_fingerprint"], parent_fingerprint);
+    let approval_id = pending["id"].as_str().unwrap().to_string();
+    let invocation_fingerprint = pending["fingerprint"].as_str().unwrap().to_string();
+    let parent_request_id = pending["request_id"].as_str().unwrap().to_string();
+    let approved = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/tool-approvals/{approval_id}/approve"),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"fingerprint":"{invocation_fingerprint}","reason":"operator approved"}}"#),
+    ));
+    assert_eq!(approved["status"], "approved", "{approved}");
+    let clean = call.join().unwrap();
+    assert!(clean.get("error").is_none(), "{clean}");
+
+    // --- 1) A malformed declared parent is rejected up front (400). ---
+    let malformed = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agents/downstream-agent/message:send",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-parent-action-fingerprint: not-a-fingerprint",
+        ],
+        r#"{"params":{"message":{"parts":[{"kind":"text","text":"hello"}]}}}"#,
+    );
+    assert!(malformed.contains("HTTP/1.1 400"), "{malformed}");
+    assert!(
+        malformed.contains("invalid_parent_action_fingerprint_header"),
+        "{malformed}"
+    );
+
+    // --- 2) The CHILD A2A exchange declaring the governed parent. ---
+    let child = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agents/downstream-agent/message:send",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            &format!("x-ferrogate-parent-action-fingerprint: {parent_fingerprint}"),
+        ],
+        r#"{"params":{"message":{"parts":[{"kind":"text","text":"do the downstream work"}]}}}"#,
+    );
+    assert!(child.contains("HTTP/1.1 200"), "{child}");
+    let child_request_id =
+        response_header(&child, "x-request-id").expect("A2A response exposes its request id");
+
+    // --- 5a) An absent-parent A2A exchange (NULL recorded explicitly). ---
+    let orphan = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agents/downstream-agent/message:send",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"params":{"message":{"parts":[{"kind":"text","text":"no parent here"}]}}}"#,
+    );
+    assert!(orphan.contains("HTTP/1.1 200"), "{orphan}");
+    let orphan_request_id =
+        response_header(&orphan, "x-request-id").expect("A2A response exposes its request id");
+
+    // --- 2b) Egress stamp: the gateway re-declared the parent on the
+    //     outbound forward of the child call and did NOT invent one for the
+    //     orphan call. ---
+    let forwarded = upstream.join().unwrap();
+    assert_eq!(forwarded.len(), 2, "exactly two exchanges reach upstream");
+    assert!(
+        forwarded[0].to_ascii_lowercase().contains(&format!(
+            "x-ferrogate-parent-action-fingerprint: {parent_fingerprint}"
+        )),
+        "the egress leg must carry the declared parent (#307): {}",
+        forwarded[0]
+    );
+    assert!(
+        !forwarded[1]
+            .to_ascii_lowercase()
+            .contains("x-ferrogate-parent-action-fingerprint"),
+        "no parent header may be fabricated on the absent-parent egress: {}",
+        forwarded[1]
+    );
+
+    // --- 3) Investigating the PARENT walks parent → child. ---
+    let parent_view = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={parent_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let correlations = parent_view["action_correlations"].as_array().unwrap();
+    let group = correlations
+        .iter()
+        .find(|group| group["action_fingerprint"] == parent_fingerprint)
+        .unwrap_or_else(|| panic!("no correlation group for the parent: {parent_view}"));
+    let child_ids = group["child_request_ids"].as_array().unwrap();
+    assert!(
+        child_ids.contains(&Value::String(child_request_id.clone())),
+        "the parent's correlation group must list the child A2A exchange (#307): {parent_view}"
+    );
+    assert!(
+        !child_ids.contains(&Value::String(orphan_request_id.clone())),
+        "the absent-parent exchange must not appear as a child: {parent_view}"
+    );
+
+    // --- 4) Investigating the CHILD surfaces its parent identity. ---
+    let child_view = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={child_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let child_requests = child_view["requests"].as_array().unwrap();
+    assert_eq!(child_requests.len(), 1, "{child_view}");
+    assert_eq!(
+        child_requests[0]["parent_action_fingerprint"], parent_fingerprint,
+        "the child request evidence must carry its parent (#307): {child_view}"
+    );
+    assert!(
+        child_view["action_correlations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["action_fingerprint"] == parent_fingerprint
+                && group["child_request_ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&Value::String(child_request_id.clone()))),
+        "the child's investigation must surface the parent-keyed group: {child_view}"
+    );
+
+    // --- 5b) The absent-parent exchange records NULL explicitly. ---
+    let orphan_view = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={orphan_request_id}"),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let orphan_requests = orphan_view["requests"].as_array().unwrap();
+    assert_eq!(orphan_requests.len(), 1, "{orphan_view}");
+    assert!(
+        orphan_requests[0]
+            .get("parent_action_fingerprint")
+            .is_none(),
+        "an absent parent stays NULL (omitted), never fabricated: {orphan_view}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 fn wait_for_pending_approval(gateway_addr: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -388,6 +599,17 @@ fn provision_guardrail_policy(gateway_addr: &str, policy_id: &str, policy: Polic
     assert_eq!(activated["active_revision"], revision, "{activated}");
 }
 
+fn response_header(response: &str, name: &str) -> Option<String> {
+    let headers = response.split("\r\n\r\n").next()?;
+    headers.lines().find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
+}
+
 fn response_json(response: String) -> Value {
     let body = response
         .split_once("\r\n\r\n")
@@ -429,6 +651,30 @@ tools_to_execute = ["echo"]
 timeout_ms = 3000
 "#,
         script.display()
+    )
+}
+
+/// The MCP-governance gateway config plus an A2A agent upstream pointing at a
+/// local stub, and an `agents.invoke` key for the child A2A exchanges (#307).
+fn handoff_config(gateway_addr: &str, script: &Path, upstream_addr: &str) -> String {
+    format!(
+        r#"{}
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agents.invoke"]
+organization_id = "org_demo"
+
+[[agent_upstreams]]
+id = "downstream-agent"
+name = "Downstream Agent"
+enabled = true
+protocol = "a2a"
+endpoint = "http://{upstream_addr}/a2a"
+capabilities = ["invoke", "read"]
+"#,
+        mcp_governance_config(gateway_addr, script)
     )
 }
 

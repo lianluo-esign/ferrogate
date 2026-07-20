@@ -17,6 +17,43 @@ use serde_json::Value;
 /// `anthropic.messages` / `openai.chat.completions` route constants.
 pub(super) const A2A_ROUTE: &str = "a2a.message";
 
+/// #307: header by which an A2A caller declares the PARENT governed action
+/// this exchange is a downstream effect of. The value is the parent action's
+/// target-level fingerprint under the `canonical_target_sha256` contract
+/// (`"sha256:<hex>"`, `ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`) — the
+/// same value the parent's timeline/audit/guardrail/approval rows carry, so
+/// child A2A evidence joins the parent's evidence by fingerprint. Parent
+/// request/trace correlation needs no new headers: it already flows through
+/// `traceparent` / `x-ferrogate-agent-run-id` (#305).
+pub(super) const PARENT_ACTION_FINGERPRINT_HEADER: &str = "x-ferrogate-parent-action-fingerprint";
+
+/// Parse + validate the optional declared-parent header (#307). Returns
+/// `Ok(None)` when absent/empty — an absent parent is recorded as an explicit
+/// NULL, never fabricated — and an error message (mapped to a 400 by the
+/// handler) when the value is not a well-formed `sha256:<64 lowercase hex>`
+/// fingerprint, so malformed values cannot pollute the fingerprint join space.
+pub(super) fn declared_parent_action_fingerprint(
+    headers: &http::HeaderMap,
+) -> Result<Option<String>, String> {
+    let Some(value) = headers.get(PARENT_ACTION_FINGERPRINT_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        format!("{PARENT_ACTION_FINGERPRINT_HEADER} must be valid visible ASCII header text")
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !ferrogate_runtime::is_canonical_action_fingerprint(value) {
+        return Err(format!(
+            "{PARENT_ACTION_FINGERPRINT_HEADER} must be a canonical_target_sha256 action \
+             fingerprint: \"sha256:\" followed by exactly 64 lowercase hex characters"
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 /// Build the request-stage (`input`) guardrail envelope for an inbound A2A
 /// message body (issue #278). A2A message parts (`{"kind":"text","text":...}`)
 /// can appear at several JSON-RPC / task locations (`params.message.parts[]`,

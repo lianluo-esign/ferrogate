@@ -2241,3 +2241,25 @@ ALTER TABLE guardrail_evaluations
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (47, '047_guardrail_action_identity')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 48 (#307): downstream handoff parent identity — a dispatched
+-- worker run created as a downstream effect of a governed action records
+-- WHICH upstream action caused it, so the chain "governed action -> child
+-- dispatch" is reconstructable. Additive, nullable projection column
+-- (pre-migration rows and dispatches created outside any governed-action
+-- context — registry seed, scheduler tick, admin run-now — stay NULL;
+-- nothing is fabricated):
+--   * parent_action_fingerprint -- the PARENT governed action's target-level
+--     fingerprint under the canonical_target_sha256 contract
+--     ("sha256:<hex>", ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT), i.e.
+--     the same value the parent's #304 timeline/audit and #306
+--     guardrail/approval rows carry — NOT this dispatch's own identity.
+-- The A2A leg of #307 needs no column: child A2A exchange rows persist the
+-- declared parent inside the request_logs.request_json / audit_events
+-- .audit_json documents their read paths already deserialize.
+ALTER TABLE self_hosted_run_dispatches
+    ADD COLUMN IF NOT EXISTS parent_action_fingerprint TEXT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (48, '048_handoff_parent_identity')
+ON CONFLICT (version) DO NOTHING;

@@ -9078,6 +9078,28 @@ impl FerroGateway {
             }
         };
 
+        // #307: when this A2A exchange is a downstream effect of a governed
+        // action, the caller declares the parent's canonical_target_sha256
+        // fingerprint via `x-ferrogate-parent-action-fingerprint`; every
+        // governance row this handler records then carries that parent
+        // identity, so investigations can walk parent → child. Malformed
+        // values are a 400 (never persisted); an absent header records an
+        // explicit NULL parent — never fabricated.
+        let parent_action_fingerprint =
+            match super::a2a::declared_parent_action_fingerprint(&headers) {
+                Ok(parent) => parent,
+                Err(message) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_parent_action_fingerprint_header",
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+
         // #278: per-upstream policy context, identical shape to the RequestContext
         // fed to evaluate_policy / match_guardrail on the inference ingresses.
         let policy_request = ferrogate_core::RequestContext {
@@ -9120,7 +9142,9 @@ impl FerroGateway {
         {
             state.record_guardrail_match(&guardrail);
             state.record_admin_audit_event(AdminAuditEventDraft {
-                action_identity: Default::default(),
+                // #307: the declared parent action rides the audit evidence.
+                action_identity: crate::state::AuditActionIdentityDraft::default()
+                    .with_parent_action_fingerprint(parent_action_fingerprint.clone()),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 agent_run_id: agent_run_id.clone(),
@@ -9144,6 +9168,7 @@ impl FerroGateway {
                 &tenant,
                 &agent_id,
                 agent_run_id.as_deref(),
+                parent_action_fingerprint.as_deref(),
                 StatusCode::FORBIDDEN,
                 &guardrail.code,
                 started_at_unix,
@@ -9164,7 +9189,9 @@ impl FerroGateway {
             state.evaluate_policy(&policy_request, None, Some(&agent_id))
         {
             state.record_admin_audit_event(AdminAuditEventDraft {
-                action_identity: Default::default(),
+                // #307: the declared parent action rides the audit evidence.
+                action_identity: crate::state::AuditActionIdentityDraft::default()
+                    .with_parent_action_fingerprint(parent_action_fingerprint.clone()),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 agent_run_id: agent_run_id.clone(),
@@ -9183,6 +9210,7 @@ impl FerroGateway {
                 &tenant,
                 &agent_id,
                 agent_run_id.as_deref(),
+                parent_action_fingerprint.as_deref(),
                 StatusCode::FORBIDDEN,
                 &code,
                 started_at_unix,
@@ -9202,7 +9230,17 @@ impl FerroGateway {
             endpoint: upstream.endpoint.clone(),
             body: payload,
             stream,
-            headers: agent_upstream_headers(upstream, &auth, &ctx.request_id),
+            // #307: the outbound (gateway-mediated egress) leg of the A2A
+            // forward re-declares the parent identity to the upstream agent,
+            // so a downstream FerroGate — or any A2A server — receives the
+            // same parent chain the caller declared. Absent parent → no
+            // header, nothing fabricated.
+            headers: agent_upstream_headers(
+                upstream,
+                &auth,
+                &ctx.request_id,
+                parent_action_fingerprint.as_deref(),
+            ),
         };
         let timeout = std::time::Duration::from_secs(30);
 
@@ -9217,6 +9255,7 @@ impl FerroGateway {
                     &tenant,
                     &agent_id,
                     agent_run_id.as_deref(),
+                    parent_action_fingerprint.as_deref(),
                     StatusCode::BAD_GATEWAY,
                     "agent_upstream_error",
                     started_at_unix,
@@ -9267,7 +9306,9 @@ impl FerroGateway {
             match guardrail.effect {
                 GuardrailEffect::Deny => {
                     state.record_admin_audit_event(AdminAuditEventDraft {
-                        action_identity: Default::default(),
+                        // #307: the declared parent rides the audit evidence.
+                        action_identity: crate::state::AuditActionIdentityDraft::default()
+                            .with_parent_action_fingerprint(parent_action_fingerprint.clone()),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
                         agent_run_id: agent_run_id.clone(),
@@ -9291,6 +9332,7 @@ impl FerroGateway {
                         &tenant,
                         &agent_id,
                         agent_run_id.as_deref(),
+                        parent_action_fingerprint.as_deref(),
                         StatusCode::FORBIDDEN,
                         &guardrail.code,
                         started_at_unix,
@@ -9309,7 +9351,9 @@ impl FerroGateway {
                         .redact_text(&String::from_utf8_lossy(&response_body))
                         .into_bytes();
                     state.record_admin_audit_event(AdminAuditEventDraft {
-                        action_identity: Default::default(),
+                        // #307: the declared parent rides the audit evidence.
+                        action_identity: crate::state::AuditActionIdentityDraft::default()
+                            .with_parent_action_fingerprint(parent_action_fingerprint.clone()),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
                         agent_run_id: agent_run_id.clone(),
@@ -9340,6 +9384,7 @@ impl FerroGateway {
                 &ctx.request_id,
                 ctx.trace_id.as_deref(),
                 agent_run_id.as_deref(),
+                parent_action_fingerprint.as_deref(),
                 &tenant,
                 &agent_id,
                 stream,
@@ -9393,6 +9438,10 @@ impl FerroGateway {
             cache_status: None,
             started_at_unix: Some(started_at_unix),
             completed_at_unix: Some(a2a_now_unix_seconds()),
+            // #307: the child A2A exchange records its declared parent action
+            // (None when absent — never fabricated), so investigations walk
+            // parent → child by fingerprint.
+            parent_action_fingerprint: parent_action_fingerprint.clone(),
         });
 
         if stream {
@@ -9427,6 +9476,7 @@ impl FerroGateway {
         tenant: &ferrogate_core::TenantContext,
         agent_id: &str,
         agent_run_id: Option<&str>,
+        parent_action_fingerprint: Option<&str>,
         status: StatusCode,
         error_code: &str,
         started_at_unix: u64,
@@ -9460,6 +9510,9 @@ impl FerroGateway {
                 cache_status: None,
                 started_at_unix: Some(started_at_unix),
                 completed_at_unix: Some(a2a_now_unix_seconds()),
+                // #307: rejected exchanges keep the declared parent identity
+                // too (None when absent — never fabricated).
+                parent_action_fingerprint: parent_action_fingerprint.map(str::to_string),
             });
     }
 
@@ -9770,6 +9823,7 @@ fn agent_upstream_headers(
     upstream: &crate::config::AgentUpstreamConfig,
     auth: &AuthContext,
     request_id: &str,
+    parent_action_fingerprint: Option<&str>,
 ) -> Vec<ProviderHeader> {
     let mut headers = vec![
         ProviderHeader {
@@ -9785,6 +9839,14 @@ fn agent_upstream_headers(
             value: SecretValue::new(request_id),
         },
     ];
+    // #307: propagate the validated declared-parent identity on the outbound
+    // (egress) leg so the downstream agent receives the same handoff chain.
+    if let Some(parent) = parent_action_fingerprint {
+        headers.push(ProviderHeader {
+            name: super::a2a::PARENT_ACTION_FINGERPRINT_HEADER.to_string(),
+            value: SecretValue::new(parent),
+        });
+    }
 
     match &upstream.auth {
         crate::config::AgentUpstreamAuth::None => {}

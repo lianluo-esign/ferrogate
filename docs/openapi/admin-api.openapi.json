@@ -13371,6 +13371,13 @@
               "null"
             ]
           },
+          "parent_action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #307: fingerprint of the UPSTREAM governed action this row is a downstream effect of (canonical_target_sha256, \"sha256:<hex>\"), declared via x-ferrogate-parent-action-fingerprint on the A2A ingress. Null/absent when no parent was declared - never fabricated."
+          },
           "cluster_id": {
             "type": [
               "string",
@@ -13633,6 +13640,13 @@
               "null"
             ],
             "minimum": 0
+          },
+          "parent_action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #307: fingerprint of the UPSTREAM governed action this row is a downstream effect of (canonical_target_sha256, \"sha256:<hex>\"), declared via x-ferrogate-parent-action-fingerprint on the A2A ingress. Null/absent when no parent was declared - never fabricated."
           },
           "action_fingerprint": {
             "type": [
@@ -19975,6 +19989,13 @@
               "null"
             ]
           },
+          "parent_action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #307: fingerprint of the UPSTREAM governed action this request is a downstream effect of (canonical_target_sha256). Present only when the child declared a parent; omitted for absent-parent rows - never fabricated. Join key for walking child -> parent."
+          },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
           },
@@ -20402,6 +20423,20 @@
               "type": "string"
             },
             "description": "Ids of audit-event rows carrying the fingerprint."
+          },
+          "child_request_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Issue #307 parent -> child traversal: request ids of request-log rows (e.g. child A2A exchanges) that declared THIS fingerprint as their parent_action_fingerprint. Omitted when empty."
+          },
+          "child_dispatch_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Issue #307 parent -> child traversal: dispatch ids of self-hosted run dispatches created as downstream effects of this action (self_hosted_run_dispatches.parent_action_fingerprint, migration 048). Omitted when empty."
           }
         },
         "additionalProperties": false

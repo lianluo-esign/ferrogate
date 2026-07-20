@@ -267,6 +267,12 @@ pub struct SelfHostedRunDispatch {
     pub request_id: Option<String>,
     pub trace_id: Option<String>,
     pub agent_run_id: Option<String>,
+    /// #307 handoff parent identity: the `canonical_target_sha256` fingerprint
+    /// (`"sha256:<hex>"`, [`crate::ACTION_FINGERPRINT_CONTRACT`]) of the
+    /// UPSTREAM governed action this dispatch is a downstream effect of.
+    /// `None` when the dispatch was not created from a governed-action context
+    /// (registry seed, scheduler tick, admin run-now) — never fabricated.
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +319,12 @@ pub struct SelfHostedRunLease {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_run_id: Option<String>,
+    /// #307: the dispatch's parent-action fingerprint rides the lease so the
+    /// worker knows which upstream governed action caused this run. `None`
+    /// when the dispatch has no governed-action parent; `serde(default)`
+    /// keeps older gateways/workers wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1053,6 +1065,8 @@ impl InMemorySelfHostedRunQueue {
             request_id: queued.dispatch.request_id.clone(),
             trace_id: queued.dispatch.trace_id.clone(),
             agent_run_id: queued.dispatch.agent_run_id.clone(),
+            // #307: the parent-action identity rides the lease verbatim too.
+            parent_action_fingerprint: queued.dispatch.parent_action_fingerprint.clone(),
         }))
     }
 
@@ -2234,6 +2248,11 @@ mod tests {
         assert_eq!(lease.request_id.as_deref(), Some("fg-dispatch-1"));
         assert_eq!(lease.trace_id.as_deref(), Some("trace-dispatch-1"));
         assert_eq!(lease.agent_run_id.as_deref(), Some("run-1"));
+        // #307: the parent-action identity rides the lease verbatim too.
+        assert_eq!(
+            lease.parent_action_fingerprint,
+            Some(format!("sha256:{}", "ab".repeat(32)))
+        );
 
         let ack = transport
             .ack_run(
@@ -2256,6 +2275,74 @@ mod tests {
         assert_eq!(ack.lease_id, "dispatch-1:attempt-1");
         assert_eq!(ack.worker_id, "worker-1");
         assert_eq!(ack.status, SelfHostedRunAckStatus::Accepted);
+    }
+
+    /// #307: a dispatch created outside any governed-action context carries no
+    /// parent, and the lease records that absence explicitly (None — never a
+    /// fabricated fingerprint); on the wire the field is simply omitted.
+    #[test]
+    fn lease_records_explicit_none_parent_for_dispatches_without_a_governed_parent() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let mut orphan = dispatch();
+        orphan.parent_action_fingerprint = None;
+        queue.enqueue_run(orphan).unwrap();
+
+        let lease = queue
+            .poll_run(
+                &registry,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+
+        assert_eq!(lease.parent_action_fingerprint, None);
+        let wire = serde_json::to_value(&lease).unwrap();
+        assert!(
+            wire.get("parent_action_fingerprint").is_none(),
+            "absent parent must be omitted from the wire (legacy-compatible): {wire}"
+        );
+    }
+
+    /// #307 wire compatibility: a lease serialized by a pre-#307 gateway (no
+    /// `parent_action_fingerprint` key) deserializes with `None`, and a lease
+    /// carrying a parent round-trips it verbatim.
+    #[test]
+    fn lease_parent_fingerprint_is_wire_compatible_with_pre_307_gateways() {
+        let legacy = serde_json::json!({
+            "dispatch_id": "dispatch-legacy",
+            "action": "start_run",
+            "lease_id": "dispatch-legacy:attempt-1",
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "worker_id": "worker-1",
+            "session_id": "session-1",
+            "run_id": "run-legacy",
+            "framework_adapter": "codex",
+            "required_capabilities": ["logs"],
+            "workload_ref": "queue://runs/run-legacy",
+            "attempt": 1,
+            "lease_expires_at_unix": 1_725_000_040,
+            "trust_level": "reported_by_self_hosted_worker"
+        });
+        let lease: SelfHostedRunLease = serde_json::from_value(legacy).unwrap();
+        assert_eq!(lease.parent_action_fingerprint, None);
+        assert_eq!(lease.request_id, None);
+
+        let parent = format!("sha256:{}", "cd".repeat(32));
+        let mut with_parent = lease.clone();
+        with_parent.parent_action_fingerprint = Some(parent.clone());
+        let wire = serde_json::to_value(&with_parent).unwrap();
+        assert_eq!(wire["parent_action_fingerprint"], parent.as_str());
+        let restored: SelfHostedRunLease = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored, with_parent);
     }
 
     #[test]
@@ -2886,6 +2973,7 @@ mod tests {
             request_id: Some("fg-dispatch-1".to_string()),
             trace_id: Some("trace-dispatch-1".to_string()),
             agent_run_id: Some("run-1".to_string()),
+            parent_action_fingerprint: Some(format!("sha256:{}", "ab".repeat(32))),
         };
         let ack = SelfHostedRunAck {
             dispatch_id: lease.dispatch_id.clone(),
@@ -3150,6 +3238,7 @@ mod tests {
             request_id: Some("fg-dispatch-1".to_string()),
             trace_id: Some("trace-dispatch-1".to_string()),
             agent_run_id: Some("run-1".to_string()),
+            parent_action_fingerprint: Some(format!("sha256:{}", "ab".repeat(32))),
         }
     }
 

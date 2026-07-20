@@ -916,6 +916,7 @@ fn record_provider_latency(
         cache_status: None,
         started_at_unix: Some(started_at_unix),
         completed_at_unix: Some(completed_at_unix),
+        parent_action_fingerprint: None,
     });
 }
 

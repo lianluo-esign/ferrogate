@@ -303,6 +303,7 @@ fn request_log(id: &str, org: &str, started: i64, response_recorded: bool) -> St
         cache_status: None,
         started_at_unix: Some(started.max(0) as u64),
         completed_at_unix: None,
+        parent_action_fingerprint: None,
     }
 }
 
@@ -328,6 +329,7 @@ fn audit_event(id: &str, org: &str, occurred: i64) -> StoredAuditEvent {
         outcome: "committed".into(),
         message: "m".into(),
         occurred_at_unix: Some(occurred.max(0) as u64),
+        parent_action_fingerprint: None,
     }
 }
 

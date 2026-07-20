@@ -42,6 +42,38 @@ fn evaluation(tenant_id: &str) -> StoredGuardrailEvaluation {
     }
 }
 
+/// A minimal request-log row for #307 parent → child traversal tests: no
+/// parent declared (tests attach one explicitly where needed).
+fn request_log(request_id: &str, status_code: u16) -> StoredRequestLog {
+    StoredRequestLog {
+        request_id: request_id.into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        route: Some("a2a.message".into()),
+        provider: Some("planner".into()),
+        logical_model: Some("a2a:planner".into()),
+        provider_model: None,
+        gateway_config_id: None,
+        gateway_config_revision: None,
+        status_code,
+        error_code: None,
+        prompt_recorded: false,
+        response_recorded: false,
+        prompt_body: None,
+        response_body: None,
+        cache_status: None,
+        started_at_unix: Some(1),
+        completed_at_unix: Some(2),
+        parent_action_fingerprint: None,
+    }
+}
+
 #[test]
 fn evidence_filter_rejects_a_matching_request_from_another_tenant() {
     let filter = GuardrailEvidenceFilter {
@@ -81,6 +113,7 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
         cache_status: None,
         started_at_unix: None,
         completed_at_unix: None,
+        parent_action_fingerprint: None,
     });
     let approval = sanitize_investigation_approval(ToolApprovalRecord {
         id: "approval-1".into(),
@@ -454,6 +487,7 @@ fn investigation_groups_evidence_rows_by_shared_action_fingerprint() {
         decision: Some("allow".into()),
         decision_reason: Some("audit_success".into()),
         output_disposition: Some("returned".into()),
+        parent_action_fingerprint: None,
     };
     let mut other_audit_event = audit_event.clone();
     other_audit_event.id = "audit-other".into();
@@ -467,6 +501,10 @@ fn investigation_groups_evidence_rows_by_shared_action_fingerprint() {
         &[approval],
         &[agent_event],
         &[audit_event, other_audit_event],
+        &[],
+        &HashSet::new(),
+        &[],
+        &HashSet::new(),
     );
     assert_eq!(correlations.len(), 2, "{correlations:?}");
     let shared_group = &correlations[0];
@@ -475,12 +513,167 @@ fn investigation_groups_evidence_rows_by_shared_action_fingerprint() {
     assert_eq!(shared_group.approval_ids, vec!["approval-shared"]);
     assert_eq!(shared_group.agent_event_ids, vec!["agent-event-shared"]);
     assert_eq!(shared_group.audit_event_ids, vec!["audit-shared"]);
+    // #307: without child rows the parent → child link lists stay empty (and
+    // are omitted from the serialized payload, keeping pre-#307 shapes).
+    assert!(shared_group.child_request_ids.is_empty());
+    assert!(shared_group.child_dispatch_ids.is_empty());
+    let encoded = serde_json::to_value(shared_group).unwrap();
+    assert!(encoded.get("child_request_ids").is_none());
+    assert!(encoded.get("child_dispatch_ids").is_none());
     let other_group = &correlations[1];
     assert_eq!(other_group.action_fingerprint, other);
     assert_eq!(other_group.audit_event_ids, vec!["audit-other"]);
     assert!(other_group.guardrail_evaluation_ids.is_empty());
     assert!(other_group.approval_ids.is_empty());
     assert!(other_group.agent_event_ids.is_empty());
+}
+
+/// #307 parent → child traversal: request-log rows and dispatch rows that
+/// declared a `parent_action_fingerprint` join the correlation group KEYED BY
+/// that parent fingerprint — creating the group when only the child is under
+/// investigation — while rows without a parent never appear as children.
+#[test]
+fn investigation_links_child_rows_to_their_parent_action_fingerprint() {
+    let parent = format!("sha256:{}", "aa".repeat(32));
+
+    // The parent action's own evidence: one audit row carrying the fingerprint.
+    let mut parent_audit = ferrogate_storage::StoredAuditEvent {
+        id: "audit-parent".into(),
+        request_id: "request-parent".into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        actor_api_key_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        action: "tool.execute".into(),
+        target: "mcp:local:echo".into(),
+        outcome: "success".into(),
+        message: "executed".into(),
+        occurred_at_unix: Some(1),
+        action_fingerprint: Some(parent.clone()),
+        decision: Some("allow".into()),
+        decision_reason: Some("audit_success".into()),
+        output_disposition: Some("returned".into()),
+        parent_action_fingerprint: None,
+    };
+
+    // Child A2A exchange rows: one declaring the parent, one absent-parent.
+    let mut child_log = request_log("request-child-a2a", 200);
+    child_log.parent_action_fingerprint = Some(parent.clone());
+    let orphan_log = request_log("request-orphan", 200);
+    assert_eq!(orphan_log.parent_action_fingerprint, None);
+
+    // Child dispatch rows: one declaring the parent, one absent-parent (the
+    // absent one is filtered before the walk, mirroring the read path).
+    let child_dispatch = ferrogate_storage::StoredSelfHostedRunDispatch {
+        dispatch_id: "dispatch-child".into(),
+        action: "start_run".into(),
+        tenant_id: "org".into(),
+        workspace_id: "ws".into(),
+        session_id: "session".into(),
+        run_id: "run-child".into(),
+        framework_adapter: "codex".into(),
+        required_capabilities: vec![],
+        workload_ref: "queue://runs/run-child".into(),
+        queued_at_unix: Some(1),
+        assigned_worker_id: None,
+        lease_id: None,
+        lease_expires_at_unix: None,
+        attempt: 0,
+        acknowledged_status: None,
+        acknowledged_at_unix: None,
+        request_id: None,
+        trace_id: None,
+        agent_run_id: Some("run-child".into()),
+        parent_action_fingerprint: Some(parent.clone()),
+    };
+
+    // An UNRELATED parent/child pair elsewhere in the store: its parent is
+    // not in scope and the child is not selected, so it must never leak into
+    // this investigation's correlations.
+    let mut unrelated_log = request_log("request-unrelated", 200);
+    unrelated_log.parent_action_fingerprint = Some(format!("sha256:{}", "ee".repeat(32)));
+
+    // Investigating the PARENT (its audit evidence is in scope; no child row
+    // is selected): every child of the in-scope fingerprint attaches.
+    let correlations = investigation_action_correlations(
+        &[],
+        &[],
+        &[],
+        std::slice::from_ref(&parent_audit),
+        &[child_log.clone(), orphan_log.clone(), unrelated_log.clone()],
+        &HashSet::new(),
+        std::slice::from_ref(&child_dispatch),
+        &HashSet::new(),
+    );
+    assert_eq!(correlations.len(), 1, "{correlations:?}");
+    let group = &correlations[0];
+    assert_eq!(group.action_fingerprint, parent);
+    assert_eq!(group.audit_event_ids, vec!["audit-parent"]);
+    assert_eq!(group.child_request_ids, vec!["request-child-a2a"]);
+    assert_eq!(group.child_dispatch_ids, vec!["dispatch-child"]);
+
+    // Investigating only the CHILD (it is selected; none of the parent's own
+    // evidence is in scope): the parent-keyed group still surfaces to pivot
+    // on, while the unrelated pair stays invisible.
+    parent_audit.action_fingerprint = None;
+    let child_only = investigation_action_correlations(
+        &[],
+        &[],
+        &[],
+        &[],
+        &[child_log.clone(), unrelated_log],
+        &HashSet::from(["request-child-a2a".to_string()]),
+        &[],
+        &HashSet::new(),
+    );
+    assert_eq!(child_only.len(), 1, "{child_only:?}");
+    assert_eq!(child_only[0].action_fingerprint, parent);
+    assert_eq!(child_only[0].child_request_ids, vec!["request-child-a2a"]);
+    assert!(child_only[0].audit_event_ids.is_empty());
+
+    // Investigating a SELECTED child dispatch surfaces the parent group too.
+    let dispatch_only = investigation_action_correlations(
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &HashSet::new(),
+        std::slice::from_ref(&child_dispatch),
+        &HashSet::from(["dispatch-child".to_string()]),
+    );
+    assert_eq!(dispatch_only.len(), 1, "{dispatch_only:?}");
+    assert_eq!(dispatch_only[0].action_fingerprint, parent);
+    assert_eq!(dispatch_only[0].child_dispatch_ids, vec!["dispatch-child"]);
+}
+
+/// #307: the investigation request DTO surfaces the declared parent (and
+/// omits the key entirely for absent-parent rows — NULL is explicit, not "").
+#[test]
+fn investigation_request_dto_surfaces_the_declared_parent_action() {
+    let parent = format!("sha256:{}", "dd".repeat(32));
+    let mut log = request_log("request-child", 200);
+    log.parent_action_fingerprint = Some(parent.clone());
+    let sanitized = sanitize_investigation_request(log);
+    assert_eq!(
+        sanitized.parent_action_fingerprint.as_deref(),
+        Some(&*parent)
+    );
+    let encoded = serde_json::to_value(&sanitized).unwrap();
+    assert_eq!(encoded["parent_action_fingerprint"], parent.as_str());
+
+    let orphan = sanitize_investigation_request(request_log("request-orphan", 200));
+    assert_eq!(orphan.parent_action_fingerprint, None);
+    let encoded = serde_json::to_value(&orphan).unwrap();
+    assert!(
+        encoded.get("parent_action_fingerprint").is_none(),
+        "absent parent must be omitted: {encoded}"
+    );
 }
 
 /// #306: investigation approval DTOs surface the shared action identity and

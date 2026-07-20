@@ -753,6 +753,7 @@ impl FerroGateway {
                             cache_status: None,
                             started_at_unix: Some(request_started_at_unix),
                             completed_at_unix: Some(now_unix_seconds()),
+                            parent_action_fingerprint: None,
                         });
 
                         // Image responses are already the canonical OpenAI
@@ -868,6 +869,7 @@ impl FerroGateway {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
+            parent_action_fingerprint: None,
         });
     }
 }

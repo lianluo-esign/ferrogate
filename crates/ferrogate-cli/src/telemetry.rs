@@ -1607,6 +1607,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
+            parent_action_fingerprint: None,
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
             action_identity: Default::default(),
@@ -1738,6 +1739,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
+            parent_action_fingerprint: None,
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
             action_identity: Default::default(),
@@ -1949,6 +1951,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
+            parent_action_fingerprint: None,
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
             action_identity: Default::default(),

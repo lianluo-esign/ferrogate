@@ -181,6 +181,7 @@ impl FerroGateway {
                 cache_status: None,
                 started_at_unix: None,
                 completed_at_unix: None,
+                parent_action_fingerprint: None,
             });
         Ok(())
     }

@@ -67,6 +67,7 @@ fn sample_audit_event(id: &str) -> StoredAuditEvent {
         decision: Some("degrade".into()),
         decision_reason: Some("audit_redacted".into()),
         output_disposition: Some("redacted".into()),
+        parent_action_fingerprint: None,
     }
 }
 
@@ -186,6 +187,107 @@ fn none_action_identity_fields_are_omitted_from_serialized_documents() {
     }
     let restored: StoredAgentRunEvent = serde_json::from_value(value).expect("round trip");
     assert_eq!(restored, event);
+}
+
+// ---------------------------------------------------------------------------
+// #307: handoff parent identity on request-log / audit documents.
+// ---------------------------------------------------------------------------
+
+/// #307: a request log carrying a declared parent-action fingerprint
+/// round-trips it verbatim; a log WITHOUT a parent serializes byte-identically
+/// to the pre-#307 shape (no `parent_action_fingerprint` key), and legacy
+/// documents deserialize with an explicit `None` parent — never fabricated.
+#[test]
+fn request_log_parent_action_fingerprint_round_trips_and_stays_legacy_byte_stable() {
+    let parent = format!("sha256:{}", "cd".repeat(32));
+    let log = crate::StoredRequestLog {
+        request_id: "req-307-child".into(),
+        trace_id: Some("trace-307".into()),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext::default(),
+        route: Some("a2a.message".into()),
+        provider: Some("planner".into()),
+        logical_model: Some("a2a:planner".into()),
+        provider_model: None,
+        gateway_config_id: None,
+        gateway_config_revision: None,
+        status_code: 200,
+        error_code: None,
+        prompt_recorded: false,
+        response_recorded: false,
+        prompt_body: None,
+        response_body: None,
+        cache_status: None,
+        started_at_unix: Some(1),
+        completed_at_unix: Some(2),
+        parent_action_fingerprint: Some(parent.clone()),
+    };
+
+    // With a parent: round trip through the in-memory store keeps it verbatim.
+    let repositories = memory_repositories();
+    block_on(repositories.append_request_log(log.clone()));
+    let stored = block_on(repositories.request_logs());
+    let stored = stored
+        .iter()
+        .find(|stored| stored.request_id == "req-307-child")
+        .expect("log present");
+    assert_eq!(stored.parent_action_fingerprint.as_deref(), Some(&*parent));
+
+    // Without a parent: the serialized document has NO parent key (legacy
+    // byte-stability), and a legacy document deserializes to None.
+    let mut orphan = log.clone();
+    orphan.parent_action_fingerprint = None;
+    let value = serde_json::to_value(&orphan).expect("serialize");
+    assert!(
+        !value
+            .as_object()
+            .expect("object")
+            .contains_key("parent_action_fingerprint"),
+        "None parent must be omitted from the serialized document"
+    );
+    let restored: crate::StoredRequestLog = serde_json::from_value(value).expect("round trip");
+    assert_eq!(restored.parent_action_fingerprint, None);
+    assert_eq!(restored, orphan);
+}
+
+/// #307: same contract for audit documents — parent rides `audit_json`
+/// verbatim, absent-parent rows record None explicitly and serialize without
+/// the key.
+#[test]
+fn audit_event_parent_action_fingerprint_round_trips_and_stays_legacy_byte_stable() {
+    let parent = format!("sha256:{}", "ef".repeat(32));
+    let mut event = sample_audit_event("audit-307-parent");
+    event.parent_action_fingerprint = Some(parent.clone());
+
+    let repositories = memory_repositories();
+    block_on(repositories.append_audit_event(event.clone()));
+    let stored = block_on(repositories.audit_events());
+    let stored = stored
+        .iter()
+        .find(|stored| stored.id == "audit-307-parent")
+        .expect("event present");
+    assert_eq!(stored, &event);
+    assert_eq!(stored.parent_action_fingerprint.as_deref(), Some(&*parent));
+    // The parent is distinct from the event's OWN action identity.
+    assert_ne!(stored.parent_action_fingerprint, stored.action_fingerprint);
+
+    let mut orphan = event.clone();
+    orphan.parent_action_fingerprint = None;
+    let value = serde_json::to_value(&orphan).expect("serialize");
+    assert!(
+        !value
+            .as_object()
+            .expect("object")
+            .contains_key("parent_action_fingerprint"),
+        "None parent must be omitted from the serialized document"
+    );
+    let restored: StoredAuditEvent = serde_json::from_value(value).expect("round trip");
+    assert_eq!(restored, orphan);
 }
 
 // ---------------------------------------------------------------------------

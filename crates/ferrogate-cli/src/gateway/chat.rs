@@ -589,6 +589,7 @@ impl FerroGateway {
                         cache_status: Some("hit".into()),
                         started_at_unix: Some(request_started_at_unix),
                         completed_at_unix: Some(now_unix_seconds()),
+                        parent_action_fingerprint: None,
                     });
                     return write_raw_response(
                         session,
@@ -1404,6 +1405,7 @@ impl FerroGateway {
                                     cache_status: None,
                                     started_at_unix: Some(request_started_at_unix),
                                     completed_at_unix: Some(now_unix_seconds()),
+                                    parent_action_fingerprint: None,
                                 });
                                 return write_streaming_bytes_response(
                                     session,
@@ -1446,6 +1448,7 @@ impl FerroGateway {
                                         cache_status: None,
                                         started_at_unix: Some(request_started_at_unix),
                                         completed_at_unix: Some(now_unix_seconds()),
+                                        parent_action_fingerprint: None,
                                     });
                                 };
                             if streaming_guardrail_plan
@@ -2000,6 +2003,7 @@ impl FerroGateway {
                             cache_status: cache_key.as_ref().map(|_| "miss".to_string()),
                             started_at_unix: Some(request_started_at_unix),
                             completed_at_unix: Some(now_unix_seconds()),
+                            parent_action_fingerprint: None,
                         });
                         if let Some(cache_key) = cache_key {
                             if final_status.is_success() {
@@ -2127,6 +2131,7 @@ impl FerroGateway {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
+            parent_action_fingerprint: None,
         });
     }
 
@@ -2160,6 +2165,7 @@ impl FerroGateway {
             cache_status: None,
             started_at_unix: Some(context.now_unix),
             completed_at_unix: Some(context.now_unix),
+            parent_action_fingerprint: None,
         });
         write_json_error(
             session,

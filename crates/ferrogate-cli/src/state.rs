@@ -1998,6 +1998,11 @@ pub(crate) struct AuditActionIdentityDraft {
     pub(crate) decision_reason: Option<String>,
     /// `"returned"`/`"redacted"`/`"withheld"`/`"errored"`.
     pub(crate) output_disposition: Option<String>,
+    /// #307: fingerprint of the UPSTREAM governed action this audited event is
+    /// a downstream effect of (e.g. the declared parent of an A2A exchange).
+    /// NOT this event's own `action_fingerprint`. `None` (the default) when no
+    /// parent context exists — never fabricated.
+    pub(crate) parent_action_fingerprint: Option<String>,
 }
 
 impl AuditActionIdentityDraft {
@@ -2017,7 +2022,15 @@ impl AuditActionIdentityDraft {
                 .as_ref()
                 .map(|decision| decision.code().to_string()),
             output_disposition: None,
+            parent_action_fingerprint: None,
         }
+    }
+
+    /// #307: attach the fingerprint of the upstream governed action this
+    /// audited event is a downstream effect of (None when no parent exists).
+    pub(crate) fn with_parent_action_fingerprint(mut self, parent: Option<String>) -> Self {
+        self.parent_action_fingerprint = parent;
+        self
     }
 
     pub(crate) fn with_output_disposition(
@@ -2817,6 +2830,13 @@ pub(crate) struct InvestigationRequestEvidence {
     pub(crate) workflow_id: Option<String>,
     pub(crate) workflow_version: Option<u32>,
     pub(crate) workflow_node_id: Option<String>,
+    /// #307: fingerprint of the UPSTREAM governed action this request is a
+    /// downstream effect of (declared via
+    /// `x-ferrogate-parent-action-fingerprint` on the A2A ingress), so an
+    /// investigation of the child walks child → parent by fingerprint. None
+    /// when no parent was declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_action_fingerprint: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) route: Option<String>,
     pub(crate) provider: Option<String>,
@@ -2902,6 +2922,17 @@ pub(crate) struct InvestigationActionCorrelation {
     pub(crate) agent_event_ids: Vec<String>,
     /// Ids of audit-event rows carrying the fingerprint.
     pub(crate) audit_event_ids: Vec<String>,
+    /// #307 parent → child traversal: request ids of request-log rows (e.g.
+    /// child A2A exchanges) that declared THIS fingerprint as their
+    /// `parent_action_fingerprint` — downstream effects of this action.
+    /// Omitted when empty so pre-#307 investigation payloads stay byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) child_request_ids: Vec<String>,
+    /// #307 parent → child traversal: dispatch ids of self-hosted run
+    /// dispatches created as downstream effects of this action
+    /// (`self_hosted_run_dispatches.parent_action_fingerprint`, migration 048).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) child_dispatch_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4030,6 +4061,9 @@ impl SelfHostedWorkerDispatchRuntime {
             request_id: None,
             trace_id: None,
             agent_run_id: Some(run_id),
+            // #307: a registry-seed dispatch has no upstream governed action —
+            // the parent stays an explicit None (never fabricated).
+            parent_action_fingerprint: None,
         }) {
             Ok(()) => Ok(()),
             Err(SelfHostedWorkerError::InvalidTransport(message))
@@ -4144,6 +4178,8 @@ fn self_hosted_queue_record_to_storage(
         request_id: record.dispatch.request_id,
         trace_id: record.dispatch.trace_id,
         agent_run_id: record.dispatch.agent_run_id,
+        // #307: the parent governed action's identity survives too.
+        parent_action_fingerprint: record.dispatch.parent_action_fingerprint,
     }
 }
 
@@ -4165,6 +4201,7 @@ fn self_hosted_queue_record_from_storage(
             request_id: record.request_id,
             trace_id: record.trace_id,
             agent_run_id: record.agent_run_id,
+            parent_action_fingerprint: record.parent_action_fingerprint,
         },
         assigned_worker_id: record.assigned_worker_id,
         lease_id: record.lease_id,

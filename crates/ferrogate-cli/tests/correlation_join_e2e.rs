@@ -285,6 +285,14 @@ fn run_now_dispatch_lease_carries_the_admin_requests_correlation_triple() {
         lease["agent_run_id"], lease["run_id"],
         "the lease's agent-run correlation is the run it starts (#305): {lease}"
     );
+    // #307 absent-parent acceptance: an admin run-now trigger is not a
+    // governed ACTION, so the dispatch records an explicit NULL parent — the
+    // lease carries no parent_action_fingerprint (omitted on the wire), and
+    // nothing was fabricated to fill it.
+    assert!(
+        lease.get("parent_action_fingerprint").is_none(),
+        "a run-now dispatch has no governed-action parent (#307): {lease}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

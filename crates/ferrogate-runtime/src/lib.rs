@@ -23,10 +23,10 @@ mod target_capability;
 
 pub use action_identity::{
     audit_outcome_from_action_decision, capability_decision_from_action_decision, decision_codes,
-    guardrail_outcome_from_action_decision, ActingPrincipal, ActionContext, ActionDecision,
-    ActionIdentity, ActionReceipt, AuditOutcome, DecisionReason, GuardrailEnforcement,
-    GuardrailOutcome, GuardrailOutcomeParseError, GuardrailTriggeredAction, GuardrailVerdict,
-    OutputDisposition, UnknownAuditOutcome, ACTION_FINGERPRINT_CONTRACT,
+    guardrail_outcome_from_action_decision, is_canonical_action_fingerprint, ActingPrincipal,
+    ActionContext, ActionDecision, ActionIdentity, ActionReceipt, AuditOutcome, DecisionReason,
+    GuardrailEnforcement, GuardrailOutcome, GuardrailOutcomeParseError, GuardrailTriggeredAction,
+    GuardrailVerdict, OutputDisposition, UnknownAuditOutcome, ACTION_FINGERPRINT_CONTRACT,
 };
 pub use agent::{
     AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,

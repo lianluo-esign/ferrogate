@@ -6,7 +6,10 @@
 // firing on an A2A message body in both directions, and the A2A exchange landing
 // in metering + usage aggregates attributable to the calling key/tenant.
 
-use super::{a2a_input_envelope, a2a_message_count, a2a_output_envelope, A2A_ROUTE};
+use super::{
+    a2a_input_envelope, a2a_message_count, a2a_output_envelope, declared_parent_action_fingerprint,
+    A2A_ROUTE, PARENT_ACTION_FINGERPRINT_HEADER,
+};
 use crate::config::{Config, GuardrailStage};
 use crate::state::{AppState, GuardrailEvaluationContext, SharedAppState};
 use ferrogate_guardrails::{
@@ -226,10 +229,12 @@ fn a2a_guardrail_blocks_secret_in_request_and_response() {
 #[test]
 fn a2a_exchange_is_metered_into_usage_aggregates() {
     let state = AppState::new(Config::default());
+    let parent = format!("sha256:{}", "ab".repeat(32));
     block_on(state.record_a2a_exchange_event(
         "fg-a2a-meter",
         Some("trace-a2a"),
         Some("agent-run-a2a"),
+        Some(&parent),
         &tenant(),
         "planner",
         false,
@@ -256,6 +261,14 @@ fn a2a_exchange_is_metered_into_usage_aggregates() {
         event.metadata.get("a2a_bytes").map(String::as_str),
         Some("4096")
     );
+    // #307: the declared parent action rides the billing evidence metadata.
+    assert_eq!(
+        event
+            .metadata
+            .get("a2a_parent_action_fingerprint")
+            .map(String::as_str),
+        Some(parent.as_str())
+    );
     assert_eq!(event.latency_ms, Some(42));
     assert_eq!(
         event.cost_usd, None,
@@ -274,4 +287,98 @@ fn a2a_exchange_is_metered_into_usage_aggregates() {
 fn a2a_route_label_is_stable() {
     // The request-log / policy route label the ingress stamps on A2A traffic.
     assert_eq!(A2A_ROUTE, "a2a.message");
+}
+
+/// #307: an A2A exchange WITHOUT a declared parent records no parent metadata
+/// on its billing evidence — absence is explicit, never back-filled.
+#[test]
+fn a2a_exchange_without_parent_records_no_parent_metadata() {
+    let state = AppState::new(Config::default());
+    block_on(state.record_a2a_exchange_event(
+        "fg-a2a-orphan",
+        None,
+        None,
+        None,
+        &tenant(),
+        "planner",
+        false,
+        1,
+        128,
+        200,
+        None,
+    ))
+    .expect("record a2a metering event");
+    let events = state.billing_events();
+    assert_eq!(events.len(), 1);
+    assert!(
+        !events[0]
+            .metadata
+            .contains_key("a2a_parent_action_fingerprint"),
+        "absent parent must not appear in billing metadata: {:?}",
+        events[0].metadata
+    );
+}
+
+/// #307: validation of the declared-parent header. Absent/empty → Ok(None)
+/// (explicit NULL, nothing fabricated); a well-formed canonical fingerprint →
+/// Ok(Some); anything else → Err (the handler maps it to a 400).
+#[test]
+fn declared_parent_action_fingerprint_header_validation() {
+    let parent = format!("sha256:{}", "ab".repeat(32));
+
+    // Absent header → None.
+    let headers = http::HeaderMap::new();
+    assert_eq!(declared_parent_action_fingerprint(&headers), Ok(None));
+
+    // Empty / whitespace-only header → None (treated as absent).
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        PARENT_ACTION_FINGERPRINT_HEADER,
+        http::HeaderValue::from_static("   "),
+    );
+    assert_eq!(declared_parent_action_fingerprint(&headers), Ok(None));
+
+    // A canonical fingerprint (with surrounding whitespace) is accepted.
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        PARENT_ACTION_FINGERPRINT_HEADER,
+        http::HeaderValue::from_str(&format!(" {parent} ")).unwrap(),
+    );
+    assert_eq!(
+        declared_parent_action_fingerprint(&headers),
+        Ok(Some(parent.clone()))
+    );
+
+    // Malformed values are rejected with a caller-visible message.
+    for invalid in [
+        "not-a-fingerprint",
+        "sha256:short",
+        &format!("sha256:{}", "AB".repeat(32)), // uppercase hex
+        &format!("sha256:{}ff", "ab".repeat(32)), // too long
+        &format!("blake2b:{}", "ab".repeat(32)), // wrong scheme
+    ] {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            PARENT_ACTION_FINGERPRINT_HEADER,
+            http::HeaderValue::from_str(invalid).unwrap(),
+        );
+        let error = declared_parent_action_fingerprint(&headers)
+            .expect_err(&format!("must reject {invalid:?}"));
+        assert!(
+            error.contains(PARENT_ACTION_FINGERPRINT_HEADER),
+            "error names the offending header: {error}"
+        );
+        assert!(
+            error.contains("64 lowercase hex"),
+            "error explains the contract: {error}"
+        );
+    }
+
+    // Non-ASCII header bytes are rejected, not lossily accepted.
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        PARENT_ACTION_FINGERPRINT_HEADER,
+        http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+    );
+    assert!(declared_parent_action_fingerprint(&headers).is_err());
 }

@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 47;
-const POSTGRES_SCHEMA_NAME: &str = "047_guardrail_action_identity";
+const POSTGRES_SCHEMA_VERSION: u64 = 48;
+const POSTGRES_SCHEMA_NAME: &str = "048_handoff_parent_identity";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1196,6 +1196,16 @@ pub struct StoredSelfHostedRunDispatch {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_run_id: Option<String>,
+    /// #307 handoff parent identity (migration 048, optional): the
+    /// `canonical_target_sha256` fingerprint (`"sha256:<hex>"`) of the
+    /// UPSTREAM governed action this dispatch is a downstream effect of — the
+    /// same value the parent's timeline/audit/guardrail/approval rows carry,
+    /// NOT this dispatch's own identity. NULL on rows persisted before the
+    /// migration and on dispatches created outside any governed-action
+    /// context (registry seed, scheduler tick, admin run-now) — never
+    /// fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -7248,9 +7258,10 @@ impl PostgresControlPlaneStore {
                  (dispatch_id, action, tenant, workspace_id, session_id, run_id, \
                   framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
                   lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                  acknowledged_at_unix, request_id, trace_id, agent_run_id) \
+                  acknowledged_at_unix, request_id, trace_id, agent_run_id, \
+                  parent_action_fingerprint) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
-                         $16, $17, $18) \
+                         $16, $17, $18, $19) \
                  ON CONFLICT (dispatch_id) DO UPDATE SET \
                  action = EXCLUDED.action, \
                  tenant = EXCLUDED.tenant, \
@@ -7268,7 +7279,8 @@ impl PostgresControlPlaneStore {
                  acknowledged_at_unix = EXCLUDED.acknowledged_at_unix, \
                  request_id = EXCLUDED.request_id, \
                  trace_id = EXCLUDED.trace_id, \
-                 agent_run_id = EXCLUDED.agent_run_id",
+                 agent_run_id = EXCLUDED.agent_run_id, \
+                 parent_action_fingerprint = EXCLUDED.parent_action_fingerprint",
                 &[
                     &dispatch.dispatch_id,
                     &dispatch.action,
@@ -7288,6 +7300,7 @@ impl PostgresControlPlaneStore {
                     &dispatch.request_id,
                     &dispatch.trace_id,
                     &dispatch.agent_run_id,
+                    &dispatch.parent_action_fingerprint,
                 ],
             )
             .await
@@ -7337,7 +7350,8 @@ impl PostgresControlPlaneStore {
                 "SELECT dispatch_id, action, tenant, workspace_id, session_id, run_id, \
                     framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
                     lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                    acknowledged_at_unix, request_id, trace_id, agent_run_id \
+                    acknowledged_at_unix, request_id, trace_id, agent_run_id, \
+                    parent_action_fingerprint \
                  FROM self_hosted_run_dispatches \
                  ORDER BY queued_at_unix ASC, dispatch_id ASC",
                 &[],
@@ -7818,6 +7832,10 @@ where
         ("self_hosted_run_dispatches", "request_id"),
         ("self_hosted_run_dispatches", "trace_id"),
         ("self_hosted_run_dispatches", "agent_run_id"),
+        // #307 (migration 48): the parent governed action's fingerprint on the
+        // dispatch queue table (nullable by design: dispatches created outside
+        // any governed-action context carry NULL).
+        ("self_hosted_run_dispatches", "parent_action_fingerprint"),
     ];
     // #306 (migration 47): the shared action identity + stored canonical
     // decision on guardrail evidence rows, same presence + type pin (nullable
@@ -7845,7 +7863,7 @@ where
             .map(|row| row.get::<_, String>(0));
         if data_type.as_deref() != Some("text") {
             return Err(StorageError::Postgres(format!(
-                "required action-identity/correlation column {table}.{column} must be text (#304/#305/#306)"
+                "required action-identity/correlation column {table}.{column} must be text (#304/#305/#306/#307)"
             )));
         }
     }
@@ -9168,6 +9186,7 @@ fn self_hosted_run_dispatch_from_row(
         request_id: row.get(15),
         trace_id: row.get(16),
         agent_run_id: row.get(17),
+        parent_action_fingerprint: row.get(18),
     }
 }
 
@@ -11015,6 +11034,15 @@ pub struct StoredRequestLog {
     pub cache_status: Option<String>,
     pub started_at_unix: Option<u64>,
     pub completed_at_unix: Option<u64>,
+    /// #307 handoff parent identity: the `canonical_target_sha256` fingerprint
+    /// (`"sha256:<hex>"`) of the UPSTREAM governed action this request is a
+    /// downstream effect of (e.g. an A2A exchange declaring
+    /// `x-ferrogate-parent-action-fingerprint`). Persisted inside the
+    /// `request_logs.request_json` document the read paths deserialize — no
+    /// projection column needed. `None` when no parent was declared — never
+    /// fabricated; `skip_serializing_if` keeps legacy documents byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11052,6 +11080,13 @@ pub struct StoredAuditEvent {
     pub decision_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_disposition: Option<String>,
+    /// #307 handoff parent identity: the fingerprint of the UPSTREAM governed
+    /// action this audited event is a downstream effect of (declared-parent
+    /// A2A exchanges stamp it on their guardrail/policy audit rows). NOT
+    /// `action_fingerprint` (this event's own identity). Persisted inside the
+    /// `audit_events.audit_json` document; `None` when no parent was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15151,6 +15186,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
+            parent_action_fingerprint: None,
         });
         repository.append(StoredRequestLog {
             request_id: "fg-2".into(),
@@ -15177,6 +15213,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(3),
             completed_at_unix: Some(4),
+            parent_action_fingerprint: None,
         });
 
         let logs = repository.list();
@@ -15214,6 +15251,7 @@ mod tests {
                 cache_status: None,
                 started_at_unix: None,
                 completed_at_unix: None,
+                parent_action_fingerprint: None,
             });
         }
 
@@ -15269,6 +15307,7 @@ mod tests {
             outcome: "accepted".into(),
             message: "candidate config valid".into(),
             occurred_at_unix: Some(1),
+            parent_action_fingerprint: None,
         });
         repository.append(StoredAuditEvent {
             action_fingerprint: None,
@@ -15291,6 +15330,7 @@ mod tests {
             outcome: "rejected".into(),
             message: "field listen: invalid listen address".into(),
             occurred_at_unix: Some(2),
+            parent_action_fingerprint: None,
         });
 
         let events = repository.list();
@@ -16249,6 +16289,10 @@ mod tests {
                 request_id: Some("fg-dispatch-1".into()),
                 trace_id: Some("trace-dispatch-1".into()),
                 agent_run_id: Some("self-hosted-run-1".into()),
+                // #307: the parent governed action's fingerprint survives the
+                // in-memory round-trip / migration snapshot like the #305
+                // correlation keys.
+                parent_action_fingerprint: Some(format!("sha256:{}", "ab".repeat(32))),
             }),
         )
         .unwrap();
@@ -16289,6 +16333,11 @@ mod tests {
                 .as_deref(),
             Some("dispatch-1:attempt-1")
         );
+        // #307: the parent-action identity round-trips with the dispatch.
+        assert_eq!(
+            block_on(repositories.self_hosted_run_dispatches())[0].parent_action_fingerprint,
+            Some(format!("sha256:{}", "ab".repeat(32)))
+        );
     }
 
     #[test]
@@ -16322,6 +16371,11 @@ mod tests {
         assert_eq!(
             block_on(target.self_hosted_run_dispatches())[0].required_capabilities,
             vec!["shell".to_string()]
+        );
+        // #307: the parent-action identity survives the migration snapshot.
+        assert_eq!(
+            block_on(target.self_hosted_run_dispatches())[0].parent_action_fingerprint,
+            Some(format!("sha256:{}", "ab".repeat(32)))
         );
     }
 
@@ -16542,6 +16596,7 @@ mod tests {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
+            parent_action_fingerprint: None,
         }));
         block_on(repositories.append_request_log(StoredRequestLog {
             request_id: "fg-2".into(),
@@ -16568,6 +16623,7 @@ mod tests {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
+            parent_action_fingerprint: None,
         }));
 
         let page = block_on(repositories.request_logs_page(0, 10));

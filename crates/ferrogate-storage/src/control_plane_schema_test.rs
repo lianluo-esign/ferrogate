@@ -317,6 +317,7 @@ fn live_audit_event_writes_to_configured_schema_not_public() {
         outcome: "success".into(),
         message: "schema routing probe".into(),
         occurred_at_unix: Some(1_700_000_000),
+        parent_action_fingerprint: None,
     }));
     drop(repositories);
 
@@ -589,6 +590,9 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
             request_id: Some("fg-cp-239".into()),
             trace_id: Some("trace-cp-239".into()),
             agent_run_id: Some("run-cp-239".into()),
+            // #307 (migration 48): the parent governed action's fingerprint
+            // lands in its own column.
+            parent_action_fingerprint: Some(format!("sha256:{}", "ab".repeat(32))),
         }),
     )
     .expect("upsert self-hosted run dispatch must not error");
@@ -631,6 +635,20 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
         ),
         1,
         "the dispatch correlation keys must be persisted in the configured schema (#305)",
+    );
+    // #307 (migration 48): the handoff parent-identity column lands populated.
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".self_hosted_run_dispatches \
+                 WHERE dispatch_id = '{dispatch_id}' \
+                   AND parent_action_fingerprint = 'sha256:{}'",
+                "ab".repeat(32)
+            )
+        ),
+        1,
+        "the dispatch parent-action fingerprint must be persisted in the configured schema (#307)",
     );
     assert_eq!(
         count_rows(
@@ -713,6 +731,9 @@ fn live_self_hosted_lease_state_survives_gateway_restart() {
             request_id: Some("fg-lease-restart".into()),
             trace_id: Some("trace-lease-restart".into()),
             agent_run_id: Some("run-lease".into()),
+            // #307: an absent-parent dispatch records NULL explicitly, and
+            // that NULL must survive the restart as None (never back-filled).
+            parent_action_fingerprint: None,
         }),
     )
     .expect("persist in-flight lease must not error");
@@ -764,6 +785,8 @@ fn live_self_hosted_lease_state_survives_gateway_restart() {
     assert_eq!(restored.request_id.as_deref(), Some("fg-lease-restart"));
     assert_eq!(restored.trace_id.as_deref(), Some("trace-lease-restart"));
     assert_eq!(restored.agent_run_id.as_deref(), Some("run-lease"));
+    // #307: an absent parent stays explicitly NULL across the restart.
+    assert_eq!(restored.parent_action_fingerprint, None);
 
     // No double-deliver: while the deadline holds, exactly one active lease row
     // remains bound to the original worker -- there is no second, unassigned copy

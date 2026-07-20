@@ -36,9 +36,17 @@ impl AppState {
             0,
             GUARDRAIL_INVESTIGATION_EVALUATION_LIMIT,
         )?;
-        let mut requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
+        // #307: keep the full (tenant-scoped) request-log set around — child
+        // rows that declared a parent action are discovered by fingerprint
+        // even when they do not match the investigation selector themselves.
+        let all_requests = crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
             .into_iter()
+            .filter(|log| investigation_matches_tenant(&filter, &log.tenant))
+            .collect::<Vec<_>>();
+        let mut requests = all_requests
+            .iter()
             .filter(|log| investigation_matches_request(&filter, log))
+            .cloned()
             .collect::<Vec<_>>();
         let mut agent_runs = crate::gateway::block_on_sync_bridge(self.repositories.agent_runs())
             .into_iter()
@@ -126,15 +134,55 @@ impl AppState {
                 .sum(),
         );
         let final_outcome = investigation_final_outcome(&requests, &guardrail_evaluations);
+        // #307: parent → child traversal — child rows (A2A request logs and
+        // self-hosted dispatches) that declared a parent action fingerprint,
+        // tenant-scoped like every other evidence source. The selected-id sets
+        // scope the walk: a parent-keyed group appears only when the parent's
+        // own evidence is in scope OR a selected row IS one of its children —
+        // unrelated parent/child pairs elsewhere in the store never leak in.
+        let selected_request_ids = requests
+            .iter()
+            .map(|request| request.request_id.clone())
+            .collect::<HashSet<_>>();
+        let child_dispatches =
+            crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
+                .into_iter()
+                .filter(|dispatch| {
+                    dispatch.parent_action_fingerprint.is_some()
+                        && filter
+                            .tenant_id
+                            .as_ref()
+                            .is_none_or(|tenant_id| &dispatch.tenant_id == tenant_id)
+                })
+                .collect::<Vec<_>>();
+        let selected_dispatch_ids = child_dispatches
+            .iter()
+            .filter(|dispatch| {
+                investigation_matches_ids(
+                    &filter,
+                    dispatch.request_id.as_deref().unwrap_or_default(),
+                    dispatch.trace_id.as_deref(),
+                    dispatch.agent_run_id.as_deref(),
+                )
+            })
+            .map(|dispatch| dispatch.dispatch_id.clone())
+            .collect::<HashSet<_>>();
         // #306: fingerprint-based joining — group every evidence row that
         // carries the shared canonical_target_sha256 action fingerprint, so
         // "same fingerprint across guardrail evidence + approval + timeline +
         // audit = same action" is surfaced instead of left to the caller.
+        // #307 extends the same groups with child rows referencing the
+        // fingerprint as their PARENT, so an investigation walks parent →
+        // child (and a child's investigation surfaces its parent group).
         let action_correlations = investigation_action_correlations(
             &guardrail_evaluations,
             &approvals,
             &agent_events,
             &audit_events,
+            &all_requests,
+            &selected_request_ids,
+            &child_dispatches,
+            &selected_dispatch_ids,
         );
         let requests = requests
             .into_iter()
@@ -364,11 +412,16 @@ fn investigation_final_outcome(
 /// fingerprint across guardrail evidence, approvals, timeline events and
 /// audit events describe the SAME external action. Deterministic order
 /// (sorted by fingerprint); rows without a fingerprint never appear.
+#[allow(clippy::too_many_arguments)]
 fn investigation_action_correlations(
     guardrails: &[GuardrailEvaluationView],
     approvals: &[ToolApprovalRecord],
     agent_events: &[StoredAgentRunEvent],
     audit_events: &[StoredAuditEvent],
+    all_requests: &[StoredRequestLog],
+    selected_request_ids: &HashSet<String>,
+    child_dispatches: &[ferrogate_storage::StoredSelfHostedRunDispatch],
+    selected_dispatch_ids: &HashSet<String>,
 ) -> Vec<InvestigationActionCorrelation> {
     fn correlation_entry<'map>(
         correlations: &'map mut BTreeMap<String, InvestigationActionCorrelation>,
@@ -382,6 +435,8 @@ fn investigation_action_correlations(
                 approval_ids: Vec::new(),
                 agent_event_ids: Vec::new(),
                 audit_event_ids: Vec::new(),
+                child_request_ids: Vec::new(),
+                child_dispatch_ids: Vec::new(),
             }
         }))
     }
@@ -418,6 +473,47 @@ fn investigation_action_correlations(
             correlation.audit_event_ids.push(event.id.clone());
         }
     }
+    // #307 parent → child links: rows that declared THIS fingerprint as their
+    // PARENT, in two scoped passes so the traversal works from both ends
+    // WITHOUT leaking unrelated parent/child pairs from the rest of the
+    // store. Pass 1: a child row that is itself under investigation
+    // (selected) creates its parent-fingerprint group, so investigating a
+    // child surfaces the parent group to pivot on. Pass 2: every child of an
+    // in-scope group attaches, so investigating the parent lists ALL of that
+    // action's downstream rows deterministically (independent of row order).
+    for log in all_requests {
+        if selected_request_ids.contains(&log.request_id) {
+            correlation_entry(&mut correlations, log.parent_action_fingerprint.as_deref());
+        }
+    }
+    for dispatch in child_dispatches {
+        if selected_dispatch_ids.contains(&dispatch.dispatch_id) {
+            correlation_entry(
+                &mut correlations,
+                dispatch.parent_action_fingerprint.as_deref(),
+            );
+        }
+    }
+    for log in all_requests {
+        if let Some(correlation) = log
+            .parent_action_fingerprint
+            .as_deref()
+            .and_then(|parent| correlations.get_mut(parent))
+        {
+            correlation.child_request_ids.push(log.request_id.clone());
+        }
+    }
+    for dispatch in child_dispatches {
+        if let Some(correlation) = dispatch
+            .parent_action_fingerprint
+            .as_deref()
+            .and_then(|parent| correlations.get_mut(parent))
+        {
+            correlation
+                .child_dispatch_ids
+                .push(dispatch.dispatch_id.clone());
+        }
+    }
     correlations.into_values().collect()
 }
 
@@ -429,6 +525,9 @@ fn sanitize_investigation_request(log: StoredRequestLog) -> InvestigationRequest
         workflow_id: log.workflow_id,
         workflow_version: log.workflow_version,
         workflow_node_id: log.workflow_node_id,
+        // #307: the declared parent action is investigation-safe evidence —
+        // it is the child → parent join key.
+        parent_action_fingerprint: log.parent_action_fingerprint,
         tenant: log.tenant,
         route: log.route,
         provider: log.provider,

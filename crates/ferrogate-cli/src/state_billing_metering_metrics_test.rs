@@ -80,6 +80,7 @@ fn prometheus_metrics_snapshot_aggregates_request_logs_and_distinct_attempts() {
         cache_status: None,
         started_at_unix: None,
         completed_at_unix: None,
+        parent_action_fingerprint: None,
     });
     record_attempt(
         &state,

@@ -528,6 +528,9 @@ impl AppState {
             decision: event.action_identity.decision,
             decision_reason: event.action_identity.decision_reason,
             output_disposition: event.action_identity.output_disposition,
+            // #307: the upstream governed action's identity (declared-parent
+            // handoff) rides the audit document alongside the event's own.
+            parent_action_fingerprint: event.action_identity.parent_action_fingerprint,
             id: self.repositories.next_audit_event_id(),
             request_id: event.request_id,
             trace_id: event.trace_id,
@@ -727,6 +730,7 @@ impl AppState {
         request_id: &str,
         trace_id: Option<&str>,
         agent_run_id: Option<&str>,
+        parent_action_fingerprint: Option<&str>,
         tenant: &ferrogate_core::TenantContext,
         agent_id: &str,
         stream: bool,
@@ -740,6 +744,15 @@ impl AppState {
         metadata.insert("a2a_message_count".to_string(), message_count.to_string());
         metadata.insert("a2a_bytes".to_string(), bytes.to_string());
         metadata.insert("a2a_stream".to_string(), stream.to_string());
+        // #307: the declared parent governed action rides the billing evidence
+        // in metadata (absent when no parent was declared — never fabricated),
+        // so even the metered exchange joins the parent by fingerprint.
+        if let Some(parent) = parent_action_fingerprint {
+            metadata.insert(
+                "a2a_parent_action_fingerprint".to_string(),
+                parent.to_string(),
+            );
+        }
 
         let event = BillingEvent {
             request_id: request_id.to_string(),
@@ -1231,6 +1244,7 @@ mod tests {
             cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
+            parent_action_fingerprint: None,
         });
 
         let logs = state.request_logs();
@@ -1317,6 +1331,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(10),
             completed_at_unix: Some(11),
+            parent_action_fingerprint: None,
         });
         state.record_request_log(StoredRequestLog {
             request_id: "fg-export-2".into(),
@@ -1348,6 +1363,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(12),
             completed_at_unix: Some(13),
+            parent_action_fingerprint: None,
         });
 
         let records = state.request_log_export_records(RequestLogExportFilter::from_query(Some(
@@ -1407,6 +1423,7 @@ mod tests {
                 cache_status: None,
                 started_at_unix: None,
                 completed_at_unix: None,
+                parent_action_fingerprint: None,
             });
             state.record_admin_audit_event(AdminAuditEventDraft {
                 action_identity: Default::default(),

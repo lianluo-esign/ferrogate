@@ -1994,6 +1994,7 @@ mod tests {
             cache_status: None,
             started_at_unix: Some(ts),
             completed_at_unix: Some(ts),
+            parent_action_fingerprint: None,
         };
         state.record_request_log(log("tenant-a", "start", 100));
 

@@ -564,6 +564,12 @@ fn build_self_hosted_dispatch(
         request_id: correlation.map(|correlation| correlation.request_id.to_string()),
         trace_id: correlation.and_then(|correlation| correlation.trace_id.map(str::to_string)),
         agent_run_id: Some(run_id),
+        // #307: neither a schedule tick nor the admin run-now trigger is a
+        // governed ACTION — there is no upstream action fingerprint to
+        // inherit, so the parent stays an explicit None (never fabricated).
+        // The field flows end-to-end (dispatch → durable row → worker lease)
+        // for the day a governed seam enqueues dispatches.
+        parent_action_fingerprint: None,
     })
 }
 
@@ -741,6 +747,9 @@ mod tests {
             Some(dispatch.run_id.as_str()),
             "the dispatch's agent run correlation is the run it starts"
         );
+        // #307: run-now is an admin trigger, not a governed action — the
+        // parent stays an explicit NULL (never fabricated).
+        assert_eq!(dispatch.parent_action_fingerprint, None);
     }
 
     /// #305: a background tick fire has no dispatching request — the dispatch
@@ -775,6 +784,8 @@ mod tests {
             dispatch.agent_run_id.as_deref(),
             Some(dispatch.run_id.as_str())
         );
+        // #307: a tick fire has no governed-action parent either.
+        assert_eq!(dispatch.parent_action_fingerprint, None);
     }
 
     #[test]

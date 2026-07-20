@@ -94,6 +94,24 @@ use crate::{CanonicalCapabilityTarget, CapabilityAuthorizationDecision};
 /// (`action_fingerprint_contract`).
 pub const ACTION_FINGERPRINT_CONTRACT: &str = "canonical_target_sha256";
 
+/// Whether `value` is a well-formed fingerprint under the
+/// [`ACTION_FINGERPRINT_CONTRACT`]: `"sha256:"` followed by exactly 64
+/// lowercase hex characters — the shape [`CanonicalCapabilityTarget::fingerprint`]
+/// emits. Used by ingress seams (issue #307: the declared
+/// `x-ferrogate-parent-action-fingerprint` header) to validate a fingerprint
+/// BEFORE persisting it, so malformed values are rejected instead of polluting
+/// the fingerprint join space. Purely syntactic — it does not (and cannot)
+/// prove the fingerprint refers to a recorded action.
+pub fn is_canonical_action_fingerprint(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+}
+
 /// Stable reason codes carried by [`DecisionReason::code`]. Codes are the
 /// lossless discriminator when several source values collapse onto one
 /// canonical decision (e.g. approval `denied` vs `expired` are both `deny`).
@@ -774,6 +792,35 @@ mod tests {
         assert!(identity.action_fingerprint["sha256:".len()..]
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn canonical_action_fingerprint_validation_accepts_only_the_contract_shape() {
+        // A real fingerprint from the canonical builder validates.
+        assert!(is_canonical_action_fingerprint(
+            &sample_target().fingerprint()
+        ));
+        assert!(is_canonical_action_fingerprint(&format!(
+            "sha256:{}",
+            "a1".repeat(32)
+        )));
+        // Everything outside "sha256:" + 64 lowercase hex is rejected.
+        for invalid in [
+            "",
+            "sha256:",
+            "sha256:abc",                                   // too short
+            &format!("sha256:{}", "a1".repeat(33)),         // too long
+            &format!("sha256:{}Z", &"a1".repeat(32)[..62]), // non-hex
+            &format!("sha256:{}", "A1".repeat(32)),         // uppercase hex
+            &format!("sha512:{}", "a1".repeat(32)),         // wrong scheme
+            &"a1".repeat(32),                               // missing prefix
+            &format!(" sha256:{}", "a1".repeat(32)),        // leading space
+        ] {
+            assert!(
+                !is_canonical_action_fingerprint(invalid),
+                "must reject {invalid:?}"
+            );
+        }
     }
 
     #[test]
