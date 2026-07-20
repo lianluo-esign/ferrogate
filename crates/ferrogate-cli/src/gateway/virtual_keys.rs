@@ -860,15 +860,28 @@ impl FerroGateway {
                     Ok(payload) => payload,
                     Err(()) => return Ok(()),
                 };
-                let Some(existing) = state.get_project(id).await.ok().flatten() else {
-                    return write_json_error(
-                        session,
-                        StatusCode::NOT_FOUND,
-                        "project_not_found",
-                        format!("no project with id {id}"),
-                        &ctx.request_id,
-                    )
-                    .await;
+                let existing = match state.get_project(id).await {
+                    Ok(Some(existing)) => existing,
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "project_not_found",
+                            format!("no project with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                 };
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
                 {
@@ -958,15 +971,28 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                let Some(existing) = state.get_project(id).await.ok().flatten() else {
-                    return write_json_error(
-                        session,
-                        StatusCode::NOT_FOUND,
-                        "project_not_found",
-                        format!("no project with id {id}"),
-                        &ctx.request_id,
-                    )
-                    .await;
+                let existing = match state.get_project(id).await {
+                    Ok(Some(existing)) => existing,
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "project_not_found",
+                            format!("no project with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                 };
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
                 {
@@ -1388,15 +1414,28 @@ impl FerroGateway {
                     Ok(payload) => payload,
                     Err(()) => return Ok(()),
                 };
-                let Some(existing) = state.get_workspace(id).await.ok().flatten() else {
-                    return write_json_error(
-                        session,
-                        StatusCode::NOT_FOUND,
-                        "workspace_not_found",
-                        format!("no workspace with id {id}"),
-                        &ctx.request_id,
-                    )
-                    .await;
+                let existing = match state.get_workspace(id).await {
+                    Ok(Some(existing)) => existing,
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "workspace_not_found",
+                            format!("no workspace with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                 };
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
                 {
@@ -1490,15 +1529,28 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                let Some(existing) = state.get_workspace(id).await.ok().flatten() else {
-                    return write_json_error(
-                        session,
-                        StatusCode::NOT_FOUND,
-                        "workspace_not_found",
-                        format!("no workspace with id {id}"),
-                        &ctx.request_id,
-                    )
-                    .await;
+                let existing = match state.get_workspace(id).await {
+                    Ok(Some(existing)) => existing,
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "workspace_not_found",
+                            format!("no workspace with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                 };
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
                 {
