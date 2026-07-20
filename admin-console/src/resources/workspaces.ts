@@ -18,7 +18,6 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
   description: "Workspaces are the scope virtual API keys are issued against.",
   basePath: "/admin/v1/workspaces",
   idField: "id",
-  noEditDelete: true,
   columns: [
     { key: "name", header: "Name" },
     { key: "slug", header: "Slug" },
@@ -27,7 +26,15 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
     { key: "status", header: "Status" },
   ],
   fields: [
-    { name: "project_id", label: "Project ID", type: "text", required: true },
+    {
+      name: "project_id",
+      label: "Project ID",
+      type: "text",
+      required: true,
+      // Immutable after create (#326: the backend rejects project re-attribution
+      // with 400 to avoid stranding child rows), so it is hidden on edit.
+      createOnly: true,
+    },
     { name: "name", label: "Name", type: "text", required: true },
     { name: "slug", label: "Slug", type: "text", required: true },
     { name: "environment", label: "Environment", type: "text", placeholder: "default" },

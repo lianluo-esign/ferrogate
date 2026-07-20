@@ -16,7 +16,6 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
   description: "Projects group workspaces under a tenant.",
   basePath: "/admin/v1/projects",
   idField: "id",
-  noEditDelete: true,
   columns: [
     { key: "name", header: "Name" },
     { key: "slug", header: "Slug" },
@@ -24,7 +23,15 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
     { key: "status", header: "Status" },
   ],
   fields: [
-    { name: "tenant_id", label: "Tenant ID", type: "text", required: true },
+    {
+      name: "tenant_id",
+      label: "Tenant ID",
+      type: "text",
+      required: true,
+      // Immutable after create (#326: the backend rejects tenant re-attribution
+      // with 400 to avoid stranding child rows), so it is hidden on edit.
+      createOnly: true,
+    },
     { name: "name", label: "Name", type: "text", required: true },
     { name: "slug", label: "Slug", type: "text", required: true },
     { name: "status", label: "Status", type: "text", placeholder: "active" },
