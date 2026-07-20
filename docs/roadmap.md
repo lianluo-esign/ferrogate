@@ -14,7 +14,7 @@ permalink: /roadmap/
 
 # FerroGate Roadmap
 
-Last reviewed: 2026-07-09.
+Last reviewed: 2026-07-20.
 
 This roadmap describes where FerroGate is going and how current GitHub issues
 map to that direction. It is a planning document, not a release promise. The
@@ -33,9 +33,15 @@ FerroGate uses a GitHub-native planning model:
   needing tighter acceptance criteria.
 - **Later** means useful but intentionally deferred.
 
-Broad epics stay open until their acceptance criteria are actually complete.
-When a slice lands, the related issue should get a progress comment with the
-commit, verification commands, and remaining work.
+The issue tracker is organized as a two-level epic hierarchy: six product
+pillars ([#266](https://github.com/lianluo-esign/ferrogate/issues/266)–[#271](https://github.com/lianluo-esign/ferrogate/issues/271))
+that describe outcome-level direction, and per-module epics
+([#285](https://github.com/lianluo-esign/ferrogate/issues/285)–[#300](https://github.com/lianluo-esign/ferrogate/issues/300))
+that own the concrete work inside each crate or deliverable. Individual work
+items are filed as child issues of those epics. Broad epics stay open until
+their acceptance criteria are actually complete. When a slice lands, the
+related issue should get a progress comment with the commit, verification
+commands, and remaining work.
 
 ## Product Direction
 
@@ -60,21 +66,48 @@ These areas are implemented in the current open-source gateway:
   request IDs, trace IDs, streaming responses, graceful shutdown, and graceful
   listener upgrade.
 - OpenAI-compatible `GET /v1/models`, `POST /v1/chat/completions`, and
-  `POST /v1/responses`.
+  `POST /v1/responses`, Anthropic-native `POST /v1/messages`,
+  `POST /v1/embeddings` through OpenAI-compatible and non-OpenAI adapter
+  families, and the governed `POST /v1/images/generations` ingress.
 - Provider adapters for OpenAI-compatible APIs, OpenAI, Azure OpenAI,
   OpenRouter, Anthropic, Gemini, Grok/xAI, and DeepSeek.
 - Logical model registry, fallback routing, weighted routing, lowest-cost
-  routing, lowest-latency routing, balanced routing, tenant visibility, and
-  provider allow/deny controls.
+  routing, lowest-latency routing, balanced routing, canary rollout splits,
+  shadow/mirror traffic duplication, tenant visibility, and provider
+  allow/deny controls.
 - Virtual API keys, scopes, tenant context, model/provider allowlists and
-  denylists, request rate limits, and token budget reservation/settlement.
-- Exact-match AI response cache for non-streaming requests.
+  denylists, request rate limits, token budget reservation/settlement with
+  local-tokenizer pre-request estimation, and a wallet reserve/hold
+  primitive for exact-amount irreversible spends.
+- Exact-match AI response cache for non-streaming requests, plus a semantic
+  (vector-similarity) cache behind the same cache seam.
 - Prompt/response guardrails, request logs, token metering events, usage
   aggregates, provider health, Prometheus metrics, OTLP export, and ClickHouse
   analytics delivery through Vector pipeline mode or direct warehouse mode.
-- MCP host/client support, native `/v1/mcp` JSON-RPC ingress, tool execution,
-  dispatch isolation, timeout handling, approval gates, immutable approval
-  fingerprints, Codex compatibility, and Claude Code compatibility.
+- MCP host/client support on the MCP 2026-07-28 specification, native
+  `/v1/mcp` JSON-RPC ingress including `resources/list`/`resources/read`,
+  tool execution, dispatch isolation, timeout handling, approval gates,
+  immutable approval fingerprints, Codex compatibility, and Claude Code
+  compatibility.
+- The hosted-asset closed loop: versioned `/v1/assets/*` publish/pull/delete,
+  artifact-registry channels/semver/variants/yank, signature and malware-scan
+  supply-chain gates, presigned large-file S3 path with a private bucket,
+  egress metering with download quotas and audit, 304/Range pull caching,
+  retention policies and unreferenced-blob GC, static-site serve mode under
+  `/sites/*`, and agent consumption via MCP resources and the `fetch_asset`
+  tool.
+- Time-based agent schedules (cron/interval) firing `agent_run` targets into
+  the dispatch lease queue, with an `/admin/v1/agent-schedules` CRUD API,
+  run-now, and fire history.
+- Self-hosted worker transport over verified mTLS: explicit issuing CA,
+  control-plane certificate issuance and rotation, CRL revocation, and
+  report-only governed execution for covered command families.
+- A2A ingress deep governance (policy, guardrails, billing on message
+  bodies) and workflow-graph-level execution budgets for multi-step agent
+  runs.
+- Per-tenant SSO persistence with SAML alongside OIDC in the auth service,
+  and retention-engine TTL/purge adoption for request logs and audit
+  events.
 - Agent-sandbox capability boundary (`isolation.rs` + `capability_boundary.rs`
   + `function_egress.rs`): ten `CapabilityAction` classes, fail-closed
   denial proven against a CVE-2025-53967-shaped escalation attempt with a
@@ -106,31 +139,49 @@ These areas are implemented in the current open-source gateway:
 
 ## Now
 
-| Theme | Goal | Tracking |
+Near-term work is organized under the six product pillars. Each pillar epic
+lists its own child issues and acceptance criteria:
+
+| Pillar | Goal | Tracking |
 | --- | --- | --- |
-| Agent run evidence | Move from retained evidence aggregation to durable `agent_run` and `agent_run_event` records, lifecycle events, checkpoint/resume evidence, cancellation events, and tenant/API-key filters. | [#49](https://github.com/lianluo-esign/ferrogate/issues/49) |
-| Managed runtime | Complete the `agent-worker` Firecracker microVM transport and local microVM E2E harness for Codex CLI, Claude Code, Hermes, and native adapters without moving VM lifecycle into the gateway hot path. | [#82](https://github.com/lianluo-esign/ferrogate/issues/82), [#85](https://github.com/lianluo-esign/ferrogate/issues/85) |
-| Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67), [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#69](https://github.com/lianluo-esign/ferrogate/issues/69) |
-| Prompt workflows | Complete versioned prompt template management and render APIs as first-class agent workflow inputs. | [#44](https://github.com/lianluo-esign/ferrogate/issues/44) |
-| Release supply-chain verification | Verify the shipped SBOM/cosign-signing/attestation pipeline end to end against a real CI-built image once self-hosted runners are back online; record the verification in the issue. | [#189](https://github.com/lianluo-esign/ferrogate/issues/189) |
+| LLM routing & provider surface | Deepen the multi-protocol inference surface (Chat Completions, Responses, Messages, embeddings, images), provider adapters, and rollout routing. | [#266](https://github.com/lianluo-esign/ferrogate/issues/266) |
+| MCP & agent governance | Keep MCP ingress/host support current with the spec and deepen agent-run, A2A, workflow, and schedule governance. | [#267](https://github.com/lianluo-esign/ferrogate/issues/267) |
+| Cost management & billing | Wallets, plans, metering dimensions, settlement paths, and billing-service integration. | [#268](https://github.com/lianluo-esign/ferrogate/issues/268) |
+| Guardrails, identity & compliance | Guardrail adapters and promotion loops, SSO/RBAC, retention, and audit evidence. | [#269](https://github.com/lianluo-esign/ferrogate/issues/269) |
+| Static-asset & tool hosting closed loop v2 | Extend the shipped `/v1/assets/*` + `/sites/*` loop (custom domains, live-bucket verification, richer registry semantics). | [#270](https://github.com/lianluo-esign/ferrogate/issues/270) |
+| Platform, durable storage & operations | Durable control plane, cluster operations, deployment shapes, and operational hardening. | [#271](https://github.com/lianluo-esign/ferrogate/issues/271) |
 
 ## Next
 
-| Theme | Goal | Tracking |
+Module epics own the concrete slices inside each crate or deliverable and
+feed the pillars above:
+
+| Module | Scope | Tracking |
 | --- | --- | --- |
-| Database providers | Keep Supabase as the durable control-plane target while hardening or retiring compatibility providers behind the same storage contract. MySQL has been retired as a production provider. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#94](https://github.com/lianluo-esign/ferrogate/issues/94), [#192](https://github.com/lianluo-esign/ferrogate/issues/192) |
-| External service boundaries | Keep tenant RBAC and billing integrations behind explicit service/provider boundaries instead of moving that complexity into the gateway hot path. | [#54](https://github.com/lianluo-esign/ferrogate/issues/54) |
-| Agent graph governance | Add workflow graph policy and execution budgets so multi-step agent runs can be governed at graph/run level, not only per request. | [#50](https://github.com/lianluo-esign/ferrogate/issues/50) |
-| Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. Current slice covers registered agent upstream control-plane storage plus discovery metadata. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
-| Canonical AI request model | Extend the internal AI request model for tools and multimodal inputs without leaking provider-specific request shapes into gateway core. | [#9](https://github.com/lianluo-esign/ferrogate/issues/9) |
-| Responses streaming | Normalize Responses API streaming events so client compatibility is predictable across providers. | [#10](https://github.com/lianluo-esign/ferrogate/issues/10) |
-| Wallet reservation primitive | Add a reserve/hold mechanic to the prepaid-credit wallet (`adjust_wallet_balance` is currently check-then-proceed with no hold) — required before any exact-amount, irreversible spend decision (e.g. agent-initiated x402 payments) can be gated safely under concurrency. Surfaced by the x402/AP2 spike, not yet filed as its own issue. | Backlog, see [#191](https://github.com/lianluo-esign/ferrogate/issues/191) |
+| Gateway core | Pingora data plane and request pipeline. | [#285](https://github.com/lianluo-esign/ferrogate/issues/285) |
+| MCP | `ferrogate-mcp` host/client and MCP ingress. | [#286](https://github.com/lianluo-esign/ferrogate/issues/286) |
+| Agent worker | `agent-worker` process, self-hosted and managed workers. | [#287](https://github.com/lianluo-esign/ferrogate/issues/287) |
+| Runtime | `ferrogate-runtime` isolation, sandbox, and function egress. | [#288](https://github.com/lianluo-esign/ferrogate/issues/288) |
+| Auth | `ferrogate-auth`, RBAC, SSO, and tenant entitlements. | [#289](https://github.com/lianluo-esign/ferrogate/issues/289) |
+| Security | Security hardening and vulnerability remediation. | [#290](https://github.com/lianluo-esign/ferrogate/issues/290) |
+| Secrets | `ferrogate-secrets` and credential backends. | [#291](https://github.com/lianluo-esign/ferrogate/issues/291) |
+| Storage | `ferrogate-storage` durable control plane. | [#292](https://github.com/lianluo-esign/ferrogate/issues/292) |
+| Test | `ferrogate-test` harness, CI gates, and compliance suites. | [#293](https://github.com/lianluo-esign/ferrogate/issues/293) |
+| Observability | Metrics, tracing, and analytics. | [#294](https://github.com/lianluo-esign/ferrogate/issues/294) |
+| Admin console | Admin console UI and Admin API surface. | [#295](https://github.com/lianluo-esign/ferrogate/issues/295) |
+| Release | Release engineering and supply-chain integrity. | [#296](https://github.com/lianluo-esign/ferrogate/issues/296) |
+| Deploy | Deployment, TLS/ACME, and cluster operations. | [#297](https://github.com/lianluo-esign/ferrogate/issues/297) |
+| Config | Configuration model and Caddyfile compatibility. | [#298](https://github.com/lianluo-esign/ferrogate/issues/298) |
+| Docs | Documentation, wiki, and repo housekeeping. | [#299](https://github.com/lianluo-esign/ferrogate/issues/299) |
+| Commercialization | Secure Agent Gateway wedge, pilots, and GTM. | [#300](https://github.com/lianluo-esign/ferrogate/issues/300) |
 
 ## Later
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Semantic caching | Add semantic/vector cache matching after exact-match caching, billing evidence, and redaction policy remain reliable. | Backlog |
+| Firecracker real guest execution | Run real workloads inside Firecracker microVMs in `agent-worker`; blocked on KVM-capable infrastructure. Per-VM rootfs isolation and the boot-validation harness are already in place. | [#280](https://github.com/lianluo-esign/ferrogate/issues/280) |
+| Static-site custom domains | Bind a hosted site to a hostname via ACME HTTP-01/DNS-01 plus graceful upgrade. | [#265](https://github.com/lianluo-esign/ferrogate/issues/265) |
+| Audio endpoints | `/v1/audio/speech` and `/v1/audio/transcriptions`; needs multipart request and binary response handling in the body path (images shipped first). | Backlog, child of [#266](https://github.com/lianluo-esign/ferrogate/issues/266) |
 | Hosted control plane | Expand hosted Admin API and dashboard workflows after the self-hosted durable control-plane contract is stable. | Backlog |
 | DNS provider expansion | Add DNS providers beyond the current Cloudflare ACME DNS-01 implementation and external hook boundary. | Backlog |
 
@@ -156,13 +207,15 @@ Use analytics delivery for high-write observability data:
 - dashboard chart statistics.
 
 The current direction is Supabase-first for commercial durable control-plane
-tables and operator evidence. Turso/libSQL ([#94](https://github.com/lianluo-esign/ferrogate/issues/94))
-is retired from the production provider surface and remains only as legacy
-migration input; MySQL ([#192](https://github.com/lianluo-esign/ferrogate/issues/192))
-is retired outright, with no remaining migration tooling. Generic PostgreSQL is
-a compatibility path until its separate hardening or removal issue closes.
-Analytics can flow through Vector to ClickHouse or directly to ClickHouse when
-operators want fewer moving parts.
+tables and operator evidence. Turso/libSQL is retired from the production
+provider surface (closed [#94](https://github.com/lianluo-esign/ferrogate/issues/94))
+and remains only as legacy migration input; MySQL is retired outright
+(closed [#192](https://github.com/lianluo-esign/ferrogate/issues/192)), with
+no remaining migration tooling. Generic PostgreSQL is a compatibility path
+tracked under the storage module epic
+([#292](https://github.com/lianluo-esign/ferrogate/issues/292)). Analytics can
+flow through Vector to ClickHouse or directly to ClickHouse when operators
+want fewer moving parts.
 
 ## Non-Goals
 

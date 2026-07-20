@@ -9,40 +9,76 @@ work belongs in [`roadmap.md`](roadmap.md).
 - **Pingora gateway runtime** for HTTP reverse proxying, route matching,
   upstream pools, path/header rewrites, request IDs, tracing IDs, streaming
   responses, graceful shutdown, and listener-level graceful upgrade.
-- **OpenAI-compatible AI API** with `GET /v1/models`,
-  `POST /v1/chat/completions`, and `POST /v1/responses`, including
-  non-streaming and streaming SSE forwarding.
+- **Multi-protocol inference API** with `GET /v1/models`,
+  `POST /v1/chat/completions`, `POST /v1/responses`, Anthropic-native
+  `POST /v1/messages`, `POST /v1/embeddings` (served through OpenAI-compatible
+  and non-OpenAI adapter families), and `POST /v1/images/generations`,
+  including non-streaming and streaming SSE forwarding.
 - **Provider adapters** for OpenAI-compatible APIs, OpenAI, Azure OpenAI,
   OpenRouter, Anthropic, Gemini, and Grok/xAI.
 - **Model registry and fallback routing** with logical model names, provider
   model mapping, priority fallback, weighted fallback, lowest-cost,
-  lowest-latency, balanced routing, tenant visibility, and provider allow/deny
-  controls.
-- **Exact-match AI response cache** for non-streaming requests with global,
-  model, and API-key enablement controls.
+  lowest-latency, balanced routing, canary rollout splits, shadow/mirror
+  traffic duplication, tenant visibility, and provider allow/deny controls.
+- **AI response caching** with exact-match caching for non-streaming requests
+  plus an opt-in semantic (vector-similarity) cache behind the same cache
+  seam, with global, model, and API-key enablement controls.
 - **MCP gateway support** through `ferrogate-mcp`, including streamable HTTP,
   SSE, stdio sessions, `initialize`, `tools/list`, namespaced tools,
   deny-by-default execution allowlists, health checks, reconnects, and governed
-  tool execution.
+  tool execution, negotiating up to the MCP 2026-07-28 specification.
 - **Native MCP JSON-RPC ingress** at `POST /v1/mcp` for `initialize`, `ping`,
-  `tools/list`, and `tools/call`.
+  `tools/list`, `tools/call`, and `resources/list`/`resources/read` over the
+  hosted-asset registry.
+- **Hosted asset closed loop** at `/v1/assets/*`: versioned publish/pull/
+  delete with tenant quota accounting, artifact-registry semantics (channels
+  such as latest/stable/canary, semver resolution, platform/arch variants,
+  yank), supply-chain trust gates (malware scanning, signature verification,
+  cross-tenant publish approval), presigned large-file S3 upload/download
+  against a private Supabase Storage (S3-compatible) bucket, egress
+  metering/billing with download-side audit and bandwidth quotas, unified
+  ETag/Range/304 HTTP caching on pulls, version retention policies with
+  unreferenced-blob GC, static-site serve mode at
+  `GET /sites/{tenant}/{site}/{path}` (index.html resolution, optional SPA
+  fallback, per-site anonymous opt-in), and agent consumption through MCP
+  `resources/*` plus the built-in `fetch_asset` tool.
 - **Agentic Lite plugin surface** for governed capability bundles, tool
   providers, event sinks, permission declarations, tool sessions, admin views,
   and audit events.
 - **Agent runtime and skill package surface** for agent discovery, governed
   agent upstreams, bounded runs, workflow counters/timelines, and skill-owned
   plugins, tools, MCP servers, prompt templates, and workflows.
+- **A2A ingress deep governance** applying policy, guardrails, and billing to
+  agent-to-agent message bodies, and **workflow-graph-level execution
+  budgets** (model-call, tool-call, and token budgets with iteration limits)
+  for multi-step agent runs.
+- **Agent schedules** with cron/interval triggers that fire `agent_run`
+  targets into the dispatch lease queue, plus an
+  `/admin/v1/agent-schedules` CRUD API with `run-now` and per-schedule fire
+  history.
+- **Self-hosted worker transport** over verified mutual TLS: a single
+  explicitly configured issuing CA, control-plane certificate issuance and
+  rotation, CRL revocation, fail-closed trust-anchor handling, and
+  report-only governed execution for covered command families on the shared
+  `agent-worker` binary (`--worker-type self-hosted`).
 - **Caddy-style config compatibility** through `Ferrogate/Caddyfile`, alongside
   structured TOML and YAML configuration.
 - **Virtual API keys and policy checks** with hashed keys, tenant context,
   scopes, disabled/expired keys, model/provider allowlists and denylists,
   deny-rule evaluation, request rate limits, and token budgets.
 - **Token usage metering events** using provider-reported usage when available
-  and gateway estimates when needed.
+  and gateway estimates when needed, with a local BPE tokenizer for
+  pre-request estimation and budget prechecks.
+- **Billing primitives** including a prepaid-wallet reserve/hold mechanic for
+  exact-amount, irreversible spend decisions under concurrency.
+- **Per-tenant SSO persistence** with SAML alongside OIDC in the standalone
+  auth service.
 - **Observability** with structured request logs, token metering events,
-  configurable retention, usage aggregates, provider health, cache metrics, MCP
-  tool metrics, agent-run OTLP spans, Prometheus metrics, request/trace ID
-  propagation, and OTLP/HTTP export.
+  a retention engine applied to request logs and audit events (per-tenant
+  TTL and audited purge, disabled and dry-run by default), usage aggregates,
+  provider health, cache metrics,
+  MCP tool metrics, agent-run OTLP spans, Prometheus metrics, request/trace
+  ID propagation, and OTLP/HTTP export.
 - **Admin API and dashboard** for status, providers, model catalog discovery,
   configured models, API keys, tenants, policies, request logs, agent run
   timelines, metering events, aggregates, audit events, gateway config
@@ -67,27 +103,52 @@ work belongs in [`roadmap.md`](roadmap.md).
 ## Current Status
 
 The open-source gateway implementation covers the core API gateway, AI gateway,
-governance, tool execution, observability, TLS, durable storage, analytics, and
-cluster operations needed for a self-hosted first production slice.
+governance, tool execution, asset hosting, agent scheduling, observability,
+TLS, durable storage, analytics, and cluster operations needed for a
+self-hosted first production slice.
 
 Validated end to end:
 
 - HTTP reverse proxy runtime on Pingora.
-- OpenAI-compatible Chat Completions and Responses API paths.
+- OpenAI-compatible Chat Completions and Responses API paths, the
+  Anthropic-native `/v1/messages` ingress, `/v1/embeddings` across
+  OpenAI-compatible and non-OpenAI adapter families, and the governed
+  `/v1/images/generations` ingress with per-image metering.
 - Canonical Responses request mapping for text, image, tool definitions, tool
   choice, and tool-call input shapes across provider paths.
 - Agent framework compatibility for OpenAI-compatible clients using FerroGate
   `base_url`, virtual API keys, logical models, request logs, metering events,
   and Prometheus model/provider metrics.
-- Provider adapters and priority, weighted, cost, latency, and balanced routing.
-- Virtual API key auth, policy checks, rate limits, and token budget handling.
-- Exact-match response cache for non-streaming AI requests.
+- Provider adapters and priority, weighted, cost, latency, and balanced
+  routing, plus canary rollout splits and shadow/mirror traffic duplication.
+- Virtual API key auth, policy checks, rate limits, and token budget handling
+  with local-tokenizer pre-request estimation.
+- Exact-match and semantic (vector-similarity) response caches for
+  non-streaming AI requests.
 - Agentic Lite tools and MCP gateway execution through auth, policy, billing,
   audit, and metrics.
-- Native MCP JSON-RPC ingress at `POST /v1/mcp`.
-- Agent discovery, A2A-style agent upstream invocation and streaming, bounded
-  agent runs, workflow graph execution, workflow budgets, tool-call limits,
-  immutable approval/audit evidence, and agent run timelines.
+- Native MCP JSON-RPC ingress at `POST /v1/mcp`, including
+  `resources/list`/`resources/read` over hosted assets and MCP 2026-07-28
+  protocol negotiation.
+- The hosted-asset closed loop: authenticated publish/pull/delete on
+  `/v1/assets/*`, channels/semver/variant resolution, signature and
+  malware-scan gates, presigned large-file upload/commit/download against a
+  private bucket (mock S3-compatible endpoint; live Supabase Storage bucket
+  verification remains open), egress metering with download quotas and
+  audit, 304/Range pull caching, retention/GC sweeps, static-site serving
+  under `/sites/*`, and agent consumption via MCP resources and
+  `fetch_asset`.
+- Agent discovery, A2A-style agent upstream invocation and streaming, deep
+  A2A message-body governance (policy, guardrails, billing), bounded agent
+  runs, workflow graph execution, workflow-graph-level budgets, tool-call
+  limits, immutable approval/audit evidence, and agent run timelines.
+- Cron/interval agent schedules firing into the dispatch lease queue, with
+  admin CRUD, run-now, and fire-history endpoints.
+- Self-hosted worker registration, verified-mTLS ingress with control-plane
+  certificate issuance and CRL revocation, run polling/acknowledgement, and
+  report-only governed execution for covered command families.
+- Wallet reserve/hold settlement and per-tenant SSO (OIDC and SAML)
+  persistence in the auth service.
 - Agent run timelines exported as reconstructable OTLP trace trees with agent
   root, provider-step, billing-write, audit/tool, and runtime lifecycle spans.
 - Plugin registration, plugin-owned tool exposure, skill package compatibility
@@ -113,7 +174,16 @@ Still intentionally scoped as next-stage production work:
   boundary is separately hardened, while Turso/libSQL and MySQL are retired
   from the production provider surface.
 - Full hosted Admin API control plane beyond the current implemented resources.
-- Semantic/vector cache matching. The implemented cache is exact-match only.
+- Audio endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`) — the
+  multimodal surface currently ships images only; audio needs multipart
+  request and binary response handling in the body path.
+- Real Firecracker guest execution in `agent-worker` (blocked on
+  KVM-capable infrastructure); per-VM rootfs isolation and the boot-validation
+  harness are in place.
+- Live Supabase Storage bucket verification for the asset object-storage
+  path, which is currently proven against a mock S3-compatible endpoint.
+- Static-site custom domains (binding a hosted site to a hostname via
+  ACME).
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
   generic external hook boundary.
 

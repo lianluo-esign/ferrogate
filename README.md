@@ -12,9 +12,11 @@
 
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for AI traffic:
-OpenAI-compatible APIs, multi-vendor provider routing, virtual API keys, policy
-checks, token accounting settled against a standalone billing service,
-MCP/tool execution, opt-in agent runs, isolated `agent-worker` execution,
+OpenAI-compatible and Anthropic-native APIs, multi-vendor provider routing,
+virtual API keys, policy checks, token accounting settled against a standalone
+billing service, MCP/tool execution, opt-in agent runs and schedules, isolated
+`agent-worker` execution (managed or self-hosted over verified mTLS), a hosted
+asset closed loop for agent-consumable artifacts and static sites,
 observability, Admin APIs, cluster operations, and automatic HTTPS.
 
 The project is developed as the open-source gateway foundation behind
@@ -25,31 +27,48 @@ For the longer capability inventory and current implementation status, read the
 
 ## Highlights
 
-- **OpenAI-compatible gateway:** `GET /v1/models`,
-  `POST /v1/chat/completions`, and `POST /v1/responses`, including streaming
-  SSE forwarding.
+- **Multi-protocol inference gateway:** `GET /v1/models`,
+  `POST /v1/chat/completions`, `POST /v1/responses`, Anthropic-native
+  `POST /v1/messages`, `POST /v1/embeddings`, and
+  `POST /v1/images/generations`, including streaming SSE forwarding.
 - **Provider orchestration:** OpenAI-compatible APIs, OpenAI, Azure OpenAI,
-  OpenRouter, Anthropic, Gemini, and Grok/xAI with logical models and fallback
-  routing. Ships a ready-to-run [token4ai.cloud](https://token4ai.cloud)
+  OpenRouter, Anthropic, Gemini, and Grok/xAI with logical models, fallback
+  routing, and canary plus shadow/mirror traffic splitting for model
+  rollouts. Ships a ready-to-run [token4ai.cloud](https://token4ai.cloud)
   example (`config/ferrogate.token4ai.example.toml`) serving gpt-5.5 through
   the same OpenAI-compatible adapter.
 - **Governance:** virtual API keys, scopes, tenant context, allow/deny rules,
-  request rate limits, token budgets, and exact-match response caching.
+  request rate limits, token budgets with local tokenizer pre-request
+  estimation, wallet reserve/hold for exact-amount spends, and exact-match
+  plus opt-in semantic (vector-similarity) response caching.
+- **Asset hosting closed loop:** publish, govern, and agent-consume artifacts
+  through `/v1/assets/*` — versioned assets with channels/semver and
+  platform variants, signature and malware-scan supply-chain gates, MCP
+  `resources/*` ingress plus a built-in `fetch_asset` tool for agent
+  consumption, static-site serve mode at `GET /sites/{tenant}/{site}/{path}`
+  with ETag/Range/304 caching, a presigned large-file path against a private
+  S3-compatible bucket (Supabase Storage), egress metering/audit,
+  retention/GC lifecycle policies, and a `ferrogate assets` push/pull CLI.
 - **Service decomposition:** `ferrogate auth serve` and `ferrogate billing
   serve` run tenant/RBAC and token-usage settlement as independent REST
   services from the same binary, each with an optional durable Supabase
   backend — a durable, dead-letter-tracked outbox delivers settled usage from
   the gateway to the billing service without blocking the request hot path.
 - **Agent and tool traffic:** MCP host/client support, native `POST /v1/mcp`
-  JSON-RPC ingress, explicit `POST /v1/agent-runs`, governed tool execution,
-  plugin registration, an isolated `agent-worker` process for Firecracker-backed
-  execution, and audit events.
+  JSON-RPC ingress on the MCP 2026-07-28 spec, explicit `POST /v1/agent-runs`,
+  cron/interval agent schedules with an admin CRUD API, governed A2A ingress
+  with policy/guardrails/billing on message bodies, governed tool execution,
+  plugin registration, an isolated `agent-worker` process for
+  Firecracker-backed execution — self-hosted workers connect over verified
+  mTLS with control-plane cert issuance and CRL revocation — and audit
+  events.
 - **Operator visibility:** request logs, usage and metering events, provider
   health, cache/tool metrics, agent run timelines, structured agent-run OTLP
   spans, Prometheus, OTLP export, Admin API, and dashboard.
-- **Production operations:** durable control-plane storage options, analytics
-  warehouse delivery, reload/drain readiness, cluster counters, Docker,
-  Kubernetes manifests, Helm chart, and ACME HTTPS.
+- **Production operations:** durable control-plane storage options, a
+  retention engine with per-tenant TTL/purge for request logs and audit
+  events, analytics warehouse delivery, reload/drain readiness, cluster
+  counters, Docker, Kubernetes manifests, Helm chart, and ACME HTTPS.
 
 ## Quick Start
 
@@ -158,8 +177,16 @@ Implemented agentic gateway surfaces include:
   gateway-authorized governed execution of CLI, tool, MCP tool, skill, memory,
   secret, network-egress, browser, REST, and filesystem actions. A shared
   `--worker-type cloud|self-hosted` flag selects the trust/enforcement policy
-  on one binary; self-hosted report-only enforcement is not implemented yet,
-  so real execution subcommands currently require `cloud` (managed) mode.
+  on one binary; self-hosted workers run covered command families in
+  report-only mode, connect to the gateway's production ingress over verified
+  mTLS (single explicit issuing CA, control-plane certificate issuance,
+  rotation, and CRL revocation), and poll dispatched runs through
+  `/v1/self-hosted-workers/*`. See
+  [`docs/security/self-hosted-mtls-transport.md`](docs/security/self-hosted-mtls-transport.md).
+- Time-based agent schedules: cron/interval triggers fire `agent_run` targets
+  into the same dispatch lease queue self-hosted workers poll, managed
+  through `/admin/v1/agent-schedules` CRUD, `run-now`, and per-schedule fire
+  history.
 - Workflow graph policies with model/tool nodes, edge conditions, model-call
   and tool-call budgets, token budgets, iteration limits, counters, and runtime
   timelines.
@@ -396,6 +423,9 @@ GET  /readyz
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
+POST /v1/messages
+POST /v1/embeddings
+POST /v1/images/generations
 POST /v1/agent-runs
 GET  /.well-known/agent.json
 GET  /v1/skills
@@ -406,6 +436,12 @@ POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
 POST /v1/functions/execute
+GET  /v1/assets
+GET/PUT/DELETE /v1/assets/{asset_type}/{name}/{version}
+POST /v1/assets/presign/upload/{asset_type}/{name}/{version}
+POST /v1/assets/presign/commit/{asset_type}/{name}/{version}
+GET  /v1/assets/presign/download/{asset_type}/{name}/{version}
+GET  /sites/{tenant}/{site}/{path}
 POST /v1/self-hosted-workers/heartbeat
 POST /v1/self-hosted-workers/runs/poll
 GET  /admin/v1/agent-runs
@@ -423,6 +459,9 @@ GET  /admin/v1/plugins/{plugin_id}
 GET  /admin/v1/plugins/{plugin_id}/tools
 GET  /admin/v1/virtual-keys
 GET  /admin/v1/quota-policies
+GET/POST /admin/v1/agent-schedules
+POST /admin/v1/agent-schedules/{id}/run-now
+GET  /admin/v1/agent-schedules/{id}/fires
 GET  /admin/v1/self-hosted-workers
 GET  /admin/v1/status
 GET  /admin/v1/providers
@@ -488,6 +527,8 @@ git diff --check
 - Guardrail investigation view (who/why/target/action/cost for a blocked request): [`docs/guardrails/investigation-view.md`](docs/guardrails/investigation-view.md)
 - Supply-chain verification (SBOM, cosign signing, provenance): [`docs/security/supply-chain.md`](docs/security/supply-chain.md)
 - Agent sandbox security model: [`docs/security/agent-sandbox-model.md`](docs/security/agent-sandbox-model.md)
+- Self-hosted worker mTLS transport: [`docs/security/self-hosted-mtls-transport.md`](docs/security/self-hosted-mtls-transport.md)
+- Private asset-bucket migration runbook: [`docs/assets/private-bucket-migration.md`](docs/assets/private-bucket-migration.md)
 - SOC 2 audit scoping: [`docs/soc2-audit-scoping.md`](docs/soc2-audit-scoping.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
