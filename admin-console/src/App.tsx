@@ -10,6 +10,7 @@ import DashboardPage from "@/pages/dashboard";
 import LoginPage from "@/pages/login";
 import RegisterPage from "@/pages/register";
 import TenantResolvedDefaultsPage from "@/pages/tenant-resolved-defaults";
+import ToolApprovalsPage from "@/pages/tool-approvals";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -37,6 +38,7 @@ function App() {
                   path="/app/tenant-resolved-defaults"
                   element={<TenantResolvedDefaultsPage />}
                 />
+                <Route path="/app/tool-approvals" element={<ToolApprovalsPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

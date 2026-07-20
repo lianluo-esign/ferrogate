@@ -16,6 +16,7 @@ import {
   ReceiptText,
   ScrollText,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Wrench,
@@ -70,6 +71,11 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Managed workers", url: "/app/managed-workers" },
       { title: "Assets", url: "/app/assets" },
     ],
+  },
+  {
+    title: "Governance",
+    icon: ShieldAlert,
+    items: [{ title: "Tool approvals", url: "/app/tool-approvals" }],
   },
   {
     title: "Observability & billing",
