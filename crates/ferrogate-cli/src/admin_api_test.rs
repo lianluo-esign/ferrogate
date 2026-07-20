@@ -125,11 +125,37 @@ fn body_cap_resolves_per_path_from_the_limits_section() {
         body_cap_bytes(&config, RouteClass::Assets, "/v1/assets/static_site/site/1"),
         10 * 1024 * 1024
     );
-    // MAX_PROXY_REQUEST_BYTES must be able to carry the largest per-path
-    // cap plus headers, or the parse-time bound would starve the per-path
-    // bound of ever firing cleanly.
+    // The parse ceiling must be able to carry the largest per-path cap plus
+    // headers, or the parse-time bound would starve the per-path bound of
+    // ever firing cleanly.
     let largest_cap = body_cap_bytes(&config, RouteClass::Assets, "/v1/assets/any");
-    assert!(MAX_PROXY_REQUEST_BYTES > largest_cap);
+    assert!(max_proxy_request_bytes(&config) > largest_cap);
+}
+
+/// Finding 3 (issue #328): the parse ceiling must scale with a raised
+/// per-family `[limits]` cap so a request sized between the per-path cap
+/// and the old fixed ceiling gets a clean 413 from the per-path check
+/// instead of erroring out of the parser and dropping the connection.
+#[test]
+fn parse_ceiling_never_sits_below_a_raised_family_cap() {
+    let default_config = Config::default();
+    let default_ceiling = max_proxy_request_bytes(&default_config);
+
+    // Raise the guardrail-policy family cap well above the old ~10MB
+    // default; the ceiling must rise with it (plus headroom) and still
+    // strictly exceed the configured per-path cap.
+    let raised = 32 * 1024 * 1024;
+    let mut config = Config::default();
+    config.limits.guardrail_policy_body_max_bytes = Some(raised);
+
+    let raised_cap = body_cap_bytes(&config, RouteClass::Admin, "/admin/v1/guardrail-policies");
+    assert_eq!(raised_cap, raised);
+    let ceiling = max_proxy_request_bytes(&config);
+    assert!(
+        ceiling > raised_cap,
+        "parse ceiling {ceiling} must exceed the raised family cap {raised_cap}"
+    );
+    assert!(ceiling > default_ceiling);
 }
 
 /// The gate refuses an absent credential outright: never an open proxy.

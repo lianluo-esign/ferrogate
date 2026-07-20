@@ -826,11 +826,39 @@ fn handle_connection(mut stream: TcpStream, service: &AuthService) -> anyhow::Re
     stream
         .set_write_timeout(Some(CONNECTION_TIMEOUT))
         .context("failed to set auth service write timeout")?;
-    let request = read_http_request(&mut stream)?;
+    let request = match read_http_request(&mut stream) {
+        Ok(request) => request,
+        Err(error) => {
+            // A body-framing rejection (unlengthed/chunked, issue #328) is
+            // answered with a clean HTTP error rather than dropping the
+            // connection; any other parse failure keeps the prior
+            // fail-closed behavior of tearing the connection down.
+            if let Some(length_error) = error.downcast_ref::<RequestLengthError>() {
+                let response = request_length_error_response(*length_error);
+                return stream
+                    .write_all(&response.to_bytes(service.cors_allowed_origin.as_deref()))
+                    .context("failed to write auth service length-error response");
+            }
+            return Err(error);
+        }
+    };
     let response = route_request(service, request);
     stream
         .write_all(&response.to_bytes(service.cors_allowed_origin.as_deref()))
         .context("failed to write auth service response")
+}
+
+/// Render a [`RequestLengthError`] as this service's JSON error envelope.
+fn request_length_error_response(error: RequestLengthError) -> HttpResponse {
+    HttpResponse::json(
+        error.http_status(),
+        json!({
+            "error": {
+                "code": error.code(),
+                "message": error.message(),
+            }
+        }),
+    )
 }
 
 fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
@@ -3745,6 +3773,73 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     read_http_request_bounded(stream, MAX_REQUEST_BYTES)
 }
 
+/// A request-length precondition [`read_http_request_bounded`] rejects
+/// *before* reading a body, so callers can map it to the correct HTTP
+/// status instead of dropping the connection (issue #328, finding 2).
+///
+/// This parser frames a body solely from `Content-Length`; it does NOT
+/// implement chunked transfer decoding. Rather than silently treating an
+/// unlengthed or chunked body as empty -- which forwards a truncated
+/// request downstream -- it refuses these shapes up front. Callers that
+/// speak HTTP to a real client (the auth service and the `admin-api`
+/// reverse proxy) surface these as a proper error response;
+/// [`RequestLengthError`] is returned inside the parser's `anyhow::Error`
+/// and recovered with [`anyhow::Error::downcast_ref`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLengthError {
+    /// A body-bearing method (`POST`/`PUT`/`PATCH`) arrived with no
+    /// `Content-Length` header (and no chunked framing). Surfaced as
+    /// `411 Length Required` -- the caller must send an explicit length,
+    /// even `Content-Length: 0` for an empty body.
+    LengthRequired,
+    /// A `Transfer-Encoding` other than `identity` (e.g. `chunked`) was
+    /// present. This parser does not decode chunked bodies, and a
+    /// `Content-Length`+`Transfer-Encoding` combination is a
+    /// request-smuggling shape we refuse outright. Surfaced as
+    /// `400 Bad Request`.
+    ChunkedUnsupported,
+}
+
+impl RequestLengthError {
+    /// The HTTP status a caller should return for this rejection.
+    pub fn http_status(self) -> u16 {
+        match self {
+            RequestLengthError::LengthRequired => 411,
+            RequestLengthError::ChunkedUnsupported => 400,
+        }
+    }
+
+    /// A stable, machine-readable code for the JSON error envelope.
+    pub fn code(self) -> &'static str {
+        match self {
+            RequestLengthError::LengthRequired => "length_required",
+            RequestLengthError::ChunkedUnsupported => "unsupported_transfer_encoding",
+        }
+    }
+
+    /// A human-readable message for the JSON error envelope.
+    pub fn message(self) -> &'static str {
+        match self {
+            RequestLengthError::LengthRequired => {
+                "a request with a body-bearing method must declare a Content-Length header \
+                 (send Content-Length: 0 for an empty body)"
+            }
+            RequestLengthError::ChunkedUnsupported => {
+                "Transfer-Encoding is not supported by this endpoint; send the body with an \
+                 explicit Content-Length header instead of chunked encoding"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for RequestLengthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for RequestLengthError {}
+
 /// Read and parse one HTTP/1.1 request (headers + `Content-Length` body)
 /// from `reader`, rejecting anything larger than `max_request_bytes` --
 /// including a declared `Content-Length` that would exceed it, checked
@@ -3793,6 +3888,29 @@ pub fn read_http_request_bounded<R: Read>(
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
         .collect();
+
+    // Body framing (issue #328, finding 2). This parser frames the body
+    // solely from `Content-Length`, so reject anything it cannot frame
+    // rather than silently reading a zero-length body and forwarding a
+    // truncated request downstream:
+    //   * any `Transfer-Encoding` other than `identity` (e.g. chunked) ->
+    //     400, since we do not implement chunked decoding (and a CL+TE
+    //     combination is a smuggling shape we refuse outright);
+    //   * a body-bearing method (POST/PUT/PATCH) with no `Content-Length`
+    //     -> 411, forcing an explicit length (even `Content-Length: 0`).
+    // GET/HEAD/DELETE/OPTIONS with no body are unaffected: they are not
+    // body-bearing and so require no length.
+    if let Some(transfer_encoding) = headers.get("transfer-encoding") {
+        if !transfer_encoding.eq_ignore_ascii_case("identity") {
+            return Err(anyhow::Error::new(RequestLengthError::ChunkedUnsupported));
+        }
+    }
+    if !headers.contains_key("content-length")
+        && matches!(method.as_str(), "POST" | "PUT" | "PATCH")
+    {
+        return Err(anyhow::Error::new(RequestLengthError::LengthRequired));
+    }
+
     let content_length = headers
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
@@ -3881,6 +3999,7 @@ impl HttpResponse {
             404 => "Not Found",
             405 => "Method Not Allowed",
             409 => "Conflict",
+            411 => "Length Required",
             413 => "Payload Too Large",
             422 => "Unprocessable Entity",
             429 => "Too Many Requests",

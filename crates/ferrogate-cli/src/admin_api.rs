@@ -37,7 +37,7 @@ use std::{
 
 use ferrogate_auth::{
     read_http_request_bounded, serve_connections, ApiKeyAuthenticator, HttpRequest, HttpResponse,
-    StorageApiKeyAuthenticator,
+    RequestLengthError, StorageApiKeyAuthenticator,
 };
 use ferrogate_storage::StorageProviderKind;
 
@@ -50,12 +50,35 @@ use crate::{
 /// #147 hardening value.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Overall parse cap for one incoming request: the largest per-path body
-/// cap this service forwards (`INLINE_ASSET_MAX_BYTES`, the gateway's
-/// inline asset push ceiling) plus header headroom. Tighter per-path caps
-/// from the #312 `[limits]` section are enforced after routing, below.
-const MAX_PROXY_REQUEST_BYTES: usize =
-    crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize + 64 * 1024;
+/// Header (and framing) headroom added on top of the largest configured
+/// per-path body cap when sizing the parser ceiling.
+const PROXY_HEADER_HEADROOM_BYTES: usize = 64 * 1024;
+
+/// Overall parse cap for one incoming request, sized so it can never sit
+/// below a per-path `[limits]` cap this service enforces after routing
+/// (issue #328, finding 3).
+///
+/// The parser applies this ceiling *before* routing resolves the tighter
+/// per-family cap in [`body_cap_bytes`]. If it were a fixed constant below
+/// a configured family cap (an operator can raise e.g.
+/// `guardrail_policy_body_max_bytes` above the old ~10MB default), a
+/// request sized between the two caps would `Err` out of the parser and
+/// drop the connection with no HTTP response, instead of getting a clean
+/// 413 from the per-path check. Deriving the ceiling from
+/// `max(all configured family caps) + headroom` guarantees every request
+/// the per-path check would 413 first survives parsing.
+fn max_proxy_request_bytes(config: &Config) -> usize {
+    let largest_family_cap = [
+        config.limits.admin_body_max_bytes(),
+        config.limits.admin_config_body_max_bytes(),
+        config.limits.guardrail_policy_body_max_bytes(),
+        crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(crate::gateway::assets::INLINE_ASSET_MAX_BYTES as usize);
+    largest_family_cap.saturating_add(PROXY_HEADER_HEADROOM_BYTES)
+}
 
 /// Which admin-console surface a request belongs to. Anything that is
 /// neither is refused with 404 -- the AI data plane (e.g.
@@ -267,7 +290,23 @@ fn handle_request<S: Read + Write>(
     peer_ip: Option<IpAddr>,
     service: &AdminApiService,
 ) -> anyhow::Result<()> {
-    let request = read_http_request_bounded(stream, MAX_PROXY_REQUEST_BYTES)?;
+    let request = match read_http_request_bounded(stream, max_proxy_request_bytes(&service.config))
+    {
+        Ok(request) => request,
+        Err(error) => {
+            // A body-framing rejection (unlengthed/chunked, issue #328,
+            // finding 2) is answered with a proper HTTP error response
+            // rather than dropping the connection; any other parse
+            // failure keeps the prior fail-closed connection teardown.
+            if let Some(length_error) = error.downcast_ref::<RequestLengthError>() {
+                let response = length_error_response(*length_error, &service.next_request_id());
+                return stream
+                    .write_all(&response.to_bytes(service.cors_allowed_origin()))
+                    .context("failed to write admin-api length-error response");
+            }
+            return Err(error);
+        }
+    };
     let response = match route_request(&request, service) {
         Routed::Local(response) => response,
         Routed::Forward => {
@@ -519,6 +558,18 @@ fn error_response(
 
 fn auth_error_response(error: AuthError, request_id: &str) -> HttpResponse {
     error_response(error.status.as_u16(), error.code, error.message, request_id)
+}
+
+/// Map a parser body-framing rejection (issue #328, finding 2) to the
+/// service's JSON error envelope: 411 for a missing `Content-Length` on a
+/// body-bearing method, 400 for unsupported chunked/`Transfer-Encoding`.
+fn length_error_response(error: RequestLengthError, request_id: &str) -> HttpResponse {
+    error_response(
+        error.http_status(),
+        error.code(),
+        error.message(),
+        request_id,
+    )
 }
 
 #[cfg(test)]

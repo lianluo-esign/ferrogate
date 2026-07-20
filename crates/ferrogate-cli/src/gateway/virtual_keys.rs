@@ -15,7 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferrogate_auth::virtual_api_key_material;
 use ferrogate_core::TenantContext;
-use ferrogate_storage::{StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace};
+use ferrogate_storage::{
+    DeleteProjectOutcome, DeleteWorkspaceOutcome, StoredApiKey, StoredProject, StoredTenantAccount,
+    StoredWorkspace,
+};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -1010,62 +1013,41 @@ impl FerroGateway {
                 // ON DELETE CASCADE on both, so a bare DELETE would silently
                 // destroy live workspaces and API credentials; this guard keeps
                 // the operation fail-closed and forces the caller to tear the
-                // children down first.
-                let child_workspaces = match state.list_workspaces().await {
-                    Ok(workspaces) => workspaces
-                        .into_iter()
-                        .filter(|workspace| workspace.project_id == id)
-                        .count(),
-                    Err(error) => {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await;
+                // children down first. The child-count check and the delete run
+                // atomically inside one transaction (issue #328, finding 4) so a
+                // child created between the two can no longer slip through the
+                // window and be cascade-deleted. Workspaces are surfaced before
+                // virtual keys, preserving the prior two-step response order.
+                match state.delete_project_if_unreferenced(id).await {
+                    Ok(DeleteProjectOutcome::Referenced {
+                        workspaces,
+                        virtual_keys,
+                    }) => {
+                        if workspaces > 0 {
+                            write_json_error(
+                                session,
+                                StatusCode::CONFLICT,
+                                "project_has_workspaces",
+                                format!(
+                                    "project {id} still has {workspaces} workspace(s); delete them first"
+                                ),
+                                &ctx.request_id,
+                            )
+                            .await
+                        } else {
+                            write_json_error(
+                                session,
+                                StatusCode::CONFLICT,
+                                "project_has_virtual_keys",
+                                format!(
+                                    "project {id} still has {virtual_keys} virtual key(s); delete them first"
+                                ),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
                     }
-                };
-                if child_workspaces > 0 {
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "project_has_workspaces",
-                        format!(
-                            "project {id} still has {child_workspaces} workspace(s); delete them first"
-                        ),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-                let child_keys = match state.list_virtual_api_keys().await {
-                    Ok(keys) => keys.into_iter().filter(|key| key.project_id == id).count(),
-                    Err(error) => {
-                        return write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await;
-                    }
-                };
-                if child_keys > 0 {
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "project_has_virtual_keys",
-                        format!(
-                            "project {id} still has {child_keys} virtual key(s); delete them first"
-                        ),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-                match state.delete_project(id).await {
-                    Ok(true) => {
+                    Ok(DeleteProjectOutcome::Deleted) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -1081,7 +1063,7 @@ impl FerroGateway {
                         };
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
-                    Ok(false) => {
+                    Ok(DeleteProjectOutcome::NotFound) => {
                         write_json_error(
                             session,
                             StatusCode::NOT_FOUND,
@@ -1565,37 +1547,24 @@ impl FerroGateway {
                 }
                 // Reject-if-referenced: a workspace that still owns virtual keys
                 // cannot be deleted (the schema's ON DELETE CASCADE would
-                // silently destroy live credentials otherwise).
-                let child_keys = match state.list_virtual_api_keys().await {
-                    Ok(keys) => keys
-                        .into_iter()
-                        .filter(|key| key.workspace_id == id)
-                        .count(),
-                    Err(error) => {
-                        return write_json_error(
+                // silently destroy live credentials otherwise). The count
+                // check and the delete run atomically inside one transaction
+                // (issue #328, finding 4) so a key created between them cannot
+                // slip through the window and be cascade-deleted.
+                match state.delete_workspace_if_unreferenced(id).await {
+                    Ok(DeleteWorkspaceOutcome::Referenced { virtual_keys }) => {
+                        write_json_error(
                             session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
+                            StatusCode::CONFLICT,
+                            "workspace_has_virtual_keys",
+                            format!(
+                                "workspace {id} still has {virtual_keys} virtual key(s); delete them first"
+                            ),
                             &ctx.request_id,
                         )
-                        .await;
+                        .await
                     }
-                };
-                if child_keys > 0 {
-                    return write_json_error(
-                        session,
-                        StatusCode::CONFLICT,
-                        "workspace_has_virtual_keys",
-                        format!(
-                            "workspace {id} still has {child_keys} virtual key(s); delete them first"
-                        ),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-                match state.delete_workspace(id).await {
-                    Ok(true) => {
+                    Ok(DeleteWorkspaceOutcome::Deleted) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -1611,7 +1580,7 @@ impl FerroGateway {
                         };
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
-                    Ok(false) => {
+                    Ok(DeleteWorkspaceOutcome::NotFound) => {
                         write_json_error(
                             session,
                             StatusCode::NOT_FOUND,

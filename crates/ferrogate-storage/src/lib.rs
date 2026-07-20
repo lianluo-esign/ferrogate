@@ -3274,6 +3274,76 @@ impl PostgresControlPlaneStore {
         Ok(affected > 0)
     }
 
+    /// Atomic reject-if-referenced project delete (issue #328, finding 4).
+    /// Locks the parent row `FOR UPDATE` -- which conflicts with the
+    /// `FOR KEY SHARE` lock a concurrent child insert takes on its FK
+    /// parent -- then counts children and deletes inside the same
+    /// transaction, closing the TOCTOU window where a workspace/key created
+    /// between a separate count and delete would be silently
+    /// `ON DELETE CASCADE`d.
+    async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        let operation = self.tenancy_operation("delete project if unreferenced");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239) so
+        // these control-plane queries resolve their tables in the
+        // configured schema, not the connection default.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        // Lock the parent row first; a missing row means nothing to delete.
+        let locked = transaction
+            .query_opt("SELECT id FROM projects WHERE id = $1 FOR UPDATE", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        if locked.is_none() {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(DeleteProjectOutcome::NotFound);
+        }
+        let workspaces: i64 = transaction
+            .query_one(
+                "SELECT COUNT(*) FROM workspaces WHERE project_id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .get(0);
+        let virtual_keys: i64 = transaction
+            .query_one(
+                "SELECT COUNT(*) FROM api_keys WHERE project_id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .get(0);
+        if workspaces > 0 || virtual_keys > 0 {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(DeleteProjectOutcome::Referenced {
+                workspaces: workspaces.max(0) as usize,
+                virtual_keys: virtual_keys.max(0) as usize,
+            });
+        }
+        let affected = transaction
+            .execute("DELETE FROM projects WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(if affected > 0 {
+            DeleteProjectOutcome::Deleted
+        } else {
+            DeleteProjectOutcome::NotFound
+        })
+    }
+
     async fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
         let operation = self.tenancy_operation("upsert workspace");
         let mut client = self
@@ -3396,6 +3466,59 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(affected > 0)
+    }
+
+    /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
+    /// See [`PostgresControlPlaneStore::delete_project_if_unreferenced`] for
+    /// the `FOR UPDATE` locking rationale that closes the TOCTOU window.
+    async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError> {
+        let operation = self.tenancy_operation("delete workspace if unreferenced");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let locked = transaction
+            .query_opt("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        if locked.is_none() {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(DeleteWorkspaceOutcome::NotFound);
+        }
+        let virtual_keys: i64 = transaction
+            .query_one(
+                "SELECT COUNT(*) FROM api_keys WHERE workspace_id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .get(0);
+        if virtual_keys > 0 {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(DeleteWorkspaceOutcome::Referenced {
+                virtual_keys: virtual_keys.max(0) as usize,
+            });
+        }
+        let affected = transaction
+            .execute("DELETE FROM workspaces WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(if affected > 0 {
+            DeleteWorkspaceOutcome::Deleted
+        } else {
+            DeleteWorkspaceOutcome::NotFound
+        })
     }
 
     async fn resolve_workspace_scope(
@@ -9770,6 +9893,40 @@ impl RuntimeControlPlaneState {
         self.projects.remove(id).is_some()
     }
 
+    /// Atomic reject-if-referenced project delete (issue #328, finding 4).
+    /// The in-memory backend runs the whole check-then-delete inside the
+    /// caller's `Mutex` critical section, so counting and deleting are
+    /// already indivisible; this mirrors the Postgres transaction so both
+    /// backends expose the same contract.
+    pub fn delete_project_if_unreferenced(&mut self, id: &str) -> DeleteProjectOutcome {
+        if self.projects.get(id).is_none() {
+            return DeleteProjectOutcome::NotFound;
+        }
+        let workspaces = self
+            .workspaces
+            .list()
+            .into_iter()
+            .filter(|workspace| workspace.project_id == id)
+            .count();
+        let virtual_keys = self
+            .api_key_records
+            .list()
+            .into_iter()
+            .filter(|key| key.project_id == id)
+            .count();
+        if workspaces > 0 || virtual_keys > 0 {
+            return DeleteProjectOutcome::Referenced {
+                workspaces,
+                virtual_keys,
+            };
+        }
+        if self.projects.remove(id).is_some() {
+            DeleteProjectOutcome::Deleted
+        } else {
+            DeleteProjectOutcome::NotFound
+        }
+    }
+
     pub fn upsert_workspace(&mut self, workspace: StoredWorkspace) {
         self.workspaces.insert(workspace.id.clone(), workspace);
     }
@@ -9784,6 +9941,28 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_workspace(&mut self, id: &str) -> bool {
         self.workspaces.remove(id).is_some()
+    }
+
+    /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
+    /// See [`RuntimeControlPlaneState::delete_project_if_unreferenced`].
+    pub fn delete_workspace_if_unreferenced(&mut self, id: &str) -> DeleteWorkspaceOutcome {
+        if self.workspaces.get(id).is_none() {
+            return DeleteWorkspaceOutcome::NotFound;
+        }
+        let virtual_keys = self
+            .api_key_records
+            .list()
+            .into_iter()
+            .filter(|key| key.workspace_id == id)
+            .count();
+        if virtual_keys > 0 {
+            return DeleteWorkspaceOutcome::Referenced { virtual_keys };
+        }
+        if self.workspaces.remove(id).is_some() {
+            DeleteWorkspaceOutcome::Deleted
+        } else {
+            DeleteWorkspaceOutcome::NotFound
+        }
     }
 
     pub fn upsert_sso_provider_config(&mut self, config: StoredSsoProviderConfig) {
@@ -10742,6 +10921,40 @@ fn default_active_status() -> String {
 
 fn default_environment() -> String {
     "default".to_string()
+}
+
+/// Outcome of an atomic reject-if-referenced project delete (issue #328,
+/// finding 4). The child-count check and the `DELETE` run inside one
+/// transaction (locking the parent row `FOR UPDATE` on Postgres so a
+/// concurrent child insert cannot slip through the window and then be
+/// silently `ON DELETE CASCADE`d), so the caller never observes a
+/// time-of-check/time-of-use gap between counting and deleting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteProjectOutcome {
+    /// The project existed, had no children, and was deleted.
+    Deleted,
+    /// No project with the given id exists.
+    NotFound,
+    /// The project still owns children and was left untouched. Both counts
+    /// are reported so the caller can pick the exact 409 code/message
+    /// (workspaces are surfaced before virtual keys, matching the prior
+    /// two-step handler behavior).
+    Referenced {
+        workspaces: usize,
+        virtual_keys: usize,
+    },
+}
+
+/// Outcome of an atomic reject-if-referenced workspace delete (issue #328,
+/// finding 4). See [`DeleteProjectOutcome`] for the atomicity guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteWorkspaceOutcome {
+    /// The workspace existed, had no virtual keys, and was deleted.
+    Deleted,
+    /// No workspace with the given id exists.
+    NotFound,
+    /// The workspace still owns virtual keys and was left untouched.
+    Referenced { virtual_keys: usize },
 }
 
 /// A human identity for the admin console (issue #157) -- distinct from
@@ -12605,6 +12818,30 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Atomic reject-if-referenced project delete (issue #328, finding 4):
+    /// the child-count check and the delete run indivisibly (one Postgres
+    /// transaction with the parent row locked `FOR UPDATE`, or the whole
+    /// in-memory critical section), so a child created between a separate
+    /// count and delete can no longer be silently `ON DELETE CASCADE`d.
+    pub async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_project_if_unreferenced(id))
+                .map_err(|_| {
+                    StorageError::Runtime(
+                        "in-memory control-plane mutex poisoned during project delete".to_string(),
+                    )
+                }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_project_if_unreferenced(id).await
+            }
+        }
+    }
+
     pub async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
@@ -12651,6 +12888,28 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_workspace(id).await
+            }
+        }
+    }
+
+    /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
+    /// See [`RuntimeStorageRepositories::delete_project_if_unreferenced`].
+    pub async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_workspace_if_unreferenced(id))
+                .map_err(|_| {
+                    StorageError::Runtime(
+                        "in-memory control-plane mutex poisoned during workspace delete"
+                            .to_string(),
+                    )
+                }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_workspace_if_unreferenced(id).await
             }
         }
     }
@@ -18086,6 +18345,152 @@ mod tests {
             0,
             0,
         )
+    }
+
+    fn stored_project(id: &str) -> StoredProject {
+        StoredProject {
+            id: id.into(),
+            tenant_id: "org".into(),
+            name: id.into(),
+            slug: id.into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }
+    }
+
+    fn stored_workspace(id: &str, project_id: &str) -> StoredWorkspace {
+        StoredWorkspace {
+            id: id.into(),
+            project_id: project_id.into(),
+            tenant_id: "org".into(),
+            name: id.into(),
+            slug: id.into(),
+            environment: "default".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }
+    }
+
+    fn stored_api_key(id: &str, project_id: &str, workspace_id: &str) -> StoredApiKey {
+        StoredApiKey {
+            id: id.into(),
+            workspace_id: workspace_id.into(),
+            tenant_id: "org".into(),
+            project_id: project_id.into(),
+            name: id.into(),
+            key_prefix: "fg_test".into(),
+            key_hash: "blake2b:test".into(),
+            last4: "test".into(),
+            enabled: true,
+            scopes: Vec::new(),
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            tenant: TenantContext {
+                workspace_id: Some(workspace_id.into()),
+                organization_id: Some("org".into()),
+                team_id: None,
+                project_id: Some(project_id.into()),
+                user_id: None,
+                api_key_id: Some(id.into()),
+            },
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            rotated_at_unix: None,
+            expires_at_unix: None,
+            revoked_at_unix: None,
+        }
+    }
+
+    // --- Atomic reject-if-referenced deletes (issue #328, finding 4) ---
+
+    #[test]
+    fn delete_project_if_unreferenced_deletes_a_childless_project() {
+        let repositories = in_memory_repositories();
+        block_on(repositories.upsert_project(stored_project("p_1"))).unwrap();
+
+        let outcome = block_on(repositories.delete_project_if_unreferenced("p_1")).unwrap();
+        assert_eq!(outcome, DeleteProjectOutcome::Deleted);
+        assert!(block_on(repositories.get_project("p_1")).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_project_if_unreferenced_rejects_a_project_with_a_workspace() {
+        let repositories = in_memory_repositories();
+        block_on(repositories.upsert_project(stored_project("p_1"))).unwrap();
+        block_on(repositories.upsert_workspace(stored_workspace("w_1", "p_1"))).unwrap();
+
+        let outcome = block_on(repositories.delete_project_if_unreferenced("p_1")).unwrap();
+        assert_eq!(
+            outcome,
+            DeleteProjectOutcome::Referenced {
+                workspaces: 1,
+                virtual_keys: 0,
+            }
+        );
+        // The project must survive an atomic reject.
+        assert!(block_on(repositories.get_project("p_1")).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_project_if_unreferenced_rejects_a_project_with_only_a_virtual_key() {
+        let repositories = in_memory_repositories();
+        block_on(repositories.upsert_project(stored_project("p_1"))).unwrap();
+        block_on(repositories.upsert_api_key_record(stored_api_key("k_1", "p_1", "w_1"))).unwrap();
+
+        let outcome = block_on(repositories.delete_project_if_unreferenced("p_1")).unwrap();
+        assert_eq!(
+            outcome,
+            DeleteProjectOutcome::Referenced {
+                workspaces: 0,
+                virtual_keys: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_project_if_unreferenced_reports_not_found_for_an_unknown_id() {
+        let repositories = in_memory_repositories();
+        let outcome = block_on(repositories.delete_project_if_unreferenced("missing")).unwrap();
+        assert_eq!(outcome, DeleteProjectOutcome::NotFound);
+    }
+
+    #[test]
+    fn delete_workspace_if_unreferenced_deletes_a_childless_workspace() {
+        let repositories = in_memory_repositories();
+        block_on(repositories.upsert_workspace(stored_workspace("w_1", "p_1"))).unwrap();
+
+        let outcome = block_on(repositories.delete_workspace_if_unreferenced("w_1")).unwrap();
+        assert_eq!(outcome, DeleteWorkspaceOutcome::Deleted);
+        assert!(block_on(repositories.get_workspace("w_1"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn delete_workspace_if_unreferenced_rejects_a_workspace_with_a_virtual_key() {
+        let repositories = in_memory_repositories();
+        block_on(repositories.upsert_workspace(stored_workspace("w_1", "p_1"))).unwrap();
+        block_on(repositories.upsert_api_key_record(stored_api_key("k_1", "p_1", "w_1"))).unwrap();
+
+        let outcome = block_on(repositories.delete_workspace_if_unreferenced("w_1")).unwrap();
+        assert_eq!(
+            outcome,
+            DeleteWorkspaceOutcome::Referenced { virtual_keys: 1 }
+        );
+        assert!(block_on(repositories.get_workspace("w_1"))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn delete_workspace_if_unreferenced_reports_not_found_for_an_unknown_id() {
+        let repositories = in_memory_repositories();
+        let outcome = block_on(repositories.delete_workspace_if_unreferenced("missing")).unwrap();
+        assert_eq!(outcome, DeleteWorkspaceOutcome::NotFound);
     }
 
     #[test]

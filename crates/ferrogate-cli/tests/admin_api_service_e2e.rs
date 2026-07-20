@@ -335,8 +335,60 @@ fn admin_api_gate_refuses_before_forwarding() {
         "payload_too_large"
     );
 
+    // Body-framing rejections (issue #328, finding 2) are answered with a
+    // clean HTTP error at the admin-api edge -- again with no upstream, so
+    // the parser rejects before any forwarding, rather than dropping the
+    // connection and stranding the console.
+    //
+    // A chunked POST -> 400 unsupported_transfer_encoding (this parser
+    // frames bodies from Content-Length only and never decodes chunked).
+    let chunked = raw_admin_api_request(
+        &admin_api_addr,
+        "POST /admin/v1/tenant-accounts HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: Bearer admin-secret\r\nContent-Type: application/json\r\n\
+         Transfer-Encoding: chunked\r\n\r\n1e\r\n{\"id\":\"x\",\"name\":\"x\",\"slug\":\"x\"}\r\n0\r\n\r\n",
+    );
+    assert!(
+        chunked.contains("HTTP/1.1 400"),
+        "chunked request must be rejected with 400 at the admin-api edge: {chunked}"
+    );
+    assert_eq!(
+        response_json(&chunked)["error"]["code"],
+        "unsupported_transfer_encoding"
+    );
+
+    // A body-bearing POST with NO Content-Length -> 411 length_required.
+    let unlengthed = raw_admin_api_request(
+        &admin_api_addr,
+        "POST /admin/v1/tenant-accounts HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: Bearer admin-secret\r\nContent-Type: application/json\r\n\r\n",
+    );
+    assert!(
+        unlengthed.contains("HTTP/1.1 411"),
+        "unlengthed body-bearing request must be rejected with 411: {unlengthed}"
+    );
+    assert_eq!(
+        response_json(&unlengthed)["error"]["code"],
+        "length_required"
+    );
+
     let _ = admin_api.kill();
     let _ = admin_api.wait();
+}
+
+/// Write an exact raw HTTP request (bypassing the Content-Length-setting
+/// `support::http_request` helper) and return the full response, so tests
+/// can exercise malformed framing the normal helper would never produce.
+fn raw_admin_api_request(addr: &str, raw: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(raw.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
 }
 
 /// Startup fail-closed: with no credential source at all (no [[api_keys]],

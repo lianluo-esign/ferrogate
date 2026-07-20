@@ -65,8 +65,15 @@ impl AppState {
         Ok(self.repositories.upsert_project(project).await?)
     }
 
-    pub(crate) async fn delete_project(&self, id: &str) -> anyhow::Result<bool> {
-        Ok(self.repositories.delete_project(id).await?)
+    /// Atomic reject-if-referenced project delete (issue #328, finding 4).
+    /// Replaces the former separate list-children + `delete_project` round
+    /// trips, closing the TOCTOU window where a workspace/key created
+    /// between the count and the delete was silently `ON DELETE CASCADE`d.
+    pub(crate) async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<DeleteProjectOutcome> {
+        Ok(self.repositories.delete_project_if_unreferenced(id).await?)
     }
 
     pub(crate) async fn list_workspaces(&self) -> anyhow::Result<Vec<StoredWorkspace>> {
@@ -81,8 +88,16 @@ impl AppState {
         Ok(self.repositories.upsert_workspace(workspace).await?)
     }
 
-    pub(crate) async fn delete_workspace(&self, id: &str) -> anyhow::Result<bool> {
-        Ok(self.repositories.delete_workspace(id).await?)
+    /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
+    /// See [`AppState::delete_project_if_unreferenced`].
+    pub(crate) async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<DeleteWorkspaceOutcome> {
+        Ok(self
+            .repositories
+            .delete_workspace_if_unreferenced(id)
+            .await?)
     }
 
     pub(crate) async fn resolve_workspace_scope(
