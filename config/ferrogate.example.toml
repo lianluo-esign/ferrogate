@@ -77,6 +77,38 @@ graceful_upgrade_pid_file = "/tmp/ferrogate.pid"
 graceful_upgrade_sock = "/tmp/ferrogate_upgrade.sock"
 graceful_upgrade_sock_retries = 5
 
+# Request-body size caps per gateway surface (#312). Every knob is optional;
+# the values shown are the built-in defaults, so omitting the whole section
+# (or any knob) leaves behavior unchanged. Each knob must be > 0 and at most
+# 1073741824 (1 GiB) -- request bodies are buffered in memory.
+# [limits]
+# /v1/chat/completions, /v1/embeddings, /v1/images/generations, /v1/messages
+# inference_body_max_bytes = 1048576
+# Standard /admin/v1 JSON mutations (providers, models, api keys, policies,
+# plugins, prompt templates, skill packages, agent workflows/upstreams, MCP
+# servers, gateway configs, plans, quota policies, RBAC, virtual keys,
+# agent schedules, self-hosted worker management)
+# admin_body_max_bytes = 65536
+# Compact admin control operations (wallets, site-domain bindings,
+# /admin/v1/drain, tool-approval decisions)
+# admin_small_body_max_bytes = 16384
+# Full-config documents for /admin/v1/config/validate and /config/reload
+# admin_config_body_max_bytes = 262144
+# Data-plane tool/agent invocation payloads (/v1/tools/execute,
+# /v1/mcp/tool/execute, /v1/functions/execute, /v1/mcp JSON-RPC,
+# /v1/prompts/{id}/render, /v1/agent-runs creation)
+# tool_body_max_bytes = 65536
+# Asset control-plane JSON (/v1/assets/presign/* upload-intent, commit,
+# download-url) -- asset payload bytes are governed by storage quotas instead
+# asset_control_body_max_bytes = 65536
+# A2A agent ingress bodies on /v1/agents/*
+# agent_ingress_body_max_bytes = 131072
+# Self-hosted worker transport frames (lease poll/ack, heartbeat,
+# checkpoint, artifact, telemetry envelopes)
+# worker_transport_body_max_bytes = 1048576
+# /admin/v1/guardrail-policies documents (can carry large pattern lists)
+# guardrail_policy_body_max_bytes = 1048576
+
 [[extensions]]
 id = "tool.echo"
 kind = "tool_provider"

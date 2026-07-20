@@ -42,8 +42,6 @@ use crate::{
 /// Small ceiling for the intent/commit JSON control bodies -- these carry
 /// only a size + sha256 + content-type, never object bytes (those go
 /// straight to the bucket via the presigned URL).
-const CONTROL_BODY_MAX_BYTES: usize = 64 * 1024;
-
 #[derive(Debug, Deserialize)]
 struct PresignUploadIntentRequest {
     size_bytes: u64,
@@ -722,7 +720,12 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &super::ProxyContext,
     ) -> PingoraResult<Result<Option<T>, ()>> {
-        let body = match read_request_body(session, CONTROL_BODY_MAX_BYTES).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().asset_control_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 write_json_error(

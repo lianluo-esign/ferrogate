@@ -23,8 +23,6 @@ use crate::{
     state::AppState,
 };
 
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-
 #[derive(Debug, Clone, Copy)]
 enum GuardrailPermission {
     Read,
@@ -325,7 +323,13 @@ impl FerroGateway {
         else {
             return Ok(());
         };
-        let Some(mut revision) = read_guardrail_body::<PolicyRevision>(session, ctx).await? else {
+        let Some(mut revision) = read_guardrail_body::<PolicyRevision>(
+            session,
+            state.limits().guardrail_policy_body_max_bytes(),
+            ctx,
+        )
+        .await?
+        else {
             return Ok(());
         };
         if let Some(path_policy_id) = path_policy_id {
@@ -421,7 +425,12 @@ impl FerroGateway {
             return Ok(());
         };
         let revision = if rollback {
-            let Some(selection) = read_guardrail_body::<RollbackSelection>(session, ctx).await?
+            let Some(selection) = read_guardrail_body::<RollbackSelection>(
+                session,
+                state.limits().guardrail_policy_body_max_bytes(),
+                ctx,
+            )
+            .await?
             else {
                 return Ok(());
             };
@@ -438,7 +447,12 @@ impl FerroGateway {
                 },
             }
         } else {
-            let Some(selection) = read_guardrail_body::<RevisionSelection>(session, ctx).await?
+            let Some(selection) = read_guardrail_body::<RevisionSelection>(
+                session,
+                state.limits().guardrail_policy_body_max_bytes(),
+                ctx,
+            )
+            .await?
             else {
                 return Ok(());
             };
@@ -612,7 +626,12 @@ impl FerroGateway {
         else {
             return Ok(());
         };
-        let Some(request) = read_guardrail_body::<GuardrailDryRunRequest>(session, ctx).await?
+        let Some(request) = read_guardrail_body::<GuardrailDryRunRequest>(
+            session,
+            state.limits().guardrail_policy_body_max_bytes(),
+            ctx,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -936,9 +955,10 @@ async fn require_guardrail_auth(
 
 async fn read_guardrail_body<T: serde::de::DeserializeOwned>(
     session: &mut Session,
+    max_bytes: usize,
     ctx: &ProxyContext,
 ) -> PingoraResult<Option<T>> {
-    let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             write_json_error_and_close(

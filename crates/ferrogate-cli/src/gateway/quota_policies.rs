@@ -21,8 +21,6 @@ use crate::{
     },
 };
 
-const MAX_BODY_BYTES: usize = 64 * 1024;
-
 struct QuotaPolicyScope<'a> {
     scope_type: QuotaScopeKind,
     scope_id: &'a str,
@@ -317,11 +315,16 @@ impl FerroGateway {
                 .await;
             }
         };
-        let payload =
-            match read_json_body::<AdminQuotaPolicyMutation>(session, &ctx.request_id).await? {
-                Ok(payload) => payload,
-                Err(()) => return Ok(()),
-            };
+        let payload = match read_json_body::<AdminQuotaPolicyMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
         let Some(scope_type_raw) = payload.scope_type.as_deref() else {
             return write_json_error(
                 session,
@@ -396,11 +399,16 @@ impl FerroGateway {
                 .await;
             }
         };
-        let payload =
-            match read_json_body::<AdminQuotaPolicyMutation>(session, &ctx.request_id).await? {
-                Ok(payload) => payload,
-                Err(()) => return Ok(()),
-            };
+        let payload = match read_json_body::<AdminQuotaPolicyMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
         if let Some(body_scope_type) = payload.scope_type.as_deref() {
             if body_scope_type != scope_type.as_str() {
                 return write_json_error(
@@ -612,9 +620,10 @@ impl FerroGateway {
 
 async fn read_json_body<T: serde::de::DeserializeOwned>(
     session: &mut Session,
+    max_bytes: usize,
     request_id: &str,
 ) -> PingoraResult<Result<T, ()>> {
-    let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             write_json_error_and_close(

@@ -27,7 +27,6 @@ use crate::{
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
 };
 
-const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Newest fire-history rows returned by `GET .../{id}/fires`.
 const FIRE_HISTORY_LIMIT: i64 = 100;
 
@@ -244,7 +243,7 @@ impl FerroGateway {
             None => None,
         };
 
-        let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+        let body = match read_request_body(session, state.limits().admin_body_max_bytes()).await? {
             Ok(body) => body,
             Err(limit) => {
                 return write_json_error_and_close(

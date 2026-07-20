@@ -27,8 +27,6 @@ use crate::{
     },
 };
 
-const MAX_BODY_BYTES: usize = 16 * 1024;
-
 impl FerroGateway {
     pub(super) async fn handle_admin_wallets(
         &self,
@@ -248,7 +246,13 @@ impl FerroGateway {
                 .await;
             }
         };
-        let payload = match read_json_body::<AdminWalletMutation>(session, &ctx.request_id).await? {
+        let payload = match read_json_body::<AdminWalletMutation>(
+            session,
+            state.limits().admin_small_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
@@ -360,7 +364,13 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload = match read_json_body::<AdminWalletMutation>(session, &ctx.request_id).await? {
+        let payload = match read_json_body::<AdminWalletMutation>(
+            session,
+            state.limits().admin_small_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
@@ -460,11 +470,16 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload =
-            match read_json_body::<AdminWalletAdjustRequest>(session, &ctx.request_id).await? {
-                Ok(payload) => payload,
-                Err(()) => return Ok(()),
-            };
+        let payload = match read_json_body::<AdminWalletAdjustRequest>(
+            session,
+            state.limits().admin_small_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
         if payload.delta_credits == 0 {
             return write_json_error(
                 session,
@@ -572,6 +587,7 @@ impl FerroGateway {
         }
         let payload = match read_json_body::<crate::responses::AdminWalletChargeRequest>(
             session,
+            state.limits().admin_small_body_max_bytes(),
             &ctx.request_id,
         )
         .await?
@@ -1077,13 +1093,16 @@ impl FerroGateway {
                 .await;
             }
         };
-        let payload =
-            match read_json_body::<AdminPaymentMethodCreateRequest>(session, &ctx.request_id)
-                .await?
-            {
-                Ok(payload) => payload,
-                Err(()) => return Ok(()),
-            };
+        let payload = match read_json_body::<AdminPaymentMethodCreateRequest>(
+            session,
+            state.limits().admin_small_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
         let Some(tenant_id) = payload
             .tenant_id
             .filter(|tenant_id| !tenant_id.trim().is_empty())
@@ -1266,9 +1285,10 @@ fn validate_auto_recharge(payload: &AdminWalletMutation) -> Result<(), &'static 
 
 async fn read_json_body<T: serde::de::DeserializeOwned>(
     session: &mut Session,
+    max_bytes: usize,
     request_id: &str,
 ) -> PingoraResult<Result<T, ()>> {
-    let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             write_json_error_and_close(

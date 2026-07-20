@@ -27,8 +27,6 @@ use crate::{
     },
 };
 
-const MAX_BODY_BYTES: usize = 64 * 1024;
-
 impl FerroGateway {
     pub(super) async fn handle_admin_plans(
         &self,
@@ -192,7 +190,13 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload = match read_json_body::<AdminPlanMutation>(session, &ctx.request_id).await? {
+        let payload = match read_json_body::<AdminPlanMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
@@ -293,7 +297,13 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload = match read_json_body::<AdminPlanMutation>(session, &ctx.request_id).await? {
+        let payload = match read_json_body::<AdminPlanMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
@@ -434,9 +444,10 @@ impl FerroGateway {
 
 async fn read_json_body<T: serde::de::DeserializeOwned>(
     session: &mut Session,
+    max_bytes: usize,
     request_id: &str,
 ) -> PingoraResult<Result<T, ()>> {
-    let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             write_json_error_and_close(

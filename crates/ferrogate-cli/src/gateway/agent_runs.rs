@@ -44,8 +44,6 @@ const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
 const WORKFLOW_ID_HEADER: &str = "x-ferrogate-workflow-id";
 const WORKFLOW_VERSION_HEADER: &str = "x-ferrogate-workflow-version";
 const WORKFLOW_NODE_ID_HEADER: &str = "x-ferrogate-workflow-node-id";
-const AGENT_RUN_BODY_MAX_BYTES: usize = 64 * 1024;
-
 #[derive(Debug, Deserialize)]
 struct AgentRunCreateRequest {
     input: String,
@@ -137,7 +135,7 @@ impl FerroGateway {
             }
         };
 
-        let body = match read_request_body(session, AGENT_RUN_BODY_MAX_BYTES).await? {
+        let body = match read_request_body(session, state.limits().tool_body_max_bytes()).await? {
             Ok(body) => body,
             Err(limit) => {
                 return write_json_error_and_close(

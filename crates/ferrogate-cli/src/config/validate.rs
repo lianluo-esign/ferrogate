@@ -119,6 +119,7 @@ impl Config {
         self.validate_cache()?;
         self.validate_storage()?;
         self.validate_reliability()?;
+        self.validate_limits()?;
         self.validate_agent_runtime()?;
         self.validate_cluster()?;
         self.validate_network_access()?;
@@ -781,6 +782,64 @@ impl Config {
             bail!("field reliability.graceful_upgrade_sock_retries: must be greater than zero");
         }
 
+        Ok(())
+    }
+
+    /// #312: `[limits]` request-body caps. Every knob is optional; when set
+    /// it must be a sane byte count -- zero would reject every request with
+    /// a body, and anything above 1 GiB is treated as a configuration
+    /// mistake (the gateway buffers these bodies in memory).
+    fn validate_limits(&self) -> AnyResult<()> {
+        const MAX_BODY_CAP_BYTES: usize = 1024 * 1024 * 1024;
+        let knobs = [
+            (
+                "limits.inference_body_max_bytes",
+                self.limits.inference_body_max_bytes,
+            ),
+            (
+                "limits.admin_body_max_bytes",
+                self.limits.admin_body_max_bytes,
+            ),
+            (
+                "limits.admin_small_body_max_bytes",
+                self.limits.admin_small_body_max_bytes,
+            ),
+            (
+                "limits.admin_config_body_max_bytes",
+                self.limits.admin_config_body_max_bytes,
+            ),
+            (
+                "limits.tool_body_max_bytes",
+                self.limits.tool_body_max_bytes,
+            ),
+            (
+                "limits.asset_control_body_max_bytes",
+                self.limits.asset_control_body_max_bytes,
+            ),
+            (
+                "limits.agent_ingress_body_max_bytes",
+                self.limits.agent_ingress_body_max_bytes,
+            ),
+            (
+                "limits.worker_transport_body_max_bytes",
+                self.limits.worker_transport_body_max_bytes,
+            ),
+            (
+                "limits.guardrail_policy_body_max_bytes",
+                self.limits.guardrail_policy_body_max_bytes,
+            ),
+        ];
+        for (field, value) in knobs {
+            let Some(value) = value else {
+                continue;
+            };
+            if value == 0 {
+                bail!("field {field}: must be greater than zero");
+            }
+            if value > MAX_BODY_CAP_BYTES {
+                bail!("field {field}: must not exceed {MAX_BODY_CAP_BYTES} bytes (1 GiB)");
+            }
+        }
         Ok(())
     }
 

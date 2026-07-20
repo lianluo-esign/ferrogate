@@ -164,34 +164,35 @@ impl FerroGateway {
                 return Ok(());
             }
         };
-        let body = match read_request_body(session, 1024 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: ingress_plan.auth.tenant_context(),
-                        logical_model: None,
-                        provider: None,
-                        status: StatusCode::PAYLOAD_TOO_LARGE,
-                        error_code: "payload_too_large",
-                    },
-                );
-                write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        let body =
+            match read_request_body(session, state.limits().inference_body_max_bytes()).await? {
+                Ok(body) => body,
+                Err(limit) => {
+                    self.record_ai_error_log(
+                        endpoint,
+                        ctx,
+                        AiErrorLog {
+                            tenant: ingress_plan.auth.tenant_context(),
+                            logical_model: None,
+                            provider: None,
+                            status: StatusCode::PAYLOAD_TOO_LARGE,
+                            error_code: "payload_too_large",
+                        },
+                    );
+                    write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
         let request_plan = match build_ai_request_plan(&state, ingress_plan, &body, endpoint) {
             Ok(plan) => plan,
             Err(rejection) => {

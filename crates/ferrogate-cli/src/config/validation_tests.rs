@@ -2712,6 +2712,119 @@ fn rejects_zero_provider_response_body_max_bytes() {
     assert!(error.contains("field reliability.provider_response_body_max_bytes"));
 }
 
+/// #312: `[limits]` knobs reject zero -- a zero cap would reject every
+/// request carrying a body.
+#[test]
+fn rejects_zero_limits_body_caps() {
+    type KnobSelector = fn(&mut LimitsConfig) -> &mut Option<usize>;
+    let knobs: [(&str, KnobSelector); 9] = [
+        ("limits.inference_body_max_bytes", |limits| {
+            &mut limits.inference_body_max_bytes
+        }),
+        ("limits.admin_body_max_bytes", |limits| {
+            &mut limits.admin_body_max_bytes
+        }),
+        ("limits.admin_small_body_max_bytes", |limits| {
+            &mut limits.admin_small_body_max_bytes
+        }),
+        ("limits.admin_config_body_max_bytes", |limits| {
+            &mut limits.admin_config_body_max_bytes
+        }),
+        ("limits.tool_body_max_bytes", |limits| {
+            &mut limits.tool_body_max_bytes
+        }),
+        ("limits.asset_control_body_max_bytes", |limits| {
+            &mut limits.asset_control_body_max_bytes
+        }),
+        ("limits.agent_ingress_body_max_bytes", |limits| {
+            &mut limits.agent_ingress_body_max_bytes
+        }),
+        ("limits.worker_transport_body_max_bytes", |limits| {
+            &mut limits.worker_transport_body_max_bytes
+        }),
+        ("limits.guardrail_policy_body_max_bytes", |limits| {
+            &mut limits.guardrail_policy_body_max_bytes
+        }),
+    ];
+    for (field, select) in knobs {
+        let mut limits = LimitsConfig::default();
+        *select(&mut limits) = Some(0);
+        let config = Config {
+            limits,
+            ..Config::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("field {field}: must be greater than zero")),
+            "unexpected error for {field}: {error}"
+        );
+    }
+}
+
+/// #312: `[limits]` knobs reject absurd values (above 1 GiB) because the
+/// gateway buffers request bodies in memory.
+#[test]
+fn rejects_absurd_limits_body_caps() {
+    let config = Config {
+        limits: LimitsConfig {
+            inference_body_max_bytes: Some(2 * 1024 * 1024 * 1024),
+            ..LimitsConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("field limits.inference_body_max_bytes: must not exceed"),
+        "unexpected error: {error}"
+    );
+}
+
+/// #312: defaults mirror the pre-centralization literals so an absent
+/// `[limits]` section leaves behavior unchanged, and an explicit value
+/// overrides the default.
+#[test]
+fn limits_body_caps_resolve_documented_defaults() {
+    let limits = LimitsConfig::default();
+    assert_eq!(limits.inference_body_max_bytes(), 1024 * 1024);
+    assert_eq!(limits.admin_body_max_bytes(), 64 * 1024);
+    assert_eq!(limits.admin_small_body_max_bytes(), 16 * 1024);
+    assert_eq!(limits.admin_config_body_max_bytes(), 256 * 1024);
+    assert_eq!(limits.tool_body_max_bytes(), 64 * 1024);
+    assert_eq!(limits.asset_control_body_max_bytes(), 64 * 1024);
+    assert_eq!(limits.agent_ingress_body_max_bytes(), 128 * 1024);
+    assert_eq!(limits.worker_transport_body_max_bytes(), 1024 * 1024);
+    assert_eq!(limits.guardrail_policy_body_max_bytes(), 1024 * 1024);
+
+    let overridden = LimitsConfig {
+        inference_body_max_bytes: Some(4 * 1024 * 1024),
+        ..LimitsConfig::default()
+    };
+    assert_eq!(overridden.inference_body_max_bytes(), 4 * 1024 * 1024);
+    let config = Config {
+        limits: overridden,
+        ..Config::default()
+    };
+    config.validate().expect("in-range override must validate");
+}
+
+/// #312: the `[limits]` TOML section wires into `Config.limits`; unset
+/// knobs keep their documented defaults.
+#[test]
+fn limits_section_deserializes_from_toml() {
+    let config = Config::from_toml_str(
+        r#"
+[limits]
+inference_body_max_bytes = 2097152
+admin_body_max_bytes = 131072
+"#,
+    )
+    .expect("limits section must parse and validate");
+    assert_eq!(config.limits.inference_body_max_bytes(), 2 * 1024 * 1024);
+    assert_eq!(config.limits.admin_body_max_bytes(), 128 * 1024);
+    assert_eq!(config.limits.admin_small_body_max_bytes(), 16 * 1024);
+    assert_eq!(config.limits.worker_transport_body_max_bytes(), 1024 * 1024);
+}
+
 #[test]
 fn rejects_zero_graceful_shutdown_settings() {
     let config = Config {

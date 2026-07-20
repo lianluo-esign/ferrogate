@@ -26,8 +26,6 @@ use crate::{
     },
 };
 
-const MAX_BODY_BYTES: usize = 64 * 1024;
-
 impl FerroGateway {
     pub(super) async fn handle_admin_permissions(
         &self,
@@ -257,11 +255,16 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload =
-            match read_json_body::<AdminPermissionMutation>(session, &ctx.request_id).await? {
-                Ok(payload) => payload,
-                Err(()) => return Ok(()),
-            };
+        let payload = match read_json_body::<AdminPermissionMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
         let Some(key) = payload.key.clone().filter(|key| !key.trim().is_empty()) else {
             return write_json_error(
                 session,
@@ -552,7 +555,13 @@ impl FerroGateway {
             )
             .await;
         }
-        let payload = match read_json_body::<AdminRoleMutation>(session, &ctx.request_id).await? {
+        let payload = match read_json_body::<AdminRoleMutation>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
         };
@@ -735,13 +744,16 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                let payload =
-                    match read_json_body::<AdminTenantRoleBindingRequest>(session, &ctx.request_id)
-                        .await?
-                    {
-                        Ok(payload) => payload,
-                        Err(()) => return Ok(()),
-                    };
+                let payload = match read_json_body::<AdminTenantRoleBindingRequest>(
+                    session,
+                    state.limits().admin_body_max_bytes(),
+                    &ctx.request_id,
+                )
+                .await?
+                {
+                    Ok(payload) => payload,
+                    Err(()) => return Ok(()),
+                };
                 if state
                     .get_role(&payload.role_id)
                     .await
@@ -881,9 +893,10 @@ impl FerroGateway {
 
 async fn read_json_body<T: serde::de::DeserializeOwned>(
     session: &mut Session,
+    max_bytes: usize,
     request_id: &str,
 ) -> PingoraResult<Result<T, ()>> {
-    let body = match read_request_body(session, MAX_BODY_BYTES).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             write_json_error_and_close(

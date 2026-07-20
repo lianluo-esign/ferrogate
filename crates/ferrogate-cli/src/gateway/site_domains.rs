@@ -31,8 +31,6 @@ use crate::{
     responses::{write_json_error, write_json_error_and_close, write_json_response, AdminList},
 };
 
-const MAX_BODY_BYTES: usize = 16 * 1024;
-
 impl FerroGateway {
     /// Data-plane resolution for a bound custom hostname (#265): when the
     /// request's normalized `Host` maps to a `{tenant}/{site}` binding, the
@@ -197,22 +195,23 @@ impl FerroGateway {
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
 
-        let body = match read_request_body(session, MAX_BODY_BYTES).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                return write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let body =
+            match read_request_body(session, state.limits().admin_small_body_max_bytes()).await? {
+                Ok(body) => body,
+                Err(limit) => {
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
         let mutation = match serde_json::from_slice::<AdminSiteDomainMutation>(&body) {
             Ok(mutation) => mutation,
             Err(error) => {

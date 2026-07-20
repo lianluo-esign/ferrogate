@@ -572,7 +572,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -964,7 +969,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -1346,7 +1356,12 @@ impl FerroGateway {
             )
             .await;
         }
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 return write_json_error_and_close(
@@ -1713,7 +1728,12 @@ impl FerroGateway {
             )
             .await;
         }
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 return write_json_error_and_close(
@@ -2143,7 +2163,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -2439,33 +2464,36 @@ impl FerroGateway {
             }
         };
 
-        let body = match read_request_body(session, 64 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                    ctx,
-                    &auth,
-                    "prompt_template.render",
-                    id,
-                    "error",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                ));
-                return write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let body =
+            match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
+                .await?
+            {
+                Ok(body) => body,
+                Err(limit) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "prompt_template.render",
+                        id,
+                        "error",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                    ));
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
         let request = if body.is_empty() {
             PromptTemplateRenderRequest {
                 variables: BTreeMap::new(),
@@ -2817,22 +2845,25 @@ impl FerroGateway {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
 
-        let body = match read_request_body(session, 64 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                return write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let body =
+            match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
+                .await?
+            {
+                Ok(body) => body,
+                Err(limit) => {
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
         let rpc: mcp_rpc::McpJsonRpcRequest = match serde_json::from_slice(&body) {
             Ok(rpc) => rpc,
             Err(error) => {
@@ -2979,22 +3010,25 @@ impl FerroGateway {
             .await;
         };
 
-        let body = match read_request_body(session, 64 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                return write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let body =
+            match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
+                .await?
+            {
+                Ok(body) => body,
+                Err(limit) => {
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
         let request: ferrogate_runtime::FunctionInvocationRequest =
             match serde_json::from_slice(&body) {
                 Ok(request) => request,
@@ -3182,22 +3216,25 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                return write_json_error_and_close(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let body =
+            match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
+                .await?
+            {
+                Ok(body) => body,
+                Err(limit) => {
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
         let request: ToolExecutionRequest = match serde_json::from_slice(&body) {
             Ok(request) => request,
             Err(error) => {
@@ -4196,7 +4233,12 @@ impl FerroGateway {
             }
         };
 
-        let body = match read_request_body(session, 256 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_config_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft(
@@ -4318,7 +4360,12 @@ impl FerroGateway {
             }
         };
 
-        let body = match read_request_body(session, 256 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_config_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_action(
@@ -4473,7 +4520,12 @@ impl FerroGateway {
                     }
                 };
 
-                let body = match read_request_body(session, 16 * 1024).await? {
+                let body = match read_request_body(
+                    session,
+                    self.state.current().limits().admin_small_body_max_bytes(),
+                )
+                .await?
+                {
                     Ok(body) => body,
                     Err(limit) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -5050,6 +5102,7 @@ impl FerroGateway {
         let request =
             match read_self_hosted_transport_body::<SelfHostedWorkerHeartbeatTransportRequest>(
                 session,
+                state.limits().worker_transport_body_max_bytes(),
                 transport_security,
                 |frame| {
                     state.self_hosted_worker_transport_secret(
@@ -5138,6 +5191,7 @@ impl FerroGateway {
         let request =
             match read_self_hosted_transport_body::<SelfHostedWorkerCheckpointTransportRequest>(
                 session,
+                state.limits().worker_transport_body_max_bytes(),
                 transport_security,
                 |frame| {
                     state.self_hosted_worker_transport_secret(
@@ -5230,6 +5284,7 @@ impl FerroGateway {
         let request =
             match read_self_hosted_transport_body::<SelfHostedWorkerArtifactTransportRequest>(
                 session,
+                state.limits().worker_transport_body_max_bytes(),
                 transport_security,
                 |frame| {
                     state.self_hosted_worker_transport_secret(
@@ -5324,6 +5379,7 @@ impl FerroGateway {
             SelfHostedWorkerTelemetryEventTransportRequest,
         >(
             session,
+            state.limits().worker_transport_body_max_bytes(),
             transport_security,
             |frame| {
                 state.self_hosted_worker_transport_secret(
@@ -5413,6 +5469,7 @@ impl FerroGateway {
         let state = self.state.current();
         let request = match read_self_hosted_transport_body::<SelfHostedRunPollRequest>(
             session,
+            state.limits().worker_transport_body_max_bytes(),
             transport_security,
             |frame| {
                 state.self_hosted_worker_transport_secret(
@@ -5464,6 +5521,7 @@ impl FerroGateway {
         let state = self.state.current();
         let request = match read_self_hosted_transport_body::<SelfHostedRunAckRequest>(
             session,
+            state.limits().worker_transport_body_max_bytes(),
             transport_security,
             |frame| {
                 state.self_hosted_worker_transport_secret(
@@ -5689,7 +5747,12 @@ impl FerroGateway {
                     }
                 };
 
-                let body = match read_request_body(session, 64 * 1024).await? {
+                let body = match read_request_body(
+                    session,
+                    self.state.current().limits().admin_body_max_bytes(),
+                )
+                .await?
+                {
                     Ok(body) => body,
                     Err(limit) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -6074,7 +6137,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -6225,7 +6293,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -6438,7 +6511,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -6595,7 +6673,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -6754,7 +6837,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -7116,7 +7204,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -7569,7 +7662,12 @@ impl FerroGateway {
                         .await;
                     }
                 }
-                let body = match read_request_body(session, 16 * 1024).await? {
+                let body = match read_request_body(
+                    session,
+                    self.state.current().limits().admin_small_body_max_bytes(),
+                )
+                .await?
+                {
                     Ok(body) => body,
                     Err(limit) => {
                         return write_json_error_and_close(
@@ -7856,7 +7954,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -8224,7 +8327,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -8717,7 +8825,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 64 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().admin_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -9014,7 +9127,12 @@ impl FerroGateway {
             .await;
         }
 
-        let body = match read_request_body(session, 128 * 1024).await? {
+        let body = match read_request_body(
+            session,
+            self.state.current().limits().agent_ingress_body_max_bytes(),
+        )
+        .await?
+        {
             Ok(body) => body,
             Err(limit) => {
                 return write_json_error_and_close(
@@ -10732,6 +10850,7 @@ fn self_hosted_transport_policy() -> SelfHostedTransportPolicy {
 
 async fn read_self_hosted_transport_body<T>(
     session: &mut Session,
+    max_bytes: usize,
     transport_security: SelfHostedTransportSecurity,
     shared_secret_for_frame: impl Fn(
         &SelfHostedWorkerTransportFrame,
@@ -10741,7 +10860,7 @@ async fn read_self_hosted_transport_body<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    let body = match read_request_body(session, 1024 * 1024).await? {
+    let body = match read_request_body(session, max_bytes).await? {
         Ok(body) => body,
         Err(limit) => {
             return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(

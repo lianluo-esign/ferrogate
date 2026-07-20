@@ -603,6 +603,13 @@ impl AppState {
             .unwrap_or(16 * 1024 * 1024)
     }
 
+    /// #312: single resolver for request-body size caps. Handlers must go
+    /// through `state.limits().<surface>_body_max_bytes()` instead of
+    /// hard-coding literals at `read_request_body` call sites.
+    pub(crate) fn limits(&self) -> &crate::config::LimitsConfig {
+        &self.config.limits
+    }
+
     pub(crate) fn provider_health_checks(&self) -> Vec<ProviderHealthCheck> {
         self.config
             .providers

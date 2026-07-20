@@ -101,31 +101,32 @@ impl FerroGateway {
             return Ok(());
         }
 
-        let body = match read_request_body(session, 1024 * 1024).await? {
-            Ok(body) => body,
-            Err(limit) => {
-                self.record_embeddings_error_log(
-                    ctx,
-                    tenant,
-                    None,
-                    None,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                );
-                write_json_error(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds maximum size of {} bytes",
-                        limit.max_bytes
-                    ),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        let body =
+            match read_request_body(session, state.limits().inference_body_max_bytes()).await? {
+                Ok(body) => body,
+                Err(limit) => {
+                    self.record_embeddings_error_log(
+                        ctx,
+                        tenant,
+                        None,
+                        None,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                    );
+                    write_json_error(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
 
         let plan = match build_embeddings_request_plan(&state, &auth, &body) {
             Ok(plan) => plan,

@@ -70,6 +70,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
     #[serde(default)]
+    pub(crate) limits: LimitsConfig,
+    #[serde(default)]
     pub(crate) agent_runtime: AgentRuntimeConfig,
     #[serde(default)]
     pub(crate) cluster: ClusterConfig,
@@ -1662,6 +1664,114 @@ pub(crate) struct ReliabilityConfig {
     pub(crate) graceful_upgrade_sock_retries: Option<usize>,
 }
 
+/// #312: centralized request-body size caps (`[limits]`).
+///
+/// Every `read_request_body` call site in the gateway resolves its cap
+/// through this section instead of a scattered hard-coded literal. Each
+/// knob groups handlers that shared the same literal and purpose before
+/// centralization; the defaults below are exactly those literals, so an
+/// absent `[limits]` section leaves behavior unchanged.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct LimitsConfig {
+    /// `/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`,
+    /// `/v1/messages` request bodies. Default 1 MiB.
+    #[serde(default)]
+    pub(crate) inference_body_max_bytes: Option<usize>,
+    /// Standard `/admin/v1/*` JSON mutations (providers/models/api-keys/
+    /// policies/plugins/prompt-templates/skill-packages/agent-workflows/
+    /// agent-upstreams/mcp-servers/gateway-configs upserts, plans, quota
+    /// policies, RBAC, virtual keys/tenants, agent schedules, admin
+    /// agent-run mutations, self-hosted worker management). Default 64 KiB.
+    #[serde(default)]
+    pub(crate) admin_body_max_bytes: Option<usize>,
+    /// Compact admin control operations: wallet mutations, site-domain
+    /// bindings, `/admin/v1/drain`, tool-approval decisions. Default 16 KiB.
+    #[serde(default)]
+    pub(crate) admin_small_body_max_bytes: Option<usize>,
+    /// Full-config documents posted to `/admin/v1/config/validate` and
+    /// `/admin/v1/config/reload`. Default 256 KiB.
+    #[serde(default)]
+    pub(crate) admin_config_body_max_bytes: Option<usize>,
+    /// Data-plane tool/agent invocation payloads: `/v1/tools/execute`,
+    /// `/v1/mcp/tool/execute`, `/v1/functions/execute`, `/v1/mcp` JSON-RPC,
+    /// `/v1/prompts/{id}/render`, `/v1/agent-runs` creation. Default 64 KiB.
+    #[serde(default)]
+    pub(crate) tool_body_max_bytes: Option<usize>,
+    /// Asset control-plane JSON (`/v1/assets/presign/*` upload-intent,
+    /// commit, download-url requests) -- not asset payload bytes themselves,
+    /// which are governed by tenant storage quotas. Default 64 KiB.
+    #[serde(default)]
+    pub(crate) asset_control_body_max_bytes: Option<usize>,
+    /// A2A agent ingress bodies on `/v1/agents/*`. Default 128 KiB.
+    #[serde(default)]
+    pub(crate) agent_ingress_body_max_bytes: Option<usize>,
+    /// Self-hosted worker transport frames (lease poll/ack, heartbeat,
+    /// checkpoint, artifact, telemetry envelopes). Default 1 MiB.
+    #[serde(default)]
+    pub(crate) worker_transport_body_max_bytes: Option<usize>,
+    /// `/admin/v1/guardrail-policies` documents, which can carry large
+    /// pattern lists. Default 1 MiB.
+    #[serde(default)]
+    pub(crate) guardrail_policy_body_max_bytes: Option<usize>,
+}
+
+pub(crate) const DEFAULT_INFERENCE_BODY_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const DEFAULT_ADMIN_BODY_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
+pub(crate) const DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const DEFAULT_TOOL_BODY_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES: usize = 128 * 1024;
+pub(crate) const DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const DEFAULT_GUARDRAIL_POLICY_BODY_MAX_BYTES: usize = 1024 * 1024;
+
+impl LimitsConfig {
+    pub(crate) fn inference_body_max_bytes(&self) -> usize {
+        self.inference_body_max_bytes
+            .unwrap_or(DEFAULT_INFERENCE_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn admin_body_max_bytes(&self) -> usize {
+        self.admin_body_max_bytes
+            .unwrap_or(DEFAULT_ADMIN_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn admin_small_body_max_bytes(&self) -> usize {
+        self.admin_small_body_max_bytes
+            .unwrap_or(DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn admin_config_body_max_bytes(&self) -> usize {
+        self.admin_config_body_max_bytes
+            .unwrap_or(DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn tool_body_max_bytes(&self) -> usize {
+        self.tool_body_max_bytes
+            .unwrap_or(DEFAULT_TOOL_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn asset_control_body_max_bytes(&self) -> usize {
+        self.asset_control_body_max_bytes
+            .unwrap_or(DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn agent_ingress_body_max_bytes(&self) -> usize {
+        self.agent_ingress_body_max_bytes
+            .unwrap_or(DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn worker_transport_body_max_bytes(&self) -> usize {
+        self.worker_transport_body_max_bytes
+            .unwrap_or(DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES)
+    }
+
+    pub(crate) fn guardrail_policy_body_max_bytes(&self) -> usize {
+        self.guardrail_policy_body_max_bytes
+            .unwrap_or(DEFAULT_GUARDRAIL_POLICY_BODY_MAX_BYTES)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Upstream {
     pub(crate) name: String,
@@ -2253,6 +2363,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
+            limits: LimitsConfig::default(),
             agent_runtime: AgentRuntimeConfig::default(),
             cluster: ClusterConfig::default(),
             upstreams: Vec::new(),
