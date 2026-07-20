@@ -54,6 +54,14 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
    * (virtual keys) never expose the plaintext secret again after creation.
    */
   secretResponseKey?: string;
+  /**
+   * Typed list fetcher backed by the generated OpenAPI client (#314):
+   * migrated resources implement this with `adminGet(apiKey, "<contract
+   * path>")` so contract drift becomes a type error; ResourcePage falls
+   * back to the untyped `gatewayGet(basePath)` until a resource's slice
+   * migrates. Exemplars: tenant-accounts, plans, virtual-keys.
+   */
+  fetchList?: (apiKey: string) => Promise<{ data: T[] }>;
 }
 
 export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknown> {

@@ -1,22 +1,12 @@
+import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
-export interface AdminPlan extends Record<string, unknown> {
-  id: string;
-  name: string;
-  slug: string;
-  mcp_enabled: boolean;
-  self_hosted_workers_enabled: boolean;
-  admin_console_seats: number | null;
-  default_model_allowlist: string[];
-  default_rpm_limit: number | null;
-  default_tpm_limit: number | null;
-  default_monthly_budget_usd: number | null;
-  asset_hosting_enabled: boolean;
-  default_asset_storage_quota_bytes: number | null;
-  extension_tools_enabled: boolean;
-  created_at_unix: number;
-  updated_at_unix: number;
-}
+/**
+ * Row shape derived from the OpenAPI contract (#314): if
+ * docs/openapi/admin-api.openapi.json changes this resource, the columns/
+ * fetcher below stop type-checking. Regenerate via `npm run generate:api`.
+ */
+export type AdminPlan = AdminSchema<"AdminPlan"> & Record<string, unknown>;
 
 export const plansConfig: ResourceConfig<AdminPlan> = {
   key: "plans",
@@ -25,6 +15,7 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
     "Sellable subscription tiers: the feature flags and default quota/budget a tenant inherits via tenant-accounts.plan_id.",
   basePath: "/admin/v1/plans",
   idField: "id",
+  fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/plans"),
   columns: [
     { key: "name", header: "Name" },
     { key: "slug", header: "Slug" },

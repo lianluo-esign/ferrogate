@@ -1,5 +1,6 @@
 import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
+import type { components, paths } from "@/lib/api-types.generated";
 
 export interface AdminPage<T> {
   data: T[];
@@ -7,6 +8,155 @@ export interface AdminPage<T> {
   offset: number;
   limit: number;
 }
+
+// ---------------------------------------------------------------------------
+// Typed layer over the generated OpenAPI contract (#314).
+//
+// `src/lib/api-types.generated.ts` is generated from
+// docs/openapi/admin-api.openapi.json via `npm run generate:api`. The helpers
+// below are generic over those `paths`/`components`, so a contract change
+// that the console doesn't handle becomes a TYPE ERROR at `npm run build`.
+//
+// Exemplar adopters: tenant-accounts, plans, virtual-keys (see
+// src/resources/*.ts). New/migrated pages should call `adminGet`/`adminPost`/
+// etc. with a contract path literal instead of the legacy untyped
+// `gatewayGet`/`gatewayPost` helpers further down (kept for resources that
+// haven't migrated yet; each UI slice migrates its own).
+// ---------------------------------------------------------------------------
+
+/** Named schema from the Admin API contract, e.g. `AdminSchema<"AdminPlan">`. */
+export type AdminSchema<K extends keyof components["schemas"]> =
+  components["schemas"][K];
+
+type HttpMethod = "get" | "post" | "put" | "patch" | "delete";
+
+/** Contract paths that implement a given method (template form, e.g. "/admin/v1/plans/{plan_id}"). */
+export type AdminPathWith<M extends HttpMethod> = {
+  [P in keyof paths]: paths[P] extends Record<M, unknown> ? P : never;
+}[keyof paths];
+
+type OpFor<P extends keyof paths, M extends HttpMethod> =
+  paths[P] extends Record<M, infer Op> ? Op : never;
+
+type SuccessCode = 200 | 201 | 202 | 204;
+
+/** JSON body of the operation's 2xx response (undefined for 204-style ops). */
+type SuccessBody<Op> = Op extends { responses: infer R }
+  ? {
+      [S in Extract<keyof R, SuccessCode>]: R[S] extends {
+        content: { "application/json": infer B };
+      }
+        ? B
+        : undefined;
+    }[Extract<keyof R, SuccessCode>]
+  : never;
+
+/** JSON request body the operation accepts (never for body-less ops). */
+type JsonRequestBody<Op> = Op extends {
+  requestBody: { content: { "application/json": infer B } };
+}
+  ? B
+  : Op extends { requestBody?: { content: { "application/json": infer B } } }
+    ? B | undefined
+    : never;
+
+type PathParamsFor<Op> = Op extends { parameters: { path: infer PP } }
+  ? PP extends Record<string, string | number>
+    ? PP
+    : never
+  : never;
+
+type QueryFor<Op> = Op extends { parameters: { query?: infer Q } }
+  ? Q extends Record<string, unknown>
+    ? Q
+    : never
+  : never;
+
+interface TypedRequestOptions<Op> {
+  /** Values substituted into `{placeholder}` segments of the path template. */
+  params?: PathParamsFor<Op>;
+  query?: QueryFor<Op>;
+}
+
+/** Substitutes `{name}` placeholders; throws if a placeholder has no value. */
+function resolvePathTemplate(
+  template: string,
+  params?: Record<string, string | number>,
+): string {
+  return template.replace(/\{([^}]+)\}/g, (_match, name: string) => {
+    const value = params?.[name];
+    if (value === undefined) {
+      throw new Error(`missing path parameter "${name}" for ${template}`);
+    }
+    return encodeURIComponent(String(value));
+  });
+}
+
+function typedRequest<P extends keyof paths & string, M extends HttpMethod>(
+  method: M,
+  apiKey: string,
+  path: P,
+  options?: TypedRequestOptions<OpFor<P, M>>,
+  body?: unknown,
+): Promise<SuccessBody<OpFor<P, M>>> {
+  return gatewayRequest(
+    resolvePathTemplate(path, options?.params as Record<string, string | number> | undefined),
+    {
+      method: method.toUpperCase(),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    },
+    apiKey,
+    { query: options?.query as GatewayRequestOptions["query"] },
+  );
+}
+
+export function adminGet<P extends AdminPathWith<"get"> & string>(
+  apiKey: string,
+  path: P,
+  options?: TypedRequestOptions<OpFor<P, "get">>,
+): Promise<SuccessBody<OpFor<P, "get">>> {
+  return typedRequest("get", apiKey, path, options);
+}
+
+export function adminPost<P extends AdminPathWith<"post"> & string>(
+  apiKey: string,
+  path: P,
+  body: JsonRequestBody<OpFor<P, "post">>,
+  options?: TypedRequestOptions<OpFor<P, "post">>,
+): Promise<SuccessBody<OpFor<P, "post">>> {
+  return typedRequest("post", apiKey, path, options, body);
+}
+
+export function adminPut<P extends AdminPathWith<"put"> & string>(
+  apiKey: string,
+  path: P,
+  body: JsonRequestBody<OpFor<P, "put">>,
+  options?: TypedRequestOptions<OpFor<P, "put">>,
+): Promise<SuccessBody<OpFor<P, "put">>> {
+  return typedRequest("put", apiKey, path, options, body);
+}
+
+export function adminPatch<P extends AdminPathWith<"patch"> & string>(
+  apiKey: string,
+  path: P,
+  body: JsonRequestBody<OpFor<P, "patch">>,
+  options?: TypedRequestOptions<OpFor<P, "patch">>,
+): Promise<SuccessBody<OpFor<P, "patch">>> {
+  return typedRequest("patch", apiKey, path, options, body);
+}
+
+export function adminDelete<P extends AdminPathWith<"delete"> & string>(
+  apiKey: string,
+  path: P,
+  options?: TypedRequestOptions<OpFor<P, "delete">>,
+): Promise<SuccessBody<OpFor<P, "delete">>> {
+  return typedRequest("delete", apiKey, path, options);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy untyped helpers. Prefer the typed `admin*` functions above for new
+// code; these remain for resources whose UI slice hasn't migrated yet.
+// ---------------------------------------------------------------------------
 
 export interface GatewayRequestOptions {
   query?: Record<string, string | number | boolean | undefined>;

@@ -92,6 +92,13 @@ else
   else
     echo "   (cargo-audit absent: dependency vuln gate skipped)"
   fi
+  # Admin-console gate (#314): lint + Vitest + build for the SPA that ships in
+  # the image. Soft-skips only when Node/npm isn't installed on this host.
+  if command -v node >/dev/null && command -v npm >/dev/null; then
+    "$ROOT/scripts/check-admin-console.sh"
+  else
+    echo "   (node/npm absent: admin-console gate skipped — run scripts/check-admin-console.sh on a Node 22+ host)"
+  fi
 fi
 
 if [ "$ENGINE" = "crane" ]; then

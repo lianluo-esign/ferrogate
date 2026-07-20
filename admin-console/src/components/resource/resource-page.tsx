@@ -52,7 +52,10 @@ export function ResourcePage<T extends Record<string, unknown>>({
     error: listError,
   } = useQuery({
     queryKey,
-    queryFn: () => gatewayGet<AdminPage<T>>(apiKey, config.basePath, { query: { limit: 200 } }),
+    queryFn: () =>
+      config.fetchList
+        ? config.fetchList(apiKey)
+        : gatewayGet<AdminPage<T>>(apiKey, config.basePath, { query: { limit: 200 } }),
   });
 
   const createMutation = useMutation({

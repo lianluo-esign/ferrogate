@@ -1,25 +1,13 @@
+import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
-export interface AdminVirtualApiKey extends Record<string, unknown> {
-  id: string;
-  workspace_id: string;
-  tenant_id: string;
-  project_id: string;
-  name: string;
-  key_prefix: string;
-  last4: string;
-  enabled: boolean;
-  scopes: string[];
-  allowed_models: string[];
-  allowed_providers: string[];
-  monthly_token_budget: number | null;
-  request_limit_per_minute: number | null;
-  created_at_unix: number;
-  updated_at_unix: number;
-  rotated_at_unix: number | null;
-  expires_at_unix: number | null;
-  revoked_at_unix: number | null;
-}
+/**
+ * Row shape derived from the OpenAPI contract (#314): if
+ * docs/openapi/admin-api.openapi.json changes this resource, the columns/
+ * fetcher below stop type-checking. Regenerate via `npm run generate:api`.
+ */
+export type AdminVirtualApiKey = AdminSchema<"AdminVirtualApiKey"> &
+  Record<string, unknown>;
 
 export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   key: "virtual-keys",
@@ -27,6 +15,7 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   description: "Keys used to call the gateway and its Admin API.",
   basePath: "/admin/v1/virtual-keys",
   idField: "id",
+  fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/virtual-keys"),
   secretResponseKey: "secret",
   columns: [
     { key: "name", header: "Name" },
