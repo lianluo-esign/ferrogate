@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 48;
-const POSTGRES_SCHEMA_NAME: &str = "048_handoff_parent_identity";
+const POSTGRES_SCHEMA_VERSION: u64 = 49;
+const POSTGRES_SCHEMA_NAME: &str = "049_self_hosted_worker_evidence_correlation";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1118,6 +1118,22 @@ pub struct StoredSelfHostedWorkerTelemetryEvent {
     pub occurred_at_unix: Option<u64>,
     pub ingested_at_unix: Option<u64>,
     pub event_json: String,
+    /// #329: the dispatch lease's correlation identity, stamped by the
+    /// self-hosted worker onto the evidence it reports for the run. These are
+    /// the SAME {request_id, trace_id, agent_run_id} triple (#305) and
+    /// `parent_action_fingerprint` (#307) the control plane persisted on the
+    /// dispatch (`self_hosted_run_dispatches`), so worker-reported evidence
+    /// joins the investigation view + `action_correlations` by the same keys
+    /// instead of relying on gateway-side back-fill. All `None` for a keyless
+    /// dispatch (report-only / background tick) — never fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6694,8 +6710,10 @@ impl PostgresControlPlaneStore {
             .execute(
                 "INSERT INTO self_hosted_worker_telemetry_events \
                  (id, worker_id, tenant, workspace_id, session_id, run_id, kind, trust_level, \
-                  occurred_at_unix, ingested_at_unix, event_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                  occurred_at_unix, ingested_at_unix, event_json, request_id, trace_id, \
+                  agent_run_id, parent_action_fingerprint) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb, $12, $13, \
+                  $14, $15) \
                  ON CONFLICT (id) DO NOTHING",
                 &[
                     &event.id,
@@ -6709,6 +6727,10 @@ impl PostgresControlPlaneStore {
                     &occurred_at_unix,
                     &ingested_at_unix,
                     &event.event_json,
+                    &event.request_id,
+                    &event.trace_id,
+                    &event.agent_run_id,
+                    &event.parent_action_fingerprint,
                 ],
             )
             .await
@@ -6738,7 +6760,8 @@ impl PostgresControlPlaneStore {
         let rows = transaction
             .query(
                 "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
-                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text, \
+                    request_id, trace_id, agent_run_id, parent_action_fingerprint \
                  FROM self_hosted_worker_telemetry_events \
                  ORDER BY occurred_at_unix ASC, id ASC",
                 &[],
@@ -7089,7 +7112,8 @@ impl PostgresControlPlaneStore {
         let rows = transaction
             .query(
                 "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
-                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text, \
+                    request_id, trace_id, agent_run_id, parent_action_fingerprint \
                  FROM self_hosted_worker_telemetry_events \
                  WHERE run_id = $1 \
                  ORDER BY occurred_at_unix DESC, ingested_at_unix DESC, id DESC \
@@ -7131,7 +7155,8 @@ impl PostgresControlPlaneStore {
         let rows = transaction
             .query(
                 "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
-                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                    trust_level, occurred_at_unix, ingested_at_unix, event_json::text, \
+                    request_id, trace_id, agent_run_id, parent_action_fingerprint \
                  FROM self_hosted_worker_telemetry_events \
                  WHERE worker_id = $1 \
                  ORDER BY occurred_at_unix ASC, ingested_at_unix ASC, id ASC",
@@ -9296,6 +9321,10 @@ fn self_hosted_worker_telemetry_event_from_row(
         occurred_at_unix: Some(nonnegative_u64(row.get(8))),
         ingested_at_unix: Some(nonnegative_u64(row.get(9))),
         event_json: row.get(10),
+        request_id: row.get(11),
+        trace_id: row.get(12),
+        agent_run_id: row.get(13),
+        parent_action_fingerprint: row.get(14),
     }
 }
 
@@ -15751,6 +15780,10 @@ mod tests {
                     occurred_at_unix: Some(index),
                     ingested_at_unix: Some(index),
                     event_json: "{}".into(),
+                    request_id: None,
+                    trace_id: None,
+                    agent_run_id: None,
+                    parent_action_fingerprint: None,
                 },
             ))
             .unwrap();
@@ -16034,6 +16067,10 @@ mod tests {
                     occurred_at_unix: Some(index),
                     ingested_at_unix: Some(index),
                     event_json: "{}".into(),
+                    request_id: None,
+                    trace_id: None,
+                    agent_run_id: None,
+                    parent_action_fingerprint: None,
                 },
             ))
             .unwrap();
@@ -16563,6 +16600,10 @@ mod tests {
                 occurred_at_unix: Some(24),
                 ingested_at_unix: Some(25),
                 event_json: r#"{"tool":"bash"}"#.into(),
+                request_id: None,
+                trace_id: None,
+                agent_run_id: None,
+                parent_action_fingerprint: None,
             },
         ))
         .unwrap();

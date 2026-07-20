@@ -31,8 +31,11 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 48);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "048_handoff_parent_identity");
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 49);
+    assert_eq!(
+        POSTGRES_SCHEMA_NAME,
+        "049_self_hosted_worker_evidence_correlation"
+    );
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
@@ -73,6 +76,13 @@ fn schema_contract_includes_latest_asset_egress_migration() {
     // #307: downstream handoff parent identity on the dispatch queue (048).
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (48, '048_handoff_parent_identity')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS parent_action_fingerprint TEXT"));
+    // #329: stamp the self-hosted-worker leg's reported evidence with the shared
+    // action identity (correlation triple + parent fingerprint) so it joins the
+    // investigation view + action_correlations by the same keys (049).
+    assert!(
+        POSTGRES_SCHEMA_SQL.contains("VALUES (49, '049_self_hosted_worker_evidence_correlation')")
+    );
+    assert!(POSTGRES_SCHEMA_SQL.contains("ALTER TABLE self_hosted_worker_telemetry_events"));
     assert!(
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")

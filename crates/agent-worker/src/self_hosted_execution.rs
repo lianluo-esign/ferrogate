@@ -33,7 +33,7 @@ use ferrogate_runtime::{
     CapabilityAuthorizationDecision, FrameworkAdapterError, FrameworkAdapterMode,
     FrameworkAdapterSession, IsolationBackendLifecycle, IsolationExecRequest, IsolationPolicy,
     IsolationPrepareRequest, ManagedCliAction, ManagedExternalAction,
-    SelfHostedTelemetryTrustLevel, SupportedFramework,
+    SelfHostedRunEvidenceCorrelation, SelfHostedTelemetryTrustLevel, SupportedFramework,
 };
 
 use crate::{
@@ -95,6 +95,13 @@ pub(crate) struct GovernedWorkloadExecution {
     pub(crate) workload_output: String,
     pub(crate) backend_name: String,
     pub(crate) containment_summary: String,
+    /// #329: the correlation identity carried on the run's dispatch lease
+    /// (`request_id`/`trace_id`/`agent_run_id` from #305 + the #307
+    /// `parent_action_fingerprint`). The worker stamps it onto the evidence it
+    /// reports so the self-hosted leg emits the SAME action identity the control
+    /// plane persisted, instead of forcing a gateway-side back-fill. Empty for a
+    /// keyless run (no dispatching context) — never fabricated.
+    pub(crate) lease_correlation: SelfHostedRunEvidenceCorrelation,
 }
 
 impl GovernedWorkloadExecution {
@@ -156,6 +163,18 @@ impl GovernedWorkloadExecution {
             "workload_output": self.workload_output,
             "isolation_backend": self.backend_name,
             "containment": self.containment_summary,
+            // #329: the dispatch lease's correlation identity, stamped verbatim
+            // onto the worker's emitted evidence. Absent keys serialize as null
+            // (a keyless run) — never a fabricated id — so the control plane can
+            // join this evidence on the SAME {request_id, trace_id,
+            // agent_run_id} triple + parent fingerprint it stored on the
+            // dispatch, or record NULL.
+            "correlation": {
+                "request_id": self.lease_correlation.request_id,
+                "trace_id": self.lease_correlation.trace_id,
+                "agent_run_id": self.lease_correlation.agent_run_id,
+                "parent_action_fingerprint": self.lease_correlation.parent_action_fingerprint,
+            },
         })
     }
 }
@@ -337,6 +356,7 @@ where
                 workload_output: workload.output,
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
+                lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
             })
         }
         FrameworkAdapterMode::SelfHosted => {
@@ -359,6 +379,7 @@ where
                 workload_output: workload.output,
                 backend_name: workload.backend_name,
                 containment_summary: workload.containment_summary,
+                lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
             })
         }
     }

@@ -2263,3 +2263,31 @@ ALTER TABLE self_hosted_run_dispatches
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (48, '048_handoff_parent_identity')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 49 (#329): stamp the self-hosted-worker leg with the shared action
+-- identity. A self-hosted worker that executes a leased run now reports its
+-- evidence carrying the dispatch lease's correlation keys, so worker-reported
+-- telemetry (`self_hosted_worker_telemetry_events`) joins the #199
+-- investigation view + #306/#307 `action_correlations` on the SAME
+-- {request_id, trace_id, agent_run_id} triple (#305) + `parent_action_fingerprint`
+-- (#307) the control plane persisted on `self_hosted_run_dispatches`, instead of
+-- relying on a gateway-side back-fill from the run. Additive, nullable
+-- projection columns — pre-migration rows and evidence from a keyless dispatch
+-- (report-only run, background scheduler tick) stay NULL; nothing is fabricated:
+--   * request_id / trace_id / agent_run_id -- the dispatching context's
+--     correlation triple the worker received on the lease and stamped on the
+--     reported evidence (matches the #305 dispatch/timeline/audit columns).
+--   * parent_action_fingerprint -- the UPSTREAM governed action's target-level
+--     fingerprint under the canonical_target_sha256 contract ("sha256:<hex>",
+--     ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT), the same value the #307
+--     dispatch row carries — validated before persist so a malformed
+--     worker-supplied value cannot pollute the fingerprint join space.
+ALTER TABLE self_hosted_worker_telemetry_events
+    ADD COLUMN IF NOT EXISTS request_id TEXT,
+    ADD COLUMN IF NOT EXISTS trace_id TEXT,
+    ADD COLUMN IF NOT EXISTS agent_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS parent_action_fingerprint TEXT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (49, '049_self_hosted_worker_evidence_correlation')
+ON CONFLICT (version) DO NOTHING;

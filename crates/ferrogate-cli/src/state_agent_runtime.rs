@@ -748,6 +748,7 @@ impl AppState {
         &self,
         worker_id: &str,
         request: crate::responses::AdminSelfHostedWorkerTelemetryEventRequest,
+        correlation: ferrogate_runtime::SelfHostedRunEvidenceCorrelation,
     ) -> Result<
         (
             crate::responses::AdminSelfHostedWorkerRecord,
@@ -756,6 +757,19 @@ impl AppState {
         SelfHostedWorkerRecordError,
     > {
         validate_self_hosted_telemetry_event_request(&request)?;
+        // #329/#307: a declared parent action fingerprint must satisfy the
+        // canonical_target_sha256 contract before it can be persisted, so a
+        // malformed worker-supplied value cannot pollute the fingerprint join
+        // space. Absent stays None (a keyless run) — never fabricated.
+        if let Some(fingerprint) = correlation.parent_action_fingerprint.as_deref() {
+            if !ferrogate_runtime::is_canonical_action_fingerprint(fingerprint) {
+                return Err(SelfHostedWorkerRecordError::InvalidRequest(
+                    "parent_action_fingerprint must be a canonical action fingerprint \
+                     (\"sha256:<64 lowercase hex>\")"
+                        .to_string(),
+                ));
+            }
+        }
         let registration = crate::gateway::block_on_sync_bridge(
             self.repositories.self_hosted_worker_registration(worker_id),
         )
@@ -780,6 +794,13 @@ impl AppState {
                 .event_json
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{}".into()),
+            // #329: the dispatch lease's correlation identity the worker stamped
+            // onto this evidence. Empty for a keyless dispatch (or the admin
+            // manual-record path) — every field stays None, never fabricated.
+            request_id: correlation.request_id,
+            trace_id: correlation.trace_id,
+            agent_run_id: correlation.agent_run_id,
+            parent_action_fingerprint: correlation.parent_action_fingerprint,
         };
         crate::gateway::block_on_sync_bridge(
             self.repositories
@@ -2384,6 +2405,10 @@ mod tests {
                     occurred_at_unix: Some(25),
                     ingested_at_unix: Some(26),
                     event_json: "{}".into(),
+                    request_id: None,
+                    trace_id: None,
+                    agent_run_id: None,
+                    parent_action_fingerprint: None,
                 }),
         )
         .unwrap();
@@ -2496,6 +2521,10 @@ mod tests {
                     occurred_at_unix: Some(20),
                     ingested_at_unix: Some(21),
                     event_json: r#"{"tool":"shell"}"#.into(),
+                    request_id: None,
+                    trace_id: None,
+                    agent_run_id: None,
+                    parent_action_fingerprint: None,
                 }),
         )
         .unwrap();
@@ -2514,6 +2543,10 @@ mod tests {
                     occurred_at_unix: Some(30),
                     ingested_at_unix: Some(31),
                     event_json: r#"{"state":"completed"}"#.into(),
+                    request_id: None,
+                    trace_id: None,
+                    agent_run_id: None,
+                    parent_action_fingerprint: None,
                 }),
         )
         .unwrap();
@@ -2596,6 +2629,10 @@ mod tests {
                             occurred_at_unix: Some(occurred_at_unix),
                             ingested_at_unix: Some(occurred_at_unix + 100),
                             event_json: "{}".into(),
+                            request_id: None,
+                            trace_id: None,
+                            agent_run_id: None,
+                            parent_action_fingerprint: None,
                         },
                     ),
             )
@@ -3096,6 +3133,7 @@ mod tests {
                     occurred_at_unix: Some(456),
                     event_json: Some(r#"{"tool":"shell"}"#.into()),
                 },
+                ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
             )
             .expect("telemetry event should be accepted");
 
@@ -3115,6 +3153,289 @@ mod tests {
         assert_eq!(stored_events.len(), 1);
         assert_eq!(stored_events[0].worker_id, worker.id);
         assert_eq!(stored_events[0].event_json, r#"{"tool":"shell"}"#);
+        // #329: the admin manual-record path carries no lease, so it records
+        // NULL correlation — never fabricated.
+        assert_eq!(stored_events[0].request_id, None);
+        assert_eq!(stored_events[0].trace_id, None);
+        assert_eq!(stored_events[0].agent_run_id, None);
+        assert_eq!(stored_events[0].parent_action_fingerprint, None);
+    }
+
+    fn register_self_hosted_worker_for_evidence(
+        state: &AppState,
+    ) -> crate::responses::AdminSelfHostedWorkerRecord {
+        state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: Some(4_000_000_000),
+                    orchestration_enabled: true,
+                    capability_envelope_json: Some(r#"{"frameworks":["codex"]}"#.into()),
+                },
+            )
+            .expect("registration should be accepted")
+            .0
+    }
+
+    fn telemetry_event_request(
+        run_id: &str,
+    ) -> crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+        crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+            session_id: "session-1".into(),
+            run_id: run_id.into(),
+            kind: "tool_call".into(),
+            occurred_at_unix: Some(456),
+            event_json: Some(r#"{"tool":"shell"}"#.into()),
+        }
+    }
+
+    /// #329 acceptance #1: a self-hosted worker run started from a correlated
+    /// dispatch produces evidence rows carrying the SAME {request_id, trace_id,
+    /// agent_run_id} triple + parent_action_fingerprint as the lease, so the
+    /// worker-reported evidence joins the investigation view on the same keys.
+    #[test]
+    fn self_hosted_worker_evidence_carries_the_lease_correlation_keys() {
+        let state = AppState::new(Config::default());
+        let worker = register_self_hosted_worker_for_evidence(&state);
+
+        // A lease as produced by polling a correlated dispatch: it carries the
+        // dispatch's full correlation identity (the worker stamps it verbatim).
+        let parent = format!("sha256:{}", "ab".repeat(32));
+        let lease = ferrogate_runtime::SelfHostedRunLease {
+            dispatch_id: "dispatch-correlated".into(),
+            action: ferrogate_runtime::SelfHostedRunAction::StartRun,
+            lease_id: "dispatch-correlated:attempt-1".into(),
+            tenant_id: "org".into(),
+            workspace_id: "workspace-1".into(),
+            worker_id: worker.id.clone(),
+            session_id: "session-1".into(),
+            run_id: "run-correlated".into(),
+            framework_adapter: "codex".into(),
+            required_capabilities: vec!["shell".into()],
+            workload_ref: "queue://runs/run-correlated".into(),
+            attempt: 1,
+            lease_expires_at_unix: 130,
+            trust_level:
+                ferrogate_runtime::SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+            request_id: Some("req-329".into()),
+            trace_id: Some("trace-329".into()),
+            agent_run_id: Some("run-correlated".into()),
+            parent_action_fingerprint: Some(parent.clone()),
+        };
+
+        state
+            .record_self_hosted_worker_telemetry_event(
+                &worker.id,
+                telemetry_event_request("run-correlated"),
+                lease.evidence_correlation(),
+            )
+            .expect("correlated telemetry event should be accepted");
+
+        let stored = block_on(state.repositories.self_hosted_worker_telemetry_events());
+        assert_eq!(stored.len(), 1);
+        let event = &stored[0];
+        // The worker-reported evidence row carries the SAME identity as the lease.
+        assert_eq!(event.request_id.as_deref(), Some("req-329"));
+        assert_eq!(event.trace_id.as_deref(), Some("trace-329"));
+        assert_eq!(event.agent_run_id.as_deref(), Some("run-correlated"));
+        assert_eq!(
+            event.parent_action_fingerprint.as_deref(),
+            Some(parent.as_str())
+        );
+    }
+
+    /// #329 acceptance #2: a keyless dispatch (report-only run / background tick)
+    /// records NULL correlation on the worker evidence — never a fabricated id.
+    #[test]
+    fn self_hosted_worker_evidence_records_null_for_a_keyless_dispatch() {
+        let state = AppState::new(Config::default());
+        let worker = register_self_hosted_worker_for_evidence(&state);
+
+        // An empty correlation is exactly what a keyless lease projects.
+        let keyless = ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default();
+        assert!(keyless.is_empty());
+        state
+            .record_self_hosted_worker_telemetry_event(
+                &worker.id,
+                telemetry_event_request("run-keyless"),
+                keyless,
+            )
+            .expect("keyless telemetry event should be accepted");
+
+        let stored = block_on(state.repositories.self_hosted_worker_telemetry_events());
+        assert_eq!(stored.len(), 1);
+        let event = &stored[0];
+        assert_eq!(event.request_id, None);
+        assert_eq!(event.trace_id, None);
+        assert_eq!(event.agent_run_id, None);
+        assert_eq!(event.parent_action_fingerprint, None);
+    }
+
+    /// #329: the real poll → lease → evidence path. A worker that polls the
+    /// seeded dispatch receives a lease carrying the dispatch's `agent_run_id`,
+    /// and the evidence it reports carries that SAME id — so worker evidence and
+    /// the dispatch row join on `agent_run_id` without any gateway back-fill.
+    #[test]
+    fn self_hosted_worker_evidence_joins_the_polled_dispatch_on_agent_run_id() {
+        let state = AppState::new(Config::default());
+        let (worker, transport_secret) = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: Some(4_000_000_000),
+                    orchestration_enabled: true,
+                    capability_envelope_json: Some(r#"{"frameworks":["codex"]}"#.into()),
+                },
+            )
+            .expect("registration should be accepted");
+
+        let lease = state
+            .poll_self_hosted_worker_run(SelfHostedRunPollRequest {
+                protocol_version: 1,
+                identity: SelfHostedWorkerIdentity {
+                    tenant_id: "org".into(),
+                    workspace_id: "workspace-1".into(),
+                    worker_id: worker.id.clone(),
+                    token_id: "sha256:worker".into(),
+                    token_secret: transport_secret,
+                    observed_at_unix: None,
+                },
+                supported_capabilities: vec!["shell".into()],
+                now_unix: 100,
+                lease_duration_secs: 30,
+            })
+            .expect("poll should be accepted")
+            .expect("seed dispatch should be leased");
+        // The seed dispatch carries the run it starts as agent_run_id; request /
+        // trace / parent are keyless (a registry seed has no governed context).
+        let correlation = lease.evidence_correlation();
+        assert_eq!(
+            correlation.agent_run_id.as_deref(),
+            Some(format!("self-hosted-run-{}", worker.id).as_str())
+        );
+        assert_eq!(correlation.request_id, None);
+        assert_eq!(correlation.trace_id, None);
+        assert_eq!(correlation.parent_action_fingerprint, None);
+
+        state
+            .record_self_hosted_worker_telemetry_event(
+                &worker.id,
+                telemetry_event_request(&lease.run_id),
+                correlation,
+            )
+            .expect("telemetry event should be accepted");
+
+        let stored = block_on(state.repositories.self_hosted_worker_telemetry_events());
+        assert_eq!(stored.len(), 1);
+        let dispatches = block_on(state.repositories.self_hosted_run_dispatches());
+        assert_eq!(dispatches.len(), 1);
+        // Worker-reported evidence and the dispatch row now join on agent_run_id.
+        assert_eq!(stored[0].agent_run_id, dispatches[0].agent_run_id);
+        assert_eq!(
+            stored[0].agent_run_id.as_deref(),
+            Some(format!("self-hosted-run-{}", worker.id).as_str())
+        );
+    }
+
+    /// #329 acceptance #3: the transport event request is wire-compatible. An
+    /// older worker that omits the correlation keys deserializes them as None
+    /// (a keyless run), and a newer worker's keys round-trip.
+    #[test]
+    fn self_hosted_worker_event_transport_request_is_wire_compatible() {
+        // Legacy frame from a pre-#329 worker: no correlation keys at all.
+        let legacy: crate::responses::SelfHostedWorkerTelemetryEventTransportRequest =
+            serde_json::from_str(
+                r#"{
+                    "identity": {
+                        "tenant_id": "org",
+                        "workspace_id": "workspace-1",
+                        "worker_id": "worker-1",
+                        "token_id": "sha256:worker",
+                        "token_secret": "secret"
+                    },
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "kind": "tool_call"
+                }"#,
+            )
+            .expect("legacy transport request must still deserialize");
+        assert_eq!(legacy.request_id, None);
+        assert_eq!(legacy.trace_id, None);
+        assert_eq!(legacy.agent_run_id, None);
+        assert_eq!(legacy.parent_action_fingerprint, None);
+
+        // A #329-aware worker carries the lease's correlation identity.
+        let correlated: crate::responses::SelfHostedWorkerTelemetryEventTransportRequest =
+            serde_json::from_str(
+                r#"{
+                    "identity": {
+                        "tenant_id": "org",
+                        "workspace_id": "workspace-1",
+                        "worker_id": "worker-1",
+                        "token_id": "sha256:worker",
+                        "token_secret": "secret"
+                    },
+                    "session_id": "session-1",
+                    "run_id": "run-correlated",
+                    "kind": "tool_call",
+                    "request_id": "req-329",
+                    "trace_id": "trace-329",
+                    "agent_run_id": "run-correlated",
+                    "parent_action_fingerprint": "sha256:abababababababababababababababababababababababababababababababab"
+                }"#,
+            )
+            .expect("correlated transport request must deserialize");
+        assert_eq!(correlated.request_id.as_deref(), Some("req-329"));
+        assert_eq!(correlated.trace_id.as_deref(), Some("trace-329"));
+        assert_eq!(correlated.agent_run_id.as_deref(), Some("run-correlated"));
+        assert_eq!(
+            correlated.parent_action_fingerprint.as_deref(),
+            Some("sha256:abababababababababababababababababababababababababababababababab")
+        );
+    }
+
+    /// #329/#307: a malformed parent fingerprint from a worker is rejected before
+    /// persist so it cannot pollute the fingerprint join space.
+    #[test]
+    fn self_hosted_worker_evidence_rejects_a_malformed_parent_fingerprint() {
+        let state = AppState::new(Config::default());
+        let worker = register_self_hosted_worker_for_evidence(&state);
+
+        let result = state.record_self_hosted_worker_telemetry_event(
+            &worker.id,
+            telemetry_event_request("run-1"),
+            ferrogate_runtime::SelfHostedRunEvidenceCorrelation {
+                parent_action_fingerprint: Some("not-a-canonical-fingerprint".into()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message.contains("canonical action fingerprint")
+        ));
+        // Nothing was persisted for the rejected event.
+        assert!(block_on(state.repositories.self_hosted_worker_telemetry_events()).is_empty());
     }
 
     #[test]
@@ -3130,6 +3451,7 @@ mod tests {
                 occurred_at_unix: None,
                 event_json: None,
             },
+            ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
         );
         assert!(matches!(
             missing,
@@ -3159,6 +3481,7 @@ mod tests {
                 occurred_at_unix: None,
                 event_json: None,
             },
+            ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
         );
         assert!(matches!(
             invalid_kind,
@@ -3175,6 +3498,7 @@ mod tests {
                 occurred_at_unix: None,
                 event_json: Some("{not-json".into()),
             },
+            ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
         );
         assert!(matches!(
             invalid_json,

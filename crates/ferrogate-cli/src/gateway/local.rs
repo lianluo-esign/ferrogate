@@ -5403,6 +5403,16 @@ impl FerroGateway {
         }
         let response_identity = request.identity.clone();
         let worker_id = request.identity.worker_id.clone();
+        // #329: the worker stamps the lease's correlation identity onto the
+        // evidence it reports; carry it through to the durable telemetry row so
+        // worker-reported evidence joins the investigation view on the SAME keys
+        // the control plane stored on the dispatch. Absent keys stay None.
+        let correlation = ferrogate_runtime::SelfHostedRunEvidenceCorrelation {
+            request_id: request.request_id,
+            trace_id: request.trace_id,
+            agent_run_id: request.agent_run_id,
+            parent_action_fingerprint: request.parent_action_fingerprint,
+        };
         let event = AdminSelfHostedWorkerTelemetryEventRequest {
             session_id: request.session_id,
             run_id: request.run_id,
@@ -5410,7 +5420,7 @@ impl FerroGateway {
             occurred_at_unix: request.occurred_at_unix,
             event_json: request.event_json,
         };
-        match state.record_self_hosted_worker_telemetry_event(&worker_id, event) {
+        match state.record_self_hosted_worker_telemetry_event(&worker_id, event, correlation) {
             Ok((worker, event)) => {
                 let body = AdminSelfHostedWorkerTelemetryEventResponse {
                     object: "self_hosted_worker_event",
@@ -6565,7 +6575,13 @@ impl FerroGateway {
                     .await;
                 }
             };
-        match state.record_self_hosted_worker_telemetry_event(worker_id, payload) {
+        // #329: the admin manual-record path has no dispatch lease, so it
+        // carries no correlation identity (all None) — never fabricated.
+        match state.record_self_hosted_worker_telemetry_event(
+            worker_id,
+            payload,
+            ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
+        ) {
             Ok((worker, event)) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use ferrogate_runtime::{
     CapabilityAuthorizationDecision, CapabilityPolicy, ClassOnlyPolicyMode, FrameworkAdapterMode,
-    ManagedCliAction, SimpleCapabilityAuthorizer,
+    ManagedCliAction, SelfHostedRunAction, SelfHostedRunLease, SimpleCapabilityAuthorizer,
 };
 
 use super::*;
@@ -217,6 +217,98 @@ fn cloud_enforces_and_blocks_a_denied_firecracker_workload_before_any_boot() {
         !message.contains("firecracker microVM boot failed"),
         "cloud enforce path attempted a microVM boot: {message}"
     );
+}
+
+/// A lease carrying the dispatch's correlation identity, mirroring what a
+/// self-hosted worker receives from `poll_run`.
+fn correlated_lease() -> SelfHostedRunLease {
+    SelfHostedRunLease {
+        dispatch_id: "dispatch-329".to_string(),
+        action: SelfHostedRunAction::StartRun,
+        lease_id: "dispatch-329:attempt-1".to_string(),
+        tenant_id: "tenant-1".to_string(),
+        workspace_id: "workspace-1".to_string(),
+        worker_id: "worker-1".to_string(),
+        session_id: "session-1".to_string(),
+        run_id: "run-correlated".to_string(),
+        framework_adapter: "native-harness".to_string(),
+        required_capabilities: vec!["shell".to_string()],
+        workload_ref: "queue://runs/run-correlated".to_string(),
+        attempt: 1,
+        lease_expires_at_unix: 1_725_000_040,
+        trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        request_id: Some("req-329".to_string()),
+        trace_id: Some("trace-329".to_string()),
+        agent_run_id: Some("run-correlated".to_string()),
+        parent_action_fingerprint: Some(format!("sha256:{}", "ab".repeat(32))),
+    }
+}
+
+/// #329: the worker stamps the lease's correlation identity onto the evidence
+/// it emits for the run, so the self-hosted leg reports the SAME {request_id,
+/// trace_id, agent_run_id} triple + parent fingerprint the control plane stored
+/// on the dispatch.
+#[test]
+fn self_hosted_evidence_carries_the_lease_correlation_keys() {
+    let execution = GovernedWorkloadExecution {
+        mode: FrameworkAdapterMode::SelfHosted,
+        capability_action: "cli",
+        target: "agent://self-hosted/report-only".to_string(),
+        disposition: GovernedCapabilityDisposition::ReportOnly {
+            recorded_decision: CapabilityAuthorizationDecision::Denied,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        },
+        enforcement_boundary: SELF_HOSTED_ENFORCEMENT_BOUNDARY,
+        execution_owner: SELF_HOSTED_EXECUTION_OWNER,
+        identity_expiry_unix_millis: 1_000 + SELF_HOSTED_IDENTITY_TTL_MILLIS,
+        workload_ran: true,
+        workload_exit_code: Some(0),
+        workload_output: "ok".to_string(),
+        backend_name: "local-process".to_string(),
+        containment_summary: "contained".to_string(),
+        lease_correlation: correlated_lease().evidence_correlation(),
+    };
+
+    let evidence = execution.evidence_json();
+    let correlation = &evidence["correlation"];
+    assert_eq!(correlation["request_id"], "req-329");
+    assert_eq!(correlation["trace_id"], "trace-329");
+    assert_eq!(correlation["agent_run_id"], "run-correlated");
+    assert_eq!(
+        correlation["parent_action_fingerprint"],
+        format!("sha256:{}", "ab".repeat(32))
+    );
+}
+
+/// #329: a keyless run (no dispatch lease correlation) records explicit nulls on
+/// the worker evidence — never a fabricated id.
+#[test]
+fn self_hosted_evidence_correlation_is_null_for_a_keyless_run() {
+    let execution = GovernedWorkloadExecution {
+        mode: FrameworkAdapterMode::SelfHosted,
+        capability_action: "cli",
+        target: "agent://self-hosted/report-only".to_string(),
+        disposition: GovernedCapabilityDisposition::ReportOnly {
+            recorded_decision: CapabilityAuthorizationDecision::Allowed,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        },
+        enforcement_boundary: SELF_HOSTED_ENFORCEMENT_BOUNDARY,
+        execution_owner: SELF_HOSTED_EXECUTION_OWNER,
+        identity_expiry_unix_millis: 1_000 + SELF_HOSTED_IDENTITY_TTL_MILLIS,
+        workload_ran: true,
+        workload_exit_code: Some(0),
+        workload_output: "ok".to_string(),
+        backend_name: "local-process".to_string(),
+        containment_summary: "contained".to_string(),
+        lease_correlation: SelfHostedRunEvidenceCorrelation::default(),
+    };
+
+    let evidence = execution.evidence_json();
+    let correlation = &evidence["correlation"];
+    assert!(correlation["request_id"].is_null());
+    assert!(correlation["trace_id"].is_null());
+    assert!(correlation["agent_run_id"].is_null());
+    assert!(correlation["parent_action_fingerprint"].is_null());
 }
 
 #[test]

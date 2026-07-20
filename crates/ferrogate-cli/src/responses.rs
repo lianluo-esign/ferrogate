@@ -454,6 +454,23 @@ pub(crate) struct SelfHostedWorkerTelemetryEventTransportRequest {
     pub(crate) occurred_at_unix: Option<u64>,
     #[serde(default)]
     pub(crate) event_json: Option<String>,
+    // #329: the dispatch lease's correlation identity, stamped by the worker
+    // onto the evidence it reports for the run so the self-hosted leg emits the
+    // SAME {request_id, trace_id, agent_run_id} triple (#305) +
+    // `parent_action_fingerprint` (#307) the control plane persisted on the
+    // dispatch. `serde(default)` keeps this wire-compatible: an older worker
+    // omits the keys and they deserialize as None (a keyless run) — never
+    // fabricated. This is the internal encrypted-frame transport (opaque
+    // `MachineTransportRequest` in the OpenAPI contract), so the additive fields
+    // need no contract change.
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+    #[serde(default)]
+    pub(crate) trace_id: Option<String>,
+    #[serde(default)]
+    pub(crate) agent_run_id: Option<String>,
+    #[serde(default)]
+    pub(crate) parent_action_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

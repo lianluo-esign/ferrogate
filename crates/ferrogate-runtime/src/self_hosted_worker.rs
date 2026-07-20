@@ -327,6 +327,61 @@ pub struct SelfHostedRunLease {
     pub parent_action_fingerprint: Option<String>,
 }
 
+impl SelfHostedRunLease {
+    /// #329: project the lease's correlation identity into the bundle a
+    /// self-hosted worker stamps onto every piece of evidence it reports for
+    /// this run (telemetry/timeline events, run results, checkpoints), so the
+    /// worker leg emits the SAME {request_id, trace_id, agent_run_id} triple +
+    /// `parent_action_fingerprint` the control plane persisted on the dispatch
+    /// (#305/#307) instead of forcing a gateway-side back-fill from the run.
+    ///
+    /// Every field is `Option`: a keyless dispatch (background scheduler tick,
+    /// registry seed) rides `None` end-to-end and the worker evidence records
+    /// NULL — never a fabricated id.
+    pub fn evidence_correlation(&self) -> SelfHostedRunEvidenceCorrelation {
+        SelfHostedRunEvidenceCorrelation {
+            request_id: self.request_id.clone(),
+            trace_id: self.trace_id.clone(),
+            agent_run_id: self.agent_run_id.clone(),
+            parent_action_fingerprint: self.parent_action_fingerprint.clone(),
+        }
+    }
+}
+
+/// #329: the correlation identity a self-hosted worker stamps onto the evidence
+/// it reports for a leased run. This is the worker-leg carrier of the #305
+/// `{request_id, trace_id, agent_run_id}` triple and the #307
+/// `parent_action_fingerprint`, projected verbatim from the
+/// [`SelfHostedRunLease`] via [`SelfHostedRunLease::evidence_correlation`].
+///
+/// Every field is optional and absent keys stay `None` (never fabricated), so a
+/// keyless dispatch records NULL on the worker-reported evidence rows exactly as
+/// it does on the dispatch/lease. `serde(default, skip_serializing_if)` keeps it
+/// wire-compatible with older workers/gateways that do not carry these keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfHostedRunEvidenceCorrelation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_action_fingerprint: Option<String>,
+}
+
+impl SelfHostedRunEvidenceCorrelation {
+    /// `true` when the worker carries no correlation identity for the run — a
+    /// keyless dispatch. Used by evidence emitters to decide whether to stamp
+    /// anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.request_id.is_none()
+            && self.trace_id.is_none()
+            && self.agent_run_id.is_none()
+            && self.parent_action_fingerprint.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunAckRequest {
     pub protocol_version: u32,
@@ -2343,6 +2398,71 @@ mod tests {
         assert_eq!(wire["parent_action_fingerprint"], parent.as_str());
         let restored: SelfHostedRunLease = serde_json::from_value(wire).unwrap();
         assert_eq!(restored, with_parent);
+    }
+
+    /// #329: a correlated lease projects its full identity onto the evidence
+    /// correlation the worker stamps; a keyless lease projects all-None.
+    #[test]
+    fn lease_evidence_correlation_projects_lease_keys_or_none() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+
+        // Keyless dispatch -> the worker carries nothing (all None), never a
+        // fabricated id.
+        let mut keyless_dispatch = dispatch();
+        keyless_dispatch.dispatch_id = "dispatch-keyless".to_string();
+        keyless_dispatch.run_id = "run-keyless".to_string();
+        keyless_dispatch.request_id = None;
+        keyless_dispatch.trace_id = None;
+        keyless_dispatch.agent_run_id = None;
+        keyless_dispatch.parent_action_fingerprint = None;
+        queue.enqueue_run(keyless_dispatch).unwrap();
+        let keyless_lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+        let keyless = keyless_lease.evidence_correlation();
+        assert!(keyless.is_empty());
+        assert_eq!(keyless, SelfHostedRunEvidenceCorrelation::default());
+
+        // Correlated dispatch -> the triple + parent fingerprint ride the lease
+        // and project verbatim onto the worker evidence correlation. `dispatch()`
+        // is fully correlated: request/trace/agent-run + parent fingerprint.
+        let correlated = dispatch();
+        let expected_parent = correlated.parent_action_fingerprint.clone();
+        queue.enqueue_run(correlated).unwrap();
+        let correlated_lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_020,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive the correlated run lease");
+        let correlation = correlated_lease.evidence_correlation();
+        assert!(!correlation.is_empty());
+        assert_eq!(correlation.request_id.as_deref(), Some("fg-dispatch-1"));
+        assert_eq!(correlation.trace_id.as_deref(), Some("trace-dispatch-1"));
+        assert_eq!(correlation.agent_run_id.as_deref(), Some("run-1"));
+        assert_eq!(correlation.parent_action_fingerprint, expected_parent);
     }
 
     #[test]
