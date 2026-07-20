@@ -37,6 +37,12 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
   /** Resources that support create but no update/delete API. */
   noEditDelete?: boolean;
   /**
+   * Resources that support create + delete but no update API (e.g. RBAC
+   * roles/permissions, whose contract exposes POST + DELETE but no PUT/PATCH).
+   * Independent of `noDelete`, which disables delete while keeping edit.
+   */
+  noUpdate?: boolean;
+  /**
    * Resources that support edit but not delete (e.g. tenant accounts,
    * where deleting a tenant is a large destructive operation this
    * console deliberately doesn't expose at all -- the backend has no

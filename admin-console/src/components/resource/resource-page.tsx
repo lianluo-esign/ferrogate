@@ -95,8 +95,8 @@ export function ResourcePage<T extends Record<string, unknown>>({
   });
 
   const rows = data?.data ?? [];
-  const canEdit = !config.readOnly && !config.noEditDelete;
-  const canDelete = canEdit && !config.noDelete;
+  const canEdit = !config.readOnly && !config.noEditDelete && !config.noUpdate;
+  const canDelete = !config.readOnly && !config.noEditDelete && !config.noDelete;
 
   return (
     <div className="flex flex-col gap-4">

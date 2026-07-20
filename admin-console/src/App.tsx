@@ -34,6 +34,9 @@ import OpsDrainPage from "@/pages/ops-drain";
 import OpsGatewayConfigsPage from "@/pages/ops-gateway-configs";
 import OpsProviderHealthPage from "@/pages/ops-provider-health";
 import OpsObservabilityPage from "@/pages/ops-observability";
+// IAM completion (#321): bespoke pages for virtual-key lifecycle + tenant roles.
+import VirtualKeysPage from "@/pages/virtual-keys";
+import TenantRolesPage from "@/pages/tenant-roles";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -118,6 +121,9 @@ function App() {
                   path="/app/ops/observability"
                   element={<OpsObservabilityPage />}
                 />
+                {/* IAM completion (#321) bespoke routes. */}
+                <Route path="/app/api-keys" element={<VirtualKeysPage />} />
+                <Route path="/app/tenant-roles" element={<TenantRolesPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

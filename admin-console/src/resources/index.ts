@@ -17,8 +17,13 @@ import { selfHostedWorkersConfig } from "@/resources/self-hosted-workers";
 import { skillPackagesConfig } from "@/resources/skill-packages";
 import { tenantAccountsConfig } from "@/resources/tenant-accounts";
 import { usageReportsConfig } from "@/resources/usage-reports";
-import { virtualKeysConfig } from "@/resources/virtual-keys";
 import { workspacesConfig } from "@/resources/workspaces";
+// IAM completion (#321): RBAC + native api-keys generic resources. Virtual keys
+// moved to a bespoke page (src/pages/virtual-keys.tsx) for lifecycle actions.
+import { apiKeysConfig } from "@/resources/api-keys";
+import { permissionsConfig } from "@/resources/permissions";
+import { policiesConfig } from "@/resources/policies";
+import { rolesConfig } from "@/resources/roles";
 
 export interface ResourceRoute {
   path: string;
@@ -30,7 +35,6 @@ export const RESOURCE_ROUTES: ResourceRoute[] = [
   { path: "/app/tenants", config: tenantAccountsConfig },
   { path: "/app/projects", config: projectsConfig },
   { path: "/app/workspaces", config: workspacesConfig },
-  { path: "/app/api-keys", config: virtualKeysConfig },
   { path: "/app/quota-policies", config: quotaPoliciesConfig },
   { path: "/app/plans", config: plansConfig },
   { path: "/app/providers", config: providersConfig },
@@ -47,4 +51,9 @@ export const RESOURCE_ROUTES: ResourceRoute[] = [
   { path: "/app/audit-events", config: auditEventsConfig },
   { path: "/app/usage-reports", config: usageReportsConfig },
   { path: "/app/billing-events", config: billingEventsConfig },
+  // IAM completion (#321): appended so sibling agents' additions stay conflict-free.
+  { path: "/app/api-keys-native", config: apiKeysConfig },
+  { path: "/app/roles", config: rolesConfig },
+  { path: "/app/permissions", config: permissionsConfig },
+  { path: "/app/policies", config: policiesConfig },
 ];

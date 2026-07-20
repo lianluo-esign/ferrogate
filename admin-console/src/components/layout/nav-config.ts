@@ -48,6 +48,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Quota policies", url: "/app/quota-policies" },
       { title: "Plans", url: "/app/plans" },
       { title: "Resolved tenant defaults", url: "/app/tenant-resolved-defaults" },
+      // IAM completion (#321): appended contiguously to keep sibling nav edits conflict-free.
+      { title: "API keys", url: "/app/api-keys-native" },
+      { title: "Roles", url: "/app/roles" },
+      { title: "Permissions", url: "/app/permissions" },
+      { title: "Policies", url: "/app/policies" },
+      { title: "Tenant role bindings", url: "/app/tenant-roles" },
     ],
   },
   {
