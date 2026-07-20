@@ -350,7 +350,11 @@ pub(crate) fn is_anthropic_message(value: &Value) -> bool {
         && value.get("content").is_some_and(Value::is_array)
 }
 
-pub(crate) fn finish_reason_to_stop_reason(
+/// Map an OpenAI chat-completion `finish_reason` to the Anthropic
+/// `stop_reason` vocabulary. Public so the gateway's incremental
+/// `/v1/messages` stream translator (issue #310) emits the same terminal
+/// `stop_reason` the buffered [`chat_completion_to_message`] path would.
+pub fn finish_reason_to_stop_reason(
     finish_reason: Option<&str>,
     saw_tool_use: bool,
 ) -> &'static str {

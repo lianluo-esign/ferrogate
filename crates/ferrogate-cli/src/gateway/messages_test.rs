@@ -227,6 +227,45 @@ fn estimate_messages_usage_uses_the_local_tokenizer_for_claude() {
     assert_eq!(bpe.prompt_tokens, expected);
 }
 
+// Issue #310 settlement-parity regression: the incremental streaming path
+// extracts usage from the RAW provider SSE (native extractor over the last
+// usage-bearing frame), while the buffered path extracts it from the
+// reconstructed chat completion. For the same stream both must settle the
+// same token counts -- otherwise switching a request between modes changes
+// what gets billed (the #213 under-billing failure mode).
+#[test]
+fn streamed_usage_extraction_matches_buffered_settlement_for_the_same_stream() {
+    let state = AppState::new(messages_plan_config());
+    let sse: &[u8] = concat!(
+        "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"parity\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":6,\"total_tokens\":17}}\n\n",
+        "data: [DONE]\n\n",
+    )
+    .as_bytes();
+
+    // Buffered mode: reconstruct the completion, then the native extractor.
+    let completion = chat_sse_to_completion(sse);
+    let completion_bytes = serde_json::to_vec(&completion).unwrap();
+    let buffered = state
+        .extract_provider_usage("openai", &completion_bytes)
+        .unwrap()
+        .expect("buffered completion should carry usage");
+
+    // Streamed mode: the native extractor over the raw SSE usage frames.
+    let streamed = extract_last_provider_stream_usage(sse, |payload| {
+        state
+            .extract_provider_usage("openai", payload)
+            .ok()
+            .flatten()
+    })
+    .expect("streamed capture should carry usage");
+
+    assert_eq!(streamed.prompt_tokens, buffered.prompt_tokens);
+    assert_eq!(streamed.completion_tokens, buffered.completion_tokens);
+    assert_eq!(streamed.total_tokens, buffered.total_tokens);
+    assert_eq!(streamed.total_tokens, Some(17));
+}
+
 #[test]
 fn messages_attempt_retries_before_falling_back_for_retryable_status() {
     assert!(matches!(

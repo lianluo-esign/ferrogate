@@ -4460,6 +4460,212 @@ allowed_models = ["fast-chat"]
     assert!(provider_request.contains(r#""stream":true"#));
 }
 
+// Issue #310: a streaming /v1/messages request must deliver Anthropic SSE
+// frames incrementally -- the first content_block_delta arrives while the
+// provider is still generating (multiple chunk boundaries), not as one
+// buffered body after provider completion.
+#[test]
+fn anthropic_messages_streaming_forwards_first_frame_before_provider_finishes() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_slow_sse_provider_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "claude-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["messages.create"]
+allowed_models = ["claude-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(&gateway_addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let body = r#"{"model":"claude-chat","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+    write!(
+        stream,
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer client-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 256];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        assert!(read > 0, "gateway closed before first Anthropic SSE frame");
+        response.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&response);
+        if text.contains("event: content_block_delta") && text.contains("\"text\":\"first\"") {
+            assert!(
+                started.elapsed() < Duration::from_millis(900),
+                "first Anthropic frame was buffered until provider completion"
+            );
+            assert!(text.contains("event: message_start"));
+            assert!(!text.contains("event: message_stop"));
+            break;
+        }
+    }
+
+    let mut rest = String::new();
+    stream.read_to_string(&mut rest).unwrap();
+    assert!(rest.contains("event: message_delta"));
+    assert!(rest.contains("event: message_stop"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(provider_request.contains(r#""stream":true"#));
+    assert!(!provider_request.contains("client-secret"));
+}
+
+// Issue #310: usage/billing settlement on the incremental streaming path must
+// equal the buffered (non-streaming) path for the same content. Both requests
+// hit a mock provider emitting the same known usage (11 prompt / 6 completion
+// / 17 total) and both recorded billing events must carry exactly those
+// numbers -- no fallback to the ~512-token estimate on the streamed leg.
+#[test]
+fn anthropic_messages_streaming_settles_the_same_usage_as_buffered() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_messages_usage_parity_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "claude-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["messages.create"]
+allowed_models = ["claude-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let streamed = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/messages",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"claude-chat","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(streamed.contains("200 OK"), "{streamed}");
+    assert!(streamed.contains("event: message_start"), "{streamed}");
+    assert!(streamed.contains("\"text\":\"parity\""), "{streamed}");
+    assert!(streamed.contains("\"output_tokens\":6"), "{streamed}");
+    assert!(streamed.contains("event: message_stop"), "{streamed}");
+
+    let buffered = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/messages",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"claude-chat","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(buffered.contains("200 OK"), "{buffered}");
+    assert!(buffered.contains("\"text\":\"parity\""), "{buffered}");
+    assert!(buffered.contains("\"input_tokens\":11"), "{buffered}");
+    assert!(buffered.contains("\"output_tokens\":6"), "{buffered}");
+
+    // Both modes must have settled the provider-reported usage identically.
+    let started = Instant::now();
+    let billing = loop {
+        let billing = http_request(
+            &gateway_addr,
+            "GET",
+            "/admin/v1/billing-events",
+            &["Authorization: Bearer admin-secret"],
+            "",
+        );
+        if billing.matches("\"total_tokens\":17").count() >= 2
+            || started.elapsed() > Duration::from_secs(10)
+        {
+            break billing;
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(
+        billing.matches("\"total_tokens\":17").count(),
+        2,
+        "expected identical settlement for streamed and buffered modes: {billing}"
+    );
+    assert_eq!(
+        billing.matches("\"prompt_tokens\":11").count(),
+        2,
+        "{billing}"
+    );
+    assert_eq!(
+        billing.matches("\"completion_tokens\":6").count(),
+        2,
+        "{billing}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+    assert!(provider_requests[0].contains(r#""stream":true"#));
+    assert!(!provider_requests[1].contains(r#""stream":true"#));
+}
+
 #[test]
 fn gemini_chat_non_streaming_dispatch_converts_request_shape() {
     let gateway_addr = free_addr();
@@ -4939,6 +5145,47 @@ fn spawn_sse_provider_upstream_with_body(
         )
         .unwrap();
         request
+    });
+    (addr, handle)
+}
+
+/// Serves two sequential connections with the SAME known usage (11/6/17):
+/// first a streaming chat SSE body, then a non-streaming JSON completion --
+/// the settlement-parity fixture for issue #310.
+fn spawn_messages_usage_parity_upstream() -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-parity\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"parity\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":6,\"total_tokens\":17}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse_body.len(),
+                sse_body
+            )
+            .unwrap();
+        }
+        let json_body = "{\"id\":\"chatcmpl-parity\",\"object\":\"chat.completion\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"parity\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":6,\"total_tokens\":17}}";
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_http_request(&mut stream));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                json_body.len(),
+                json_body
+            )
+            .unwrap();
+        }
+        requests
     });
     (addr, handle)
 }

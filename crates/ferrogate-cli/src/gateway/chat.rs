@@ -2254,14 +2254,14 @@ fn reject_ai_request(rejection: AiRequestRejection) -> Box<AiRequestRejection> {
 }
 
 #[derive(Debug)]
-enum StreamingBodyReadError {
+pub(super) enum StreamingBodyReadError {
     Io(IoError),
     TooLarge { max_bytes: usize },
     Timeout { timeout: std::time::Duration },
 }
 
 impl StreamingBodyReadError {
-    fn status_and_code(&self) -> (StatusCode, &'static str) {
+    pub(super) fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             Self::Io(_) => (StatusCode::BAD_GATEWAY, "provider_dispatch_error"),
             Self::TooLarge { .. } => (
@@ -2295,7 +2295,7 @@ impl fmt::Display for StreamingBodyReadError {
 
 impl std::error::Error for StreamingBodyReadError {}
 
-fn extract_last_provider_stream_usage(
+pub(super) fn extract_last_provider_stream_usage(
     body: &[u8],
     mut extract: impl FnMut(&[u8]) -> Option<ProviderUsage>,
 ) -> Option<ProviderUsage> {
@@ -2353,7 +2353,7 @@ const STREAMING_USAGE_CAPTURE_TAIL_MAX_BYTES: usize = STREAMING_USAGE_CAPTURE_MA
     - STREAMING_USAGE_CAPTURE_SEPARATOR.len();
 
 #[derive(Debug, Default)]
-struct StreamingUsageCapture {
+pub(super) struct StreamingUsageCapture {
     prefix: Vec<u8>,
     body: VecDeque<u8>,
     total_bytes: usize,
@@ -2386,7 +2386,7 @@ impl StreamingUsageCapture {
         self.body.extend(bytes.iter().copied());
     }
 
-    fn body(&self) -> Vec<u8> {
+    pub(super) fn body(&self) -> Vec<u8> {
         if self.total_bytes <= STREAMING_USAGE_CAPTURE_MAX_BYTES {
             return self.body.iter().copied().collect();
         }
@@ -2398,13 +2398,13 @@ impl StreamingUsageCapture {
     }
 }
 
-struct StreamingUsageCapturingReader<R> {
+pub(super) struct StreamingUsageCapturingReader<R> {
     reader: R,
     capture: Arc<Mutex<StreamingUsageCapture>>,
 }
 
 impl<R> StreamingUsageCapturingReader<R> {
-    fn new(reader: R, initial_body: &[u8]) -> (Self, Arc<Mutex<StreamingUsageCapture>>) {
+    pub(super) fn new(reader: R, initial_body: &[u8]) -> (Self, Arc<Mutex<StreamingUsageCapture>>) {
         let mut state = StreamingUsageCapture::default();
         state.append(initial_body);
         let capture = Arc::new(Mutex::new(state));
@@ -2431,9 +2431,9 @@ impl<R: Read> Read for StreamingUsageCapturingReader<R> {
 }
 
 #[derive(Debug, Clone, Default)]
-struct StreamingCapture {
-    body: Vec<u8>,
-    truncated: bool,
+pub(super) struct StreamingCapture {
+    pub(super) body: Vec<u8>,
+    pub(super) truncated: bool,
 }
 
 impl StreamingCapture {
@@ -2447,14 +2447,14 @@ impl StreamingCapture {
     }
 }
 
-struct CapturingReader<R> {
+pub(super) struct CapturingReader<R> {
     reader: R,
     capture: Arc<Mutex<StreamingCapture>>,
     max_bytes: usize,
 }
 
 impl<R> CapturingReader<R> {
-    fn new(
+    pub(super) fn new(
         reader: R,
         initial_body: &[u8],
         max_bytes: usize,
@@ -2485,7 +2485,7 @@ impl<R: Read> Read for CapturingReader<R> {
     }
 }
 
-async fn read_provider_streaming_body<R: Read + Send + 'static>(
+pub(super) async fn read_provider_streaming_body<R: Read + Send + 'static>(
     initial_body: Vec<u8>,
     mut reader: R,
     max_bytes: usize,

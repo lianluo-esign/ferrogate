@@ -15,29 +15,40 @@
 // or Anthropic event frames (streaming). No governance bypass; the pipeline
 // mirrors `chat.rs`/`embeddings.rs` so the three stay auditable side by side.
 //
-// Scope note: streaming responses are buffered, governed, then re-emitted as the
-// Anthropic frame sequence, so guardrail block/redact and metering fire
-// identically to the non-streaming path. Translation targets OpenAI-compatible
-// upstreams (the acceptance path) and passes native Anthropic responses through;
-// incremental (token-by-token) streaming and native-Anthropic-upstream SSE are
-// tracked as follow-ups.
+// Scope note (issue #310): streaming requests now flow through the SAME
+// incremental streaming machinery chat completions uses. The provider's chat
+// SSE stream is translated frame-by-frame into Anthropic event frames by
+// `MessagesStreamNormalizer` and written to the client as it arrives; usage is
+// captured from the RAW provider SSE and settled at stream end with the origin
+// provider's native extractor (the #213 lesson: extract from the shape that
+// actually flows through the capture point). Streaming guardrail semantics
+// mirror `chat.rs`: a matching BufferAndEnforce response policy buffers the
+// whole stream and enforces block/redact before first-byte release (the
+// pre-#310 behaviour), ShadowAfterComplete evaluates the captured stream after
+// pass-through delivery, and the RAII token-budget reservation is held until
+// the stream completes and its usage is recorded. Non-streaming requests keep
+// the buffered path unchanged. Translation targets OpenAI-compatible upstreams
+// (the acceptance path); native-Anthropic-upstream SSE remains a follow-up.
 
 use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
 use std::{
-    io::Read,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    io::{Cursor, Read},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
 
 use crate::{
     auth::{authenticate, authorize_external_rbac, AuthContext},
     config::{GuardrailEffect, GuardrailStage},
-    responses::{write_json_error, write_raw_response, write_streaming_bytes_response},
+    responses::{
+        write_json_error, write_raw_response, write_streaming_bytes_response,
+        write_streaming_response,
+    },
     state::{
         AdminAuditEventDraft, AppState, BillingEventDraft, GuardrailEvaluationContext,
-        ToolInjectionContext,
+        StreamingGuardrailPlan, ToolInjectionContext,
     },
 };
 use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
@@ -45,6 +56,7 @@ use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,
     normalize_response as normalize_guardrail_response, GuardrailEnvelope, GuardrailProtocol,
+    PolicySelectionContext,
 };
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{
@@ -55,8 +67,16 @@ use ferrogate_storage::StoredRequestLog;
 
 use super::{
     body::read_request_body,
-    dispatch::{dispatch_provider_request, dispatch_provider_streaming_request},
-    messages_stream::{chat_sse_to_completion, error_sse, message_to_anthropic_sse},
+    chat::{
+        extract_last_provider_stream_usage, read_provider_streaming_body, CapturingReader,
+        StreamingBodyReadError, StreamingCapture, StreamingUsageCapturingReader,
+    },
+    dispatch::{
+        dispatch_provider_request, dispatch_provider_streaming_request, ProviderStreamingResponse,
+    },
+    messages_stream::{
+        chat_sse_to_completion, error_sse, message_to_anthropic_sse, MessagesStreamNormalizer,
+    },
     FerroGateway, ProxyContext,
 };
 
@@ -593,15 +613,27 @@ impl FerroGateway {
                 let attempt_started_at = Instant::now();
                 let attempt_request = provider_request_for_attempt(&prepared, &provider_attempt);
 
-                let outcome = fetch_provider_response(
-                    attempt_request,
-                    stream,
-                    dispatch_timeout,
-                    provider_response_body_max_bytes,
-                )
-                .await;
+                let outcome = if stream {
+                    dispatch_provider_streaming_request(attempt_request, dispatch_timeout)
+                        .await
+                        .map(MessagesProviderResponse::Streaming)
+                } else {
+                    dispatch_provider_request(
+                        attempt_request,
+                        dispatch_timeout,
+                        provider_response_body_max_bytes,
+                    )
+                    .await
+                    .map(|response| {
+                        MessagesProviderResponse::Buffered(BufferedProviderResponse {
+                            status: response.status,
+                            content_type: response.content_type,
+                            body: response.body,
+                        })
+                    })
+                };
 
-                let response = match outcome {
+                let provider_response = match outcome {
                     Ok(response) => response,
                     Err(error) => {
                         state.record_provider_failure(&provider.name);
@@ -655,6 +687,255 @@ impl FerroGateway {
                                 format!("provider dispatch failed: {error}"),
                             )
                             .await;
+                    }
+                };
+
+                let response = match provider_response {
+                    MessagesProviderResponse::Buffered(response) => response,
+                    MessagesProviderResponse::Streaming(streaming) => {
+                        let status = streaming.status;
+                        let is_error_status = status.is_client_error() || status.is_server_error();
+                        // Mirror chat.rs streaming guardrail semantics: only a
+                        // matching Enforce+BufferAndEnforce response policy
+                        // forces whole-stream buffering before first-byte
+                        // release; otherwise the stream passes through
+                        // incrementally (with ShadowAfterComplete evaluating
+                        // the captured stream afterwards).
+                        let streaming_guardrail_plan =
+                            state.streaming_guardrail_plan(PolicySelectionContext {
+                                organization_id: policy_request.tenant.organization_id.as_deref(),
+                                project_id: policy_request.tenant.project_id.as_deref(),
+                                workspace_id: policy_request.tenant.workspace_id.as_deref(),
+                                api_key_id: policy_request.tenant.api_key_id.as_deref(),
+                                service_account_id: auth.service_account_id(),
+                                gateway_config_id: None,
+                                model: Some(&request.model),
+                                provider: Some(&provider.name),
+                                managed_action: None,
+                            });
+                        if is_error_status
+                            || streaming_guardrail_plan == StreamingGuardrailPlan::BufferAndEnforce
+                        {
+                            // Buffer to completion: provider errors so the
+                            // shared error handling below governs (and bills)
+                            // them, BufferAndEnforce so the response guardrail
+                            // can block/redact before any byte reaches the
+                            // client -- the pre-#310 governed path.
+                            let content_type = streaming.content_type;
+                            match read_provider_streaming_body(
+                                streaming.initial_body,
+                                streaming.body,
+                                provider_response_body_max_bytes,
+                                dispatch_timeout,
+                            )
+                            .await
+                            {
+                                Ok(body) => BufferedProviderResponse {
+                                    status,
+                                    content_type,
+                                    body,
+                                },
+                                Err(error) => {
+                                    return self
+                                        .write_messages_stream_buffer_failure(
+                                            session,
+                                            ctx,
+                                            &state,
+                                            &auth,
+                                            &policy_request.tenant,
+                                            &request.model,
+                                            &provider.name,
+                                            error,
+                                        )
+                                        .await;
+                                }
+                            }
+                        } else {
+                            state.record_provider_success(&provider.name);
+                            // Do NOT settle the token reservation here: it is
+                            // RAII (Drop releases on every exit path), and
+                            // holding it in `token_reservation` keeps the
+                            // budget reserved for the whole stream -- released
+                            // only when this handler returns, after the
+                            // stream's usage has been recorded below (the
+                            // round-7 chat.rs lesson). The wallet reservation
+                            // is held the same way.
+                            let record_bodies =
+                                auth.can_record_bodies(state.config.telemetry.log_bodies);
+                            let shadow = streaming_guardrail_plan
+                                == StreamingGuardrailPlan::ShadowAfterComplete;
+                            let raw = Cursor::new(streaming.initial_body).chain(streaming.body);
+                            let (usage_reader, usage_capture) =
+                                StreamingUsageCapturingReader::new(raw, &[]);
+                            let (reader, shadow_capture): (Box<dyn Read + Send>, _) = if shadow {
+                                let (capturing, capture) = CapturingReader::new(
+                                    usage_reader,
+                                    &[],
+                                    provider_response_body_max_bytes,
+                                );
+                                (Box::new(capturing), Some(capture))
+                            } else {
+                                (Box::new(usage_reader), None)
+                            };
+                            let normalizer =
+                                MessagesStreamNormalizer::new(reader, request.model.clone());
+                            let stream_result = write_streaming_response(
+                                session,
+                                status,
+                                "text/event-stream",
+                                Vec::new(),
+                                normalizer,
+                                &ctx.request_id,
+                            )
+                            .await;
+
+                            // Usage settlement (#213/round-12 lesson): the
+                            // capture point sits on the RAW provider SSE,
+                            // BEFORE the Anthropic-frame translation reshapes
+                            // it, so the ORIGIN provider's native extractor is
+                            // the correct one -- the same shape whose usage the
+                            // buffered path's reconstructed completion carries.
+                            let usage_body = usage_capture
+                                .lock()
+                                .map(|capture| capture.body())
+                                .unwrap_or_default();
+                            let reported_usage =
+                                extract_last_provider_stream_usage(&usage_body, |payload| {
+                                    state
+                                        .extract_provider_usage(&provider.kind, payload)
+                                        .ok()
+                                        .flatten()
+                                });
+                            let billed = if let Some(usage) = reported_usage {
+                                state
+                                    .record_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: None,
+                                        },
+                                        &provider_attempt,
+                                        &usage,
+                                    )
+                                    .await
+                            } else {
+                                state
+                                    .record_estimated_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: None,
+                                        },
+                                        &provider_attempt,
+                                        &estimated_usage,
+                                    )
+                                    .await
+                            };
+                            if let Err(error) = billed {
+                                warn!(
+                                    request_id = %ctx.request_id,
+                                    logical_model = %request.model,
+                                    provider = %provider.name,
+                                    provider_model = %model_route.provider_model,
+                                    error_code = %error.code,
+                                    "messages streaming billing event write failed"
+                                );
+                            }
+
+                            state.record_request_log(StoredRequestLog {
+                                request_id: ctx.request_id.clone(),
+                                trace_id: ctx.trace_id.clone(),
+                                agent_run_id: None,
+                                workflow_id: None,
+                                workflow_version: None,
+                                workflow_node_id: None,
+                                cluster_id: None,
+                                node_id: None,
+                                tenant: policy_request.tenant.clone(),
+                                route: policy_request.route.clone(),
+                                provider: Some(provider.name.clone()),
+                                logical_model: Some(request.model.clone()),
+                                provider_model: Some(model_route.provider_model.clone()),
+                                gateway_config_id: None,
+                                gateway_config_revision: None,
+                                status_code: status.as_u16(),
+                                error_code: None,
+                                prompt_recorded: record_bodies,
+                                response_recorded: false,
+                                prompt_body: record_bodies.then(|| chat_body.to_string()),
+                                response_body: None,
+                                cache_status: None,
+                                started_at_unix: Some(request_started_at_unix),
+                                completed_at_unix: Some(now_unix_seconds()),
+                                parent_action_fingerprint: None,
+                            });
+
+                            if let Some(capture) = shadow_capture {
+                                let captured = capture
+                                    .lock()
+                                    .map(|capture| capture.clone())
+                                    .unwrap_or(StreamingCapture {
+                                        body: Vec::new(),
+                                        truncated: true,
+                                    });
+                                if stream_result.is_ok() {
+                                    // Shadow evaluation runs on the RAW chat
+                                    // SSE capture with the ChatCompletions
+                                    // protocol -- the same envelope chat.rs
+                                    // streaming uses.
+                                    let guardrail_envelope = normalize_guardrail_response(
+                                        GuardrailProtocol::ChatCompletions,
+                                        &captured.body,
+                                        true,
+                                    );
+                                    let evaluation_context = GuardrailEvaluationContext {
+                                        request_id: &ctx.request_id,
+                                        trace_id: ctx.trace_id.as_deref(),
+                                        agent_run_id: None,
+                                        workflow_id: None,
+                                        workflow_version: None,
+                                        workflow_node_id: None,
+                                        actor_api_key_id: auth.api_key_id.as_deref(),
+                                        tenant: &policy_request.tenant,
+                                        service_account_id: auth.service_account_id(),
+                                        gateway_config_id: None,
+                                        model: Some(&request.model),
+                                        provider: Some(&provider.name),
+                                        streaming: true,
+                                        envelope: &guardrail_envelope,
+                                        managed_action: None,
+                                        action_fingerprint: None,
+                                    };
+                                    if captured.truncated {
+                                        state
+                                            .record_guardrail_stream_capture_overflow(
+                                                evaluation_context,
+                                            )
+                                            .await;
+                                    } else {
+                                        let _ = state
+                                            .match_guardrail(
+                                                GuardrailStage::Response,
+                                                evaluation_context,
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+                            return stream_result;
+                        }
                     }
                 };
 
@@ -1036,6 +1317,69 @@ impl FerroGateway {
         write_json_error(session, status, code, message, &ctx.request_id).await
     }
 
+    /// A guarded provider stream (an error-status body being buffered for the
+    /// shared error handling, or a BufferAndEnforce plan buffering the whole
+    /// stream before first-byte release) failed to buffer. Mirror chat.rs:
+    /// give matching BufferAndEnforce guardrail policies their on_error say
+    /// via `guardrail_streaming_buffer_failure` before emitting the failure in
+    /// the Anthropic streaming error framing.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_messages_stream_buffer_failure(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        state: &AppState,
+        auth: &AuthContext,
+        tenant: &TenantContext,
+        logical_model: &str,
+        provider_name: &str,
+        error: StreamingBodyReadError,
+    ) -> PingoraResult<()> {
+        let (status, code) = error.status_and_code();
+        let empty_envelope =
+            normalize_guardrail_response(GuardrailProtocol::ChatCompletions, &[], true);
+        let policy_failure = state
+            .guardrail_streaming_buffer_failure(
+                GuardrailEvaluationContext {
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.as_deref(),
+                    agent_run_id: None,
+                    workflow_id: None,
+                    workflow_version: None,
+                    workflow_node_id: None,
+                    actor_api_key_id: auth.api_key_id.as_deref(),
+                    tenant,
+                    service_account_id: auth.service_account_id(),
+                    gateway_config_id: None,
+                    model: Some(logical_model),
+                    provider: Some(provider_name),
+                    streaming: true,
+                    envelope: &empty_envelope,
+                    managed_action: None,
+                    action_fingerprint: None,
+                },
+                code,
+            )
+            .await;
+        let (status, code, message) = match policy_failure {
+            Some(guardrail) => {
+                state.record_guardrail_match(&guardrail);
+                (StatusCode::FORBIDDEN, guardrail.code, guardrail.message)
+            }
+            None => (status, code.to_string(), error.to_string()),
+        };
+        self.record_messages_error_log(
+            ctx,
+            tenant.clone(),
+            Some(logical_model),
+            Some(provider_name),
+            status,
+            &code,
+        );
+        self.write_messages_error(session, ctx, true, status, &code, message)
+            .await
+    }
+
     fn record_messages_error_log(
         &self,
         ctx: &ProxyContext,
@@ -1081,68 +1425,14 @@ struct BufferedProviderResponse {
     body: Vec<u8>,
 }
 
-/// Dispatch a prepared provider request and return its complete body. A
-/// streaming request is buffered to completion (bounded by the same size limit
-/// and dispatch timeout as a non-streaming call) so the messages ingress can
-/// govern the full response before re-emitting it as Anthropic frames.
-async fn fetch_provider_response(
-    request: ProviderHttpRequest,
-    stream: bool,
-    dispatch_timeout: Duration,
-    max_body_bytes: usize,
-) -> anyhow::Result<BufferedProviderResponse> {
-    if !stream {
-        let response = dispatch_provider_request(request, dispatch_timeout, max_body_bytes).await?;
-        return Ok(BufferedProviderResponse {
-            status: response.status,
-            content_type: response.content_type,
-            body: response.body,
-        });
-    }
-    let response = dispatch_provider_streaming_request(request, dispatch_timeout).await?;
-    let status = response.status;
-    let content_type = response.content_type;
-    let body = read_streaming_body_to_vec(
-        response.initial_body,
-        response.body,
-        max_body_bytes,
-        dispatch_timeout,
-    )
-    .await?;
-    Ok(BufferedProviderResponse {
-        status,
-        content_type,
-        body,
-    })
-}
-
-async fn read_streaming_body_to_vec<R: Read + Send + 'static>(
-    initial_body: Vec<u8>,
-    mut reader: R,
-    max_bytes: usize,
-    timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
-    if initial_body.len() > max_bytes {
-        anyhow::bail!("provider streaming response exceeds {max_bytes} bytes");
-    }
-    let read_task = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let mut body = initial_body;
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                return Ok(body);
-            }
-            if body.len().saturating_add(read) > max_bytes {
-                anyhow::bail!("provider streaming response exceeds {max_bytes} bytes");
-            }
-            body.extend_from_slice(&buffer[..read]);
-        }
-    });
-    match tokio::time::timeout(timeout, read_task).await {
-        Ok(result) => result?,
-        Err(_) => anyhow::bail!("provider streaming response timed out"),
-    }
+/// The two shapes a provider dispatch can hand back to the messages pipeline:
+/// a fully-buffered body (non-streaming requests) or a live streaming response
+/// (streaming requests) that is either passed through incrementally or -- for
+/// provider errors and BufferAndEnforce guardrail plans -- buffered into the
+/// governed [`BufferedProviderResponse`] path.
+enum MessagesProviderResponse {
+    Buffered(BufferedProviderResponse),
+    Streaming(ProviderStreamingResponse),
 }
 
 #[derive(Debug)]
