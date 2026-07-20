@@ -43,8 +43,15 @@ spec:
           env:
             - name: AUTH_BASE_URL
               value: https://auth.ferrogate.example.com
+            # Legacy fallback (the gateway's own /admin/v1/* surface);
+            # ADMIN_API_BASE_URL below takes precedence when set.
             - name: GATEWAY_ADMIN_BASE_URL
               value: https://ferrogate.example.com
+            # The dedicated admin-console API service (issue #315,
+            # deploy/kubernetes/admin-api.yaml) -- admin control-plane
+            # traffic stops riding the AI data-plane listener.
+            - name: ADMIN_API_BASE_URL
+              value: https://admin-api.ferrogate.example.com
           readinessProbe:
             httpGet:
               path: /healthz

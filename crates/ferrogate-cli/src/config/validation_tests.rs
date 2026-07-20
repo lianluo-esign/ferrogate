@@ -3709,3 +3709,117 @@ fn mcp_server() -> McpServerConfig {
         max_reconnect_backoff_secs: 30,
     }
 }
+
+/// #315: `[admin_api]` rejects a `gateway_url` that is not an internal
+/// `http://` base URL -- the proxied hop is service-to-service, mirroring
+/// the `auth_service.endpoint` contract.
+#[test]
+fn rejects_admin_api_with_non_http_gateway_url() {
+    let config = Config {
+        admin_api: AdminApiConfig {
+            gateway_url: "https://gateway.internal:8080".into(),
+            ..AdminApiConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field admin_api.gateway_url: must start with http://"),
+        "unexpected error: {error}"
+    );
+}
+
+/// #315: `[admin_api]` rejects an unparseable listen address and an empty
+/// gateway host, so a broken section fails `ferrogate validate` instead of
+/// failing at first console request.
+#[test]
+fn rejects_admin_api_with_invalid_listen_or_empty_host() {
+    let config = Config {
+        admin_api: AdminApiConfig {
+            listen: "not-an-address".into(),
+            ..AdminApiConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field admin_api.listen: invalid listen address"),
+        "unexpected error: {error}"
+    );
+
+    let config = Config {
+        admin_api: AdminApiConfig {
+            gateway_url: "http:///".into(),
+            ..AdminApiConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field admin_api.gateway_url: host cannot be empty"),
+        "unexpected error: {error}"
+    );
+}
+
+/// #315: `[admin_api]` timeout must be non-zero and TLS cert/key must be
+/// configured as a pair.
+#[test]
+fn rejects_admin_api_zero_timeout_and_half_configured_tls() {
+    let config = Config {
+        admin_api: AdminApiConfig {
+            upstream_timeout_millis: 0,
+            ..AdminApiConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field admin_api.upstream_timeout_millis: must be greater than zero"),
+        "unexpected error: {error}"
+    );
+
+    let config = Config {
+        admin_api: AdminApiConfig {
+            tls_cert_path: Some("/etc/ferrogate/tls.crt".into()),
+            ..AdminApiConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("admin_api.tls_cert_path and admin_api.tls_key_path"),
+        "unexpected error: {error}"
+    );
+}
+
+/// #315: the `[admin_api]` TOML section wires into `Config.admin_api`;
+/// absent knobs keep their documented defaults and an absent section
+/// validates as a complete no-op.
+#[test]
+fn admin_api_section_deserializes_from_toml_with_defaults() {
+    let config = Config::from_toml_str(
+        r#"
+[admin_api]
+listen = "0.0.0.0:9095"
+gateway_url = "http://ferrogate.internal:8080"
+cors_allowed_origin = "https://admin.example.test"
+"#,
+    )
+    .expect("admin_api section must parse and validate");
+    assert_eq!(config.admin_api.listen, "0.0.0.0:9095");
+    assert_eq!(
+        config.admin_api.gateway_url,
+        "http://ferrogate.internal:8080"
+    );
+    assert_eq!(config.admin_api.upstream_timeout_millis, 30_000);
+    assert_eq!(
+        config.admin_api.cors_allowed_origin.as_deref(),
+        Some("https://admin.example.test")
+    );
+
+    let defaults = Config::default();
+    assert_eq!(defaults.admin_api.listen, "127.0.0.1:8095");
+    assert_eq!(defaults.admin_api.gateway_url, "http://127.0.0.1:8080");
+    defaults.validate().expect("defaults must validate");
+}

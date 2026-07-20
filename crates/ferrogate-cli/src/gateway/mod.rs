@@ -16,7 +16,7 @@ mod asset_registry;
 mod asset_scan;
 mod asset_security;
 mod asset_signature;
-mod assets;
+pub(crate) mod assets;
 mod billing_outbox;
 mod body;
 mod chat;

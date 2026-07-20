@@ -1594,7 +1594,9 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
     }
 }
 
-fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorageRepositories> {
+pub(crate) fn runtime_storage_repositories(
+    config: &Config,
+) -> anyhow::Result<RuntimeStorageRepositories> {
     let storage = &config.storage;
     let control_plane = control_plane_documents_from_config(config);
     let storage_options = |control_plane: ControlPlaneDocuments| RuntimeStorageOptions {

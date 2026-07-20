@@ -1,0 +1,101 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-20
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Standalone admin-console API service (issue #315): `ferrogate admin-api
+# serve` reads the SAME config file as the gateway (shared [[api_keys]] /
+# [storage] / [limits]) plus its own [admin_api] section, authenticates
+# every console request with the gateway's admin-scope semantics, and
+# reverse-proxies the path-compatible /admin/v1/* (+ /v1/assets/*)
+# surface to the ferrogate Service -- so admin control-plane traffic
+# never rides the AI data-plane listener. Point the admin console's
+# ADMIN_API_BASE_URL at this Service (through an Ingress with TLS, or set
+# admin_api.tls_cert_path/tls_key_path in the config). The [admin_api]
+# section for this deployment should set, for example:
+#
+#   [admin_api]
+#   listen = "0.0.0.0:8095"
+#   gateway_url = "http://ferrogate.ferrogate.svc.cluster.local:80"
+#   cors_allowed_origin = "https://admin.ferrogate.example.com"
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrogate-admin-api
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate-admin-api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrogate-admin-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrogate-admin-api
+    spec:
+      containers:
+        - name: admin-api
+          image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+          imagePullPolicy: IfNotPresent
+          args: ["admin-api", "serve"]
+          ports:
+            - name: http
+              containerPort: 8095
+          env:
+            - name: FERROGATE_CONFIG
+              value: /etc/ferrogate/ferrogate.toml
+            # Secrets referenced by [[api_keys]] key_env / [storage]
+            # supabase_dsn_env entries in the shared config.
+            - name: FERROGATE_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-secret
+                  key: FERROGATE_ADMIN_SECRET
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ferrogate/ferrogate.toml
+              subPath: ferrogate.toml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: config
+          configMap:
+            name: ferrogate-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferrogate-admin-api
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate-admin-api
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: ferrogate-admin-api

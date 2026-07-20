@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 mod acme;
+mod admin_api;
 mod approval;
 mod assets_cli;
 mod auth;
@@ -38,7 +39,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use std::sync::Arc;
 
 use crate::{
-    cli::{AuthCommands, BillingCommands, Cli, Commands},
+    cli::{AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands},
     config::Config,
     gateway::serve,
     lifecycle::{
@@ -106,6 +107,15 @@ fn main() -> AnyResult<()> {
                     admin_console,
                     cors_allowed_origin: args.cors_allowed_origin,
                 })
+            }
+        },
+        Commands::AdminApi(args) => match args.command {
+            // The standalone admin-console API service (issue #315) loads
+            // the SAME config file the gateway runs from ([admin_api]
+            // section plus the shared [[api_keys]]/[storage]/[limits]
+            // sections), so both processes agree on credentials and caps.
+            AdminApiCommands::Serve(args) => {
+                admin_api::execute_admin_api_serve(Config::load(&args.config)?)
             }
         },
         Commands::Billing(args) => match args.command {

@@ -99,6 +99,7 @@ impl Config {
         let mut model_names = self.validate_models(&provider_names)?;
         self.validate_mcp_servers()?;
         self.validate_auth_service()?;
+        self.validate_admin_api()?;
         self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
@@ -236,6 +237,63 @@ impl Config {
         }
         if !endpoint.starts_with("http://") {
             bail!("field auth_service.endpoint: must start with http://");
+        }
+        Ok(())
+    }
+
+    /// `[admin_api]` (issue #315): the standalone admin-console API
+    /// service. Always validated (not gated on a subcommand) so `ferrogate
+    /// validate` catches a broken section before either process starts;
+    /// every knob has a serde default, so absent sections stay a no-op.
+    fn validate_admin_api(&self) -> AnyResult<()> {
+        let admin_api = &self.admin_api;
+        if admin_api.listen.trim().is_empty() {
+            bail!("field admin_api.listen: cannot be empty");
+        }
+        normalize_listen_addr(&admin_api.listen).with_context(|| {
+            format!(
+                "field admin_api.listen: invalid listen address {}",
+                admin_api.listen
+            )
+        })?;
+        let gateway_url = admin_api.gateway_url.trim();
+        if gateway_url.is_empty() {
+            bail!("field admin_api.gateway_url: cannot be empty");
+        }
+        if !gateway_url.starts_with("http://") {
+            bail!(
+                "field admin_api.gateway_url: must start with http:// (an internal \
+                 service-to-service hop, like auth_service.endpoint; terminate public \
+                 TLS on admin_api.tls_cert_path/tls_key_path or an Ingress instead)"
+            );
+        }
+        if gateway_url
+            .trim_start_matches("http://")
+            .trim_matches('/')
+            .is_empty()
+        {
+            bail!("field admin_api.gateway_url: host cannot be empty");
+        }
+        if admin_api.upstream_timeout_millis == 0 {
+            bail!("field admin_api.upstream_timeout_millis: must be greater than zero");
+        }
+        if admin_api
+            .cors_allowed_origin
+            .as_deref()
+            .is_some_and(|origin| origin.trim().is_empty())
+        {
+            bail!("field admin_api.cors_allowed_origin: cannot be empty when set");
+        }
+        match (
+            admin_api.tls_cert_path.as_deref().map(str::trim),
+            admin_api.tls_key_path.as_deref().map(str::trim),
+        ) {
+            (None, None) => {}
+            (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {}
+            _ => bail!(
+                "fields admin_api.tls_cert_path and admin_api.tls_key_path: must be \
+                 set together and non-empty to enable TLS on the admin-api listener"
+            ),
         }
         Ok(())
     }

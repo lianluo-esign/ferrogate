@@ -70,23 +70,7 @@ impl AuthContext {
     }
 
     pub(crate) fn has_scope(&self, scope: &str) -> bool {
-        if self.scopes.contains(scope) {
-            return true;
-        }
-        // An explicit `*` wildcard grants every scope, including `admin.*`. It
-        // is set for operator-authored *static config* keys (and auth-disabled
-        // mode) that historically used an EMPTY scope list to mean "all
-        // access" -- that intent is preserved, just made explicit.
-        if self.scopes.contains(WILDCARD_SCOPE) {
-            return true;
-        }
-        // A residual empty scope set means a durable/API-created (virtual) key
-        // minted without explicit scopes: it grants ordinary data-plane scopes
-        // (the convenience default relied on by such keys) but NEVER a
-        // privileged `admin.*` scope -- otherwise a tenant admin creating a
-        // virtual key with no scopes would silently mint a full tenant-admin
-        // credential (round-7 finding).
-        self.scopes.is_empty() && !Self::is_privileged_scope(scope)
+        scope_set_allows(&self.scopes, scope)
     }
 
     pub(crate) fn can_use_model(&self, model: &str) -> bool {
@@ -190,6 +174,28 @@ impl AuthContext {
             _ => None,
         }
     }
+}
+
+/// The single source of truth for scope-set semantics, shared by
+/// `AuthContext::has_scope` and the standalone admin-api service's auth
+/// gate (#315) so the two can never drift:
+/// - an explicit grant always allows;
+/// - an explicit `*` wildcard grants every scope, including `admin.*` (set
+///   for operator-authored *static config* keys and auth-disabled mode
+///   that historically used an EMPTY scope list to mean "all access");
+/// - a residual empty scope set means a durable/API-created (virtual) key
+///   minted without explicit scopes: it grants ordinary data-plane scopes
+///   but NEVER a privileged `admin.*` scope -- otherwise a tenant admin
+///   creating a virtual key with no scopes would silently mint a full
+///   tenant-admin credential (round-7 finding).
+pub(crate) fn scope_set_allows(scopes: &HashSet<String>, scope: &str) -> bool {
+    if scopes.contains(scope) {
+        return true;
+    }
+    if scopes.contains(WILDCARD_SCOPE) {
+        return true;
+    }
+    scopes.is_empty() && !AuthContext::is_privileged_scope(scope)
 }
 
 #[derive(Debug)]
@@ -413,7 +419,12 @@ pub(crate) fn authenticate(
     };
 
     if state.config.auth_service.enabled {
-        let auth = authenticate_external(state, &provided_key, required_scope, request_id)?;
+        let auth = authenticate_external(
+            &state.config.auth_service,
+            &provided_key,
+            required_scope,
+            request_id,
+        )?;
         return finalize_auth(state, auth, request_id);
     }
 
@@ -487,6 +498,100 @@ pub(crate) fn authenticate(
                 });
             }
             return finalize_auth(state, auth, request_id);
+        }
+    }
+
+    Err(AuthError {
+        status: StatusCode::UNAUTHORIZED,
+        code: "invalid_api_key",
+        message: "invalid API key".into(),
+    })
+}
+
+/// The standalone admin-api service's fail-closed authentication gate
+/// (issue #315). Mirrors [`authenticate`]'s key-source order exactly --
+/// external auth service (when `auth_service.enabled`), then durable
+/// storage-backed virtual keys, then the static `config.api_keys` fallback
+/// -- and shares its scope semantics through [`scope_set_allows`], so a
+/// caller the gateway would 401/403 gets the same answer at the admin-api
+/// listener BEFORE anything is proxied. Differences, both deliberate:
+/// - there is NO auth-disabled open mode here: the admin-api refuses to
+///   start without a credential source (enforced by its serve entrypoint),
+///   so this gate always demands a key -- never an open proxy;
+/// - `finalize_auth`'s quota/budget/rate-limit governance and per-resource
+///   tenant scoping are NOT duplicated here: the gateway re-authenticates
+///   the forwarded bearer and remains the single enforcement authority for
+///   those (defense in depth, not a second implementation that could
+///   drift).
+pub(crate) fn authenticate_admin_gate(
+    auth_service: &crate::config::AuthServiceConfig,
+    api_keys: &[ApiKey],
+    durable_authenticator: Option<&dyn ApiKeyAuthenticator>,
+    presented_key: Option<&str>,
+    required_scope: &str,
+    request_id: &str,
+) -> std::result::Result<(), AuthError> {
+    let Some(provided_key) = presented_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "missing_api_key",
+            message: "missing API key; use Authorization: Bearer or x-api-key".into(),
+        });
+    };
+
+    if auth_service.enabled {
+        authenticate_external(auth_service, provided_key, required_scope, request_id)?;
+        return Ok(());
+    }
+
+    if let Some(decision) =
+        durable_authenticator.and_then(|authenticator| authenticator.authenticate(provided_key))
+    {
+        let scopes: HashSet<String> = decision.scopes.into_iter().collect();
+        if !scope_set_allows(&scopes, required_scope) {
+            return Err(AuthError {
+                status: StatusCode::FORBIDDEN,
+                code: "scope_denied",
+                message: format!("API key does not have required scope {required_scope}"),
+            });
+        }
+        return Ok(());
+    }
+
+    for configured_key in api_keys {
+        if configured_key.matches_presented_key(provided_key) {
+            if !configured_key.enabled {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "api_key_disabled",
+                    message: "API key is disabled".into(),
+                });
+            }
+            if configured_key.is_expired(now_unix_seconds()) {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "api_key_expired",
+                    message: "API key is expired".into(),
+                });
+            }
+            // A STATIC config key with an empty scope list has always meant
+            // "all access" (operator-authored), identical to `authenticate`.
+            let scopes: HashSet<String> = if configured_key.scopes.is_empty() {
+                HashSet::from([WILDCARD_SCOPE.to_string()])
+            } else {
+                configured_key.scopes.iter().cloned().collect()
+            };
+            if !scope_set_allows(&scopes, required_scope) {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "scope_denied",
+                    message: format!("API key does not have required scope {required_scope}"),
+                });
+            }
+            return Ok(());
         }
     }
 
@@ -675,7 +780,7 @@ pub(crate) fn authorize_external_rbac(
         resource: resource.to_string(),
     };
     let decision: ferrogate_auth::AuthorizationDecision =
-        auth_service_post_json(state, "/v1/auth/authorize", &request)
+        auth_service_post_json(&state.config.auth_service, "/v1/auth/authorize", &request)
             .map_err(external_authorize_error)?;
     if decision.allowed {
         return Ok(());
@@ -691,7 +796,7 @@ pub(crate) fn authorize_external_rbac(
 }
 
 fn authenticate_external(
-    state: &AppState,
+    service: &crate::config::AuthServiceConfig,
     provided_key: &str,
     required_scope: &str,
     request_id: &str,
@@ -700,7 +805,7 @@ fn authenticate_external(
         presented_key: provided_key.to_string(),
     };
     let decision: ferrogate_auth::AuthDecision =
-        auth_service_post_json(state, "/v1/auth/resolve-api-key", &request)
+        auth_service_post_json(service, "/v1/auth/resolve-api-key", &request)
             .map_err(|error| external_auth_error(error, request_id))?;
     let auth = AuthContext {
         region_allowlist: HashSet::new(),
@@ -787,7 +892,7 @@ fn sanitize_auth_error_body(body: &str) -> String {
 }
 
 fn auth_service_post_json<T, R>(
-    state: &AppState,
+    service: &crate::config::AuthServiceConfig,
     path: &str,
     payload: &T,
 ) -> std::result::Result<R, AuthServiceClientError>
@@ -797,10 +902,10 @@ where
 {
     let body = serde_json::to_vec(payload)
         .map_err(|error| AuthServiceClientError::Request(error.to_string()))?;
-    let endpoint = build_auth_service_target(&state.config.auth_service.endpoint, path)?;
-    let timeout = Duration::from_millis(state.config.auth_service.timeout_millis);
-    let attempts = state.config.auth_service.max_retries.saturating_add(1);
-    let backoff = Duration::from_millis(state.config.auth_service.retry_backoff_millis);
+    let endpoint = build_auth_service_target(&service.endpoint, path)?;
+    let timeout = Duration::from_millis(service.timeout_millis);
+    let attempts = service.max_retries.saturating_add(1);
+    let backoff = Duration::from_millis(service.retry_backoff_millis);
     let mut last_retryable_error = None;
     for attempt in 0..attempts {
         match auth_service_post_json_once(&endpoint, &body, timeout) {
@@ -877,7 +982,11 @@ fn parse_auth_service_response<R: DeserializeOwned>(
     serde_json::from_str(&body).map_err(|error| AuthServiceClientError::Response(error.to_string()))
 }
 
-fn build_auth_service_target(
+/// Split an internal `http://host[:port][/base]` service endpoint into a
+/// connectable `host:port` and a joined request path. Shared with the
+/// admin-api reverse proxy (#315), which forwards each console request to
+/// `admin_api.gateway_url` through exactly this parser.
+pub(crate) fn build_auth_service_target(
     endpoint: &str,
     path: &str,
 ) -> std::result::Result<AuthServiceTarget, AuthServiceClientError> {
@@ -907,13 +1016,13 @@ fn build_auth_service_target(
 }
 
 #[derive(Debug)]
-struct AuthServiceTarget {
-    host_port: String,
-    path: String,
+pub(crate) struct AuthServiceTarget {
+    pub(crate) host_port: String,
+    pub(crate) path: String,
 }
 
 #[derive(Debug)]
-enum AuthServiceClientError {
+pub(crate) enum AuthServiceClientError {
     Request(String),
     Transport(String),
     Response(String),

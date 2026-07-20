@@ -738,6 +738,43 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// The #147-hardened thread-per-connection accept loop: sheds load once
+/// `MAX_CONCURRENT_CONNECTIONS` handlers are live instead of spawning
+/// unbounded threads under a flood. Extracted (not copied -- the exact
+/// duplication lesson from #147) so sibling side services in the same
+/// binary (`ferrogate admin-api serve`, issue #315) run the same loop.
+/// The handler owns per-connection concerns (timeouts, parsing, response).
+pub fn serve_connections(
+    listener: TcpListener,
+    service_name: &'static str,
+    handler: Arc<dyn Fn(TcpStream) -> anyhow::Result<()> + Send + Sync>,
+) -> anyhow::Result<()> {
+    let live_connections = Arc::new(AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                // Shed load rather than spawn unbounded threads under a flood
+                // (issue #147).
+                if live_connections.load(Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
+                    drop(stream);
+                    continue;
+                }
+                live_connections.fetch_add(1, Ordering::SeqCst);
+                let guard = ConnectionGuard(live_connections.clone());
+                let handler = handler.clone();
+                std::thread::spawn(move || {
+                    let _guard = guard;
+                    if let Err(error) = handler(stream) {
+                        eprintln!("{service_name} request failed: {error:#}");
+                    }
+                });
+            }
+            Err(error) => eprintln!("{service_name} accept failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
 pub fn serve(config: AuthServiceConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.listen)
         .with_context(|| format!("failed to bind ferrogate-auth on {}", config.listen))?;
@@ -754,32 +791,12 @@ pub fn serve(config: AuthServiceConfig) -> anyhow::Result<()> {
         service = service.with_cors_allowed_origin(origin);
     }
     let service = Arc::new(service);
-    let live_connections = Arc::new(AtomicUsize::new(0));
     println!("ferrogate-auth listening on {}", config.listen);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                // Shed load rather than spawn unbounded threads under a flood
-                // (issue #147).
-                if live_connections.load(Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
-                    drop(stream);
-                    continue;
-                }
-                live_connections.fetch_add(1, Ordering::SeqCst);
-                let guard = ConnectionGuard(live_connections.clone());
-                let service = service.clone();
-                std::thread::spawn(move || {
-                    let _guard = guard;
-                    if let Err(error) = handle_connection(stream, &service) {
-                        eprintln!("ferrogate-auth request failed: {error:#}");
-                    }
-                });
-            }
-            Err(error) => eprintln!("ferrogate-auth accept failed: {error}"),
-        }
-    }
-    Ok(())
+    serve_connections(
+        listener,
+        "ferrogate-auth",
+        Arc::new(move |stream| handle_connection(stream, &service)),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3644,28 +3661,35 @@ fn bad_request(error: serde_json::Error) -> HttpResponse {
     )
 }
 
+/// A parsed HTTP/1.1 request as read by the side-service plumbing below.
+///
+/// Public (like [`HttpResponse`] and [`read_http_request_bounded`]) so
+/// sibling side services in the same binary -- specifically `ferrogate
+/// admin-api serve` (issue #315) -- can REUSE this #147-hardened HTTP
+/// plumbing instead of growing yet another hand-rolled copy (the exact
+/// duplication #147 had to fix across auth and billing).
 #[derive(Debug)]
-struct HttpRequest {
-    method: String,
-    path: String,
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
     /// Raw query string (no leading `?`), empty if the request line had
     /// none. Needed for the OIDC SSO callback (issue #160), which -- being
     /// a standard OAuth2 redirect from the IdP -- always arrives as
     /// `GET /.../callback?code=...&state=...`, not a JSON body.
-    query: String,
+    pub query: String,
     /// Header names lowercased for case-insensitive lookup.
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }
 
 impl HttpRequest {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())
             .map(String::as_str)
     }
 
-    fn bearer_token(&self) -> Option<&str> {
+    pub fn bearer_token(&self) -> Option<&str> {
         self.header("authorization")?.strip_prefix("Bearer ")
     }
 
@@ -3718,16 +3742,31 @@ fn urldecode(value: &str) -> String {
 }
 
 fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
+    read_http_request_bounded(stream, MAX_REQUEST_BYTES)
+}
+
+/// Read and parse one HTTP/1.1 request (headers + `Content-Length` body)
+/// from `reader`, rejecting anything larger than `max_request_bytes` --
+/// including a declared `Content-Length` that would exceed it, checked
+/// BEFORE it is used as a slice bound ([`bounded_body_end`], issue #147).
+///
+/// Public so sibling side services (`ferrogate admin-api serve`, #315) can
+/// reuse this hardened parser with their own byte caps (e.g. the gateway's
+/// `[limits]` section, #312) over any transport (plain TCP or TLS).
+pub fn read_http_request_bounded<R: Read>(
+    reader: &mut R,
+    max_request_bytes: usize,
+) -> anyhow::Result<HttpRequest> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
     let header_end = loop {
-        let read = stream.read(&mut chunk).context("failed to read request")?;
+        let read = reader.read(&mut chunk).context("failed to read request")?;
         if read == 0 {
             return Err(anyhow!("connection closed before request headers"));
         }
         buffer.extend_from_slice(&chunk[..read]);
-        if buffer.len() > MAX_REQUEST_BYTES {
-            return Err(anyhow!("request exceeds {MAX_REQUEST_BYTES} bytes"));
+        if buffer.len() > max_request_bytes {
+            return Err(anyhow!("request exceeds {max_request_bytes} bytes"));
         }
         if let Some(index) = find_header_end(&buffer) {
             break index;
@@ -3760,17 +3799,17 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         .unwrap_or(0);
 
     let body_start = header_end + 4;
-    let body_end = bounded_body_end(body_start, content_length, MAX_REQUEST_BYTES)?;
+    let body_end = bounded_body_end(body_start, content_length, max_request_bytes)?;
     while buffer.len() < body_end {
-        let read = stream
+        let read = reader
             .read(&mut chunk)
             .context("failed to read request body")?;
         if read == 0 {
             return Err(anyhow!("connection closed before request body"));
         }
         buffer.extend_from_slice(&chunk[..read]);
-        if buffer.len() > MAX_REQUEST_BYTES {
-            return Err(anyhow!("request exceeds {MAX_REQUEST_BYTES} bytes"));
+        if buffer.len() > max_request_bytes {
+            return Err(anyhow!("request exceeds {max_request_bytes} bytes"));
         }
     }
 
@@ -3806,14 +3845,17 @@ fn bounded_body_end(
         .ok_or_else(|| anyhow!("content-length overflow"))
 }
 
+/// A minimal `Connection: close` JSON response writer, shared (like
+/// [`HttpRequest`]) with sibling side services so the #147 hardening work
+/// stays in one place instead of being copied per service.
 #[derive(Debug)]
-struct HttpResponse {
+pub struct HttpResponse {
     status: u16,
     body: Vec<u8>,
 }
 
 impl HttpResponse {
-    fn json<T>(status: u16, body: T) -> Self
+    pub fn json<T>(status: u16, body: T) -> Self
     where
         T: Serialize,
     {
@@ -3821,14 +3863,14 @@ impl HttpResponse {
         Self { status, body }
     }
 
-    fn no_content(status: u16) -> Self {
+    pub fn no_content(status: u16) -> Self {
         Self {
             status,
             body: Vec::new(),
         }
     }
 
-    fn to_bytes(&self, cors_allowed_origin: Option<&str>) -> Vec<u8> {
+    pub fn to_bytes(&self, cors_allowed_origin: Option<&str>) -> Vec<u8> {
         let status_text = match self.status {
             200 => "OK",
             201 => "Created",
@@ -3837,8 +3879,12 @@ impl HttpResponse {
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            405 => "Method Not Allowed",
             409 => "Conflict",
+            413 => "Payload Too Large",
             422 => "Unprocessable Entity",
+            429 => "Too Many Requests",
+            502 => "Bad Gateway",
             503 => "Service Unavailable",
             _ => "Internal Server Error",
         };

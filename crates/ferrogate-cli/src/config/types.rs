@@ -27,6 +27,12 @@ pub(crate) struct Config {
     pub(crate) auth_service: AuthServiceConfig,
     #[serde(default)]
     pub(crate) billing_service: BillingServiceConfig,
+    /// #315: the standalone admin-console API service (`ferrogate admin-api
+    /// serve`) reads this section from the same config file the gateway
+    /// runs from, so both processes share one source of truth for keys,
+    /// storage, and limits.
+    #[serde(default)]
+    pub(crate) admin_api: AdminApiConfig,
     #[serde(default)]
     pub(crate) providers: Vec<Provider>,
     #[serde(default)]
@@ -338,6 +344,68 @@ pub(crate) struct AdminConfig {
     /// changing it requires a restart (not picked up by `/admin/v1/config/reload`).
     #[serde(default)]
     pub(crate) cors_allowed_origin: Option<String>,
+}
+
+/// `[admin_api]` -- the standalone admin-console API service (issue #315,
+/// `ferrogate admin-api serve`). A dedicated listener that terminates the
+/// console's HTTP(S), authenticates the caller with the gateway's own
+/// admin-scope semantics, and reverse-proxies the path-compatible
+/// `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway over
+/// `gateway_url`, so admin control-plane traffic never rides the AI
+/// data-plane listener.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AdminApiConfig {
+    /// Address the admin-api service listens on.
+    #[serde(default = "default_admin_api_listen")]
+    pub(crate) listen: String,
+    /// Internal base URL of the running gateway the admin surface is
+    /// proxied to. `http://` only: this is a private service-to-service
+    /// hop (same trust posture as `auth_service.endpoint` /
+    /// `billing_service.endpoint`); terminate public TLS on this
+    /// service's own listener via `tls_cert_path`/`tls_key_path` or at an
+    /// Ingress in front of it.
+    #[serde(default = "default_admin_api_gateway_url")]
+    pub(crate) gateway_url: String,
+    /// Per-attempt connect/read/write timeout for the proxied hop.
+    #[serde(default = "default_admin_api_upstream_timeout_millis")]
+    pub(crate) upstream_timeout_millis: u64,
+    /// Origin reflected as `Access-Control-Allow-Origin` on locally
+    /// generated responses (the OPTIONS preflight and auth-gate errors);
+    /// proxied responses carry the gateway's own CORS headers, so set the
+    /// gateway's `admin.cors_allowed_origin` to the same origin.
+    #[serde(default)]
+    pub(crate) cors_allowed_origin: Option<String>,
+    /// Optional TLS for the admin-api listener (PEM certificate chain +
+    /// private key). Both must be set together; unset serves plain HTTP.
+    #[serde(default)]
+    pub(crate) tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub(crate) tls_key_path: Option<String>,
+}
+
+impl Default for AdminApiConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_admin_api_listen(),
+            gateway_url: default_admin_api_gateway_url(),
+            upstream_timeout_millis: default_admin_api_upstream_timeout_millis(),
+            cors_allowed_origin: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+        }
+    }
+}
+
+fn default_admin_api_listen() -> String {
+    "127.0.0.1:8095".to_string()
+}
+
+fn default_admin_api_gateway_url() -> String {
+    "http://127.0.0.1:8080".to_string()
+}
+
+fn default_admin_api_upstream_timeout_millis() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2342,6 +2410,7 @@ impl Default for Config {
             tls: TlsConfig::default(),
             auth_service: AuthServiceConfig::default(),
             billing_service: BillingServiceConfig::default(),
+            admin_api: AdminApiConfig::default(),
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),

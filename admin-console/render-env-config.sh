@@ -18,6 +18,7 @@ set -eu
 cat > /usr/share/nginx/html/env-config.js <<JS
 window.__ENV__ = {
   VITE_AUTH_BASE_URL: "${AUTH_BASE_URL:-}",
-  VITE_GATEWAY_ADMIN_BASE_URL: "${GATEWAY_ADMIN_BASE_URL:-}"
+  VITE_GATEWAY_ADMIN_BASE_URL: "${GATEWAY_ADMIN_BASE_URL:-}",
+  VITE_ADMIN_API_BASE_URL: "${ADMIN_API_BASE_URL:-}"
 };
 JS

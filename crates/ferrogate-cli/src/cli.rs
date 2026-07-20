@@ -83,6 +83,21 @@ pub(crate) enum AuthCommands {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct AdminApiArgs {
+    #[command(subcommand)]
+    pub(crate) command: AdminApiCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminApiCommands {
+    /// Run the standalone admin-console API service (issue #315): a
+    /// dedicated listener that authenticates admin callers and proxies the
+    /// path-compatible /admin/v1/* (+ /v1/assets/*) surface to the gateway
+    /// configured in the [admin_api] config section.
+    Serve(ConfigArgs),
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct StorageArgs {
     #[command(subcommand)]
     pub(crate) command: StorageCommands,
@@ -249,6 +264,8 @@ pub(crate) enum Commands {
     Run(RunArgs),
     /// Run the tenant and RBAC auth REST service.
     Auth(AuthArgs),
+    /// Run the standalone admin-console API service (issue #315).
+    AdminApi(AdminApiArgs),
     /// Run the token-usage billing REST service.
     Billing(BillingArgs),
     /// Operate durable storage and migration tooling.

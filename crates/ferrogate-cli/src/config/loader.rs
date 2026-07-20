@@ -78,6 +78,7 @@ impl Config {
             },
             auth_service: crate::config::AuthServiceConfig::default(),
             billing_service: crate::config::BillingServiceConfig::default(),
+            admin_api: crate::config::AdminApiConfig::default(),
             tls: match (config.tls, config.tls_acme) {
                 (Some(tls), None) => TlsConfig {
                     enabled: true,

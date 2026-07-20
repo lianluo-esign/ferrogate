@@ -91,6 +91,10 @@ adminConsole:
   env:
     authBaseUrl: "https://auth.ferrogate.example.com"
     gatewayAdminBaseUrl: "https://ferrogate.example.com"
+    # Optional: the dedicated admin-console API service (issue #315,
+    # `ferrogate admin-api serve`); rendered as ADMIN_API_BASE_URL and
+    # preferred over gatewayAdminBaseUrl by the console when set.
+    adminApiBaseUrl: ""
   resources: {}
   nodeSelector: {}
   tolerations: []

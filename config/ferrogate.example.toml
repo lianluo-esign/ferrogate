@@ -109,6 +109,23 @@ graceful_upgrade_sock_retries = 5
 # /admin/v1/guardrail-policies documents (can carry large pattern lists)
 # guardrail_policy_body_max_bytes = 1048576
 
+# Standalone admin-console API service (#315): `ferrogate admin-api serve
+# --config <this file>` runs a dedicated listener that authenticates admin
+# callers (same [[api_keys]]/[storage] credentials and scope semantics as
+# the gateway) and reverse-proxies the path-compatible /admin/v1/* and
+# /v1/assets/* surfaces to gateway_url -- so the admin console never talks
+# to the AI data-plane listener. The values shown are the defaults.
+# [admin_api]
+# listen = "127.0.0.1:8095"
+# gateway_url = "http://127.0.0.1:8080"
+# upstream_timeout_millis = 30000
+# Reflected on locally generated responses (preflight + auth-gate errors);
+# set the gateway's admin.cors_allowed_origin to the same console origin.
+# cors_allowed_origin = "https://admin.example.com"
+# Optional TLS for this listener (both paths required together):
+# tls_cert_path = "./certs/admin-api.crt"
+# tls_key_path = "./certs/admin-api.key"
+
 [[extensions]]
 id = "tool.echo"
 kind = "tool_provider"

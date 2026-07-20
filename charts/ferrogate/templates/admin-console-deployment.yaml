@@ -38,6 +38,12 @@ spec:
               value: {{ .Values.adminConsole.env.authBaseUrl | quote }}
             - name: GATEWAY_ADMIN_BASE_URL
               value: {{ .Values.adminConsole.env.gatewayAdminBaseUrl | quote }}
+            {{- with .Values.adminConsole.env.adminApiBaseUrl }}
+            # Dedicated admin-console API service (issue #315); takes
+            # precedence over GATEWAY_ADMIN_BASE_URL when set.
+            - name: ADMIN_API_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz

@@ -25,7 +25,7 @@ pub(crate) use self::secrets::resolve_env_placeholders;
 pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
-    AccessLogMode, AdminConfig, AgentRuntimeConfig, AgentRuntimeExternalConfig,
+    AccessLogMode, AdminApiConfig, AdminConfig, AgentRuntimeConfig, AgentRuntimeExternalConfig,
     AgentRuntimeManagedWorkerConfig, AgentRuntimeProvider, AgentUpstreamAuth,
     AgentUpstreamCapability, AgentUpstreamConfig, AgentUpstreamProtocol, AgentWorkflowEdge,
     AgentWorkflowNode, AgentWorkflowNodeKind, AgentWorkflowPolicy, AnalyticsConfig,

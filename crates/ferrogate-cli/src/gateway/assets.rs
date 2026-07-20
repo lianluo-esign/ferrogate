@@ -57,7 +57,7 @@ impl AssetError {
 /// `gateway/asset_presign.rs`), which streams straight to the bucket so
 /// bytes never buffer in the gateway. The tenant's cumulative
 /// `asset_storage_quota_bytes` is enforced separately, on top of this.
-const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Default `Cache-Control` for a pulled asset (issues #258/#301): assets are
 /// tenant-private and content-addressed, so clients must revalidate against the
