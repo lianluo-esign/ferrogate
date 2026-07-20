@@ -104,6 +104,16 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Investigations", url: "/app/investigations" },
     ],
   },
+  {
+    title: "Billing Ops",
+    icon: ReceiptText,
+    items: [
+      { title: "Wallets", url: "/app/wallets" },
+      { title: "Payment methods", url: "/app/payment-methods" },
+      { title: "Billing dead-letters", url: "/app/billing-dead-letters" },
+      { title: "Metering & usage", url: "/app/metering" },
+    ],
+  },
 ];
 
 export const RESOURCE_ICONS: Record<string, LucideIcon> = {

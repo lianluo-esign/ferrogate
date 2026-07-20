@@ -18,6 +18,10 @@ import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
 import GuardrailPoliciesPage from "@/pages/guardrail-policies";
 import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
 import InvestigationsPage from "@/pages/investigations";
+import BillingWalletsPage from "@/pages/billing-wallets";
+import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
+import BillingDeadLettersPage from "@/pages/billing-dead-letters";
+import BillingMeteringPage from "@/pages/billing-metering";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -59,6 +63,16 @@ function App() {
                   element={<GuardrailEvaluationsPage />}
                 />
                 <Route path="/app/investigations" element={<InvestigationsPage />} />
+                <Route path="/app/wallets" element={<BillingWalletsPage />} />
+                <Route
+                  path="/app/payment-methods"
+                  element={<BillingPaymentMethodsPage />}
+                />
+                <Route
+                  path="/app/billing-dead-letters"
+                  element={<BillingDeadLettersPage />}
+                />
+                <Route path="/app/metering" element={<BillingMeteringPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}
