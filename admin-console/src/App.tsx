@@ -37,6 +37,14 @@ import OpsObservabilityPage from "@/pages/ops-observability";
 // IAM completion (#321): bespoke pages for virtual-key lifecycle + tenant roles.
 import VirtualKeysPage from "@/pages/virtual-keys";
 import TenantRolesPage from "@/pages/tenant-roles";
+// Long-tail surfaces (#323): site domains, MCP OAuth identities, plugin tools,
+// tool sessions. Appended after the IAM block to keep sibling route edits
+// conflict-free.
+import SiteDomainsPage from "@/pages/site-domains";
+import McpIdentitiesPage from "@/pages/mcp-identities";
+import ToolsCatalogPage from "@/pages/tools-catalog";
+import PluginToolsPage from "@/pages/plugin-tools";
+import ToolSessionsPage from "@/pages/tool-sessions";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -124,6 +132,15 @@ function App() {
                 {/* IAM completion (#321) bespoke routes. */}
                 <Route path="/app/api-keys" element={<VirtualKeysPage />} />
                 <Route path="/app/tenant-roles" element={<TenantRolesPage />} />
+                {/* Long-tail surfaces (#323). */}
+                <Route path="/app/site-domains" element={<SiteDomainsPage />} />
+                <Route path="/app/mcp-identities" element={<McpIdentitiesPage />} />
+                <Route path="/app/tools" element={<ToolsCatalogPage />} />
+                <Route
+                  path="/app/plugins/:pluginId/tools"
+                  element={<PluginToolsPage />}
+                />
+                <Route path="/app/tool-sessions" element={<ToolSessionsPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

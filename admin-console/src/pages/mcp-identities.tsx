@@ -1,0 +1,280 @@
+// MCP OAuth identities console (#202/#215, #323): per-server view of the
+// subject-bound MCP identity over the runtime endpoints
+//   GET    /v1/mcp/identity/{server}            → status (no token material)
+//   POST   /v1/mcp/identity/{server}/authorize  → authorization URL + state
+//   DELETE /v1/mcp/identity/{server}            → revoke locally
+//
+// These are RUNTIME (/v1/mcp/...) not /admin/v1/... paths, but they live in the
+// same Admin API OpenAPI contract and are served on the same base the typed
+// client already targets (GATEWAY_ADMIN_BASE_URL), so `adminGet/adminPost/
+// adminDelete` reach them with the same bearer auth — no separate client.
+//
+// OAuth redirect dance (out-of-band): "Connect" only INITIATES the flow and
+// returns an authorization URL. The operator (or the bound subject) opens that
+// URL and completes consent with the upstream provider, which redirects back to
+// the gateway's GET /v1/mcp/identity/callback?code&state — a browser-to-gateway
+// redirect the SPA cannot drive or observe. Once the gateway consumes the
+// one-time state and persists the encrypted credential, "Refresh status" here
+// reflects the now-connected identity. We surface the URL + state and explain
+// the hand-off rather than pretending the SPA completes it.
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useAuth } from "@/hooks/use-auth";
+import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+
+type AuthorizeResponse = AdminSchema<"McpOauthAuthorizeResponse">;
+
+// Identity types that can complete an interactive OAuth authorization-code flow
+// from this console; the rest surface status only (no Connect action).
+const OAUTH_AUTH_TYPES = new Set(["oauth", "per_user_oauth"]);
+
+function formatUnix(unix: number | null | undefined): string {
+  if (unix === null || unix === undefined) return "-";
+  return new Date(unix * 1000).toLocaleString();
+}
+
+function StatusField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-0.5">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="break-all text-sm">{children}</span>
+    </div>
+  );
+}
+
+export default function McpIdentitiesPage() {
+  const { session } = useAuth();
+  const apiKey = session!.gatewayApiKey;
+  const queryClient = useQueryClient();
+
+  const [serverInput, setServerInput] = useState("");
+  const [server, setServer] = useState("");
+  const [authorization, setAuthorization] = useState<AuthorizeResponse | null>(null);
+
+  // Populate a picker from the configured MCP servers; manual entry still works.
+  const { data: serversData } = useQuery({
+    queryKey: ["mcp-servers"],
+    queryFn: () => adminGet(apiKey, "/admin/v1/mcp-servers"),
+  });
+  const serverNames = useMemo(
+    () => (serversData?.data ?? []).map((s) => s.name),
+    [serversData],
+  );
+
+  const identityQueryKey = ["mcp-identity", server];
+  const {
+    data: status,
+    isLoading,
+    isFetching,
+    error: statusError,
+  } = useQuery({
+    queryKey: identityQueryKey,
+    queryFn: () =>
+      adminGet(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
+    enabled: server !== "",
+  });
+
+  const authorizeMutation = useMutation({
+    mutationFn: () =>
+      adminPost(apiKey, "/v1/mcp/identity/{server}/authorize", undefined, {
+        params: { server },
+      }),
+    onSuccess: (response) => {
+      setAuthorization(response);
+      toast.success("Authorization flow initiated");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: () =>
+      adminDelete(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
+    onSuccess: () => {
+      toast.success(`Disconnected ${server}`);
+      setAuthorization(null);
+      queryClient.invalidateQueries({ queryKey: identityQueryKey });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  function loadServer(name: string) {
+    const trimmed = name.trim();
+    if (trimmed === "") return;
+    setServer(trimmed);
+    setAuthorization(null);
+  }
+
+  const canOauth = status ? OAUTH_AUTH_TYPES.has(status.auth_type) : false;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h1 className="text-lg font-semibold">MCP OAuth identities</h1>
+        <p className="text-sm text-muted-foreground">
+          Subject-bound identity status for MCP servers. Connect initiates an OAuth
+          authorization-code flow; the consent redirect completes out-of-band against
+          the gateway callback, then refresh status here.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium">Select a server</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-end gap-3">
+          {serverNames.length > 0 ? (
+            <div className="grid gap-1.5">
+              <Label>Configured servers</Label>
+              <Select value={server || undefined} onValueChange={loadServer}>
+                <SelectTrigger className="w-56" aria-label="Configured servers">
+                  <SelectValue placeholder="Pick a server" />
+                </SelectTrigger>
+                <SelectContent>
+                  {serverNames.map((name) => (
+                    <SelectItem key={name} value={name}>
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          <div className="grid gap-1.5">
+            <Label htmlFor="server-input">Server name</Label>
+            <Input
+              id="server-input"
+              value={serverInput}
+              onChange={(e) => setServerInput(e.target.value)}
+              placeholder="github-mcp"
+              className="w-56"
+            />
+          </div>
+          <Button type="button" variant="outline" onClick={() => loadServer(serverInput)}>
+            Load status
+          </Button>
+        </CardContent>
+      </Card>
+
+      {statusError ? (
+        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          Failed to load identity for {server}: {statusError.message}
+        </p>
+      ) : null}
+
+      {server === "" ? (
+        <p className="text-sm text-muted-foreground">
+          Pick or enter a server name to view its identity status.
+        </p>
+      ) : isLoading ? (
+        <p className="text-sm text-muted-foreground">Loading identity...</p>
+      ) : status ? (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 pb-3">
+            <CardTitle className="text-sm font-medium">{status.server_name}</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge
+                variant={status.connected ? "default" : "secondary"}
+                data-testid="identity-connection"
+              >
+                {status.connected ? "connected" : "disconnected"}
+              </Badge>
+              <Badge variant="outline">{status.auth_type}</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <StatusField label="Credential source">{status.credential_source}</StatusField>
+              <StatusField label="Subject">{status.subject ?? "-"}</StatusField>
+              <StatusField label="Expires at">{formatUnix(status.expires_at_unix)}</StatusField>
+              <StatusField label="Revoked at">{formatUnix(status.revoked_at_unix)}</StatusField>
+              <StatusField label="Last refresh outcome">
+                {status.last_refresh_outcome ?? "-"}
+              </StatusField>
+              <StatusField label="Last revocation outcome">
+                {status.last_revocation_outcome ?? "-"}
+              </StatusField>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => queryClient.invalidateQueries({ queryKey: identityQueryKey })}
+                disabled={isFetching}
+              >
+                {isFetching ? "Refreshing..." : "Refresh status"}
+              </Button>
+              {canOauth ? (
+                <Button
+                  type="button"
+                  onClick={() => authorizeMutation.mutate()}
+                  disabled={authorizeMutation.isPending}
+                >
+                  {authorizeMutation.isPending
+                    ? "Initiating..."
+                    : status.connected
+                      ? "Reconnect (OAuth)"
+                      : "Connect (OAuth)"}
+                </Button>
+              ) : (
+                <span className="self-center text-xs text-muted-foreground">
+                  {status.auth_type} identities are not connected via an interactive
+                  OAuth flow.
+                </span>
+              )}
+              {status.connected ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => revokeMutation.mutate()}
+                  disabled={revokeMutation.isPending}
+                >
+                  {revokeMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                </Button>
+              ) : null}
+            </div>
+
+            {authorization ? (
+              <div
+                className="grid gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-3"
+                data-testid="authorization-panel"
+              >
+                <p className="text-sm font-medium">Complete authorization out-of-band</p>
+                <p className="text-xs text-muted-foreground">
+                  Open the authorization URL and grant consent with the upstream
+                  provider. It redirects to the gateway callback, which consumes the
+                  one-time state (expires {formatUnix(authorization.expires_at_unix)})
+                  and persists the encrypted credential. Then refresh status here.
+                </p>
+                <a
+                  href={authorization.authorize_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="break-all text-sm text-primary underline"
+                >
+                  {authorization.authorize_url}
+                </a>
+                <code className="break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+                  state: {authorization.state}
+                </code>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+    </div>
+  );
+}

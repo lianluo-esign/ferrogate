@@ -9,6 +9,7 @@ import {
   FileText,
   Folder,
   Gauge,
+  Globe,
   KeyRound,
   LayoutDashboard,
   ListTree,
@@ -143,6 +144,23 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Gateway config profiles", url: "/app/ops/gateway-configs" },
       { title: "Provider & runtime health", url: "/app/ops/provider-health" },
       { title: "Observability & exports", url: "/app/ops/observability" },
+    ],
+  },
+  // Long-tail surfaces (#323): custom-domain hosting, MCP OAuth identities, and
+  // the plugin-tools catalog + tool-session inspector. Appended as new groups
+  // after the last existing entry to keep sibling nav edits conflict-free.
+  {
+    title: "Hosting",
+    icon: Globe,
+    items: [{ title: "Site domains", url: "/app/site-domains" }],
+  },
+  {
+    title: "Tools & MCP identities",
+    icon: Wrench,
+    items: [
+      { title: "MCP identities", url: "/app/mcp-identities" },
+      { title: "Tools catalog", url: "/app/tools" },
+      { title: "Tool sessions", url: "/app/tool-sessions" },
     ],
   },
 ];
