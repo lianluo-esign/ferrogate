@@ -296,6 +296,19 @@ impl ActionDecision {
     pub fn code(&self) -> &str {
         &self.reason().code
     }
+
+    /// The snake_case decision-class label, identical to the serde `decision`
+    /// tag: `"allow"` / `"deny"` / `"ask"` / `"degrade"`. This is the compact
+    /// value persisted in the queryable `decision` columns on timeline/audit
+    /// rows (issue #304), alongside `decision_reason` = [`Self::code`].
+    pub fn class_label(&self) -> &'static str {
+        match self {
+            Self::Allow { .. } => "allow",
+            Self::Deny { .. } => "deny",
+            Self::Ask { .. } => "ask",
+            Self::Degrade { .. } => "degrade",
+        }
+    }
 }
 
 /// Lossless mapping from the capability-boundary decision.
@@ -816,6 +829,21 @@ mod tests {
             serde_json::to_string(&detailed).expect("serialize"),
             r#"{"decision":"deny","reason":{"code":"approval_expired","detail":"timed out after 300s"}}"#
         );
+    }
+
+    #[test]
+    fn class_label_matches_the_serde_decision_tag() {
+        let cases = [
+            (ActionDecision::allow("c"), "allow"),
+            (ActionDecision::deny("c"), "deny"),
+            (ActionDecision::ask("c"), "ask"),
+            (ActionDecision::degrade("c"), "degrade"),
+        ];
+        for (decision, expected) in cases {
+            assert_eq!(decision.class_label(), expected);
+            let json = serde_json::to_value(&decision).expect("serialize decision");
+            assert_eq!(json["decision"], expected, "label must equal the serde tag");
+        }
     }
 
     #[test]

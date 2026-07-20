@@ -2157,3 +2157,36 @@ CREATE INDEX IF NOT EXISTS idx_site_domains_tenant
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (44, '044_site_domains')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 45 (#304): persist the action identity on timeline/audit rows so
+-- CapabilityAuthorizationEvidence is no longer dropped at the persistence
+-- boundary. Additive, nullable projection columns (pre-migration rows and
+-- non-governed paths stay NULL):
+--   * action_fingerprint  -- target-level fingerprint under the
+--     canonical_target_sha256 contract ("sha256:<hex>", see
+--     ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT). NOT the
+--     invocation-level tool-approval fingerprint.
+--   * decision            -- canonical decision class from issue #303's
+--     ActionDecision: 'allow' | 'deny' | 'ask' | 'degrade'.
+--   * decision_reason     -- stable DecisionReason code, e.g.
+--     'capability_allowed', 'audit_redacted', 'guardrail:fail:block:enforced'.
+--   * output_disposition  -- what happened to the action's output:
+--     'returned' | 'redacted' | 'withheld' | 'errored'.
+-- The compact split (class + reason code as separate TEXT columns rather than
+-- one serialized ActionDecision JSON) keeps SQL filtering trivial
+-- (WHERE decision = 'deny') while remaining lossless via the reason code.
+ALTER TABLE agent_run_events
+    ADD COLUMN IF NOT EXISTS action_fingerprint TEXT,
+    ADD COLUMN IF NOT EXISTS decision TEXT,
+    ADD COLUMN IF NOT EXISTS decision_reason TEXT,
+    ADD COLUMN IF NOT EXISTS output_disposition TEXT;
+
+ALTER TABLE audit_events
+    ADD COLUMN IF NOT EXISTS action_fingerprint TEXT,
+    ADD COLUMN IF NOT EXISTS decision TEXT,
+    ADD COLUMN IF NOT EXISTS decision_reason TEXT,
+    ADD COLUMN IF NOT EXISTS output_disposition TEXT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (45, '045_action_identity')
+ON CONFLICT (version) DO NOTHING;

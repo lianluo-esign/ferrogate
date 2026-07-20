@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 44;
-const POSTGRES_SCHEMA_NAME: &str = "044_site_domains";
+const POSTGRES_SCHEMA_VERSION: u64 = 45;
+const POSTGRES_SCHEMA_NAME: &str = "045_action_identity";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -943,6 +943,24 @@ pub struct StoredAgentRunEvent {
     pub tool_call_id: Option<String>,
     pub message: Option<String>,
     pub occurred_at_unix: Option<u64>,
+    /// #304 action-identity columns (all optional; NULL on rows recorded
+    /// before migration 045 or by paths without capability evidence):
+    /// target-level fingerprint under the `canonical_target_sha256` contract
+    /// (`"sha256:<hex>"`, `ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_fingerprint: Option<String>,
+    /// Canonical decision class: `"allow"` / `"deny"` / `"ask"` / `"degrade"`
+    /// (`ferrogate_runtime::ActionDecision::class_label`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    /// Stable decision reason code (`ferrogate_runtime::ActionDecision::code`),
+    /// e.g. `"capability_allowed"` or `"guardrail:fail:block:enforced"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
+    /// Structured output disposition: `"returned"` / `"redacted"` /
+    /// `"withheld"` / `"errored"` (`ferrogate_runtime::OutputDisposition`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_disposition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4927,9 +4945,10 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO audit_events \
                  (id, request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
                   workflow_node_id, cluster_id, node_id, actor_api_key_id, tenant, action, target, \
-                  outcome, occurred_at_unix, audit_json) \
+                  outcome, occurred_at_unix, action_fingerprint, decision, decision_reason, \
+                  output_disposition, audit_json) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
-                         $16::text::jsonb) \
+                         $16, $17, $18, $19, $20::text::jsonb) \
                  ON CONFLICT (id) DO NOTHING",
                 &[
                     &event.id,
@@ -4947,6 +4966,10 @@ impl PostgresControlPlaneStore {
                     &event.target,
                     &event.outcome,
                     &occurred_at_unix,
+                    &event.action_fingerprint,
+                    &event.decision,
+                    &event.decision_reason,
+                    &event.output_disposition,
                     &audit_json,
                 ],
             )
@@ -5249,8 +5272,10 @@ impl PostgresControlPlaneStore {
             .execute(
                 "INSERT INTO agent_run_events \
                  (id, run_id, request_id, trace_id, tenant, turn, kind, target, outcome, \
-                  occurred_at_unix, event_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                  occurred_at_unix, action_fingerprint, decision, decision_reason, \
+                  output_disposition, event_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+                         $15::text::jsonb) \
                  ON CONFLICT (id) DO NOTHING",
                 &[
                     &event.id,
@@ -5263,6 +5288,10 @@ impl PostgresControlPlaneStore {
                     &event.target,
                     &event.outcome,
                     &occurred_at_unix,
+                    &event.action_fingerprint,
+                    &event.decision,
+                    &event.decision_reason,
+                    &event.output_disposition,
                     &event_json,
                 ],
             )
@@ -7743,6 +7772,37 @@ where
         {
             return Err(StorageError::Postgres(format!(
                 "required schema column {table}.{column} must be {expected_type} NOT NULL"
+            )));
+        }
+    }
+
+    // #304 (migration 45): nullable action-identity projection columns on the
+    // timeline/audit evidence tables. Nullable by design (pre-migration rows
+    // and non-governed paths carry NULL), so only presence + type are pinned.
+    const ACTION_IDENTITY_COLUMNS: &[(&str, &str)] = &[
+        ("agent_run_events", "action_fingerprint"),
+        ("agent_run_events", "decision"),
+        ("agent_run_events", "decision_reason"),
+        ("agent_run_events", "output_disposition"),
+        ("audit_events", "action_fingerprint"),
+        ("audit_events", "decision"),
+        ("audit_events", "decision_reason"),
+        ("audit_events", "output_disposition"),
+    ];
+    for (table, column) in ACTION_IDENTITY_COLUMNS {
+        let data_type = client
+            .query_opt(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = $1 AND column_name = $2",
+                &[table, column],
+            )
+            .await
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, String>(0));
+        if data_type.as_deref() != Some("text") {
+            return Err(StorageError::Postgres(format!(
+                "required action-identity column {table}.{column} must be text (#304)"
             )));
         }
     }
@@ -10934,6 +10994,18 @@ pub struct StoredAuditEvent {
     pub outcome: String,
     pub message: String,
     pub occurred_at_unix: Option<u64>,
+    /// #304 action-identity columns (all optional; NULL on rows recorded
+    /// before migration 045 or by paths without capability evidence). See
+    /// [`StoredAgentRunEvent`] for the value contracts. The free-text
+    /// `outcome`/`message` stay unchanged for humans; these are additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_disposition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14875,6 +14947,10 @@ mod agent_schedule_test;
 mod site_domain_test;
 
 #[cfg(test)]
+#[path = "action_identity_persistence_test.rs"]
+mod action_identity_persistence_test;
+
+#[cfg(test)]
 #[path = "usage_metadata_schema_test.rs"]
 mod usage_metadata_schema_test;
 
@@ -15127,6 +15203,10 @@ mod tests {
     fn in_memory_append_repository_keeps_audit_events_in_order() {
         let mut repository = InMemoryAppendRepository::new();
         repository.append(StoredAuditEvent {
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
             id: "audit-1".into(),
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
@@ -15145,6 +15225,10 @@ mod tests {
             occurred_at_unix: Some(1),
         });
         repository.append(StoredAuditEvent {
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
             id: "audit-2".into(),
             request_id: "fg-2".into(),
             trace_id: Some("fg-2".into()),
@@ -15196,6 +15280,10 @@ mod tests {
         }))
         .unwrap();
         block_on(repositories.append_agent_run_event(StoredAgentRunEvent {
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
             id: "event-1".into(),
             run_id: "run-1".into(),
             request_id: "fg-1".into(),
@@ -15285,6 +15373,10 @@ mod tests {
 
     fn sample_agent_run_event(id: &str, run_id: &str, occurred_at: u64) -> StoredAgentRunEvent {
         StoredAgentRunEvent {
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
             id: id.into(),
             run_id: run_id.into(),
             request_id: format!("req-{run_id}"),

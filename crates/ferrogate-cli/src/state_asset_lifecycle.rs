@@ -665,6 +665,7 @@ impl AppState {
             ..ferrogate_core::TenantContext::default()
         };
         self.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: format!("asset-lifecycle-{}", now_unix_seconds().unwrap_or(0)),
             trace_id: None,
             agent_run_id: None,

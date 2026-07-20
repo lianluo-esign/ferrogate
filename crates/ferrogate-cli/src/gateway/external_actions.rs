@@ -164,7 +164,24 @@ impl GatewayExternalActionAuthorizerService {
                         // fail-closed decision is auditable (issue #200) — the
                         // capability-allow event is intentionally not emitted, so
                         // this is the only evidence the action was stopped here.
+                        // #304: the enforced guardrail block maps to the
+                        // canonical `deny` with the lossless guardrail triple
+                        // reason code; the capability evidence fingerprint is
+                        // preserved so the blocked action is still correlatable
+                        // by exact action identity.
+                        let guardrail_decision = ferrogate_runtime::ActionDecision::from(
+                            ferrogate_runtime::GuardrailOutcome {
+                                verdict: ferrogate_runtime::GuardrailVerdict::Fail,
+                                action: ferrogate_runtime::GuardrailTriggeredAction::Block,
+                                enforcement: ferrogate_runtime::GuardrailEnforcement::Enforced,
+                            },
+                        );
                         state.record_agent_run_event(StoredAgentRunEvent {
+                            action_fingerprint: Some(evidence.action_fingerprint.clone())
+                                .filter(|fingerprint| !fingerprint.is_empty()),
+                            decision: Some(guardrail_decision.class_label().to_string()),
+                            decision_reason: Some(guardrail_decision.code().to_string()),
+                            output_disposition: Some("withheld".to_string()),
                             id: format!("managed-action-guardrail:{run_id}:{transport_request_id}"),
                             run_id: run_id.clone(),
                             request_id: transport_request_id.to_string(),
@@ -240,6 +257,13 @@ impl GatewayExternalActionAuthorizerService {
             return;
         };
         state.record_agent_run_event(StoredAgentRunEvent {
+            // #304: the capability-authorizer evidence (fingerprint under the
+            // canonical_target_sha256 contract + canonical decision) survives
+            // persistence instead of being dropped at this boundary.
+            action_fingerprint: record.action_fingerprint,
+            decision: record.decision,
+            decision_reason: record.decision_reason,
+            output_disposition: None,
             id: record.event_id,
             run_id: record.run_id,
             request_id: transport_request_id.to_string(),
@@ -919,6 +943,71 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("tool allowed by capability policy"));
+        // #304: the canonical decision survives into the stored columns. This
+        // class-only tool action has no canonical target, so no fingerprint.
+        assert_eq!(event.decision.as_deref(), Some("allow"));
+        assert_eq!(
+            event.decision_reason.as_deref(),
+            Some(ferrogate_runtime::decision_codes::CAPABILITY_ALLOWED)
+        );
+        assert_eq!(event.action_fingerprint, None);
+    }
+
+    /// #304 acceptance: capability-authorizer evidence survives persistence
+    /// end to end. A governed external action with a canonical target (managed
+    /// MCP tool call) must produce a timeline row whose `action_fingerprint`
+    /// EQUALS the authorizer evidence fingerprint (canonical_target_sha256
+    /// contract) and whose decision matches the authorization decision.
+    #[test]
+    fn timeline_row_action_fingerprint_equals_authorizer_evidence_fingerprint() {
+        let state = AppState::new(crate::config::Config::default());
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            mcp_allowing_capability_policy(),
+        );
+        let request = managed_mcp_request(serde_json::json!({"body": "file a routine bug"}));
+        let expected_fingerprint = ferrogate_runtime::canonical_target_for_managed_action(
+            &request.action,
+            &request.session.adapter_name,
+            request.high_risk,
+        )
+        .expect("managed MCP actions with inline arguments have a canonical target")
+        .fingerprint();
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(request);
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(response.response.accepted);
+        // The authorizer evidence fingerprint rides in the normalized event
+        // metadata; the persisted timeline row must carry the SAME value.
+        let event = response.response.event.as_ref().unwrap();
+        assert_eq!(
+            event["metadata"]["action_fingerprint"].as_str(),
+            Some(expected_fingerprint.as_str()),
+        );
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("allowed external action should record timeline evidence");
+        assert_eq!(timeline.agent_events.len(), 1);
+        let stored = &timeline.agent_events[0];
+        assert_eq!(stored.kind, "capability.allowed");
+        assert_eq!(
+            stored.action_fingerprint.as_deref(),
+            Some(expected_fingerprint.as_str()),
+            "the authorizer evidence fingerprint must survive persistence verbatim"
+        );
+        assert!(stored
+            .action_fingerprint
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(stored.decision.as_deref(), Some("allow"));
+        assert_eq!(
+            stored.decision_reason.as_deref(),
+            Some(ferrogate_runtime::decision_codes::CAPABILITY_ALLOWED)
+        );
     }
 
     #[test]
@@ -949,6 +1038,13 @@ mod tests {
         assert_eq!(event.kind, "capability.denied");
         assert_eq!(event.target, "tool:native.echo");
         assert_eq!(event.outcome, "denied");
+        // #304: the canonical deny decision is persisted alongside the
+        // free-text outcome.
+        assert_eq!(event.decision.as_deref(), Some("deny"));
+        assert_eq!(
+            event.decision_reason.as_deref(),
+            Some(ferrogate_runtime::decision_codes::CAPABILITY_DENIED)
+        );
     }
 
     fn managed_mcp_request(arguments: serde_json::Value) -> ManagedExternalActionRequest {
@@ -1047,6 +1143,30 @@ mod tests {
             !response.response.accepted,
             "guardrail-flagged MCP action must be rejected even though capability allowed it"
         );
+
+        // #304: the fail-closed guardrail block is persisted with the
+        // canonical decision (deny, lossless guardrail triple), the capability
+        // evidence fingerprint, and a structural `withheld` disposition.
+        let state = shared.current();
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("guardrail block should record timeline evidence");
+        let blocked = timeline
+            .agent_events
+            .iter()
+            .find(|event| event.kind == "guardrail.blocked")
+            .expect("guardrail.blocked timeline row present");
+        assert_eq!(blocked.decision.as_deref(), Some("deny"));
+        assert_eq!(
+            blocked.decision_reason.as_deref(),
+            Some("guardrail:fail:block:enforced")
+        );
+        assert_eq!(blocked.output_disposition.as_deref(), Some("withheld"));
+        assert!(blocked
+            .action_fingerprint
+            .as_deref()
+            .expect("MCP action with inline arguments carries a fingerprint")
+            .starts_with("sha256:"));
     }
 
     #[test]
@@ -1114,6 +1234,12 @@ mod tests {
         assert_eq!(event.kind, "capability.requested");
         assert_eq!(event.target, "tool:native.echo");
         assert_eq!(event.outcome, "approval_required");
+        // #304: approval_required maps to the canonical `ask`.
+        assert_eq!(event.decision.as_deref(), Some("ask"));
+        assert_eq!(
+            event.decision_reason.as_deref(),
+            Some(ferrogate_runtime::decision_codes::CAPABILITY_APPROVAL_REQUIRED)
+        );
     }
 
     #[test]

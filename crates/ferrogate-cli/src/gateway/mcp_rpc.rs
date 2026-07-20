@@ -529,6 +529,7 @@ fn audit_event(
 ) -> AdminAuditEventDraft {
     let (target, message) = decorate_skill_audit(skill_context, target.into(), message.into());
     AdminAuditEventDraft {
+        action_identity: Default::default(),
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         agent_run_id: None,

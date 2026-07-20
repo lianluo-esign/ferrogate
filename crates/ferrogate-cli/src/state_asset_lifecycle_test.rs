@@ -308,6 +308,10 @@ fn request_log(id: &str, org: &str, started: i64, response_recorded: bool) -> St
 
 fn audit_event(id: &str, org: &str, occurred: i64) -> StoredAuditEvent {
     StoredAuditEvent {
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
         id: id.into(),
         request_id: format!("req-{id}"),
         trace_id: None,

@@ -775,6 +775,7 @@ fn debit_workflow_budget_after_step(
             outcome: "stopped".to_string(),
             tool_call_id: None,
             message: Some(message.clone()),
+            ..Default::default()
         },
     ));
     state.record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
@@ -988,6 +989,7 @@ impl GatewayAgentToolDispatcher {
                 outcome: outcome.to_string(),
                 tool_call_id: Some(request.tool_call.id.clone()),
                 message: Some(message.into()),
+                ..Default::default()
             },
         ));
     }
@@ -1166,6 +1168,11 @@ impl AuditEventSink {
                 outcome: record.outcome,
                 tool_call_id: None,
                 message: record.message,
+                // #304: capability evidence carried by the framework event
+                // survives into the stored timeline row.
+                action_fingerprint: record.action_fingerprint,
+                decision: record.decision,
+                decision_reason: record.decision_reason,
             },
         ));
         Ok(())
@@ -1198,7 +1205,7 @@ impl TimelineEventContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct TimelineEventRecord {
     id: String,
     run_id: String,
@@ -1207,6 +1214,11 @@ struct TimelineEventRecord {
     outcome: String,
     tool_call_id: Option<String>,
     message: Option<String>,
+    /// #304 action-identity columns; `None` for timeline events without
+    /// capability evidence. See `StoredAgentRunEvent` for the value contracts.
+    action_fingerprint: Option<String>,
+    decision: Option<String>,
+    decision_reason: Option<String>,
 }
 
 fn stored_timeline_event(
@@ -1214,6 +1226,10 @@ fn stored_timeline_event(
     record: TimelineEventRecord,
 ) -> StoredAgentRunEvent {
     StoredAgentRunEvent {
+        action_fingerprint: record.action_fingerprint,
+        decision: record.decision,
+        decision_reason: record.decision_reason,
+        output_disposition: None,
         id: record.id,
         run_id: record.run_id,
         request_id: context.request_id,
@@ -1284,9 +1300,11 @@ impl AgentRunEventSink for AuditEventSink {
                 outcome: outcome.to_string(),
                 tool_call_id: event.tool_call_id,
                 message: Some(message.clone()),
+                ..Default::default()
             },
         ));
         self.state.record_admin_audit_event(AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: self.request_id.clone(),
             trace_id: self.trace_id.clone(),
             agent_run_id: Some(event.run_id),
@@ -1329,6 +1347,7 @@ struct AgentAuditEventContext<'a> {
 
 fn agent_audit_event(context: AgentAuditEventContext<'_>) -> AdminAuditEventDraft {
     AdminAuditEventDraft {
+        action_identity: Default::default(),
         request_id: context.ctx.request_id.clone(),
         trace_id: context.ctx.trace_id.clone(),
         agent_run_id: context.agent_run_id,
@@ -1441,6 +1460,9 @@ mod tests {
                 outcome: record.outcome,
                 tool_call_id: None,
                 message: record.message,
+                action_fingerprint: record.action_fingerprint,
+                decision: record.decision,
+                decision_reason: record.decision_reason,
             },
         );
 
@@ -1460,6 +1482,12 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("not allowed by capability policy"));
+        // #304: the canonical decision survives into the stored timeline row.
+        assert_eq!(stored.decision.as_deref(), Some("deny"));
+        assert_eq!(
+            stored.decision_reason.as_deref(),
+            Some(ferrogate_runtime::decision_codes::CAPABILITY_DENIED)
+        );
     }
 
     #[test]

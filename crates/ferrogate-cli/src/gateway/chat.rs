@@ -456,6 +456,7 @@ impl FerroGateway {
                     },
                 );
                 state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+                    action_identity: Default::default(),
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
                     agent_run_id: Some(agent_run_id.clone()),
@@ -1304,7 +1305,7 @@ impl FerroGateway {
                                             final_content_type = "application/json".into();
                                             final_error_code = Some(guardrail.code.clone());
                                             state.record_admin_audit_event(
-                                                crate::state::AdminAuditEventDraft {
+                                                crate::state::AdminAuditEventDraft { action_identity: Default::default(),
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
@@ -1340,7 +1341,7 @@ impl FerroGateway {
                                             let redacted_body = guardrail
                                                 .redact_text(&String::from_utf8_lossy(&final_body));
                                             state.record_admin_audit_event(
-                                                crate::state::AdminAuditEventDraft {
+                                                crate::state::AdminAuditEventDraft { action_identity: Default::default(),
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
@@ -1896,7 +1897,7 @@ impl FerroGateway {
                                     final_content_type = "application/json".into();
                                     final_error_code = Some(guardrail.code.clone());
                                     state.record_admin_audit_event(
-                                        crate::state::AdminAuditEventDraft {
+                                        crate::state::AdminAuditEventDraft { action_identity: Default::default(),
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
                                             agent_run_id: Some(agent_run_id.clone()),
@@ -1932,7 +1933,7 @@ impl FerroGateway {
                                     let redacted_body = guardrail
                                         .redact_text(&String::from_utf8_lossy(&final_body));
                                     state.record_admin_audit_event(
-                                        crate::state::AdminAuditEventDraft {
+                                        crate::state::AdminAuditEventDraft { action_identity: Default::default(),
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
                                             agent_run_id: Some(agent_run_id.clone()),

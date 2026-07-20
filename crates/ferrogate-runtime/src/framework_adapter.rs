@@ -14,7 +14,7 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use crate::{
-    self_hosted_trust_level_for_capability_report, CapabilityAction,
+    self_hosted_trust_level_for_capability_report, ActionDecision, CapabilityAction,
     CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence, CapabilityAuthorizer,
     ManagedCapabilityRequest, SelfHostedTelemetryTrustLevel,
 };
@@ -361,6 +361,15 @@ impl NormalizedFrameworkEvent {
         let event_json = serde_json::to_string(&self.canonical_json())
             .map_err(|error| FrameworkAdapterError::InvalidRequest(error.to_string()))?;
         let event_hash = fnv1a64_hex(&event_json);
+        // #304: promote the capability-authorization evidence carried in the
+        // event metadata into first-class timeline columns so the fingerprint
+        // and canonical decision survive persistence instead of being dropped.
+        let action_fingerprint = self
+            .metadata
+            .get("action_fingerprint")
+            .filter(|value| !value.is_empty())
+            .cloned();
+        let canonical_decision = self.canonical_capability_decision();
         Ok(FrameworkEventTimelineRecord {
             event_id: format!(
                 "framework:{}:{}:{}:{}:{}",
@@ -376,7 +385,30 @@ impl NormalizedFrameworkEvent {
             outcome: self.timeline_outcome().to_string(),
             message: self.message.clone(),
             event_json,
+            action_fingerprint,
+            decision: canonical_decision
+                .as_ref()
+                .map(|decision| decision.class_label().to_string()),
+            decision_reason: canonical_decision
+                .as_ref()
+                .map(|decision| decision.code().to_string()),
         })
+    }
+
+    /// Map the `decision` metadata label recorded by
+    /// `capability_authorization_event` (`allowed` / `denied` /
+    /// `approval_required`) into the canonical [`ActionDecision`] via the #303
+    /// `From<CapabilityAuthorizationDecision>` impl. Returns `None` for events
+    /// without a recognized capability decision — the mapping never guesses.
+    fn canonical_capability_decision(&self) -> Option<ActionDecision> {
+        match self.metadata.get("decision").map(String::as_str) {
+            Some("allowed") => Some(CapabilityAuthorizationDecision::Allowed.into()),
+            Some("denied") => Some(CapabilityAuthorizationDecision::Denied.into()),
+            Some("approval_required") => {
+                Some(CapabilityAuthorizationDecision::ApprovalRequired.into())
+            }
+            _ => None,
+        }
     }
 
     pub fn canonical_json(&self) -> serde_json::Value {
@@ -471,6 +503,19 @@ pub struct FrameworkEventTimelineRecord {
     pub outcome: String,
     pub message: Option<String>,
     pub event_json: String,
+    /// Target-level action fingerprint under the `canonical_target_sha256`
+    /// contract (issue #304): `"sha256:<hex>"`, exactly
+    /// [`crate::CapabilityAuthorizationEvidence::action_fingerprint`]. `None`
+    /// for events that did not pass through capability authorization.
+    pub action_fingerprint: Option<String>,
+    /// Canonical decision class (`"allow"` / `"deny"` / `"ask"` /
+    /// `"degrade"`, [`crate::ActionDecision::class_label`]) derived from the
+    /// capability decision recorded on the event; `None` when the event
+    /// carries no decision.
+    pub decision: Option<String>,
+    /// Stable reason code of the canonical decision
+    /// ([`crate::ActionDecision::code`]), e.g. `"capability_allowed"`.
+    pub decision_reason: Option<String>,
 }
 
 pub trait FrameworkAdapter {
@@ -1837,6 +1882,70 @@ mod tests {
         assert_eq!(event_json["kind"], "capability.denied");
         assert_eq!(event_json["metadata"]["decision"], "denied");
         assert_eq!(event_json["metadata"]["isolation_backend"], "firecracker");
+        // #304: the canonical decision survives into first-class timeline
+        // columns via the #303 mapping. This class-only request carries no
+        // canonical target, so its (empty) fingerprint projects to None.
+        assert_eq!(record.action_fingerprint, None);
+        assert_eq!(record.decision.as_deref(), Some("deny"));
+        assert_eq!(
+            record.decision_reason.as_deref(),
+            Some(crate::decision_codes::CAPABILITY_DENIED)
+        );
+    }
+
+    #[test]
+    fn capability_event_with_canonical_target_projects_the_action_fingerprint() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let authorizer = crate::SimpleCapabilityAuthorizer::default();
+        let target = crate::CanonicalCapabilityTarget::Filesystem {
+            path: "reports/summary.md".to_string(),
+            operation: crate::TargetOperation::Read,
+        };
+
+        let (evidence, event) = authorize_framework_capability(
+            &authorizer,
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Filesystem,
+                target: "reports/summary.md".to_string(),
+                canonical_target: Some(target.clone()),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        let record = event.timeline_record().unwrap();
+        // The persisted fingerprint EQUALS the authorizer evidence fingerprint
+        // under the canonical_target_sha256 contract.
+        assert_eq!(evidence.action_fingerprint, target.fingerprint());
+        assert_eq!(
+            record.action_fingerprint.as_deref(),
+            Some(evidence.action_fingerprint.as_str())
+        );
+        assert!(record
+            .action_fingerprint
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(record.decision.as_deref(), Some("deny"));
+        assert_eq!(
+            record.decision_reason.as_deref(),
+            Some(crate::decision_codes::CAPABILITY_DENIED)
+        );
+    }
+
+    #[test]
+    fn non_capability_events_project_no_decision_columns() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, started) = adapter.start_session(session_request()).unwrap();
+        let record = started.timeline_record().unwrap();
+        assert_eq!(record.action_fingerprint, None);
+        assert_eq!(record.decision, None);
+        assert_eq!(record.decision_reason, None);
+        let closed = adapter.close_session(&session).unwrap();
+        let record = closed.timeline_record().unwrap();
+        assert_eq!(record.decision, None);
     }
 
     fn session_request() -> FrameworkAdapterSessionRequest {

@@ -1965,6 +1965,65 @@ pub(crate) struct AdminAuditEventDraft {
     pub(crate) target: String,
     pub(crate) outcome: String,
     pub(crate) message: String,
+    /// #304: structured action-identity columns persisted alongside the
+    /// free-text `outcome`/`message` (which stay unchanged for humans).
+    pub(crate) action_identity: AuditActionIdentityDraft,
+}
+
+/// Optional #304 action-identity projection carried by an audit draft.
+/// `Default` (all `None`) keeps the many drafts without capability evidence
+/// unchanged; the tool-governance chokepoint fills in what it knows.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AuditActionIdentityDraft {
+    /// Target-level fingerprint under the `canonical_target_sha256` contract
+    /// (`ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`, `"sha256:<hex>"`).
+    /// Deliberately NOT the invocation-level tool-approval fingerprint — the
+    /// two-level contract in `ferrogate_runtime::action_identity` keeps those
+    /// distinct (the approval fingerprint stays in the human message).
+    pub(crate) action_fingerprint: Option<String>,
+    /// Canonical decision class (`"allow"`/`"deny"`/`"ask"`/`"degrade"`).
+    pub(crate) decision: Option<String>,
+    /// Stable decision reason code (`ferrogate_runtime::DecisionReason`).
+    pub(crate) decision_reason: Option<String>,
+    /// `"returned"`/`"redacted"`/`"withheld"`/`"errored"`.
+    pub(crate) output_disposition: Option<String>,
+}
+
+impl AuditActionIdentityDraft {
+    /// Derive the canonical decision columns from a chokepoint audit outcome
+    /// string via the #303 `AuditOutcome` mapping. Unknown outcomes map to no
+    /// decision (the mapping never guesses).
+    pub(crate) fn from_audit_outcome(outcome: &str) -> Self {
+        let decision = ferrogate_runtime::AuditOutcome::parse(outcome)
+            .decision()
+            .ok();
+        Self {
+            action_fingerprint: None,
+            decision: decision
+                .as_ref()
+                .map(|decision| decision.class_label().to_string()),
+            decision_reason: decision
+                .as_ref()
+                .map(|decision| decision.code().to_string()),
+            output_disposition: None,
+        }
+    }
+
+    pub(crate) fn with_output_disposition(
+        mut self,
+        disposition: ferrogate_runtime::OutputDisposition,
+    ) -> Self {
+        self.output_disposition = Some(
+            match disposition {
+                ferrogate_runtime::OutputDisposition::Returned => "returned",
+                ferrogate_runtime::OutputDisposition::Redacted => "redacted",
+                ferrogate_runtime::OutputDisposition::Withheld => "withheld",
+                ferrogate_runtime::OutputDisposition::Errored => "errored",
+            }
+            .to_string(),
+        );
+        self
+    }
 }
 
 #[derive(Debug, Clone)]

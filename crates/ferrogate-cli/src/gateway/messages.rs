@@ -317,6 +317,7 @@ impl FerroGateway {
                     &guardrail.code,
                 );
                 state.record_admin_audit_event(AdminAuditEventDraft {
+                    action_identity: Default::default(),
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
                     agent_run_id: None,
@@ -860,7 +861,7 @@ impl FerroGateway {
                     state.record_guardrail_match(&guardrail);
                     match guardrail.effect {
                         GuardrailEffect::Deny => {
-                            state.record_admin_audit_event(AdminAuditEventDraft {
+                            state.record_admin_audit_event(AdminAuditEventDraft { action_identity: Default::default(),
                                 request_id: ctx.request_id.clone(),
                                 trace_id: ctx.trace_id.clone(),
                                 agent_run_id: None,
@@ -906,7 +907,7 @@ impl FerroGateway {
                             {
                                 final_completion = value;
                             }
-                            state.record_admin_audit_event(AdminAuditEventDraft {
+                            state.record_admin_audit_event(AdminAuditEventDraft { action_identity: Default::default(),
                                 request_id: ctx.request_id.clone(),
                                 trace_id: ctx.trace_id.clone(),
                                 agent_run_id: None,

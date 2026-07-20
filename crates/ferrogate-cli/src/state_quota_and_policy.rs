@@ -333,6 +333,7 @@ impl AppState {
                     })
                     .unwrap_or(detector_stage);
                 self.record_guardrail_audit_event(AdminAuditEventDraft {
+                    action_identity: Default::default(),
                     request_id: context.request_id.to_string(),
                     trace_id: context.trace_id.map(str::to_string),
                     agent_run_id: context.agent_run_id.map(str::to_string),
@@ -463,7 +464,7 @@ impl AppState {
                 (false, false, AggregateOutcome::Fail) => "fail",
                 (false, false, AggregateOutcome::Error) => "error",
             };
-            self.record_guardrail_audit_event(AdminAuditEventDraft {
+            self.record_guardrail_audit_event(AdminAuditEventDraft { action_identity: Default::default(),
                 request_id: context.request_id.to_string(),
                 trace_id: context.trace_id.map(str::to_string),
                 agent_run_id: context.agent_run_id.map(str::to_string),
@@ -621,6 +622,7 @@ impl AppState {
             .collect::<Vec<_>>();
         for policy in policies {
             self.record_guardrail_audit_event(AdminAuditEventDraft {
+                action_identity: Default::default(),
                 request_id: context.request_id.to_string(),
                 trace_id: context.trace_id.map(str::to_string),
                 agent_run_id: context.agent_run_id.map(str::to_string),
@@ -697,6 +699,7 @@ impl AppState {
                 )
             });
             self.record_guardrail_audit_event(AdminAuditEventDraft {
+                action_identity: Default::default(),
                 request_id: context.request_id.to_string(),
                 trace_id: context.trace_id.map(str::to_string),
                 agent_run_id: context.agent_run_id.map(str::to_string),
@@ -786,6 +789,7 @@ impl AppState {
             "guardrail detector evaluation failed"
         );
         self.record_guardrail_audit_event(AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: context.request_id.to_string(),
             trace_id: context.trace_id.map(str::to_string),
             agent_run_id: context.agent_run_id.map(str::to_string),

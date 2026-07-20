@@ -3594,7 +3594,33 @@ impl FerroGateway {
 
         match result {
             Ok(response) => {
-                state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                // #200: OUTPUT guardrail. Evaluate the tool result before the
+                // caller consumes it. A `Redact`-effect match (quarantine with
+                // safe redaction evidence) rewrites the result in place via the
+                // detector's content patches; any other blocking match withholds
+                // the flagged content entirely (fail-closed). Either way, raw
+                // flagged output never leaves the gateway.
+                //
+                // #304: evaluated BEFORE the tool.execute success row is
+                // recorded so that row's structured `output_disposition` column
+                // reflects what the caller actually received (returned /
+                // redacted / withheld) instead of a pre-guardrail guess. Audit
+                // row order and prose messages are unchanged.
+                let output_guardrail_match = evaluate_managed_action_guardrail_async(
+                    &state,
+                    GuardrailStage::Response,
+                    &guardrail_request,
+                    payload_text(&response.content),
+                )
+                .await;
+                let output_disposition = match &output_guardrail_match {
+                    None => ferrogate_runtime::OutputDisposition::Returned,
+                    Some(matched) if matched.effect == GuardrailEffect::Redact => {
+                        ferrogate_runtime::OutputDisposition::Redacted
+                    }
+                    Some(_) => ferrogate_runtime::OutputDisposition::Withheld,
+                };
+                let mut success_audit = tool_audit_event_draft_for_target(
                     ctx,
                     auth,
                     execution,
@@ -3607,24 +3633,15 @@ impl FerroGateway {
                         "executed",
                         Some(response.latency_ms),
                     ),
-                ));
-                // #200: OUTPUT guardrail. Evaluate the tool result before the
-                // caller consumes it. A `Redact`-effect match (quarantine with
-                // safe redaction evidence) rewrites the result in place via the
-                // detector's content patches; any other blocking match withholds
-                // the flagged content entirely (fail-closed). Either way, raw
-                // flagged output never leaves the gateway.
-                if let Some(matched) = evaluate_managed_action_guardrail_async(
-                    &state,
-                    GuardrailStage::Response,
-                    &guardrail_request,
-                    payload_text(&response.content),
-                )
-                .await
-                {
+                );
+                success_audit.action_identity = success_audit
+                    .action_identity
+                    .with_output_disposition(output_disposition);
+                state.record_admin_audit_event(success_audit);
+                if let Some(matched) = output_guardrail_match {
                     if matched.effect == GuardrailEffect::Redact {
                         let redacted = matched.redact_text(&payload_text(&response.content));
-                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                        let mut redacted_audit = tool_audit_event_draft_for_target(
                             ctx,
                             auth,
                             execution,
@@ -3635,14 +3652,21 @@ impl FerroGateway {
                                 "tool output redacted by guardrail policy {} ({}): {}",
                                 matched.rule_id, matched.code, matched.message
                             ),
-                        ));
+                        );
+                        // Structured replacement for the prose-only evidence
+                        // (#304): the output was rewritten before return.
+                        redacted_audit.action_identity =
+                            redacted_audit.action_identity.with_output_disposition(
+                                ferrogate_runtime::OutputDisposition::Redacted,
+                            );
+                        state.record_admin_audit_event(redacted_audit);
                         return Ok(ToolExecutionResponse {
                             content: serde_json::Value::String(redacted),
                             is_error: false,
                             ..response
                         });
                     }
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                    let mut withheld_audit = tool_audit_event_draft_for_target(
                         ctx,
                         auth,
                         execution,
@@ -3653,7 +3677,13 @@ impl FerroGateway {
                             "tool output withheld by guardrail policy {} ({}): {}",
                             matched.rule_id, matched.code, matched.message
                         ),
-                    ));
+                    );
+                    // Structured replacement for the prose-only evidence
+                    // (#304): the flagged output was withheld entirely.
+                    withheld_audit.action_identity = withheld_audit
+                        .action_identity
+                        .with_output_disposition(ferrogate_runtime::OutputDisposition::Withheld);
+                    state.record_admin_audit_event(withheld_audit);
                     return Ok(ToolExecutionResponse {
                         content: serde_json::json!({
                             "error": "tool_output_blocked_by_guardrail",
@@ -3667,7 +3697,7 @@ impl FerroGateway {
                 Ok(response)
             }
             Err(error) => {
-                state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                let mut error_audit = tool_audit_event_draft_for_target(
                     ctx,
                     auth,
                     execution,
@@ -3680,7 +3710,12 @@ impl FerroGateway {
                         error.code(),
                         error.message(),
                     ),
-                ));
+                );
+                // #304: execution failed, so there is no output to dispose of.
+                error_audit.action_identity = error_audit
+                    .action_identity
+                    .with_output_disposition(ferrogate_runtime::OutputDisposition::Errored);
+                state.record_admin_audit_event(error_audit);
                 Err(ToolExecutionHttpError {
                     status: error.status(),
                     code: error.code(),
@@ -8997,6 +9032,7 @@ impl FerroGateway {
         {
             state.record_guardrail_match(&guardrail);
             state.record_admin_audit_event(AdminAuditEventDraft {
+                action_identity: Default::default(),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 agent_run_id: None,
@@ -9039,6 +9075,7 @@ impl FerroGateway {
             state.evaluate_policy(&policy_request, None, Some(&agent_id))
         {
             state.record_admin_audit_event(AdminAuditEventDraft {
+                action_identity: Default::default(),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 agent_run_id: None,
@@ -9138,6 +9175,7 @@ impl FerroGateway {
             match guardrail.effect {
                 GuardrailEffect::Deny => {
                     state.record_admin_audit_event(AdminAuditEventDraft {
+                        action_identity: Default::default(),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
                         agent_run_id: None,
@@ -9178,6 +9216,7 @@ impl FerroGateway {
                         .redact_text(&String::from_utf8_lossy(&response_body))
                         .into_bytes();
                     state.record_admin_audit_event(AdminAuditEventDraft {
+                        action_identity: Default::default(),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
                         agent_run_id: None,
@@ -10752,6 +10791,7 @@ pub(super) fn admin_audit_event_draft_for_target(
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
     AdminAuditEventDraft {
+        action_identity: Default::default(),
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         agent_run_id: None,
@@ -10777,6 +10817,10 @@ fn tool_audit_event_draft_for_target(
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
     let mut event = admin_audit_event_draft_for_target(ctx, auth, action, target, outcome, message);
+    // #304: every tool-governance audit row carries the canonical decision
+    // derived from its outcome via the #303 AuditOutcome mapping. The prose
+    // outcome/message stay unchanged for humans; the columns are additive.
+    event.action_identity = crate::state::AuditActionIdentityDraft::from_audit_outcome(outcome);
     event.agent_run_id = execution.agent_run_id.map(str::to_string);
     event.workflow_id = execution.workflow_id.map(str::to_string);
     event.workflow_version = execution.workflow_version;

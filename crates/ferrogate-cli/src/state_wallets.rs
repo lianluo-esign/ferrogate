@@ -311,6 +311,7 @@ impl AppState {
         message: String,
     ) {
         self.record_admin_audit_event(AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: self.next_request_id(),
             trace_id: None,
             agent_run_id: None,

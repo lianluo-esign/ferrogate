@@ -512,6 +512,7 @@ impl AppState {
             ));
         }
         self.record_admin_audit_event(AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: request_id.to_string(),
             trace_id,
             agent_run_id: None,

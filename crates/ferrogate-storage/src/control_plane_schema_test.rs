@@ -297,6 +297,10 @@ fn live_audit_event_writes_to_configured_schema_not_public() {
 
     let repositories = open_repositories(&dsn, &schema);
     block_on(repositories.append_audit_event(StoredAuditEvent {
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
         id: id.clone(),
         request_id: format!("req-{id}"),
         trace_id: None,

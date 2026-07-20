@@ -236,6 +236,28 @@ fn quarantine_guardrail_redacts_tool_execute_output() {
         }),
         "missing guardrail redacted evidence: {audit_events}"
     );
+    // #304: the redaction is recorded structurally, not just in prose — the
+    // audit row carries output_disposition = "redacted" and the canonical
+    // `degrade` decision derived from the redacted outcome.
+    assert!(
+        events.iter().any(|event| {
+            event["action"] == "tool.guardrail"
+                && event["outcome"] == "redacted"
+                && event["output_disposition"] == "redacted"
+                && event["decision"] == "degrade"
+                && event["decision_reason"] == "audit_redacted"
+        }),
+        "missing structured output_disposition on the redacted audit row: {audit_events}"
+    );
+    // The tool.execute success row reflects what the caller actually received.
+    assert!(
+        events.iter().any(|event| {
+            event["action"] == "tool.execute"
+                && event["outcome"] == "success"
+                && event["output_disposition"] == "redacted"
+        }),
+        "tool.execute row must carry the post-guardrail disposition: {audit_events}"
+    );
     assert!(
         !audit_events.to_string().contains("SECRETLEAK"),
         "durable audit evidence must not carry the raw flagged output: {audit_events}"

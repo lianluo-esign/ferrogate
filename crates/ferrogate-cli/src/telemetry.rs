@@ -1555,6 +1555,10 @@ mod tests {
             completed_at_unix: Some(3),
         });
         state.record_agent_run_event(StoredAgentRunEvent {
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
             id: "agent-event-1".into(),
             run_id: "agent-run-1".into(),
             request_id: "fg-1".into(),
@@ -1605,6 +1609,7 @@ mod tests {
             completed_at_unix: Some(2),
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: Some("agent-run-1".into()),
@@ -1735,6 +1740,7 @@ mod tests {
             completed_at_unix: Some(2),
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
@@ -1945,6 +1951,7 @@ mod tests {
             completed_at_unix: Some(2),
         });
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            action_identity: Default::default(),
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,

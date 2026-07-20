@@ -305,6 +305,7 @@ impl FerroGateway {
                     &guardrail.code,
                 );
                 state.record_admin_audit_event(AdminAuditEventDraft {
+                    action_identity: Default::default(),
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
                     agent_run_id: None,

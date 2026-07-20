@@ -13578,6 +13578,34 @@
               "null"
             ],
             "minimum": 0
+          },
+          "action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: target-level action fingerprint under the canonical_target_sha256 contract (\"sha256:<hex>\"). Null/absent on rows recorded before migration 045 or without capability evidence."
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: canonical governance decision class: allow | deny | ask | degrade."
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: stable decision reason code, e.g. capability_allowed, audit_redacted, guardrail:fail:block:enforced."
+          },
+          "output_disposition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: what happened to the action's output: returned | redacted | withheld | errored."
           }
         },
         "additionalProperties": false
@@ -14052,6 +14080,34 @@
               "null"
             ],
             "minimum": 0
+          },
+          "action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: target-level action fingerprint under the canonical_target_sha256 contract (\"sha256:<hex>\"). Null/absent on rows recorded before migration 045 or without capability evidence."
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: canonical governance decision class: allow | deny | ask | degrade."
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: stable decision reason code, e.g. capability_allowed, audit_redacted, guardrail:fail:block:enforced."
+          },
+          "output_disposition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #304: what happened to the action's output: returned | redacted | withheld | errored."
           }
         },
         "additionalProperties": false

@@ -522,6 +522,12 @@ impl AppState {
         event: AdminAuditEventDraft,
     ) -> StoredAuditEvent {
         StoredAuditEvent {
+            // #304: the structured action-identity columns ride along with the
+            // free-text outcome/message.
+            action_fingerprint: event.action_identity.action_fingerprint,
+            decision: event.action_identity.decision,
+            decision_reason: event.action_identity.decision_reason,
+            output_disposition: event.action_identity.output_disposition,
             id: self.repositories.next_audit_event_id(),
             request_id: event.request_id,
             trace_id: event.trace_id,
@@ -1399,6 +1405,7 @@ mod tests {
                 completed_at_unix: None,
             });
             state.record_admin_audit_event(AdminAuditEventDraft {
+                action_identity: Default::default(),
                 request_id: format!("fg-{index}"),
                 trace_id: None,
                 agent_run_id: None,

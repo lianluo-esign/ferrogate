@@ -26,6 +26,10 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 fn audit_event(id: &str) -> StoredAuditEvent {
     StoredAuditEvent {
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
         id: id.into(),
         request_id: "request".into(),
         trace_id: Some("trace".into()),
