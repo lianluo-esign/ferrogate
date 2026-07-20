@@ -104,6 +104,36 @@ impl AppState {
         Ok(self.repositories.delete_asset_channel(id).await?)
     }
 
+    /// Binds (or re-binds) a custom hostname to a `{tenant}/{site}` static
+    /// site (#265). The caller audits the change via the admin audit-event
+    /// path and normalizes/validates the hostname first.
+    pub(crate) async fn upsert_site_domain(
+        &self,
+        domain: ferrogate_storage::StoredSiteDomain,
+    ) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_site_domain(domain).await?)
+    }
+
+    pub(crate) async fn get_site_domain(
+        &self,
+        hostname: &str,
+    ) -> anyhow::Result<Option<ferrogate_storage::StoredSiteDomain>> {
+        Ok(self.repositories.get_site_domain(hostname).await?)
+    }
+
+    /// Lists bindings; `None` is the platform-operator all-tenants view (also
+    /// used at startup to merge bound hostnames into the ACME domain set).
+    pub(crate) async fn list_site_domains(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ferrogate_storage::StoredSiteDomain>> {
+        Ok(self.repositories.list_site_domains(tenant_id).await?)
+    }
+
+    pub(crate) async fn delete_site_domain(&self, hostname: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_site_domain(hostname).await?)
+    }
+
     /// Cumulative stored bytes for a tenant across all asset types, used to
     /// enforce `StoredPlan::default_asset_storage_quota_bytes` at push time.
     pub(crate) async fn tenant_asset_storage_bytes_used(

@@ -4549,6 +4549,17 @@ impl AppState {
         self.acme_renewal.as_ref().map(|state| state.snapshot())
     }
 
+    /// Records a runtime ACME domain-set change (site custom domain bound or
+    /// unbound, #265) on the shared renewal status: the tracked domain set is
+    /// updated and `reload_required` is raised so the admin status surfaces
+    /// that the certificate needs the listener-level graceful upgrade to cover
+    /// the change. No-op when ACME renewal is not active.
+    pub(crate) fn mark_acme_domains_changed(&self, hostname: &str, bound: bool) {
+        if let Some(renewal) = self.acme_renewal.as_ref() {
+            renewal.mark_domains_changed(hostname, bound);
+        }
+    }
+
     pub(crate) fn should_log_access(
         &self,
         request_id: &str,

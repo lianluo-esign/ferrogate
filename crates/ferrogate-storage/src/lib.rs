@@ -225,6 +225,9 @@ pub use agent_schedule::{
     StoredAgentScheduleFire,
 };
 
+mod site_domain;
+pub use site_domain::StoredSiteDomain;
+
 mod metadata_rollups;
 use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
@@ -530,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 43;
-const POSTGRES_SCHEMA_NAME: &str = "043_retention_policies";
+const POSTGRES_SCHEMA_VERSION: u64 = 44;
+const POSTGRES_SCHEMA_NAME: &str = "044_site_domains";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1223,6 +1226,8 @@ pub struct RuntimeControlPlaneState {
     /// Generalizable retention rules keyed by
     /// `retention_policy_id(tenant_id, resource_type, scope)` (#263).
     retention_policies: InMemoryRepository<StoredRetentionPolicy>,
+    /// Custom-domain -> static-site bindings keyed by hostname (#265).
+    site_domains: InMemoryRepository<StoredSiteDomain>,
 }
 
 struct PostgresControlPlaneStore {
@@ -7600,6 +7605,7 @@ where
         "agent_schedule_fires",
         "workflow_run_budgets",
         "retention_policies",
+        "site_domains",
     ];
     for table in TABLES {
         let exists = client
@@ -7959,6 +7965,7 @@ where
         "idx_admin_user_tenant_memberships_tenant",
         "idx_admin_user_refresh_tokens_user",
         "idx_admin_user_refresh_tokens_hash",
+        "idx_site_domains_tenant",
     ];
     for index in INDEXES {
         let count = client
@@ -9274,6 +9281,7 @@ impl RuntimeControlPlaneState {
             agent_schedule_fires: InMemoryRepository::new(),
             workflow_run_budgets: InMemoryRepository::new(),
             retention_policies: InMemoryRepository::new(),
+            site_domains: InMemoryRepository::new(),
         }
     }
 
@@ -14861,6 +14869,10 @@ mod replay_floor_test;
 #[cfg(test)]
 #[path = "agent_schedule_test.rs"]
 mod agent_schedule_test;
+
+#[cfg(test)]
+#[path = "site_domain_test.rs"]
+mod site_domain_test;
 
 #[cfg(test)]
 #[path = "usage_metadata_schema_test.rs"]

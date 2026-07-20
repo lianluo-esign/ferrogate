@@ -41,6 +41,7 @@ mod rbac;
 mod responses_stream;
 mod route_groups;
 mod shadow;
+mod site_domains;
 mod sites;
 mod usage_reports;
 mod virtual_keys;
@@ -181,18 +182,41 @@ pub(crate) struct FerroGateway {
 
 pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool) -> AnyResult<()> {
     let listen = config.listen.clone();
-    let tls = config.tls.clone();
+    let mut tls = config.tls.clone();
     crate::responses::set_cors_allowed_origin(config.admin.cors_allowed_origin.clone());
     write_runtime_pid_file(&config)?;
     let server_conf = pingora_server_conf(&config);
+    // The control plane is opened BEFORE TLS resolution so bound site custom
+    // domains (#265) can be merged into the ACME certificate domain set:
+    // initial issuance and the renewal loop below then cover them through the
+    // exact same multi-SAN order as the statically configured domains.
+    let state = SharedAppState::try_with_source_path(config, source_path)?;
+    if tls.acme.enabled {
+        match block_on_sync_bridge(state.current().list_site_domains(None)) {
+            Ok(domains) => {
+                let added = crate::acme::merge_acme_domains(
+                    &mut tls.acme,
+                    domains.into_iter().map(|domain| domain.hostname),
+                );
+                if !added.is_empty() {
+                    info!(
+                        domains = added.join(","),
+                        "merged bound site custom domains into the ACME certificate domain set"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to load site custom domains for ACME issuance: {error}");
+            }
+        }
+    }
     let resolved_tls = resolve_tls_certificate_paths(&tls)?;
     let acme_renewal_state = resolved_tls.as_ref().and_then(|paths| {
         tls.acme
             .enabled
             .then(|| Arc::new(SharedAcmeRenewalState::new(&tls.acme, paths)))
     });
-    let state = SharedAppState::try_with_source_path(config, source_path)?
-        .with_acme_renewal_state(acme_renewal_state.clone());
+    let state = state.with_acme_renewal_state(acme_renewal_state.clone());
     let _otlp_sender = start_otlp_background_sender(state.current());
     let _analytics_sender = start_analytics_background_sender(state.current());
     let _acme_renewal =

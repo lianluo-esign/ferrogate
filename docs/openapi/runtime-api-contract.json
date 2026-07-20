@@ -375,6 +375,14 @@
       "group": "site"
     },
     {
+      "pattern": "/admin/v1/site-domains",
+      "group": "site_domain"
+    },
+    {
+      "pattern": "/admin/v1/site-domains/{*rest}",
+      "group": "site_domain"
+    },
+    {
       "pattern": "/admin/v1/permissions",
       "group": "rbac"
     },
@@ -2317,6 +2325,50 @@
       "path": "/admin/v1/quota-policies/{scope_type}/{scope_id}",
       "method": "delete",
       "operation_id": "deleteQuotaPolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/site-domains",
+      "method": "get",
+      "operation_id": "listSiteDomains",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/site-domains",
+      "method": "post",
+      "operation_id": "bindSiteDomain",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/site-domains/{hostname}",
+      "method": "get",
+      "operation_id": "getSiteDomain",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/site-domains/{hostname}",
+      "method": "delete",
+      "operation_id": "unbindSiteDomain",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

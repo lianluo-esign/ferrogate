@@ -123,8 +123,28 @@ impl FerroGateway {
         let site = parts.next().unwrap_or("").to_string();
         let file_path = parts.next().unwrap_or("").to_string();
 
+        self.serve_site_and_log(session, ctx, headers, method, &tenant, &site, &file_path)
+            .await
+    }
+
+    /// Shared serve entry point for both resolution surfaces: the path-based
+    /// `/sites/{tenant}/{site}/{path...}` route and a bound custom hostname
+    /// (`Host: mysite.example.com`, #265). Serves the file (with the same
+    /// visibility gating either way) and emits a request log so browse traffic
+    /// shows up in the admin request-log surface like any other gateway route.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn serve_site_and_log(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        tenant: &str,
+        site: &str,
+        file_path: &str,
+    ) -> PingoraResult<()> {
         let status = self
-            .serve_site_file(session, ctx, headers, method, &tenant, &site, &file_path)
+            .serve_site_file(session, ctx, headers, method, tenant, site, file_path)
             .await?;
 
         self.state
@@ -139,7 +159,7 @@ impl FerroGateway {
                 cluster_id: None,
                 node_id: None,
                 tenant: ferrogate_core::TenantContext {
-                    organization_id: (!tenant.is_empty()).then(|| tenant.clone()),
+                    organization_id: (!tenant.is_empty()).then(|| tenant.to_string()),
                     team_id: None,
                     project_id: None,
                     workspace_id: None,
@@ -561,7 +581,7 @@ impl FerroGateway {
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
-    async fn load_site_manifest(
+    pub(super) async fn load_site_manifest(
         &self,
         tenant_id: &str,
         site: &str,

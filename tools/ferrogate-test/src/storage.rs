@@ -1300,10 +1300,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 43",
+         FROM {}.storage_schema_migrations WHERE version = 44",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "43:043_retention_policies" {
+    if migration_version.trim() != "44:044_site_domains" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 

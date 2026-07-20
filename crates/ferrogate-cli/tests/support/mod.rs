@@ -28,8 +28,14 @@ pub fn start_gateway(config: &std::path::Path) -> Child {
 }
 
 pub fn wait_for_gateway(addr: &str) {
+    // Generous readiness window: a Supabase-backed gateway re-runs the full
+    // idempotent schema batch and the ~150-probe validate_schema pass against
+    // a REMOTE pooler before listening, which takes minutes at cross-region
+    // round-trip latencies (~300ms/query). Fast (local/in-memory) environments
+    // are unaffected -- this only bounds how long a genuinely broken startup
+    // waits before failing.
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < Duration::from_secs(300) {
         if let Ok(mut stream) = TcpStream::connect(addr) {
             stream
                 .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -73,6 +79,38 @@ pub fn http_request_bytes(
 
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
+    response
+}
+
+/// Like [`http_request`] but with an explicit `Host` header, for exercising
+/// host-based resolution (e.g. custom-domain static-site serving, #265) --
+/// `http_request` always sends `Host: localhost`.
+#[allow(dead_code)]
+pub fn http_request_with_host(
+    addr: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> String {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    )
+    .unwrap();
+    for header in headers {
+        write!(stream, "{header}\r\n").unwrap();
+    }
+    write!(stream, "\r\n{body}").unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
     response
 }
 

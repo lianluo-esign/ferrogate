@@ -163,6 +163,20 @@ impl FerroGateway {
             .map(normalize_host)
             .filter(|value| !value.is_empty());
 
+        // Custom-domain static-site resolution (#265): a hostname explicitly
+        // bound to a `{tenant}/{site}` serves that site (with the site's own
+        // visibility gating) before dynamic host/path proxy routes are
+        // consulted -- binding is an explicit admin action, so it wins for
+        // that hostname. Unbound hostnames fall through unchanged.
+        if let Some(bound_host) = normalized_host.as_deref() {
+            if self
+                .try_custom_domain_site_serve(session, ctx, &parts, bound_host)
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+
         let Some(route) =
             state.match_runtime_route(normalized_host.as_deref(), &path, &parts.headers)
         else {

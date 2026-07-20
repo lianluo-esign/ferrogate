@@ -2133,3 +2133,27 @@ CREATE INDEX IF NOT EXISTS idx_retention_policies_tenant_resource
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (43, '043_retention_policies')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 44 (#265): custom-domain bindings for hosted static sites. A row
+-- maps one exact hostname (normalized lowercase, no port) to the
+-- `{tenant}/{site}` a `Host: <hostname>` request should serve through the
+-- existing `/sites/{tenant}/{site}/{path...}` resolution (#258). The hostname
+-- is the primary key: a hostname can point at exactly one site, while a site
+-- may be reachable through several hostnames. Binding/unbinding is an audited
+-- admin action; TLS for bound hostnames rides the existing ACME issuance +
+-- graceful-upgrade reload (no separate PKI path).
+CREATE TABLE IF NOT EXISTS site_domains (
+    hostname TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    created_at_unix BIGINT NOT NULL,
+    updated_at_unix BIGINT NOT NULL
+);
+
+-- Admin listings resolve per tenant; serve-path lookups hit the PK directly.
+CREATE INDEX IF NOT EXISTS idx_site_domains_tenant
+    ON site_domains(tenant_id);
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (44, '044_site_domains')
+ON CONFLICT (version) DO NOTHING;

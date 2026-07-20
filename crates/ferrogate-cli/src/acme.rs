@@ -179,6 +179,27 @@ impl SharedAcmeRenewalState {
         }
     }
 
+    /// Records that the ACME domain set changed at runtime (a site custom
+    /// domain was bound/unbound, #265). The running renewal loop owns the
+    /// startup-time domain set, so the expanded/shrunk certificate is picked
+    /// up by the next listener-level graceful upgrade -- the same reload path
+    /// a scheduled renewal uses. Until then the admin status surfaces
+    /// `reload_required = true` plus the updated domain set.
+    pub(crate) fn mark_domains_changed(&self, hostname: &str, bound: bool) {
+        self.update(|status| {
+            let hostname = hostname.to_string();
+            if bound {
+                if !status.domains.contains(&hostname) {
+                    status.domains.push(hostname);
+                }
+            } else {
+                status.domains.retain(|domain| domain != &hostname);
+            }
+            status.reload_required = true;
+            status.reload_mode = "listener-level-graceful-upgrade";
+        });
+    }
+
     fn update(&self, update: impl FnOnce(&mut AcmeRenewalStatus)) {
         match self.inner.lock() {
             Ok(mut status) => update(&mut status),
@@ -200,6 +221,35 @@ impl AcmeCertificateRenewer for IssuingAcmeRenewer {
     fn renew(&self, acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AnyResult<()> {
         issue_certificate_blocking(acme, paths)
     }
+}
+
+/// Merges extra hostnames (bound site custom domains, #265) into the ACME
+/// certificate domain set, returning the hostnames actually added. Both the
+/// initial issuance (`ensure_certificate`) and the background renewal loop
+/// consume the merged `TlsAcmeConfig`, so a bound hostname enters the same
+/// multi-SAN order and renewal schedule as the statically configured domains
+/// -- no separate PKI path. Hostnames are normalized lowercase and
+/// deduplicated case-insensitively; empty entries are skipped.
+pub(crate) fn merge_acme_domains(
+    acme: &mut TlsAcmeConfig,
+    extra: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut added = Vec::new();
+    for hostname in extra {
+        let hostname = hostname.trim().to_ascii_lowercase();
+        if hostname.is_empty() {
+            continue;
+        }
+        let known = acme
+            .domains
+            .iter()
+            .any(|domain| domain.trim().eq_ignore_ascii_case(&hostname));
+        if !known && !added.contains(&hostname) {
+            acme.domains.push(hostname.clone());
+            added.push(hostname);
+        }
+    }
+    added
 }
 
 pub(crate) fn ensure_certificate(acme: &TlsAcmeConfig) -> AnyResult<AcmeCertificatePaths> {
@@ -1421,6 +1471,78 @@ mod tests {
     use super::*;
     use crate::config::TlsAcmeConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn merge_acme_domains_appends_only_new_hostnames() {
+        let mut acme = TlsAcmeConfig {
+            domains: vec!["gateway.example.com".to_string()],
+            ..TlsAcmeConfig::default()
+        };
+        let added = merge_acme_domains(
+            &mut acme,
+            vec![
+                "mysite.example.com".to_string(),
+                // Case-insensitive duplicate of a configured domain.
+                "Gateway.Example.Com".to_string(),
+                // Duplicate of an entry merged in this same call.
+                "mysite.example.com".to_string(),
+                // Blank entries are skipped.
+                "  ".to_string(),
+            ],
+        );
+        assert_eq!(added, vec!["mysite.example.com".to_string()]);
+        assert_eq!(
+            acme.domains,
+            vec![
+                "gateway.example.com".to_string(),
+                "mysite.example.com".to_string(),
+            ],
+            "the configured domain order is preserved and bound hostnames follow",
+        );
+    }
+
+    #[test]
+    fn mark_domains_changed_flags_reload_and_tracks_the_domain_set() {
+        let acme = TlsAcmeConfig {
+            enabled: true,
+            domains: vec!["gateway.example.com".to_string()],
+            ..TlsAcmeConfig::default()
+        };
+        let paths = AcmeCertificatePaths {
+            cert_path: "/tmp/fullchain.pem".to_string(),
+            key_path: "/tmp/privkey.pem".to_string(),
+        };
+        let state = SharedAcmeRenewalState::new(&acme, &paths);
+        assert!(!state.snapshot().reload_required);
+
+        state.mark_domains_changed("mysite.example.com", true);
+        let status = state.snapshot();
+        assert!(status.reload_required, "binding requires a reload");
+        assert_eq!(status.reload_mode, "listener-level-graceful-upgrade");
+        assert!(
+            status.domains.contains(&"mysite.example.com".to_string()),
+            "the bound hostname enters the tracked renewal domain set",
+        );
+        // Binding the same hostname again does not duplicate it.
+        state.mark_domains_changed("mysite.example.com", true);
+        assert_eq!(
+            state
+                .snapshot()
+                .domains
+                .iter()
+                .filter(|domain| domain.as_str() == "mysite.example.com")
+                .count(),
+            1
+        );
+
+        state.mark_domains_changed("mysite.example.com", false);
+        let status = state.snapshot();
+        assert!(
+            !status.domains.contains(&"mysite.example.com".to_string()),
+            "unbinding removes the hostname from the tracked set",
+        );
+        assert!(status.reload_required);
+    }
 
     #[test]
     fn dns01_record_name_strips_wildcard_and_adds_fqdn_dot() {

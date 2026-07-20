@@ -9947,6 +9947,210 @@
           }
         }
       }
+    },
+    "/admin/v1/site-domains": {
+      "get": {
+        "operationId": "listSiteDomains",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List custom-domain bindings for hosted static sites (tenant scoped).",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Site domain binding list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "bindSiteDomain",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Bind a custom hostname to a hosted static site (audited; TLS rides the existing ACME issuance + graceful-upgrade reload).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSiteDomainMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Site domain bound.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Existing binding for the hostname updated (re-bound within the same tenant).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/site-domains/{hostname}": {
+      "get": {
+        "operationId": "getSiteDomain",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Fetch one custom-domain binding by hostname.",
+        "parameters": [
+          {
+            "name": "hostname",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Site domain binding.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "unbindSiteDomain",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Unbind a custom hostname from its hosted static site (audited).",
+        "parameters": [
+          {
+            "name": "hostname",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Site domain unbound.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -16399,48 +16603,373 @@
       },
       "AdminManagedWorkerCapabilityPolicy": {
         "type": "object",
-        "required": ["revision", "class_only_policy_mode", "target_level_enforced", "action_fingerprint_contract", "exact_action_approval_enforced", "target_grants"],
+        "required": [
+          "revision",
+          "class_only_policy_mode",
+          "target_level_enforced",
+          "action_fingerprint_contract",
+          "exact_action_approval_enforced",
+          "target_grants"
+        ],
         "properties": {
-          "revision": {"type": "string", "minLength": 1},
-          "class_only_policy_mode": {"type": "string", "enum": ["deny", "legacy_class_wide"]},
-          "target_level_enforced": {"type": "boolean", "description": "False while explicit legacy_class_wide migration mode permits class-only grants."},
-          "action_fingerprint_contract": {"type": "string", "const": "canonical_target_sha256", "description": "Stable fingerprint emitted for approval and Guardrail consumers."},
-          "exact_action_approval_enforced": {"type": "boolean", "const": false, "description": "False until the #200 exact-action approval workflow consumes and rechecks this fingerprint."},
+          "revision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "class_only_policy_mode": {
+            "type": "string",
+            "enum": [
+              "deny",
+              "legacy_class_wide"
+            ]
+          },
+          "target_level_enforced": {
+            "type": "boolean",
+            "description": "False while explicit legacy_class_wide migration mode permits class-only grants."
+          },
+          "action_fingerprint_contract": {
+            "type": "string",
+            "const": "canonical_target_sha256",
+            "description": "Stable fingerprint emitted for approval and Guardrail consumers."
+          },
+          "exact_action_approval_enforced": {
+            "type": "boolean",
+            "const": false,
+            "description": "False until the #200 exact-action approval workflow consumes and rechecks this fingerprint."
+          },
           "target_grants": {
             "type": "array",
-            "items": {"$ref": "#/components/schemas/AdminManagedWorkerTargetGrant"}
+            "items": {
+              "$ref": "#/components/schemas/AdminManagedWorkerTargetGrant"
+            }
           }
         },
         "additionalProperties": false
       },
       "AdminManagedWorkerTargetGrant": {
         "type": "object",
-        "required": ["selector_id", "permission_key", "action", "selector"],
+        "required": [
+          "selector_id",
+          "permission_key",
+          "action",
+          "selector"
+        ],
         "properties": {
-          "selector_id": {"type": "string", "minLength": 1},
-          "permission_key": {"type": "string", "minLength": 1, "description": "DB-backed RBAC action key required by this target grant; role names are not interpreted."},
-          "action": {"type": "string", "enum": ["mcp.tool", "filesystem", "rest", "network.egress", "secret", "cli"]},
-          "selector": {"$ref": "#/components/schemas/CapabilityTargetSelector"}
+          "selector_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "permission_key": {
+            "type": "string",
+            "minLength": 1,
+            "description": "DB-backed RBAC action key required by this target grant; role names are not interpreted."
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "mcp.tool",
+              "filesystem",
+              "rest",
+              "network.egress",
+              "secret",
+              "cli"
+            ]
+          },
+          "selector": {
+            "$ref": "#/components/schemas/CapabilityTargetSelector"
+          }
         },
         "additionalProperties": false
       },
       "CapabilityTargetSelector": {
         "oneOf": [
-          {"type": "object", "required": ["kind", "server", "tool", "risk", "argument_schema", "allow_extra_arguments"], "properties": {"kind": {"const": "mcp"}, "server": {"type": "string"}, "tool": {"type": "string"}, "risk": {"type": "string", "enum": ["read", "write"]}, "argument_schema": {"$ref": "#/components/schemas/JsonShape"}, "allow_extra_arguments": {"type": "boolean"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "workspace_root", "path_glob", "operations"], "properties": {"kind": {"const": "filesystem"}, "workspace_root": {"type": "string"}, "path_glob": {"type": "string"}, "operations": {"type": "array", "items": {"type": "string", "enum": ["read", "write", "delete", "execute"]}}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "scheme", "host", "port", "method", "path_glob", "allowed_ips", "allow_redirects"], "properties": {"kind": {"const": "network"}, "scheme": {"type": "string", "enum": ["http", "https", "tcp", "tls"]}, "host": {"type": "string"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "method": {"type": ["string", "null"]}, "path_glob": {"type": "string"}, "allowed_ips": {"type": "array", "items": {"type": "string"}}, "allow_redirects": {"type": "boolean"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "reference_namespace", "reference_name", "destination_adapter", "destination_action"], "properties": {"kind": {"const": "secret"}, "reference_namespace": {"type": "string"}, "reference_name": {"type": "string"}, "destination_adapter": {"type": "string"}, "destination_action": {"type": "string"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "executable", "argv", "environment", "cwd_glob", "max_timeout_millis", "max_stdout_bytes", "max_stderr_bytes"], "properties": {"kind": {"const": "cli"}, "executable": {"type": "string"}, "argv": {"type": "array", "items": {"type": "string"}}, "environment": {"type": "object", "maxProperties": 0, "additionalProperties": false, "description": "Must be empty; managed CLI execution clears the inherited environment."}, "cwd_glob": {"type": "string"}, "max_timeout_millis": {"type": "integer", "minimum": 1}, "max_stdout_bytes": {"type": "integer", "minimum": 1}, "max_stderr_bytes": {"type": "integer", "minimum": 1}}, "additionalProperties": false}
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "server",
+              "tool",
+              "risk",
+              "argument_schema",
+              "allow_extra_arguments"
+            ],
+            "properties": {
+              "kind": {
+                "const": "mcp"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              },
+              "risk": {
+                "type": "string",
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              },
+              "argument_schema": {
+                "$ref": "#/components/schemas/JsonShape"
+              },
+              "allow_extra_arguments": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "workspace_root",
+              "path_glob",
+              "operations"
+            ],
+            "properties": {
+              "kind": {
+                "const": "filesystem"
+              },
+              "workspace_root": {
+                "type": "string"
+              },
+              "path_glob": {
+                "type": "string"
+              },
+              "operations": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "delete",
+                    "execute"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "scheme",
+              "host",
+              "port",
+              "method",
+              "path_glob",
+              "allowed_ips",
+              "allow_redirects"
+            ],
+            "properties": {
+              "kind": {
+                "const": "network"
+              },
+              "scheme": {
+                "type": "string",
+                "enum": [
+                  "http",
+                  "https",
+                  "tcp",
+                  "tls"
+                ]
+              },
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "method": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path_glob": {
+                "type": "string"
+              },
+              "allowed_ips": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allow_redirects": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "reference_namespace",
+              "reference_name",
+              "destination_adapter",
+              "destination_action"
+            ],
+            "properties": {
+              "kind": {
+                "const": "secret"
+              },
+              "reference_namespace": {
+                "type": "string"
+              },
+              "reference_name": {
+                "type": "string"
+              },
+              "destination_adapter": {
+                "type": "string"
+              },
+              "destination_action": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "executable",
+              "argv",
+              "environment",
+              "cwd_glob",
+              "max_timeout_millis",
+              "max_stdout_bytes",
+              "max_stderr_bytes"
+            ],
+            "properties": {
+              "kind": {
+                "const": "cli"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "argv": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "environment": {
+                "type": "object",
+                "maxProperties": 0,
+                "additionalProperties": false,
+                "description": "Must be empty; managed CLI execution clears the inherited environment."
+              },
+              "cwd_glob": {
+                "type": "string"
+              },
+              "max_timeout_millis": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_stdout_bytes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_stderr_bytes": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
         ]
       },
       "JsonShape": {
         "oneOf": [
-          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "null"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "boolean"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "number"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "string"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "items"], "properties": {"kind": {"const": "array"}, "items": {"$ref": "#/components/schemas/JsonShape"}}, "additionalProperties": false},
-          {"type": "object", "required": ["kind", "fields"], "properties": {"kind": {"const": "object"}, "fields": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/JsonShape"}}}, "additionalProperties": false}
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "null"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "number"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "items"
+            ],
+            "properties": {
+              "kind": {
+                "const": "array"
+              },
+              "items": {
+                "$ref": "#/components/schemas/JsonShape"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "fields"
+            ],
+            "properties": {
+              "kind": {
+                "const": "object"
+              },
+              "fields": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonShape"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
         ]
       },
       "AdminManagedWorkerIsolationBackend": {
@@ -21345,6 +21874,128 @@
           "request_count",
           "error_count"
         ]
+      },
+      "AdminSiteDomain": {
+        "type": "object",
+        "required": [
+          "object",
+          "hostname",
+          "tenant_id",
+          "site",
+          "serve_path",
+          "created_at_unix",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "site_domain"
+          },
+          "hostname": {
+            "type": "string",
+            "description": "Normalized (lowercase, portless) bound hostname."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "serve_path": {
+            "type": "string",
+            "description": "Equivalent path-based serve prefix, /sites/{tenant}/{site}/."
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainAcme": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "reload_triggered"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether ACME issuance is enabled on this gateway."
+          },
+          "reload_triggered": {
+            "type": "boolean",
+            "description": "Whether this change triggered the listener-level graceful upgrade that re-issues the certificate with the updated domain set."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainMutation": {
+        "type": "object",
+        "required": [
+          "hostname",
+          "tenant_id",
+          "site"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string",
+            "description": "Fully qualified hostname to bind (no wildcard, no IP literal)."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string",
+            "description": "Published static_site name under the tenant (#258)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "site_domain",
+          "acme"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "site_domain"
+          },
+          "site_domain": {
+            "$ref": "#/components/schemas/AdminSiteDomain"
+          },
+          "acme": {
+            "$ref": "#/components/schemas/AdminSiteDomainAcme"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSiteDomainList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSiteDomain"
+            }
+          }
+        },
+        "additionalProperties": false
       }
     }
   }
