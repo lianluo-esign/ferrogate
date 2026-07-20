@@ -145,3 +145,108 @@ fn billing_outbox_backoff_is_capped_exponential() {
     assert_eq!(billing_outbox_backoff_secs(6), 60);
     assert_eq!(billing_outbox_backoff_secs(100), 60);
 }
+
+/// #309 backpressure guarantee: billing events NEVER route through the bounded
+/// background evidence writer — they keep the inline awaited durable-outbox
+/// path — so a stalled evidence writer can neither drop nor delay a charge,
+/// while evidence queued behind the stall still lands once the writer drains
+/// (no silent loss on either side).
+#[test]
+fn billing_events_survive_a_stalled_evidence_writer() {
+    let state = AppState::new(unreachable_billing_config());
+    assert!(state.billing_reporter.is_some());
+
+    // Park the evidence writer thread on a gate job, simulating a stalled
+    // Postgres evidence writer.
+    let (started_sender, started) = std::sync::mpsc::channel();
+    let (release, release_receiver) = std::sync::mpsc::channel();
+    assert!(state
+        .evidence_writer
+        .enqueue(crate::state::EvidenceWriteJob::Gate {
+            started: started_sender,
+            release: release_receiver,
+        }));
+    started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("evidence writer never picked up the gate job");
+    // Queue an audit row BEHIND the stall: it must not be processed yet.
+    let audit_event = state.prepare_admin_audit_event(AdminAuditEventDraft {
+        action_identity: Default::default(),
+        request_id: "req-stalled-writer".into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        actor_api_key_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        action: "tool.execute".into(),
+        target: "tool".into(),
+        outcome: "success".into(),
+        message: "queued behind the stalled writer".into(),
+    });
+    assert!(state
+        .evidence_writer
+        .enqueue(crate::state::EvidenceWriteJob::AuditEvent(audit_event)));
+    assert_eq!(
+        state.evidence_writer.metrics().written_total,
+        0,
+        "the audit row must still be stalled behind the gate"
+    );
+
+    // The billing event settles inline through the durable metering +
+    // outbox-enqueue path while the evidence writer is parked.
+    let request = RequestContext {
+        request_id: "req-stalled-writer".into(),
+        trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        route: Some("openai.chat.completions".into()),
+        upstream: Some("openai".into()),
+        tenant: ferrogate_core::TenantContext {
+            organization_id: Some("org_demo".into()),
+            ..ferrogate_core::TenantContext::default()
+        },
+    };
+    block_on(state.record_billing_event(
+        BillingEventDraft {
+            request: &request,
+            logical_model: "fast-chat",
+            provider: "openai",
+            provider_model: "gpt-4o-mini",
+            status_code: 200,
+            latency_ms: Some(50),
+            metadata: None,
+        },
+        &ProviderUsage {
+            prompt_tokens: Some(3),
+            completion_tokens: Some(5),
+            total_tokens: Some(8),
+        },
+    ))
+    .expect("billing settlement must not depend on the evidence writer");
+
+    let events = state.billing_events();
+    assert_eq!(events.len(), 1, "the charge must land despite the stall");
+    assert_eq!(events[0].request_id, "req-stalled-writer");
+    let pending = block_on(state.repositories.list_due_billing_reports(i64::MAX, 10)).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the durable outbox enqueue must also land despite the stall"
+    );
+
+    // Release the stall: the queued audit evidence drains and persists too —
+    // nothing was silently lost.
+    release.send(()).expect("writer thread must still be alive");
+    assert!(state.evidence_writer.flush());
+    let audited = block_on(state.repositories.audit_events());
+    assert!(
+        audited
+            .iter()
+            .any(|event| event.request_id == "req-stalled-writer"),
+        "the stalled audit evidence must persist after the writer drains"
+    );
+}

@@ -440,10 +440,18 @@ impl AppState {
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
         }
-        // Fire-and-forget write bridged to the async pool (issue #221); the
-        // request path is async but the audit/analytics readers on the sync
-        // telemetry threads share the same wrappers, so bridge here.
-        crate::gateway::block_on_sync_bridge(self.repositories.append_request_log(log));
+        // #309: on the durable backend the Postgres write is handed to the
+        // bounded background evidence writer so this (sync, hot-path) wrapper
+        // never parks a Pingora worker on DB I/O via block_in_place. The
+        // in-memory backend keeps the inline bridged write: it completes
+        // without I/O and unit tests rely on read-after-write. Metrics above
+        // stay synchronous either way.
+        if self.evidence_writes_deferred() {
+            self.evidence_writer
+                .enqueue(EvidenceWriteJob::RequestLog(log));
+        } else {
+            crate::gateway::block_on_sync_bridge(self.repositories.append_request_log(log));
+        }
     }
 
     fn sanitize_request_log_bodies(&self, log: &mut StoredRequestLog) {
@@ -513,8 +521,17 @@ impl AppState {
     }
 
     pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
+        // The event (id + occurred_at) is prepared HERE, at call time, so
+        // ordering-sensitive sequences (#304's chokepoint success/redacted/
+        // withheld rows) are stamped and enqueued in emission order; the
+        // single-consumer evidence writer then persists them FIFO (#309).
         let event = self.prepare_admin_audit_event(event);
-        crate::gateway::block_on_sync_bridge(self.repositories.append_audit_event(event));
+        if self.evidence_writes_deferred() {
+            self.evidence_writer
+                .enqueue(EvidenceWriteJob::AuditEvent(event));
+        } else {
+            crate::gateway::block_on_sync_bridge(self.repositories.append_audit_event(event));
+        }
     }
 
     pub(super) fn prepare_admin_audit_event(
@@ -877,6 +894,9 @@ impl AppState {
                 postgres_pool_acquire_total: 0,
                 postgres_pool_acquire_timeout_total: 0,
                 postgres_pool_acquire_wait_micros_total: 0,
+                evidence_writer_enqueued_total: 0,
+                evidence_writer_written_total: 0,
+                evidence_writer_dropped_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
                 mcp_method_totals: Vec::new(),
@@ -890,6 +910,12 @@ impl AppState {
         snapshot.postgres_pool_acquire_total = pool.acquire_total;
         snapshot.postgres_pool_acquire_timeout_total = pool.acquire_timeout_total;
         snapshot.postgres_pool_acquire_wait_micros_total = pool.acquire_wait_micros_total;
+        // #309: evidence-writer health — enqueued vs written proves the queue
+        // drains; dropped is the alertable overflow-loss signal.
+        let evidence_writer = self.evidence_writer.metrics();
+        snapshot.evidence_writer_enqueued_total = evidence_writer.enqueued_total;
+        snapshot.evidence_writer_written_total = evidence_writer.written_total;
+        snapshot.evidence_writer_dropped_total = evidence_writer.dropped_total;
         snapshot
     }
 }

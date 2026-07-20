@@ -258,6 +258,24 @@ fn quarantine_guardrail_redacts_tool_execute_output() {
         }),
         "tool.execute row must carry the post-guardrail disposition: {audit_events}"
     );
+    // #304/#309 ordering regression: the chokepoint emits the tool.execute
+    // success row BEFORE the tool.guardrail redacted row, and that order must
+    // survive persistence (the #309 background evidence writer is a single
+    // FIFO consumer precisely so this sequence cannot invert).
+    let success_position = events.iter().position(|event| {
+        event["action"] == "tool.execute"
+            && event["outcome"] == "success"
+            && event["output_disposition"] == "redacted"
+    });
+    let redacted_position = events.iter().position(|event| {
+        event["action"] == "tool.guardrail"
+            && event["outcome"] == "redacted"
+            && event["target"] == "tool:tool.echo"
+    });
+    assert!(
+        success_position.unwrap() < redacted_position.unwrap(),
+        "the tool.execute success row must persist before the tool.guardrail redacted row: {audit_events}"
+    );
     assert!(
         !audit_events.to_string().contains("SECRETLEAK"),
         "durable audit evidence must not carry the raw flagged output: {audit_events}"

@@ -15,11 +15,14 @@ impl AppState {
         // Sync wrapper bridging the async storage read (issue #221) — called
         // from telemetry.rs's raw thread::spawn OTLP/analytics senders (no
         // tokio runtime) as well as async handlers; block_on_sync_bridge
-        // handles both.
+        // handles both. Flushes the background evidence writer first (#309)
+        // so readers keep read-your-writes over the deferred durable writes.
+        self.flush_evidence_writer();
         crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
     }
 
     pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
+        self.flush_evidence_writer();
         crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
     }
 
@@ -189,6 +192,7 @@ impl AppState {
         pagination: AdminPagination,
         tenant_scope: Option<&str>,
     ) -> AdminPage<StoredRequestLog> {
+        self.flush_evidence_writer();
         if let Some(tenant_id) = tenant_scope {
             let filtered: Vec<StoredRequestLog> =
                 crate::gateway::block_on_sync_bridge(self.repositories.request_logs())
@@ -224,6 +228,7 @@ impl AppState {
         &self,
         filter: RequestLogExportFilter,
     ) -> Vec<RequestLogExportRecord> {
+        self.flush_evidence_writer();
         let usage_by_request_id = self
             .metering_events
             .list()
@@ -248,6 +253,7 @@ impl AppState {
         pagination: AdminPagination,
         tenant_scope: Option<&str>,
     ) -> AdminPage<StoredAuditEvent> {
+        self.flush_evidence_writer();
         if let Some(tenant_id) = tenant_scope {
             let filtered: Vec<StoredAuditEvent> =
                 crate::gateway::block_on_sync_bridge(self.repositories.audit_events())
@@ -1210,6 +1216,7 @@ impl AppState {
     /// hard-coded None. Returns None when the run is unknown or was created
     /// without a trace (nothing is fabricated).
     pub(crate) fn agent_run_trace_id(&self, run_id: &str) -> Option<String> {
+        self.flush_evidence_writer();
         crate::gateway::block_on_sync_bridge(self.repositories.agent_run(run_id))
             .and_then(|run| run.trace_id)
     }
@@ -1219,6 +1226,7 @@ impl AppState {
         id: &str,
         filter: AgentRunFilter,
     ) -> Option<AgentRunTimeline> {
+        self.flush_evidence_writer();
         // Filtering `run` itself (not just the related events below) closes
         // a leak (issue #185): without this, a run belonging to a different
         // tenant than `filter.organization_id` would still surface via
@@ -1284,6 +1292,7 @@ impl AppState {
     }
 
     fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
+        self.flush_evidence_writer();
         // Issue #231: enumerate candidate run ids with a filtered + LIMITed
         // repository query (SQL on the durable path) instead of loading four
         // whole tables, then batch-fetch only those runs' records. The scan
@@ -1376,10 +1385,19 @@ impl AppState {
     }
 
     pub(crate) fn record_agent_run(&self, run: StoredAgentRun) {
-        // Fire-and-forget write bridged to the async pool (issue #221). Kept
-        // sync because record_agent_run_event's sibling is reached from
-        // external_actions.rs's Unix-socket authorizer thread (no tokio
-        // runtime); block_on_sync_bridge handles both that and async handlers.
+        // Fire-and-forget write. Kept sync because record_agent_run_event's
+        // sibling is reached from external_actions.rs's Unix-socket authorizer
+        // thread (no tokio runtime) as well as async handlers. On the durable
+        // backend the write is handed to the bounded background evidence
+        // writer (#309) so neither caller parks a thread on Postgres I/O; the
+        // in-memory backend keeps the inline bridged write (no I/O,
+        // read-after-write for tests). FIFO through the single writer keeps
+        // a run's status upserts (running -> completed/failed) in order.
+        if self.evidence_writes_deferred() {
+            self.evidence_writer
+                .enqueue(EvidenceWriteJob::AgentRun(run));
+            return;
+        }
         if let Err(error) =
             crate::gateway::block_on_sync_bridge(self.repositories.upsert_agent_run(run))
         {
@@ -1389,12 +1407,22 @@ impl AppState {
 
     /// Looks up an existing agent-run record by id, for the create-path
     /// ownership guard (a client-controlled run_id must not overwrite another
-    /// tenant's run). Sync, bridged to the async pool like `record_agent_run`.
+    /// tenant's run). Sync, bridged to the async pool like `record_agent_run`;
+    /// flushes the evidence writer first (#309) so the guard observes a run
+    /// row whose upsert is still queued.
     pub(crate) fn agent_run_record(&self, id: &str) -> Option<StoredAgentRun> {
+        self.flush_evidence_writer();
         crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
     }
 
     pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
+        // Same #309 routing as record_agent_run: durable -> background
+        // evidence writer, in-memory -> inline.
+        if self.evidence_writes_deferred() {
+            self.evidence_writer
+                .enqueue(EvidenceWriteJob::AgentRunEvent(event));
+            return;
+        }
         if let Err(error) =
             crate::gateway::block_on_sync_bridge(self.repositories.append_agent_run_event(event))
         {
@@ -1408,9 +1436,10 @@ impl AppState {
     /// `None` on a storage error -- a budget-store outage must not itself break
     /// every workflow run, so the caller treats `None` as "no budget decision
     /// available" and proceeds, matching the additive/opt-in wallet pattern.
-    /// Sync (bridged like `record_agent_run`) because its caller,
-    /// `agent_workflow_use`, is sync.
-    pub(crate) fn open_workflow_run_budget(
+    /// Async (#309): its only callers are the async agent-run handler chain,
+    /// so this enforcement read-modify-write awaits the pool directly instead
+    /// of parking a Pingora worker via block_in_place.
+    pub(crate) async fn open_workflow_run_budget(
         &self,
         workflow_id: &str,
         workflow_version: u32,
@@ -1419,14 +1448,18 @@ impl AppState {
         caps: ferrogate_storage::WorkflowRunBudgetCaps,
         now_unix: i64,
     ) -> Option<ferrogate_storage::StoredWorkflowRunBudget> {
-        match crate::gateway::block_on_sync_bridge(self.repositories.open_workflow_run_budget(
-            workflow_id,
-            workflow_version,
-            run_id,
-            tenant_id,
-            caps,
-            now_unix,
-        )) {
+        match self
+            .repositories
+            .open_workflow_run_budget(
+                workflow_id,
+                workflow_version,
+                run_id,
+                tenant_id,
+                caps,
+                now_unix,
+            )
+            .await
+        {
             Ok(budget) => Some(budget),
             Err(error) => {
                 warn!("failed to open workflow run budget: {error}");
@@ -1439,8 +1472,9 @@ impl AppState {
     /// envelope. Returns the debit outcome, or `None` when the run has no budget
     /// row (unbounded run) or on a storage error. Fail-closed enforcement of the
     /// resulting `Exceeded` is the caller's responsibility (it records the
-    /// lifecycle event and denies the next step at open time).
-    pub(crate) fn debit_workflow_run_budget(
+    /// lifecycle event and denies the next step at open time). Async (#309),
+    /// same rationale as `open_workflow_run_budget`.
+    pub(crate) async fn debit_workflow_run_budget(
         &self,
         id: &str,
         cost_credits: i64,
@@ -1448,13 +1482,11 @@ impl AppState {
         tool_calls: i64,
         now_unix: i64,
     ) -> Option<ferrogate_storage::WorkflowBudgetDebit> {
-        match crate::gateway::block_on_sync_bridge(self.repositories.debit_workflow_run_budget(
-            id,
-            cost_credits,
-            tokens,
-            tool_calls,
-            now_unix,
-        )) {
+        match self
+            .repositories
+            .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
+            .await
+        {
             Ok(debit) => Some(debit),
             Err(ferrogate_storage::StorageError::NotFound(_)) => None,
             Err(error) => {
@@ -1746,6 +1778,7 @@ impl AppState {
     }
 
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
+        self.flush_evidence_writer();
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
         crate::gateway::block_on_sync_bridge(self.repositories.audit_events())

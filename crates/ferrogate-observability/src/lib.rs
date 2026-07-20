@@ -377,6 +377,15 @@ pub struct GatewayMetricsSnapshot {
     pub postgres_pool_acquire_total: u64,
     pub postgres_pool_acquire_timeout_total: u64,
     pub postgres_pool_acquire_wait_micros_total: u64,
+    /// #309 bounded background evidence writer: jobs accepted into the queue.
+    pub evidence_writer_enqueued_total: u64,
+    /// #309: jobs the writer thread finished persisting (enqueued minus
+    /// written = current queue depth).
+    pub evidence_writer_written_total: u64,
+    /// #309: evidence writes dropped because the queue stayed full past the
+    /// bounded enqueue timeout — the alertable overflow-loss signal (billing
+    /// events never route through the writer and cannot appear here).
+    pub evidence_writer_dropped_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
     /// Per-operation MCP ingress counts keyed by the `Mcp-Method`/`Mcp-Name`
@@ -638,6 +647,36 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_postgres_pool_acquire_wait_seconds_total {}\n",
         snapshot.postgres_pool_acquire_wait_micros_total as f64 / 1_000_000.0
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_evidence_writer_enqueued_total",
+        "Evidence writes (request logs, audit events, agent-run rows) accepted into the bounded background writer queue.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_evidence_writer_enqueued_total {}\n",
+        snapshot.evidence_writer_enqueued_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_evidence_writer_written_total",
+        "Evidence writes the background writer finished persisting.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_evidence_writer_written_total {}\n",
+        snapshot.evidence_writer_written_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_evidence_writer_dropped_total",
+        "Evidence writes dropped after the writer queue stayed full past the bounded enqueue timeout.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_evidence_writer_dropped_total {}\n",
+        snapshot.evidence_writer_dropped_total
     ));
 
     push_help(

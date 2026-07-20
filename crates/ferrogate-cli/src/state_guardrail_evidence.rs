@@ -31,6 +31,10 @@ impl AppState {
         if !filter.has_investigation_selector() {
             anyhow::bail!("request_id, trace_id, or agent_run_id is required");
         }
+        // #309: the investigation joins request logs, audit events and
+        // agent-run evidence, which the background evidence writer may still
+        // have queued — flush first for read-your-writes.
+        self.flush_evidence_writer();
         let (guardrail_evaluations, _) = self.guardrail_evaluation_views_page(
             &filter,
             0,

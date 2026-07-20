@@ -1367,6 +1367,12 @@ pub(crate) struct AppState {
     metering_exporter: Option<Arc<MeteringExporter>>,
     billing_reporter: Option<Arc<BillingReporter>>,
     repositories: Arc<RuntimeStorageRepositories>,
+    /// #309: bounded background writer that persists per-request evidence
+    /// (request logs, audit events, agent-run rows) off the request path on
+    /// the durable backend, replacing the per-write `block_in_place` bridge.
+    /// Shared across config reloads (like `guardrail_evidence_permits`) so
+    /// FIFO ordering and the drain-on-shutdown guarantee span reloads.
+    evidence_writer: Arc<EvidenceWriter>,
     durable_api_key_authenticator: Arc<ferrogate_auth::StorageApiKeyAuthenticator>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
@@ -3483,6 +3489,11 @@ impl GatewayMetricsAccumulator {
             postgres_pool_acquire_total: 0,
             postgres_pool_acquire_timeout_total: 0,
             postgres_pool_acquire_wait_micros_total: 0,
+            // #309: filled by prometheus_metrics_snapshot from the evidence
+            // writer's own counters, like the pool metrics above.
+            evidence_writer_enqueued_total: 0,
+            evidence_writer_written_total: 0,
+            evidence_writer_dropped_total: 0,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
             mcp_method_totals: self.mcp_method_totals.values().cloned().collect(),
@@ -4504,6 +4515,7 @@ impl AppState {
             durable_api_key_authenticator: Arc::new(
                 ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&repositories)),
             ),
+            evidence_writer: Arc::new(EvidenceWriter::new(Arc::clone(&repositories))),
             repositories,
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
@@ -4566,6 +4578,10 @@ impl AppState {
         next.mcp_manager.reconfigure(&next.config.mcp_servers);
         next.approvals = self.approvals.clone();
         next.guardrail_evidence_permits = Arc::clone(&self.guardrail_evidence_permits);
+        // #309: keep the one long-lived evidence writer (and its FIFO queue)
+        // across reloads; the fresh never-started instance from
+        // try_new_with_repositories is discarded without ever spawning.
+        next.evidence_writer = Arc::clone(&self.evidence_writer);
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
@@ -4678,6 +4694,26 @@ impl AppState {
 
     pub(crate) fn storage_status(&self) -> StorageBackendEvidence {
         self.repositories.backend_evidence()
+    }
+
+    /// #309: whether per-request evidence writes (request logs, audit events,
+    /// agent-run rows) route through the bounded background
+    /// [`EvidenceWriter`] instead of an inline bridged write. True only on
+    /// the durable (Postgres) backend, where the inline write would park a
+    /// Pingora worker thread on real DB I/O via `block_in_place`; the
+    /// in-memory backend keeps the inline write (it completes without I/O
+    /// and tests rely on strict read-after-write).
+    pub(super) fn evidence_writes_deferred(&self) -> bool {
+        self.storage_status().durable
+    }
+
+    /// #309: wait until every evidence write enqueued so far is persisted.
+    /// Called by the evidence READERS (admin request-log/audit/agent-run
+    /// views, workflow gating readers) so the deferred writer keeps
+    /// read-your-writes semantics. A cheap no-op when the writer was never
+    /// used (in-memory backend).
+    pub(crate) fn flush_evidence_writer(&self) {
+        self.evidence_writer.flush();
     }
 
     pub(crate) fn managed_worker_session_lifecycle_storage_ready(&self) -> bool {
@@ -6677,6 +6713,11 @@ pub(crate) mod semantic_cache;
 
 #[path = "state_agent_runtime.rs"]
 mod state_agent_runtime;
+// #309: bounded background evidence writer keeping request-log/audit/agent-run
+// persistence off the Pingora request path on the durable backend.
+#[path = "state_evidence_writer.rs"]
+mod state_evidence_writer;
+pub(crate) use state_evidence_writer::{EvidenceWriteJob, EvidenceWriter};
 #[path = "state_guardrail_evidence.rs"]
 mod state_guardrail_evidence;
 #[path = "state_scheduler.rs"]
