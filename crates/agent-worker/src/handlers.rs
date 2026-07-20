@@ -356,6 +356,15 @@ fn handler_binary_task_target(adapter_name: &str, prompt: &str) -> Result<Handle
                 prompt_arg_index,
             })
         }
+        // Template validated against the real Claude Code CLI 2.1.215 (#308):
+        // `--bare` (minimal mode; auth is strictly ANTHROPIC_API_KEY /
+        // ANTHROPIC_AUTH_TOKEN / apiKeyHelper — OAuth and keychain are never
+        // read), `--print` (non-interactive one-shot), `--permission-mode
+        // dontAsk` (a documented choice), `--tools ""` (empty string disables
+        // all built-in tools), and `--no-session-persistence` (documented,
+        // requires `--print`). The gated
+        // `tests/claude_code_harness_e2e.rs` re-proves this against the real
+        // binary end to end.
         "claude-code" | "claude_code" => {
             let mut task_args = vec![
                 "--bare".to_string(),
@@ -662,6 +671,57 @@ mod tests {
         assert_eq!(result.prompt_arg_index, 2);
         assert!(!result.task_args.iter().any(|arg| arg == "--max-turns"));
         assert!(result.stdout_excerpt.contains("hermes task args:"));
+    }
+
+    #[test]
+    fn claude_code_task_smoke_uses_bare_print_oneshot_arguments() {
+        // Locks the exact non-interactive template validated against the real
+        // Claude Code CLI 2.1.215 (#308). Every flag below exists on claude
+        // 2.x and does what the adapter assumes; see the module comment on
+        // `handler_binary_task_target` and the gated real-harness E2E in
+        // `tests/claude_code_harness_e2e.rs`.
+        let _env_lock = crate::test_support::lock_handler_env();
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("claude-task-smoke");
+        fs::write(
+            &binary_path,
+            "#!/bin/sh\nprintf 'claude task args:'\nprintf ' [%s]' \"$@\"\nprintf '\\nsmoke-ok\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        env::set_var("AGENT_WORKER_CLAUDE_CODE_BIN", &binary_path);
+
+        let result = smoke_handler_task(
+            "claude-code",
+            DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS,
+            "Return exactly: smoke-ok",
+        )
+        .unwrap();
+
+        env::remove_var("AGENT_WORKER_CLAUDE_CODE_BIN");
+        assert_eq!(result.adapter_name, "claude-code");
+        assert_eq!(result.env_var, "AGENT_WORKER_CLAUDE_CODE_BIN");
+        assert_eq!(
+            result.task_args,
+            vec![
+                "--bare",
+                "--print",
+                "--permission-mode",
+                "dontAsk",
+                "--tools",
+                "",
+                "--no-session-persistence",
+                "Return exactly: smoke-ok",
+            ]
+        );
+        assert_eq!(result.prompt_arg_index, 7);
+        assert_eq!(result.status_code, Some(0));
+        assert!(result.stdout_excerpt.contains("claude task args:"));
+        assert!(result.stdout_excerpt.contains("smoke-ok"));
+        let redacted = redacted_args(&result.task_args, result.prompt_arg_index);
+        assert_eq!(redacted[result.prompt_arg_index], "<prompt>");
     }
 
     #[test]

@@ -606,6 +606,53 @@ configured handler binary accepted and completed a bounded non-interactive task
 under `agent-worker` ownership; it is not Firecracker boot proof or proof of the
 full production managed execution path.
 
+### Real Claude Code Harness E2E (gated, #308)
+
+`crates/agent-worker/tests/claude_code_harness_e2e.rs` runs the ACTUAL `claude`
+binary through the governed agent-worker execution path, gated like the
+KVM/Firecracker E2Es (explicit opt-in + prerequisite probe + clean skip, never
+a fake pass):
+
+```sh
+FERROGATE_TEST_CLAUDE_CODE_E2E=1 \
+AGENT_WORKER_CLAUDE_CODE_BIN=/path/to/claude \
+cargo test -p agent-worker --test claude_code_harness_e2e -- --nocapture
+# Layer 3 (governed run timeline, in-crate seam), same gate:
+FERROGATE_TEST_CLAUDE_CODE_E2E=1 \
+AGENT_WORKER_CLAUDE_CODE_BIN=/path/to/claude \
+cargo test -p agent-worker --bin agent-worker claude_code_governed -- --nocapture
+```
+
+Gating: `FERROGATE_TEST_CLAUDE_CODE_E2E=1` AND a resolvable claude binary
+(`AGENT_WORKER_CLAUDE_CODE_BIN`, else `claude` on `PATH`). Without either, the
+gated tests print an explicit `SKIP` reason; the ungated layer (probe-handlers
+readiness plumbing with a fake script) always runs.
+
+TOKEN COST: the gated task smokes need an AUTHENTICATED claude CLI and perform
+one real model call each with trivial deterministic prompts (`Return exactly:
+<marker>`). Keep prompts trivial; the harness runs as the invoking user with the
+adapter's tool-less template, so it performs a pure-text reply only.
+
+What it proves, per layer: (1) claude-code handler readiness plumbing through
+`probe-handlers` (env-var resolution, executable checks, honest unready
+reasons); (2) the worker-owned `smoke-handler-binary` `--version` probe and
+`smoke-handler-task` execute the REAL harness through the validated
+non-interactive template `--bare --print --permission-mode dontAsk --tools ""
+--no-session-persistence <prompt>` — every flag confirmed against Claude Code
+2.1.215 (`--permission-mode dontAsk` is a documented mode choice, `--tools ""`
+disables all built-in tools, `--no-session-persistence` requires `--print`) —
+with real zero-exit plus the expected-output validation; (3) on the governed
+managed run timeline, `capability.allowed` evidence lands BEFORE the real
+harness spawns and the harness's actual output flows back through the single
+normalized framework-event path (`run.started` with
+`real_binary_task_smoke=true`, redacted argv, bounded output excerpts).
+
+Note on `--bare` and auth: on claude 2.x, `--bare` never reads OAuth/keychain
+credentials — authentication must come from `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or an `apiKeyHelper` provided via `--settings`. Ensure
+one of these is present in the worker environment or the task smoke fails
+closed with the auth error captured in the recorded stderr excerpt.
+
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST
 /v1/agent-worker/management`, sets `content-type: application/json`, sets

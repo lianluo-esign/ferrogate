@@ -716,6 +716,156 @@ mod tests {
         assert!(!events.iter().any(|event| event.kind == "session.closed"));
     }
 
+    /// #308 Layer 3 (gated): the governed execution path with the REAL Claude
+    /// Code binary. Opt in with `FERROGATE_TEST_CLAUDE_CODE_E2E=1` plus a
+    /// resolvable claude binary (`AGENT_WORKER_CLAUDE_CODE_BIN` or `claude` on
+    /// PATH; needs an authenticated CLI — the task smoke consumes tokens).
+    /// Skips with an explicit reason otherwise; never fake-passes.
+    ///
+    /// Proves that a managed run whose handler is the real claude adapter
+    /// crosses the gateway capability gate first (capability.allowed on the
+    /// run timeline BEFORE any harness spawn), executes the real harness
+    /// through the validated non-interactive template, and streams the
+    /// harness's actual output back through the single normalized
+    /// framework-event path.
+    #[test]
+    fn claude_code_governed_execution_streams_real_harness_output_when_gated() {
+        const TEST: &str = "claude_code_governed_execution_streams_real_harness_output_when_gated";
+        const PROMPT: &str = "Return exactly: ferrogate-claude-code-governed-e2e-ok";
+        const MARKER: &str = "ferrogate-claude-code-governed-e2e-ok";
+        if env::var("FERROGATE_TEST_CLAUDE_CODE_E2E").ok().as_deref() != Some("1") {
+            println!(
+                "SKIP {TEST}: set FERROGATE_TEST_CLAUDE_CODE_E2E=1 (with an authenticated \
+                 claude CLI; the task smoke consumes tokens) to run the real harness"
+            );
+            return;
+        }
+        let Some(claude_bin) = resolve_real_claude_binary() else {
+            println!(
+                "SKIP {TEST}: no real claude binary (set AGENT_WORKER_CLAUDE_CODE_BIN or put \
+                 `claude` on PATH)"
+            );
+            return;
+        };
+        let _env_lock = crate::test_support::lock_handler_env();
+        env::set_var("AGENT_WORKER_CLAUDE_CODE_BIN", &claude_bin);
+        env::set_var("AGENT_WORKER_HANDLER_TASK_SMOKE", "1");
+        env::set_var("AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT", PROMPT);
+        env::set_var("AGENT_WORKER_HANDLER_TASK_SMOKE_TIMEOUT_MILLIS", "180000");
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("claude-code".to_string());
+        let authorizer = authorizer();
+
+        let outcome =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer));
+
+        env::remove_var("AGENT_WORKER_CLAUDE_CODE_BIN");
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE");
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT");
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE_TIMEOUT_MILLIS");
+        let (state, result) = outcome.unwrap();
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        assert_eq!(state.session.adapter_name, "claude-code");
+        assert!(state.closed);
+        assert!(events.iter().any(|event| event.kind == "session.started"
+            && event.framework == "claude_code"
+            && event.mode == "managed"));
+        // Capability evidence lands on the run timeline before the harness runs.
+        let capability_index = events
+            .iter()
+            .position(|event| {
+                event.kind == "capability.allowed"
+                    && event
+                        .metadata
+                        .get("external_target")
+                        .is_some_and(|target| target == "claude-code")
+                    && event
+                        .metadata
+                        .get("external_action")
+                        .is_some_and(|action| action == "cli")
+            })
+            .expect("expected capability.allowed evidence for the claude-code cli action");
+        // The real binary --version probe reported through the normalized path.
+        let probe = events
+            .iter()
+            .find(|event| {
+                event.kind == "cli.requested"
+                    && event
+                        .metadata
+                        .get("real_binary_probe")
+                        .is_some_and(|value| value == "true")
+            })
+            .expect("expected real binary probe event");
+        assert!(probe
+            .metadata
+            .get("stdout_excerpt")
+            .is_some_and(|value| value.contains("Claude Code")));
+        // The real harness task executed and its actual output flowed back
+        // through the normalized framework-event path.
+        let task_index = events
+            .iter()
+            .position(|event| {
+                event.kind == "run.started"
+                    && event
+                        .metadata
+                        .get("real_binary_task_smoke")
+                        .is_some_and(|value| value == "true")
+            })
+            .expect("expected real harness task event");
+        assert!(capability_index < task_index);
+        let task_event = &events[task_index];
+        assert!(task_event
+            .metadata
+            .get("handler_owner")
+            .is_some_and(|value| value == "agent-worker"));
+        assert!(task_event
+            .metadata
+            .get("stdout_excerpt")
+            .is_some_and(|value| value.contains(MARKER)));
+        assert_eq!(
+            task_event.metadata.get("status_code").map(String::as_str),
+            Some("0")
+        );
+        assert!(task_event.metadata.get("task_args").is_some_and(|value| {
+            value.contains("--bare") && value.contains("<prompt>") && !value.contains(MARKER)
+        }));
+        println!(
+            "claude_code governed execution evidence: binary={} stdout_excerpt={:?} task_args={:?}",
+            claude_bin,
+            task_event.metadata.get("stdout_excerpt"),
+            task_event.metadata.get("task_args"),
+        );
+        // The run continued through the shared adapter contract and closed.
+        assert!(events.iter().any(|event| event.kind == "model.requested"));
+        assert!(events.iter().any(|event| event.kind == "session.closed"));
+        assert!(state
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == "claude-code-artifact"));
+    }
+
+    /// Resolve a REAL claude binary for the gated #308 harness E2E:
+    /// `AGENT_WORKER_CLAUDE_CODE_BIN` first, then `claude` on PATH.
+    fn resolve_real_claude_binary() -> Option<String> {
+        if let Ok(configured) = env::var("AGENT_WORKER_CLAUDE_CODE_BIN") {
+            let trimmed = configured.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        let output = std::process::Command::new("which")
+            .arg("claude")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!path.is_empty()).then_some(path)
+    }
+
     #[test]
     fn approval_required_framework_capability_is_returned_without_handler_execution() {
         let mut envelope = envelope();
