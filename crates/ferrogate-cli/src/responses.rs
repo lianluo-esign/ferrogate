@@ -10,8 +10,12 @@ use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as 
 use serde::{Deserialize, Serialize};
 
 use ferrogate_runtime::SelfHostedWorkerIdentity;
-use std::{collections::BTreeMap, io::Read, sync::OnceLock};
-use tokio::{sync::mpsc, task};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    io::Read,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 /// Origin reflected as `Access-Control-Allow-Origin` on every locally-handled
 /// response (config.admin.cors_allowed_origin), set once at process start by
@@ -2003,14 +2007,124 @@ pub(crate) async fn write_cacheable_response(
     }
 }
 
-pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
+/// Async source of provider streaming-body chunks (issue #311). Replaces the
+/// old blocking sync-`Read` shim: implementors surface the upstream
+/// bytes natively on the async runtime, so no blocking-pool thread is parked
+/// per active stream.
+pub(crate) trait StreamingBodySource: Send {
+    fn next_chunk(&mut self) -> impl Future<Output = std::io::Result<Option<Bytes>>> + Send + '_;
+}
+
+#[derive(Default)]
+struct StreamingFeedState {
+    chunks: VecDeque<Bytes>,
+    finished: bool,
+}
+
+/// Sender half of the chunkwise feed between the async pump and the
+/// synchronous `Read`-based transform tower (SSE normalizers, capture
+/// readers). Holds only the chunks pushed since the transform last drained
+/// it -- never the whole stream.
+pub(crate) struct StreamingBodyUpstream<S> {
+    source: S,
+    feed: Arc<Mutex<StreamingFeedState>>,
+}
+
+impl<S: StreamingBodySource> StreamingBodyUpstream<S> {
+    /// Pulls the next upstream chunk into the feed. Returns `Ok(false)` once
+    /// the upstream body is exhausted (the feed then reports EOF to the
+    /// transform tower).
+    pub(crate) async fn advance(&mut self) -> std::io::Result<bool> {
+        match self.source.next_chunk().await? {
+            Some(chunk) => {
+                if let Ok(mut state) = self.feed.lock() {
+                    if !chunk.is_empty() {
+                        state.chunks.push_back(chunk);
+                    }
+                }
+                Ok(true)
+            }
+            None => {
+                if let Ok(mut state) = self.feed.lock() {
+                    state.finished = true;
+                }
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Reader half of the chunkwise feed: the innermost `Read` of the transform
+/// tower. Reports `ErrorKind::WouldBlock` when no chunk has been fed yet
+/// (the pump's cue to await the next upstream chunk) and `Ok(0)` only at
+/// true upstream EOF -- so the incremental SSE parsers above it observe the
+/// exact byte sequence and EOF the old blocking reader produced.
+pub(crate) struct StreamingBodyFeedReader {
+    feed: Arc<Mutex<StreamingFeedState>>,
+}
+
+impl Read for StreamingBodyFeedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let Ok(mut state) = self.feed.lock() else {
+            return Err(std::io::Error::other("streaming body feed lock poisoned"));
+        };
+        let Some(front) = state.chunks.front_mut() else {
+            return if state.finished {
+                Ok(0)
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            };
+        };
+        let read = front.len().min(buffer.len());
+        buffer[..read].copy_from_slice(&front[..read]);
+        if read < front.len() {
+            let _ = front.split_to(read);
+        } else {
+            state.chunks.pop_front();
+        }
+        Ok(read)
+    }
+}
+
+/// Builds the chunkwise feed pair for one provider stream: the async
+/// upstream half that pulls from `source`, and the `Read` half the SSE
+/// transform tower wraps.
+pub(crate) fn streaming_body_channel<S: StreamingBodySource>(
+    source: S,
+) -> (StreamingBodyUpstream<S>, StreamingBodyFeedReader) {
+    let feed = Arc::new(Mutex::new(StreamingFeedState::default()));
+    (
+        StreamingBodyUpstream {
+            source,
+            feed: Arc::clone(&feed),
+        },
+        StreamingBodyFeedReader { feed },
+    )
+}
+
+/// Streams a provider response to the client fully on the async runtime
+/// (issue #311): chunks are pulled from `upstream`, run through the
+/// `Read`-based `transform` tower chunk-by-chunk via the in-memory feed, and
+/// written to the session as soon as the transform releases bytes. A failed
+/// downstream write (client disconnect) propagates immediately: this
+/// function returns, dropping `upstream` and with it the provider
+/// connection.
+pub(crate) async fn write_streaming_response<S, R>(
     session: &mut Session,
     status: StatusCode,
     content_type: &str,
     initial_body: Vec<u8>,
-    reader: R,
+    mut upstream: StreamingBodyUpstream<S>,
+    mut transform: R,
     request_id: &str,
-) -> PingoraResult<()> {
+) -> PingoraResult<()>
+where
+    S: StreamingBodySource,
+    R: Read + Send,
+{
     let mut response = ResponseHeader::build(status, Some(4))?;
     response.insert_header(header::CONTENT_TYPE, content_type)?;
     response.insert_header("x-request-id", request_id)?;
@@ -2027,19 +2141,37 @@ pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
             .await?;
     }
 
-    let (sender, mut receiver) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    let read_task = task::spawn_blocking(move || {
-        read_streaming_body_chunks(reader, sender);
-    });
-
-    while let Some(chunk) = receiver.recv().await {
-        let chunk = chunk.or_err(ErrorType::ReadError, "reading provider streaming response")?;
-        session.write_response_body(Some(chunk), false).await?;
+    let mut buffer = [0_u8; 8192];
+    let mut upstream_done = false;
+    'stream: loop {
+        // Drain everything the transform can produce from the chunks fed so
+        // far; `WouldBlock` is the feed's "need more upstream data" signal,
+        // never a failure.
+        loop {
+            match transform.read(&mut buffer) {
+                Ok(0) => break 'stream,
+                Ok(read) => {
+                    session
+                        .write_response_body(Some(Bytes::copy_from_slice(&buffer[..read])), false)
+                        .await?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    return Err(error)
+                        .or_err(ErrorType::ReadError, "reading provider streaming response")
+                }
+            }
+        }
+        if upstream_done {
+            // Defensive: the transform asked for more input after upstream
+            // EOF was fed; nothing further can arrive, so end the stream.
+            break;
+        }
+        upstream_done = !upstream
+            .advance()
+            .await
+            .or_err(ErrorType::ReadError, "reading provider streaming response")?;
     }
-
-    read_task
-        .await
-        .or_err(ErrorType::ReadError, "joining provider streaming reader")?;
     session.write_response_body(None, true).await
 }
 
@@ -2065,30 +2197,6 @@ pub(crate) async fn write_streaming_bytes_response(
             .await?;
     }
     session.write_response_body(None, true).await
-}
-
-fn read_streaming_body_chunks<R: Read>(
-    mut reader: R,
-    sender: mpsc::Sender<std::io::Result<Bytes>>,
-) {
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(read) => {
-                if sender
-                    .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..read])))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Err(error) => {
-                let _ = sender.blocking_send(Err(error));
-                return;
-            }
-        }
-    }
 }
 
 pub(crate) async fn write_json_error(

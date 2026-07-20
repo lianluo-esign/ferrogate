@@ -22,8 +22,9 @@ use crate::{
         AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailEffect, GuardrailStage, Provider,
     },
     responses::{
-        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        write_streaming_bytes_response, write_streaming_response,
+        streaming_body_channel, write_json_error, write_json_error_and_close, write_json_response,
+        write_raw_response, write_streaming_bytes_response, write_streaming_response,
+        StreamingBodySource, StreamingBodyUpstream,
     },
     state::{
         AppState, BillingEventDraft, GatewayConfigResolveError, GatewayConfigUse,
@@ -884,9 +885,11 @@ impl FerroGateway {
                             if response.status.is_client_error()
                                 || response.status.is_server_error()
                             {
+                                let (upstream, feed_reader) = streaming_body_channel(response.body);
                                 let body = match read_provider_streaming_body(
                                     response.initial_body,
-                                    response.body,
+                                    upstream,
+                                    feed_reader,
                                     provider_response_body_max_bytes,
                                     dispatch_timeout,
                                 )
@@ -1167,6 +1170,7 @@ impl FerroGateway {
                             {
                                 let response_status = response.status;
                                 let response_content_type = response.content_type;
+                                let (upstream, feed_reader) = streaming_body_channel(response.body);
                                 let (buffer_initial, buffer_reader, client_content_type): (
                                     Vec<u8>,
                                     Box<dyn Read + Send>,
@@ -1174,8 +1178,7 @@ impl FerroGateway {
                                 ) = if endpoint == AiEndpoint::Responses {
                                     let provider_kind =
                                         responses_stream_provider_kind(&provider.kind);
-                                    let raw =
-                                        Cursor::new(response.initial_body).chain(response.body);
+                                    let raw = Cursor::new(response.initial_body).chain(feed_reader);
                                     (
                                         Vec::new(),
                                         Box::new(ResponsesStreamNormalizer::new(
@@ -1189,12 +1192,13 @@ impl FerroGateway {
                                 } else {
                                     (
                                         response.initial_body,
-                                        Box::new(response.body),
+                                        Box::new(feed_reader),
                                         response_content_type,
                                     )
                                 };
                                 let mut final_body = match read_provider_streaming_body(
                                     buffer_initial,
+                                    upstream,
                                     buffer_reader,
                                     provider_response_body_max_bytes,
                                     dispatch_timeout,
@@ -1454,57 +1458,63 @@ impl FerroGateway {
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::ShadowAfterComplete
                             {
-                                let (stream_result, capture, usage_capture) =
-                                    if endpoint == AiEndpoint::Responses {
-                                        let provider_kind =
-                                            responses_stream_provider_kind(&provider.kind);
-                                        let raw =
-                                            Cursor::new(response.initial_body).chain(response.body);
-                                        let normalized = ResponsesStreamNormalizer::new(
-                                            raw,
-                                            provider_kind,
-                                            ctx.request_id.clone(),
-                                            response.content_type.clone(),
-                                        );
-                                        let (usage_capturing, usage_capture) =
-                                            StreamingUsageCapturingReader::new(normalized, &[]);
-                                        let (capturing, capture) = CapturingReader::new(
-                                            usage_capturing,
-                                            &[],
-                                            provider_response_body_max_bytes,
-                                        );
-                                        let result = write_streaming_response(
-                                            session,
-                                            response.status,
-                                            "text/event-stream",
-                                            Vec::new(),
-                                            capturing,
-                                            &ctx.request_id,
-                                        )
-                                        .await;
-                                        (result, capture, usage_capture)
-                                    } else {
-                                        let (usage_capturing, usage_capture) =
-                                            StreamingUsageCapturingReader::new(
-                                                response.body,
-                                                &response.initial_body,
-                                            );
-                                        let (capturing, capture) = CapturingReader::new(
-                                            usage_capturing,
+                                let (stream_result, capture, usage_capture) = if endpoint
+                                    == AiEndpoint::Responses
+                                {
+                                    let provider_kind =
+                                        responses_stream_provider_kind(&provider.kind);
+                                    let (upstream, feed_reader) =
+                                        streaming_body_channel(response.body);
+                                    let raw = Cursor::new(response.initial_body).chain(feed_reader);
+                                    let normalized = ResponsesStreamNormalizer::new(
+                                        raw,
+                                        provider_kind,
+                                        ctx.request_id.clone(),
+                                        response.content_type.clone(),
+                                    );
+                                    let (usage_capturing, usage_capture) =
+                                        StreamingUsageCapturingReader::new(normalized, &[]);
+                                    let (capturing, capture) = CapturingReader::new(
+                                        usage_capturing,
+                                        &[],
+                                        provider_response_body_max_bytes,
+                                    );
+                                    let result = write_streaming_response(
+                                        session,
+                                        response.status,
+                                        "text/event-stream",
+                                        Vec::new(),
+                                        upstream,
+                                        capturing,
+                                        &ctx.request_id,
+                                    )
+                                    .await;
+                                    (result, capture, usage_capture)
+                                } else {
+                                    let (upstream, feed_reader) =
+                                        streaming_body_channel(response.body);
+                                    let (usage_capturing, usage_capture) =
+                                        StreamingUsageCapturingReader::new(
+                                            feed_reader,
                                             &response.initial_body,
-                                            provider_response_body_max_bytes,
                                         );
-                                        let result = write_streaming_response(
-                                            session,
-                                            response.status,
-                                            &response.content_type,
-                                            response.initial_body,
-                                            capturing,
-                                            &ctx.request_id,
-                                        )
-                                        .await;
-                                        (result, capture, usage_capture)
-                                    };
+                                    let (capturing, capture) = CapturingReader::new(
+                                        usage_capturing,
+                                        &response.initial_body,
+                                        provider_response_body_max_bytes,
+                                    );
+                                    let result = write_streaming_response(
+                                        session,
+                                        response.status,
+                                        &response.content_type,
+                                        response.initial_body,
+                                        upstream,
+                                        capturing,
+                                        &ctx.request_id,
+                                    )
+                                    .await;
+                                    (result, capture, usage_capture)
+                                };
                                 let usage_body = usage_capture
                                     .lock()
                                     .map(|capture| capture.body())
@@ -1564,8 +1574,9 @@ impl FerroGateway {
                                 == AiEndpoint::Responses
                             {
                                 let provider_kind = responses_stream_provider_kind(&provider.kind);
+                                let (upstream, feed_reader) = streaming_body_channel(response.body);
                                 let normalized = ResponsesStreamNormalizer::new(
-                                    response.body,
+                                    feed_reader,
                                     provider_kind,
                                     ctx.request_id.clone(),
                                     response.content_type.clone(),
@@ -1579,14 +1590,16 @@ impl FerroGateway {
                                     response.status,
                                     "text/event-stream",
                                     response.initial_body,
+                                    upstream,
                                     capturing,
                                     &ctx.request_id,
                                 )
                                 .await;
                                 (result, usage_capture)
                             } else {
+                                let (upstream, feed_reader) = streaming_body_channel(response.body);
                                 let (capturing, usage_capture) = StreamingUsageCapturingReader::new(
-                                    response.body,
+                                    feed_reader,
                                     &response.initial_body,
                                 );
                                 let result = write_streaming_response(
@@ -1594,6 +1607,7 @@ impl FerroGateway {
                                     response.status,
                                     &response.content_type,
                                     response.initial_body,
+                                    upstream,
                                     capturing,
                                     &ctx.request_id,
                                 )
@@ -2485,33 +2499,56 @@ impl<R: Read> Read for CapturingReader<R> {
     }
 }
 
-pub(super) async fn read_provider_streaming_body<R: Read + Send + 'static>(
+/// Buffers a provider stream to completion through the `Read`-based
+/// `transform` tower, pumping upstream chunks on the async runtime (issue
+/// #311; no blocking-pool thread). The byte cap applies to the transform's
+/// output -- exactly what the old blocking reader capped -- and the timeout
+/// covers the whole buffering; hitting it cancels the pump, which drops the
+/// upstream source and aborts the provider read.
+pub(super) async fn read_provider_streaming_body<S, R>(
     initial_body: Vec<u8>,
-    mut reader: R,
+    mut upstream: StreamingBodyUpstream<S>,
+    mut transform: R,
     max_bytes: usize,
     timeout: std::time::Duration,
-) -> Result<Vec<u8>, StreamingBodyReadError> {
+) -> Result<Vec<u8>, StreamingBodyReadError>
+where
+    S: StreamingBodySource,
+    R: Read + Send,
+{
     if initial_body.len() > max_bytes {
         return Err(StreamingBodyReadError::TooLarge { max_bytes });
     }
-    let read_task = tokio::task::spawn_blocking(move || {
+    let read_all = async move {
         let mut body = initial_body;
         let mut buffer = [0_u8; 8192];
-        loop {
-            let read = reader
-                .read(&mut buffer)
+        let mut upstream_done = false;
+        'stream: loop {
+            loop {
+                match transform.read(&mut buffer) {
+                    Ok(0) => break 'stream,
+                    Ok(read) => {
+                        if body.len().saturating_add(read) > max_bytes {
+                            return Err(StreamingBodyReadError::TooLarge { max_bytes });
+                        }
+                        body.extend_from_slice(&buffer[..read]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(StreamingBodyReadError::Io(error)),
+                }
+            }
+            if upstream_done {
+                break;
+            }
+            upstream_done = !upstream
+                .advance()
+                .await
                 .map_err(StreamingBodyReadError::Io)?;
-            if read == 0 {
-                return Ok(body);
-            }
-            if body.len().saturating_add(read) > max_bytes {
-                return Err(StreamingBodyReadError::TooLarge { max_bytes });
-            }
-            body.extend_from_slice(&buffer[..read]);
         }
-    });
-    match tokio::time::timeout(timeout, read_task).await {
-        Ok(result) => result.map_err(|error| StreamingBodyReadError::Io(IoError::other(error)))?,
+        Ok(body)
+    };
+    match tokio::time::timeout(timeout, read_all).await {
+        Ok(result) => result,
         Err(_) => Err(StreamingBodyReadError::Timeout { timeout }),
     }
 }
@@ -3934,11 +3971,28 @@ mod tests {
         }));
     }
 
+    struct ChunkSource {
+        chunks: VecDeque<bytes::Bytes>,
+        delay: std::time::Duration,
+    }
+
+    impl StreamingBodySource for ChunkSource {
+        async fn next_chunk(&mut self) -> std::io::Result<Option<bytes::Bytes>> {
+            tokio::time::sleep(self.delay).await;
+            Ok(self.chunks.pop_front())
+        }
+    }
+
     #[tokio::test]
     async fn guarded_stream_buffer_enforces_byte_and_time_limits() {
+        let (upstream, feed_reader) = streaming_body_channel(ChunkSource {
+            chunks: VecDeque::from([bytes::Bytes::from_static(b"12345")]),
+            delay: std::time::Duration::ZERO,
+        });
         let too_large = read_provider_streaming_body(
             Vec::new(),
-            Cursor::new(b"12345".to_vec()),
+            upstream,
+            feed_reader,
             4,
             std::time::Duration::from_secs(1),
         )
@@ -3949,22 +4003,87 @@ mod tests {
             StreamingBodyReadError::TooLarge { max_bytes: 4 }
         ));
 
-        struct SlowReader;
-        impl Read for SlowReader {
-            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                Ok(0)
-            }
-        }
+        let (upstream, feed_reader) = streaming_body_channel(ChunkSource {
+            chunks: VecDeque::new(),
+            delay: std::time::Duration::from_millis(100),
+        });
         let timed_out = read_provider_streaming_body(
             Vec::new(),
-            SlowReader,
+            upstream,
+            feed_reader,
             1024,
             std::time::Duration::from_millis(10),
         )
         .await
         .expect_err("slow guarded stream must hit its deadline");
         assert!(matches!(timed_out, StreamingBodyReadError::Timeout { .. }));
+    }
+
+    // Issue #311: the transform tower (here both normalizers over the feed
+    // reader) must translate WouldBlock-fed chunkwise input identically to
+    // the old continuous blocking reader -- partial SSE frames split across
+    // chunk boundaries included.
+    #[tokio::test]
+    async fn chunkwise_fed_normalizer_matches_continuous_read() {
+        let frames = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4o\",\"choices\":",
+            "[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}],",
+            "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .as_bytes();
+        // Split at awkward boundaries (mid-frame, mid-JSON) to force the
+        // normalizer through WouldBlock retries with partial buffers.
+        let chunks: VecDeque<bytes::Bytes> = frames
+            .chunks(17)
+            .map(bytes::Bytes::copy_from_slice)
+            .collect();
+
+        let (mut upstream, feed_reader) = streaming_body_channel(ChunkSource {
+            chunks,
+            delay: std::time::Duration::ZERO,
+        });
+        let mut normalizer = ResponsesStreamNormalizer::new(
+            feed_reader,
+            responses_stream_provider_kind("openai"),
+            "fg-test",
+            "text/event-stream",
+        );
+
+        let mut chunkwise = Vec::new();
+        let mut buffer = [0_u8; 64];
+        let mut upstream_done = false;
+        'stream: loop {
+            loop {
+                match normalizer.read(&mut buffer) {
+                    Ok(0) => break 'stream,
+                    Ok(read) => chunkwise.extend_from_slice(&buffer[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("chunkwise normalizer read failed: {error}"),
+                }
+            }
+            if upstream_done {
+                break;
+            }
+            upstream_done = !upstream.advance().await.unwrap();
+        }
+
+        let mut continuous = Vec::new();
+        ResponsesStreamNormalizer::new(
+            Cursor::new(frames.to_vec()),
+            responses_stream_provider_kind("openai"),
+            "fg-test",
+            "text/event-stream",
+        )
+        .read_to_end(&mut continuous)
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8_lossy(&chunkwise),
+            String::from_utf8_lossy(&continuous)
+        );
+        assert!(String::from_utf8_lossy(&chunkwise).contains("response.output_text.delta"));
     }
 
     #[test]

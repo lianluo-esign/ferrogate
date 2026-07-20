@@ -8,12 +8,9 @@ use anyhow::{bail, Context, Result as AnyResult};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use reqwest::{redirect::Policy, Client};
-use std::{
-    io::{Error as IoError, Read},
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{io::Error as IoError, sync::OnceLock, time::Duration};
 
+use crate::responses::StreamingBodySource;
 use ferrogate_providers::{ProviderCatalogRequest, ProviderHttpRequest};
 
 #[derive(Debug, Clone)]
@@ -33,40 +30,25 @@ pub(super) struct ProviderStreamingResponse {
     pub(super) status: StatusCode,
     pub(super) content_type: String,
     pub(super) initial_body: Vec<u8>,
-    pub(super) body: ProviderBodyReader,
+    pub(super) body: ProviderBodyStream,
 }
 
-pub(super) struct ProviderBodyReader {
-    runtime: tokio::runtime::Handle,
+/// Async provider-body chunk source (issue #311): surfaces `reqwest`'s async
+/// body directly on the runtime. Replaces the former sync-`Read` shim that
+/// blocked on `response.chunk()` and parked one blocking-pool thread per
+/// active stream. Dropping this aborts the upstream connection, which is how
+/// client disconnects propagate to the provider. The reqwest request-level
+/// timeout keeps covering body reads exactly as before.
+pub(super) struct ProviderBodyStream {
     response: reqwest::Response,
-    pending: Option<Bytes>,
 }
 
-impl Read for ProviderBodyReader {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-
+impl StreamingBodySource for ProviderBodyStream {
+    async fn next_chunk(&mut self) -> std::io::Result<Option<Bytes>> {
         loop {
-            if let Some(mut pending) = self.pending.take() {
-                let read = pending.len().min(buffer.len());
-                buffer[..read].copy_from_slice(&pending[..read]);
-                if read < pending.len() {
-                    let _ = pending.split_to(read);
-                    self.pending = Some(pending);
-                }
-                return Ok(read);
-            }
-
-            let chunk = self
-                .runtime
-                .block_on(self.response.chunk())
-                .map_err(IoError::other)?;
-            match chunk {
+            match self.response.chunk().await.map_err(IoError::other)? {
                 Some(chunk) if chunk.is_empty() => continue,
-                Some(chunk) => self.pending = Some(chunk),
-                None => return Ok(0),
+                chunk => return Ok(chunk),
             }
         }
     }
@@ -142,11 +124,7 @@ pub(super) async fn dispatch_provider_streaming_request(
         status,
         content_type,
         initial_body: Vec::new(),
-        body: ProviderBodyReader {
-            runtime: tokio::runtime::Handle::current(),
-            response,
-            pending: None,
-        },
+        body: ProviderBodyStream { response },
     })
 }
 

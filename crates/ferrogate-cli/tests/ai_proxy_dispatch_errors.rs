@@ -8,8 +8,9 @@ mod support;
 
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     thread,
+    time::{Duration, Instant},
 };
 
 use support::{
@@ -279,4 +280,128 @@ provider_response_body_max_bytes = 32
     gateway.wait().unwrap();
     let provider_requests = provider_handle.join().unwrap();
     assert_eq!(provider_requests.len(), 1);
+}
+
+// Issue #311 structural guard: streaming provider bodies are forwarded
+// natively on the async runtime. No per-stream blocking-thread shim
+// (`spawn_blocking` pump or `block_on` reader) may reappear anywhere in the
+// streaming pipeline, and the old sync `ProviderBodyReader` type stays gone.
+#[test]
+fn streaming_pipeline_has_no_blocking_thread_shim() {
+    let source = |relative: &str| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+    };
+    for file in [
+        "src/gateway/dispatch.rs",
+        "src/gateway/chat.rs",
+        "src/gateway/messages.rs",
+        "src/gateway/messages_stream.rs",
+        "src/gateway/responses_stream.rs",
+        "src/responses.rs",
+    ] {
+        let contents = source(file);
+        assert!(
+            !contents.contains("spawn_blocking"),
+            "{file} reintroduced a spawn_blocking streaming shim"
+        );
+        assert!(
+            !contents.contains("block_on"),
+            "{file} reintroduced a block_on streaming bridge"
+        );
+    }
+    assert!(
+        !source("src/gateway/dispatch.rs").contains("ProviderBodyReader"),
+        "the sync ProviderBodyReader shim is back in dispatch.rs"
+    );
+}
+
+// Issue #311: a client disconnect mid-stream must abort the upstream provider
+// read promptly -- the async pump returns on the failed downstream write and
+// drops the provider connection, instead of letting the upstream stream run
+// to completion in the background.
+#[test]
+fn client_disconnect_aborts_upstream_streaming_read() {
+    let gateway_addr = free_addr();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let provider_addr = listener.local_addr().unwrap().to_string();
+    let provider = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream
+            .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
+            .unwrap();
+        stream.flush().unwrap();
+        // Keep emitting ticks: once the client is gone, the gateway must drop
+        // this connection, making a write here fail well before the ~15s the
+        // stream would otherwise keep going.
+        let started = Instant::now();
+        for _ in 0..600 {
+            if stream
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"tick\"}}]}\n\n")
+                .and_then(|_| stream.flush())
+                .is_err()
+            {
+                return (true, started.elapsed());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        (false, started.elapsed())
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(
+        &config,
+        &gateway_addr,
+        &format!("http://{provider_addr}/v1"),
+    );
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    {
+        let mut stream = TcpStream::connect(&gateway_addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let body =
+            r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        write!(
+            stream,
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer chat-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        let mut buffer = [0_u8; 512];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "gateway closed before first SSE chunk");
+            response.extend_from_slice(&buffer[..read]);
+            if String::from_utf8_lossy(&response).contains("\"content\":\"first\"") {
+                break;
+            }
+        }
+        // Drop the client connection mid-stream.
+    }
+
+    let (aborted, elapsed) = provider.join().unwrap();
+    assert!(
+        aborted,
+        "upstream stream ran to completion after client disconnect"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "upstream read was not aborted promptly after client disconnect: {elapsed:?}"
+    );
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
 }

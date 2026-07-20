@@ -43,8 +43,8 @@ use crate::{
     auth::{authenticate, authorize_external_rbac, AuthContext},
     config::{GuardrailEffect, GuardrailStage},
     responses::{
-        write_json_error, write_raw_response, write_streaming_bytes_response,
-        write_streaming_response,
+        streaming_body_channel, write_json_error, write_raw_response,
+        write_streaming_bytes_response, write_streaming_response,
     },
     state::{
         AdminAuditEventDraft, AppState, BillingEventDraft, GuardrailEvaluationContext,
@@ -722,9 +722,11 @@ impl FerroGateway {
                             // can block/redact before any byte reaches the
                             // client -- the pre-#310 governed path.
                             let content_type = streaming.content_type;
+                            let (upstream, feed_reader) = streaming_body_channel(streaming.body);
                             match read_provider_streaming_body(
                                 streaming.initial_body,
-                                streaming.body,
+                                upstream,
+                                feed_reader,
                                 provider_response_body_max_bytes,
                                 dispatch_timeout,
                             )
@@ -764,7 +766,8 @@ impl FerroGateway {
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
                             let shadow = streaming_guardrail_plan
                                 == StreamingGuardrailPlan::ShadowAfterComplete;
-                            let raw = Cursor::new(streaming.initial_body).chain(streaming.body);
+                            let (upstream, feed_reader) = streaming_body_channel(streaming.body);
+                            let raw = Cursor::new(streaming.initial_body).chain(feed_reader);
                             let (usage_reader, usage_capture) =
                                 StreamingUsageCapturingReader::new(raw, &[]);
                             let (reader, shadow_capture): (Box<dyn Read + Send>, _) = if shadow {
@@ -784,6 +787,7 @@ impl FerroGateway {
                                 status,
                                 "text/event-stream",
                                 Vec::new(),
+                                upstream,
                                 normalizer,
                                 &ctx.request_id,
                             )

@@ -4546,6 +4546,117 @@ allowed_models = ["claude-chat"]
     assert!(!provider_request.contains("client-secret"));
 }
 
+// Issue #311: with the per-stream blocking-thread shim gone, N simultaneous
+// SSE streams must all progress concurrently on the async runtime alone. The
+// mock provider parks every stream behind a barrier that only releases once
+// ALL N upstream streams have delivered their first chunk -- if the gateway
+// could not keep N provider streams in flight at once, the barrier would
+// never release and the clients below would hit their read timeouts instead
+// of completing.
+#[test]
+fn openai_chat_streaming_concurrent_streams_all_progress() {
+    const STREAMS: usize = 12;
+    let gateway_addr = free_addr();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let provider_addr = listener.local_addr().unwrap().to_string();
+    let provider = thread::spawn(move || {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(STREAMS));
+        let mut handlers = Vec::with_capacity(STREAMS);
+        for _ in 0..STREAMS {
+            let (mut stream, _) = listener.accept().unwrap();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handlers.push(thread::spawn(move || {
+                let request = read_http_request(&mut stream);
+                assert!(request.contains(r#""stream":true"#));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                stream
+                    .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
+                    .unwrap();
+                stream.flush().unwrap();
+                // Hold this stream open until every other stream is also
+                // mid-flight with its first chunk delivered.
+                barrier.wait();
+                stream.write_all(b"data: [DONE]\n\n").unwrap();
+            }));
+        }
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let started = Instant::now();
+    let mut clients = Vec::with_capacity(STREAMS);
+    for _ in 0..STREAMS {
+        let gateway_addr = gateway_addr.clone();
+        clients.push(thread::spawn(move || {
+            let mut stream = TcpStream::connect(&gateway_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let body = r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+            write!(
+                stream,
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer client-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.contains("200 OK"), "{response}");
+            assert!(response.contains("\"content\":\"first\""));
+            assert!(response.contains("data: [DONE]"));
+            assert!(!response.contains("client-secret"));
+        }));
+    }
+    for client in clients {
+        client.join().unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "concurrent streams did not all progress promptly"
+    );
+    provider.join().unwrap();
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 // Issue #310: usage/billing settlement on the incremental streaming path must
 // equal the buffered (non-streaming) path for the same content. Both requests
 // hit a mock provider emitting the same known usage (11 prompt / 6 completion

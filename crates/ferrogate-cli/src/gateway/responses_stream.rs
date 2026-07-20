@@ -306,9 +306,19 @@ impl<R: Read> Read for ResponsesStreamNormalizer<R> {
             }
 
             let mut buffer = [0_u8; 8192];
-            let read = self.reader.read(&mut buffer).map_err(|error| {
-                IoError::other(format!("reading provider streaming response: {error}"))
-            })?;
+            let read = match self.reader.read(&mut buffer) {
+                Ok(read) => read,
+                // Issue #311: `WouldBlock` is the async pump's "no upstream
+                // chunk fed yet" signal from the streaming body feed; surface
+                // it untouched (no state has been mutated) so the pump can
+                // await the next chunk and retry this read.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    return Err(IoError::other(format!(
+                        "reading provider streaming response: {error}"
+                    )))
+                }
+            };
             if read == 0 {
                 self.eof = true;
                 if !self.buffer.is_empty() {
