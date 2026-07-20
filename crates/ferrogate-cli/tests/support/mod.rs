@@ -50,6 +50,71 @@ pub fn wait_for_gateway(addr: &str) {
     panic!("gateway did not become ready at {addr}");
 }
 
+/// Starts the gateway on a genuinely-free port, transparently retrying the
+/// `free_addr()` bind race.
+///
+/// `free_addr()` picks an ephemeral port by binding then dropping a listener, so
+/// there is a TOCTOU window before the spawned gateway re-binds it. Under
+/// full-workspace parallel load two tests can be handed the same just-freed port
+/// (or another process can grab it), and the gateway that loses the race fails
+/// to bind and exits almost immediately. A plain `wait_for_gateway` would then
+/// either stall on the 300s readiness window or, worse, observe a *different*
+/// test's gateway answering on that address -- the classic load-sensitive,
+/// different-subset-each-run flake.
+///
+/// This helper closes that window: it allocates a port, (re)writes the config
+/// via `write_config_for`, spawns the gateway, and treats an early child exit as
+/// a lost bind race -- relaunching on a fresh port. It only accepts readiness
+/// while our own child is confirmed alive, so a stray gateway on the same port
+/// can never be mistaken for ours. Returns the live child and the bound address.
+#[allow(dead_code)]
+pub fn start_ready_gateway(
+    config: &std::path::Path,
+    write_config_for: impl Fn(&str),
+) -> (Child, String) {
+    for _ in 0..20 {
+        let addr = free_addr();
+        write_config_for(&addr);
+        let mut child = start_gateway(config);
+        if gateway_ready_or_exited(&addr, &mut child) {
+            return (child, addr);
+        }
+        // Lost the bind race (or a broken startup): reap and retry on a fresh
+        // port. Killing an already-exited child is harmless.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    panic!("gateway never bound a free port after 20 attempts");
+}
+
+/// Polls gateway readiness while watching for an early child exit. Returns
+/// `true` once `/healthz` answers with our child still alive, `false` if the
+/// child exits first (lost bind race / broken startup) or the readiness window
+/// elapses.
+fn gateway_ready_or_exited(addr: &str, child: &mut Child) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(300) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return false;
+        }
+        if let Ok(mut stream) = TcpStream::connect(addr) {
+            if stream
+                .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .is_ok()
+            {
+                let mut buffer = [0_u8; 512];
+                if stream.read(&mut buffer).unwrap_or(0) > 0 {
+                    // Confirm the readiness came from our own gateway, not a
+                    // stray one that transiently held the port.
+                    return !matches!(child.try_wait(), Ok(Some(_)));
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
 /// Like [`http_request`] but sends a binary request body and returns the raw
 /// response bytes, for endpoints that push non-UTF-8 payloads (e.g. a zip site
 /// bundle) or serve binary content.

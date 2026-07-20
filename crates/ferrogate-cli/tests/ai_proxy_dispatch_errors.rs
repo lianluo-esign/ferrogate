@@ -14,7 +14,8 @@ use std::{
 };
 
 use support::{
-    free_addr, http_request, spawn_provider_upstream_response, start_gateway, wait_for_gateway,
+    free_addr, http_request, spawn_provider_upstream_response, start_gateway, start_ready_gateway,
+    wait_for_gateway,
 };
 
 fn write_config(path: &std::path::Path, gateway_addr: &str, base_url: &str) {
@@ -95,13 +96,11 @@ fn chat_maps_https_provider_connect_failure_to_502() {
 
 #[test]
 fn chat_maps_streaming_provider_connect_failure_to_502() {
-    let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    write_config(&config, &gateway_addr, "http://127.0.0.1:9/v1");
-
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
+    let (mut gateway, gateway_addr) = start_ready_gateway(&config, |addr| {
+        write_config(&config, addr, "http://127.0.0.1:9/v1");
+    });
 
     let response = chat_body(
         &gateway_addr,
@@ -212,7 +211,6 @@ fn chat_maps_malformed_provider_response_to_502() {
 
 #[test]
 fn chat_normalizes_provider_error_response() {
-    let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream_response(
         1,
         "429 Too Many Requests",
@@ -221,14 +219,12 @@ fn chat_normalizes_provider_error_response() {
     );
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    write_config(
-        &config,
-        &gateway_addr,
-        &format!("http://{provider_addr}/v1"),
-    );
-
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
+    let base_url = format!("http://{provider_addr}/v1");
+    // Retry only relaunches the gateway on a lost bind race, before any request
+    // is dispatched, so the single-accept provider mock is never disturbed.
+    let (mut gateway, gateway_addr) = start_ready_gateway(&config, |addr| {
+        write_config(&config, addr, &base_url);
+    });
 
     let response = chat(&gateway_addr);
     assert!(response.contains("429 Too Many Requests"));

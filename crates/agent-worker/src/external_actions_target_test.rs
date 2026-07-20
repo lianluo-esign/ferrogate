@@ -1476,12 +1476,43 @@ fn kill_pid_from_file(path: &Path) {
     let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
 }
 
+fn read_descendant_pid(path: &Path) -> Option<rustix::process::Pid> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let pid = raw.trim().parse::<i32>().ok()?;
+    rustix::process::Pid::from_raw(pid)
+}
+
 fn assert_pid_file_process_exited(path: &Path) {
-    let raw = std::fs::read_to_string(path).unwrap();
-    let pid = rustix::process::Pid::from_raw(raw.parse::<i32>().unwrap()).unwrap();
-    for _ in 0..100 {
+    // The forking shell writes this PID file from a separate process; under
+    // full-workspace parallel load it can be scheduled late enough that the file
+    // still lags (or is momentarily empty) when we start observing. Poll for the
+    // PID to be recorded rather than unwrapping a possibly-not-yet-flushed read.
+    let pid_deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = read_descendant_pid(path) {
+            break pid;
+        }
+        assert!(
+            Instant::now() < pid_deadline,
+            "descendant PID file {} was never populated",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    // The group kill delivers SIGKILL synchronously (the security property under
+    // test), but a killed descendant lingers as a zombie -- still visible to
+    // kill(pid, 0) -- until it is reparented to the init subreaper and reaped.
+    // Under CPU load that reparent+reap can take well over a second, so poll
+    // generously: we are confirming the descendant is killed, not benchmarking
+    // init's reap latency. The window is bounded so a genuinely surviving
+    // descendant still fails the test.
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         if rustix::process::test_kill_process(pid).is_err() {
             return;
+        }
+        if Instant::now() >= exit_deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(10));
     }

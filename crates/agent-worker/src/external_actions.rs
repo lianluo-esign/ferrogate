@@ -2015,15 +2015,30 @@ fn run_authorized_cli_action_until_cancelled(
         ))
     })?;
     let started_at = Instant::now();
-    thread::sleep(Duration::from_millis(25));
-    let status = match child.try_wait() {
-        Ok(status) => status,
-        Err(error) => {
-            kill_and_reap_process_group(&mut child);
-            return Err(FrameworkAdapterError::CapabilityDenied(format!(
-                "managed CLI action status check failed: {error}"
-            )));
+    // Observe the leader over a bounded window instead of a single fixed sleep.
+    // A fast leader that exits on its own (e.g. immediately after forking a
+    // descendant) must be seen as "completed before cancellation"; under CPU
+    // load its exit can land well after a fixed 25ms probe, which would
+    // otherwise misclassify it as still-running and report a spurious cancel.
+    // Break early the moment it exits, and only treat it as cancellable once it
+    // is still alive after the full window -- either way the whole process group
+    // is killed and reaped below, so the enforcement guarantee is unchanged.
+    let observation_window = Duration::from_millis(500);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(error) => {
+                kill_and_reap_process_group(&mut child);
+                return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                    "managed CLI action status check failed: {error}"
+                )));
+            }
         }
+        if started_at.elapsed() >= observation_window {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(5));
     };
     match status {
         None => {
