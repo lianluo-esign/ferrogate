@@ -549,6 +549,8 @@ fn guest_agent_builtin_start_response_is_identity_and_policy_bound() {
             "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
         proves_microvm_boot: false,
         proves_handler_execution: false,
+        workload: None,
+        capability_envelope: None,
     };
 
     request.validate_for_guest_agent().unwrap();
@@ -594,6 +596,8 @@ fn guest_agent_builtin_start_request_validation_rejects_execution_claims() {
             "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
         proves_microvm_boot: false,
         proves_handler_execution: true,
+        workload: None,
+        capability_envelope: None,
     };
 
     let reason = request.validate_for_guest_agent().unwrap_err();

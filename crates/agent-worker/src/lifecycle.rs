@@ -70,8 +70,23 @@ fn provision(
     // rather than hardcoding Firecracker. Only backends whose host lifecycle is
     // implemented and configured are selectable, so an unimplemented or
     // unconfigured backend can never be provisioned — the path fails closed.
+    //
+    // MicroVM-required workloads (#280 acceptance 2): when
+    // AGENT_WORKER_REQUIRE_MICROVM_ISOLATION is set the selection policy pins
+    // allowed_kinds to Firecracker, so a ready local-process or docker backend
+    // can NEVER be selected as a silent degradation — a missing KVM/bundle
+    // preflight becomes an explicit microvm_required_backend_unavailable error.
+    let microvm_required = crate::backends::microvm_isolation_required();
+    let selection_policy = if microvm_required {
+        IsolationPolicy {
+            allowed_kinds: vec![IsolationBackendKind::FirecrackerMicroVm],
+            ..IsolationPolicy::default()
+        }
+    } else {
+        IsolationPolicy::default()
+    };
     let selectable = selectable_isolation_backend_descriptors();
-    let selected = match select_isolation_backend(&IsolationPolicy::default(), &selectable) {
+    let selected = match select_isolation_backend(&selection_policy, &selectable) {
         Ok(descriptor) => descriptor.clone(),
         Err(_) => {
             // Nothing selectable. Surface the Firecracker readiness reason when
@@ -81,6 +96,9 @@ fn provision(
                 .find(|backend| backend.backend_name == "firecracker")
                 .and_then(|backend| backend.readiness_reason)
                 .unwrap_or_else(|| "no isolation backend is ready for provisioning".to_string());
+            if microvm_required {
+                return Err(microvm_required_unavailable_error(&reason));
+            }
             return Err(ManagedWorkerError::management_protocol_error(
                 AgentWorkerManagementErrorCode::IncompatibleBackend,
                 reason,
@@ -117,6 +135,14 @@ fn provision(
     let preflight = firecracker_host_preflight();
     if !preflight.ready() {
         let message = preflight.failure_summary();
+        // MicroVM-required workloads degrade explicitly: the bundle may be
+        // configured (making Firecracker selectable) while the host still
+        // fails the KVM/executable preflight. That must be a hard, distinct
+        // error — never a failed-but-accepted lifecycle record that a caller
+        // could quietly retry against a weaker backend.
+        if crate::backends::microvm_isolation_required() {
+            return Err(microvm_required_unavailable_error(&message));
+        }
         let lifecycle = lifecycle_result_for_backend(
             envelope,
             ManagedWorkerSessionStatus::Failed,
@@ -181,6 +207,24 @@ fn provision(
         Some(instance_id),
     )?;
     Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+/// The distinct fail-closed error for a microVM-required workload on a host
+/// where the Firecracker/KVM preflight is unavailable (#280 acceptance 2).
+/// Callers and tests match on the stable
+/// `microvm_required_backend_unavailable` marker; the message names the exact
+/// preflight/readiness reason and states that no weaker backend was used.
+fn microvm_required_unavailable_error(reason: &str) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        AgentWorkerManagementErrorCode::IncompatibleBackend,
+        format!(
+            "{marker}: this workload requires Firecracker microVM isolation \
+             ({env}=1) and the worker refuses to degrade to local_process, docker, or any other \
+             backend; no workload was executed. Preflight: {reason}",
+            marker = crate::backends::MICROVM_REQUIRED_UNAVAILABLE,
+            env = crate::backends::REQUIRE_MICROVM_ENV,
+        ),
+    )
 }
 
 // ---- Docker isolation backend lifecycle (opt-in low-risk tier) ----
@@ -894,10 +938,160 @@ fn resource_config_error(name: &'static str, reason: String) -> ManagedWorkerErr
     )
 }
 
+/// Real Firecracker guest execution over the microVM vsock channel (#280).
+///
+/// Builds the guest workload's gateway capability envelope from a REAL
+/// gateway decision, ships the command envelope into the retained microVM
+/// through the Firecracker vsock host socket, and returns the guest's
+/// streamed normalized events as the run evidence. The capability decision is
+/// enforced INSIDE the VM boundary by the guest agent:
+///
+/// - Managed (cloud): only an allowed gateway decision grants the workload's
+///   capability. A denied / approval-required / unavailable gateway yields an
+///   empty grant set — the guest agent refuses to spawn the workload and
+///   returns enforced `capability_denied` evidence (never report-only).
+/// - Self-hosted: the #242 report-only contract — the grant is issued
+///   regardless and the recorded evidence is stamped with the report-only
+///   marker (customer_owned_host boundary, server-clock identity expiry).
+///
+/// Transport failures fail closed with `guest_vsock_unavailable` and leave
+/// the retained microVM available for later lifecycle actions.
+#[allow(clippy::too_many_arguments)]
+fn exec_or_attach_firecracker_vsock(
+    envelope: &AgentWorkerManagementEnvelope,
+    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
+    worker_mode: FrameworkAdapterMode,
+    instance_id: &str,
+    running: bool,
+    guest_rpc_socket: &std::path::Path,
+    port: u32,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    use ferrogate_runtime::{
+        FrameworkAdapterSession, ManagedCliAction, ManagedExternalAction, SupportedFramework,
+    };
+
+    use crate::{
+        backends::firecracker_guest_vsock_start_request,
+        external_actions::{request_handler_external_action_decision, ExternalActionGateRequest},
+        firecracker_guest_exec::{
+            firecracker_guest_vsock_exec, guest_vsock_exec_timeout,
+            FirecrackerGuestCapabilityEnvelope, FirecrackerGuestWorkloadSpec,
+        },
+    };
+
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if !running {
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            ManagedWorkerSessionStatus::Failed,
+            "exited",
+            &format!("Firecracker microVM {instance_id} exited before guest execution could start"),
+            Some(instance_id.to_string()),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
+
+    // The bounded managed workload this exec runs inside the guest, and the
+    // typed action the gateway decides on. Same deterministic readiness probe
+    // shape as the docker/local-process exec paths.
+    let workload = FirecrackerGuestWorkloadSpec {
+        capability_action: "cli".to_string(),
+        command: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "echo agent-worker-firecracker-guest-ready".to_string(),
+        ],
+        timeout_millis: 10_000,
+        output_limit_bytes: 4_096,
+    };
+    let cli_action = ManagedCliAction {
+        command: workload.command.clone(),
+        args: workload.args.clone(),
+        working_dir: "/".to_string(),
+        env_policy: "deny_all".to_string(),
+        timeout_millis: workload.timeout_millis,
+        stdout_limit_bytes: workload.output_limit_bytes,
+        stderr_limit_bytes: workload.output_limit_bytes,
+        artifact_capture: false,
+    };
+    let probe_session = FrameworkAdapterSession {
+        session_id: session_id.clone(),
+        run_id: run_id.clone(),
+        tenant_id: envelope.tenant_id.clone(),
+        workspace_id: envelope.workspace_id.clone(),
+        worker_id: envelope.worker_id.clone(),
+        isolation_backend: "firecracker".to_string(),
+        adapter_name: "native-harness".to_string(),
+        adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+        framework: SupportedFramework::NativeHarness,
+        mode: FrameworkAdapterMode::Managed,
+    };
+    let granted = match worker_mode {
+        FrameworkAdapterMode::Managed => {
+            match request_handler_external_action_decision(
+                external_action_authorizer,
+                ExternalActionGateRequest {
+                    session: probe_session,
+                    action: ManagedExternalAction::Cli(cli_action),
+                    high_risk: false,
+                },
+            ) {
+                Ok(decision) if decision.allowed() => vec!["cli".to_string()],
+                // Denied, approval-required, or no gateway authorizer: the
+                // grant set stays EMPTY and the guest agent enforces the
+                // denial at the VM boundary.
+                Ok(_) | Err(_) => Vec::new(),
+            }
+        }
+        // Self-hosted (#242): report-only — never enforced on the customer
+        // host; the report-only marker is stamped into the evidence below.
+        FrameworkAdapterMode::SelfHosted => vec!["cli".to_string()],
+    };
+    let capability_envelope =
+        FirecrackerGuestCapabilityEnvelope::enforced(format!("cap:{session_id}:{run_id}"), granted);
+    let request =
+        firecracker_guest_vsock_start_request(envelope, instance_id, workload, capability_envelope);
+    match firecracker_guest_vsock_exec(guest_rpc_socket, port, &request, guest_vsock_exec_timeout())
+    {
+        Ok(outcome) => {
+            let mut events = outcome.events;
+            if worker_mode == FrameworkAdapterMode::SelfHosted {
+                let marker = self_hosted_report_only_exec_marker(
+                    "cli",
+                    "agent://managed/firecracker-guest",
+                    envelope.issued_at_unix_millis,
+                );
+                for event in &mut events {
+                    event
+                        .metadata
+                        .insert("self_hosted_report_only".to_string(), marker.clone());
+                }
+            }
+            Ok(Some(AgentWorkerManagementResult::HandlerEvents { events }))
+        }
+        Err(error) => {
+            let lifecycle = lifecycle_result_with_instance(
+                envelope,
+                ManagedWorkerSessionStatus::Failed,
+                error.outcome(),
+                &format!(
+                    "Firecracker microVM {instance_id} is provisioned with running={running}, \
+                     but the vsock guest execution failed: {}; {}",
+                    error.reason(),
+                    request.summary()
+                ),
+                Some(instance_id.to_string()),
+            )?;
+            Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+        }
+    }
+}
+
 fn exec_or_attach(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
-    _external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
+    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
     worker_mode: FrameworkAdapterMode,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
@@ -916,6 +1110,24 @@ fn exec_or_attach(
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
+        // Real guest execution (#280): when the host opts into the vsock
+        // guest channel, exec_or_attach ships the command envelope into the
+        // retained microVM and streams the guest's evidence back. The legacy
+        // command-bridge probe below remains the default when the vsock port
+        // is not configured.
+        if let Some(port) = crate::firecracker_guest_exec::configured_guest_vsock_port() {
+            let instance_id = existing.instance_id.clone();
+            let guest_rpc_socket = existing.guest_rpc_socket_path();
+            return exec_or_attach_firecracker_vsock(
+                envelope,
+                external_action_authorizer,
+                worker_mode,
+                &instance_id,
+                running,
+                &guest_rpc_socket,
+                port,
+            );
+        }
         let guest_agent = firecracker_guest_agent_preflight();
         if !guest_agent.ready() {
             let lifecycle = lifecycle_result_with_instance(

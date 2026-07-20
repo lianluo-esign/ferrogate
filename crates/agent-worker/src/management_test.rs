@@ -303,6 +303,134 @@ fn provision_fails_closed_when_docker_backend_enabled_but_daemon_unreachable() {
 }
 
 #[test]
+fn microvm_required_provision_fails_closed_distinctly_instead_of_degrading_to_local_process() {
+    // #280 acceptance 2: a workload marked microVM-required must FAIL CLOSED
+    // with a distinct, explicit error when the Firecracker/KVM preflight is
+    // unavailable — it must NEVER silently fall back to local_process (or
+    // docker), even when that weaker backend is enabled and ready on the host.
+    let _env_lock = lock_firecracker_env();
+    for var in [
+        "AGENT_WORKER_FIRECRACKER_BIN",
+        "AGENT_WORKER_FIRECRACKER_JAILER",
+        "AGENT_WORKER_FIRECRACKER_KERNEL",
+        "AGENT_WORKER_FIRECRACKER_ROOTFS",
+        "AGENT_WORKER_FIRECRACKER_KVM_DEVICE",
+    ] {
+        std::env::remove_var(var);
+    }
+    // Make the silent-degradation target AVAILABLE on purpose: local_process
+    // is enabled, and (when the host has the namespace stack) selectable.
+    // Without the microVM-required marker this host would provision it.
+    std::env::set_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND", "1");
+    std::env::set_var(crate::backends::REQUIRE_MICROVM_ENV, "1");
+
+    let envelope = lifecycle_envelope(
+        AgentWorkerManagementAction::Provision,
+        "agent-worker-provision-microvm-required",
+    );
+    let input = serde_json::to_string(&envelope).unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
+    std::env::remove_var(crate::backends::REQUIRE_MICROVM_ENV);
+    std::env::remove_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND");
+    let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+    assert_eq!(response["accepted"], false, "{response}");
+    assert_eq!(response["action"], "provision", "{response}");
+    assert_eq!(
+        response["error"]["code"], "incompatible_backend",
+        "{response}"
+    );
+    assert_eq!(response["error"]["retryable"], false, "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    // The distinct, stable degradation marker (never a generic readiness
+    // error), naming the refusal to run on a weaker backend.
+    assert!(
+        message.contains(crate::backends::MICROVM_REQUIRED_UNAVAILABLE),
+        "{response}"
+    );
+    assert!(
+        message.contains("refuses to degrade to local_process"),
+        "{response}"
+    );
+    // No lifecycle result: nothing was provisioned on ANY backend.
+    assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+}
+
+#[test]
+fn microvm_required_provision_fails_closed_when_bundle_configured_but_kvm_preflight_fails() {
+    // Companion: the Firecracker bundle IS configured (so Firecracker is
+    // selectable and no other backend can win), but the host preflight fails
+    // (no KVM in this sandbox). microVM-required must turn that into the same
+    // distinct hard error instead of a soft failed-lifecycle record.
+    let _env_lock = lock_firecracker_env();
+    let temp = tempfile::tempdir().unwrap();
+    let firecracker_path = temp.path().join("firecracker");
+    let jailer_path = temp.path().join("jailer");
+    let kernel_path = temp.path().join("vmlinux");
+    let rootfs_path = temp.path().join("rootfs.ext4");
+    write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
+    write_executable_version_script(&jailer_path, "Jailer v.test").unwrap();
+    std::fs::write(&kernel_path, b"not executed").unwrap();
+    std::fs::write(&rootfs_path, b"not executed").unwrap();
+    std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+    std::env::set_var("AGENT_WORKER_FIRECRACKER_JAILER", &jailer_path);
+    std::env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
+    std::env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+    // A KVM device path that cannot exist: the preflight must fail even on a
+    // host that happens to have real /dev/kvm.
+    std::env::set_var(
+        "AGENT_WORKER_FIRECRACKER_KVM_DEVICE",
+        temp.path().join("missing-kvm"),
+    );
+    std::env::set_var(crate::backends::REQUIRE_MICROVM_ENV, "1");
+
+    let envelope = lifecycle_envelope(
+        AgentWorkerManagementAction::Provision,
+        "agent-worker-provision-microvm-required-preflight",
+    );
+    let input = serde_json::to_string(&envelope).unwrap();
+    let response_json = accept_management_json(
+        &input,
+        "agent-worker-smoke-key",
+        SMOKE_SHARED_SECRET,
+        1_000,
+        FrameworkAdapterMode::Managed,
+    )
+    .unwrap();
+    std::env::remove_var(crate::backends::REQUIRE_MICROVM_ENV);
+    for var in [
+        "AGENT_WORKER_FIRECRACKER_BIN",
+        "AGENT_WORKER_FIRECRACKER_JAILER",
+        "AGENT_WORKER_FIRECRACKER_KERNEL",
+        "AGENT_WORKER_FIRECRACKER_ROOTFS",
+        "AGENT_WORKER_FIRECRACKER_KVM_DEVICE",
+    ] {
+        std::env::remove_var(var);
+    }
+    let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+    assert_eq!(response["accepted"], false, "{response}");
+    assert_eq!(
+        response["error"]["code"], "incompatible_backend",
+        "{response}"
+    );
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(crate::backends::MICROVM_REQUIRED_UNAVAILABLE),
+        "{response}"
+    );
+    assert!(message.contains("host preflight failed"), "{response}");
+    assert_eq!(response["result"], serde_json::Value::Null, "{response}");
+}
+
+#[test]
 fn cleanup_lifecycle_action_returns_typed_noop_evidence_before_firecracker_start() {
     let envelope = lifecycle_envelope(AgentWorkerManagementAction::Cleanup, "agent-worker-cleanup");
     let input = serde_json::to_string(&envelope).unwrap();

@@ -320,6 +320,208 @@ pub(crate) fn firecracker_microvm_provision(
     Ok(started)
 }
 
+/// Deployment-level marker that every managed workload on this worker REQUIRES
+/// Firecracker microVM isolation (#280 acceptance 2). When set, provisioning
+/// must fail closed with a distinct `microvm_required_backend_unavailable`
+/// error whenever the Firecracker/KVM preflight is unavailable — it must never
+/// degrade silently to local_process or docker.
+pub(crate) const REQUIRE_MICROVM_ENV: &str = "AGENT_WORKER_REQUIRE_MICROVM_ISOLATION";
+
+/// Stable marker prefix for the fail-closed microVM-required degradation
+/// error. Tests and operators match on this exact value.
+pub(crate) const MICROVM_REQUIRED_UNAVAILABLE: &str = "microvm_required_backend_unavailable";
+
+pub(crate) fn microvm_isolation_required() -> bool {
+    env::var(REQUIRE_MICROVM_ENV)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// `agent-worker firecracker-agent-exec-smoke` (#280): the acceptance-evidence
+/// generator for real agent execution inside a Firecracker microVM.
+///
+/// On a KVM host with the guest agent staged in the rootfs it: boots a real
+/// microVM through the governed provision path, then over the vsock guest
+/// channel runs (a) an ALLOWED workload (capability granted by the envelope;
+/// must execute in-guest) and (b) a DENIED workload (capability withheld; the
+/// guest agent must enforce the denial and never spawn it). It prints one JSON
+/// report with both outcomes plus boot evidence, then tears the microVM down.
+///
+/// Without KVM (or without the bundle) it fails closed exactly like every
+/// other microVM-required workload: an explicit
+/// `microvm_required_backend_unavailable` report — never a silent
+/// local_process fallback.
+pub(crate) fn firecracker_agent_exec_smoke_command(
+    timeout_millis: u64,
+    vcpu_count: u8,
+    mem_size_mib: u32,
+    vsock_port: Option<u32>,
+) -> Result<()> {
+    use crate::firecracker_guest_exec::{
+        firecracker_guest_vsock_exec, FirecrackerGuestCapabilityEnvelope,
+        FirecrackerGuestWorkloadSpec, DEFAULT_GUEST_VSOCK_PORT,
+    };
+
+    let port = vsock_port
+        .or_else(crate::firecracker_guest_exec::configured_guest_vsock_port)
+        .unwrap_or(DEFAULT_GUEST_VSOCK_PORT);
+    let fail_closed_report = |stage: &str, reason: String| {
+        println!(
+            "{}",
+            json!({
+                "process": "agent-worker",
+                "smoke": "firecracker_agent_exec",
+                "backend_name": "firecracker",
+                "backend_kind": "firecracker_micro_vm",
+                "host_lifecycle_owner": "agent-worker",
+                "ready": false,
+                "fail_closed": true,
+                "degradation": MICROVM_REQUIRED_UNAVAILABLE,
+                "local_process_fallback": false,
+                "failure_stage": stage,
+                "failure_reason": reason,
+                "proves_microvm_boot": false,
+                "proves_handler_execution": false,
+                "capability_denial_enforced": false,
+            })
+        );
+        Ok(())
+    };
+
+    let mut microvm = match firecracker_microvm_provision(timeout_millis, vcpu_count, mem_size_mib)
+    {
+        Ok(microvm) => microvm,
+        Err(error) => return fail_closed_report(error.stage, error.reason),
+    };
+    let instance_id = microvm.instance_id.clone();
+    let boot_markers = microvm.evidence.marker_summary();
+    let guest_rpc_socket = microvm.guest_rpc_socket_path();
+    let smoke_envelope = firecracker_agent_exec_smoke_envelope();
+    let exec_timeout = crate::firecracker_guest_exec::guest_vsock_exec_timeout();
+
+    let workload = |marker: &str| FirecrackerGuestWorkloadSpec {
+        capability_action: "cli".to_string(),
+        command: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), format!("echo {marker}")],
+        timeout_millis: 10_000,
+        output_limit_bytes: 4_096,
+    };
+
+    // (a) ALLOWED: the envelope grants `cli`; the workload must really run
+    // inside the guest.
+    let allowed_request = firecracker_guest_vsock_start_request(
+        &smoke_envelope,
+        &instance_id,
+        workload("ferrogate-firecracker-guest-exec-allowed"),
+        FirecrackerGuestCapabilityEnvelope::enforced(
+            format!("cap:allowed:{instance_id}"),
+            vec!["cli".to_string()],
+        ),
+    );
+    // Retry while the guest boots and the guest agent starts listening.
+    let allowed_deadline = Instant::now() + Duration::from_millis(timeout_millis.max(1));
+    let allowed = loop {
+        match firecracker_guest_vsock_exec(&guest_rpc_socket, port, &allowed_request, exec_timeout)
+        {
+            Ok(outcome) => break Ok(outcome),
+            Err(error) if Instant::now() >= allowed_deadline => break Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(250)),
+        }
+    };
+    let allowed = match allowed {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = microvm.stop();
+            return fail_closed_report(error.outcome(), error.reason().to_string());
+        }
+    };
+
+    // (b) DENIED: the envelope grants NOTHING; the guest agent must enforce
+    // the denial inside the VM boundary and never spawn the workload.
+    let denied_request = firecracker_guest_vsock_start_request(
+        &smoke_envelope,
+        &instance_id,
+        workload("ferrogate-firecracker-guest-exec-denied"),
+        FirecrackerGuestCapabilityEnvelope::enforced(
+            format!("cap:denied:{instance_id}"),
+            Vec::new(),
+        ),
+    );
+    let denied =
+        firecracker_guest_vsock_exec(&guest_rpc_socket, port, &denied_request, exec_timeout);
+    let denied = match denied {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = microvm.stop();
+            return fail_closed_report(error.outcome(), error.reason().to_string());
+        }
+    };
+
+    let stop = microvm.stop();
+    let allowed_result = allowed.response.workload_result().cloned();
+    let denied_result = denied.response.workload_result().cloned();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "process": "agent-worker",
+            "smoke": "firecracker_agent_exec",
+            "backend_name": "firecracker",
+            "backend_kind": "firecracker_micro_vm",
+            "host_lifecycle_owner": "agent-worker",
+            "ready": true,
+            "fail_closed": false,
+            "isolation_instance_id": instance_id,
+            "serial_boot_markers": boot_markers,
+            "proves_microvm_boot": true,
+            "vsock_port": port,
+            "guest_agent_version": allowed.handshake.guest_agent_version(),
+            "allowed": {
+                "status": allowed.response.status(),
+                "proves_handler_execution": allowed.response.proves_handler_execution(),
+                "workload_result": allowed_result,
+                "event_kinds": allowed.event_kinds(),
+                "elapsed_millis": allowed.elapsed_millis,
+            },
+            "denied": {
+                "status": denied.response.status(),
+                "proves_handler_execution": denied.response.proves_handler_execution(),
+                "workload_result": denied_result,
+                "event_kinds": denied.event_kinds(),
+                "elapsed_millis": denied.elapsed_millis,
+            },
+            "teardown": stop.summary(),
+        }))?
+    );
+    Ok(())
+}
+
+/// Deterministic identity for the agent-exec smoke's guest requests. Only the
+/// identity fields are read on this path; the security block is inert.
+fn firecracker_agent_exec_smoke_envelope() -> ferrogate_runtime::AgentWorkerManagementEnvelope {
+    ferrogate_runtime::AgentWorkerManagementEnvelope {
+        protocol_version: ferrogate_runtime::AGENT_WORKER_PROTOCOL_VERSION,
+        action: ferrogate_runtime::AgentWorkerManagementAction::ExecOrAttach,
+        request_id: "agent-worker-firecracker-agent-exec-smoke-request".to_string(),
+        idempotency_key: "agent-worker-firecracker-agent-exec-smoke-idempotency".to_string(),
+        issued_at_unix_millis: 0,
+        deadline_unix_millis: 0,
+        tenant_id: "agent-worker-smoke-tenant".to_string(),
+        workspace_id: "agent-worker-smoke-workspace".to_string(),
+        worker_id: "agent-worker-smoke-worker".to_string(),
+        session_id: Some("agent-worker-firecracker-agent-exec-smoke-session".to_string()),
+        run_id: Some("agent-worker-firecracker-agent-exec-smoke-run".to_string()),
+        framework_adapter: Some("native-harness".to_string()),
+        security: ferrogate_runtime::AgentWorkerManagementSecurity {
+            key_id: "agent-worker-smoke-key".to_string(),
+            nonce: "agent-worker-firecracker-agent-exec-smoke-nonce".to_string(),
+            signature: String::new(),
+            algorithm: ferrogate_runtime::AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
+            transport_security: ferrogate_runtime::AgentWorkerTransportSecurity::LocalUnixSocket,
+            encrypted: false,
+        },
+    }
+}
+
 pub(crate) fn firecracker_boot_smoke_command(
     timeout_millis: u64,
     vcpu_count: u8,
@@ -624,6 +826,48 @@ pub(crate) fn firecracker_guest_rpc_start_request(
             "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
         proves_microvm_boot: false,
         proves_handler_execution: false,
+        workload: None,
+        capability_envelope: None,
+    }
+}
+
+/// Build the real vsock guest execution request (#280): the same
+/// identity/policy-bound `start_handler` contract as the bridge probe, plus
+/// the bounded command envelope and the gateway capability envelope the guest
+/// agent enforces at the microVM boundary.
+pub(crate) fn firecracker_guest_vsock_start_request(
+    envelope: &ferrogate_runtime::AgentWorkerManagementEnvelope,
+    isolation_instance_id: &str,
+    workload: crate::firecracker_guest_exec::FirecrackerGuestWorkloadSpec,
+    capability_envelope: crate::firecracker_guest_exec::FirecrackerGuestCapabilityEnvelope,
+) -> FirecrackerGuestRpcStartRequest {
+    let adapter = normalize_guest_launch_adapter(envelope.framework_adapter.as_deref());
+    FirecrackerGuestRpcStartRequest {
+        protocol_version: FirecrackerGuestAgentHandshake::PROTOCOL_VERSION.to_string(),
+        action: "start_handler".to_string(),
+        tenant_id: envelope.tenant_id.clone(),
+        workspace_id: envelope.workspace_id.clone(),
+        worker_id: envelope.worker_id.clone(),
+        session_id: envelope.session_id.clone().unwrap_or_default(),
+        run_id: envelope.run_id.clone().unwrap_or_default(),
+        framework_adapter: adapter.to_string(),
+        adapter_launch_profile: adapter_launch_profile(adapter),
+        isolation_backend: "firecracker".to_string(),
+        isolation_instance_id: isolation_instance_id.to_string(),
+        rpc_channel: crate::firecracker_guest_exec::VSOCK_RPC_CHANNEL.to_string(),
+        required_gateway_capabilities: guest_launch_capabilities(adapter)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect(),
+        network_policy: "gateway_control_channel_only_no_direct_public_egress".to_string(),
+        filesystem_policy: "prepared_workspace_only_with_read_only_runtime_bundle".to_string(),
+        artifact_policy: "guest_artifacts_must_return_as_artifact_created_events".to_string(),
+        checkpoint_policy:
+            "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
+        proves_microvm_boot: false,
+        proves_handler_execution: false,
+        workload: Some(workload),
+        capability_envelope: Some(capability_envelope),
     }
 }
 
@@ -1189,9 +1433,9 @@ pub(crate) struct FirecrackerGuestAgentHandshake {
 }
 
 impl FirecrackerGuestAgentHandshake {
-    const PROTOCOL_VERSION: &'static str = "ferrogate.agent-worker.guest.v1";
+    pub(crate) const PROTOCOL_VERSION: &'static str = "ferrogate.agent-worker.guest.v1";
 
-    fn parse(stdout: &[u8]) -> Result<Self, String> {
+    pub(crate) fn parse(stdout: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(stdout).map_err(|error| error.to_string())?;
         let line = text
             .lines()
@@ -1265,10 +1509,19 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
     checkpoint_policy: String,
     proves_microvm_boot: bool,
     proves_handler_execution: bool,
+    /// Real guest execution (#280): the bounded command envelope to run
+    /// inside the microVM. Absent for legacy contract-probe requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workload: Option<crate::firecracker_guest_exec::FirecrackerGuestWorkloadSpec>,
+    /// Real guest execution (#280): the gateway capability envelope the guest
+    /// agent enforces at the VM boundary. Required whenever `workload` is
+    /// present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capability_envelope: Option<crate::firecracker_guest_exec::FirecrackerGuestCapabilityEnvelope>,
 }
 
 impl FirecrackerGuestRpcStartRequest {
-    fn validate_for_guest_agent(&self) -> Result<(), String> {
+    pub(crate) fn validate_for_guest_agent(&self) -> Result<(), String> {
         if self.protocol_version != FirecrackerGuestAgentHandshake::PROTOCOL_VERSION {
             return Err(format!(
                 "unsupported protocol_version {}; expected {}",
@@ -1304,12 +1557,51 @@ impl FirecrackerGuestRpcStartRequest {
         if self.proves_handler_execution {
             return Err("start request cannot claim handler execution".to_string());
         }
+        if let Some(workload) = &self.workload {
+            workload.validate()?;
+            let Some(envelope) = &self.capability_envelope else {
+                return Err(
+                    "workload was present without a gateway capability envelope; the guest agent \
+                     cannot execute without an enforceable envelope"
+                        .to_string(),
+                );
+            };
+            envelope.validate()?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(crate) fn framework_adapter(&self) -> &str {
+        &self.framework_adapter
+    }
+
+    pub(crate) fn isolation_instance_id(&self) -> &str {
+        &self.isolation_instance_id
+    }
+
+    pub(crate) fn workload(
+        &self,
+    ) -> Option<&crate::firecracker_guest_exec::FirecrackerGuestWorkloadSpec> {
+        self.workload.as_ref()
+    }
+
+    pub(crate) fn capability_envelope(
+        &self,
+    ) -> Option<&crate::firecracker_guest_exec::FirecrackerGuestCapabilityEnvelope> {
+        self.capability_envelope.as_ref()
     }
 
     pub(crate) fn summary(&self) -> String {
         format!(
-            "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, launch_profile={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
+            "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, launch_profile={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={}, workload_present={}, capability_envelope_present={})",
             self.protocol_version,
             self.action,
             self.worker_id,
@@ -1322,7 +1614,9 @@ impl FirecrackerGuestRpcStartRequest {
             self.network_policy,
             self.filesystem_policy,
             self.proves_microvm_boot,
-            self.proves_handler_execution
+            self.proves_handler_execution,
+            self.workload.is_some(),
+            self.capability_envelope.is_some()
         )
     }
 }
@@ -1346,6 +1640,10 @@ pub(crate) struct FirecrackerGuestRpcStartResponse {
     status: String,
     message: Option<String>,
     proves_handler_execution: bool,
+    /// Real guest execution (#280): what happened to the workload envelope
+    /// inside the microVM. Absent for legacy contract-probe responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workload_result: Option<crate::firecracker_guest_exec::FirecrackerGuestWorkloadResult>,
     #[serde(skip)]
     elapsed_millis: u128,
 }
@@ -1354,6 +1652,19 @@ impl FirecrackerGuestRpcStartResponse {
     fn not_implemented_for_request(
         request: &FirecrackerGuestRpcStartRequest,
         message: impl Into<String>,
+    ) -> Self {
+        Self::for_guest_request(request, "not_implemented", message, None, false)
+    }
+
+    /// Build an identity/policy-bound response for a guest session. The guest
+    /// agent uses this for every terminal state; the host verifies the echo
+    /// with `verify_binding` before trusting any of it.
+    pub(crate) fn for_guest_request(
+        request: &FirecrackerGuestRpcStartRequest,
+        status: &str,
+        message: impl Into<String>,
+        workload_result: Option<crate::firecracker_guest_exec::FirecrackerGuestWorkloadResult>,
+        proves_handler_execution: bool,
     ) -> Self {
         Self {
             protocol_version: request.protocol_version.clone(),
@@ -1370,11 +1681,31 @@ impl FirecrackerGuestRpcStartResponse {
             filesystem_policy: request.filesystem_policy.clone(),
             artifact_policy: request.artifact_policy.clone(),
             checkpoint_policy: request.checkpoint_policy.clone(),
-            status: "not_implemented".to_string(),
+            status: status.to_string(),
             message: Some(message.into()),
-            proves_handler_execution: false,
+            proves_handler_execution,
+            workload_result,
             elapsed_millis: 0,
         }
+    }
+
+    pub(crate) fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub(crate) fn proves_handler_execution(&self) -> bool {
+        self.proves_handler_execution
+    }
+
+    pub(crate) fn workload_result(
+        &self,
+    ) -> Option<&crate::firecracker_guest_exec::FirecrackerGuestWorkloadResult> {
+        self.workload_result.as_ref()
+    }
+
+    pub(crate) fn with_elapsed_millis(mut self, elapsed_millis: u128) -> Self {
+        self.elapsed_millis = elapsed_millis;
+        self
     }
 
     fn parse(
@@ -1399,55 +1730,7 @@ impl FirecrackerGuestRpcStartResponse {
         if response.status.trim().is_empty() {
             return Err("status was empty".to_string());
         }
-        Self::require_matches("action", &response.action, &request.action)?;
-        Self::require_matches("worker_id", &response.worker_id, &request.worker_id)?;
-        Self::require_matches("session_id", &response.session_id, &request.session_id)?;
-        Self::require_matches("run_id", &response.run_id, &request.run_id)?;
-        Self::require_matches(
-            "framework_adapter",
-            &response.framework_adapter,
-            &request.framework_adapter,
-        )?;
-        Self::require_matches(
-            "adapter_launch_profile",
-            &response.adapter_launch_profile.summary(),
-            &request.adapter_launch_profile.summary(),
-        )?;
-        Self::require_matches(
-            "isolation_backend",
-            &response.isolation_backend,
-            &request.isolation_backend,
-        )?;
-        Self::require_matches(
-            "isolation_instance_id",
-            &response.isolation_instance_id,
-            &request.isolation_instance_id,
-        )?;
-        Self::require_vec_matches(
-            "required_gateway_capabilities",
-            &response.required_gateway_capabilities,
-            &request.required_gateway_capabilities,
-        )?;
-        Self::require_matches(
-            "network_policy",
-            &response.network_policy,
-            &request.network_policy,
-        )?;
-        Self::require_matches(
-            "filesystem_policy",
-            &response.filesystem_policy,
-            &request.filesystem_policy,
-        )?;
-        Self::require_matches(
-            "artifact_policy",
-            &response.artifact_policy,
-            &request.artifact_policy,
-        )?;
-        Self::require_matches(
-            "checkpoint_policy",
-            &response.checkpoint_policy,
-            &request.checkpoint_policy,
-        )?;
+        response.verify_binding(request)?;
         if response.proves_handler_execution {
             return Err(
                 "response claimed handler execution before in-guest execution is wired".to_string(),
@@ -1455,6 +1738,76 @@ impl FirecrackerGuestRpcStartResponse {
         }
         response.elapsed_millis = elapsed_millis;
         Ok(response)
+    }
+
+    /// Require the response to echo the exact identity, adapter, capability,
+    /// and policy shape of the request it answers. Shared by the legacy
+    /// command-bridge transport and the real vsock guest execution transport;
+    /// any mismatch fails closed.
+    pub(crate) fn verify_binding(
+        &self,
+        request: &FirecrackerGuestRpcStartRequest,
+    ) -> Result<(), String> {
+        if self.protocol_version != FirecrackerGuestAgentHandshake::PROTOCOL_VERSION {
+            return Err(format!(
+                "unsupported protocol_version {}; expected {}",
+                self.protocol_version,
+                FirecrackerGuestAgentHandshake::PROTOCOL_VERSION
+            ));
+        }
+        if self.status.trim().is_empty() {
+            return Err("status was empty".to_string());
+        }
+        Self::require_matches("action", &self.action, &request.action)?;
+        Self::require_matches("worker_id", &self.worker_id, &request.worker_id)?;
+        Self::require_matches("session_id", &self.session_id, &request.session_id)?;
+        Self::require_matches("run_id", &self.run_id, &request.run_id)?;
+        Self::require_matches(
+            "framework_adapter",
+            &self.framework_adapter,
+            &request.framework_adapter,
+        )?;
+        Self::require_matches(
+            "adapter_launch_profile",
+            &self.adapter_launch_profile.summary(),
+            &request.adapter_launch_profile.summary(),
+        )?;
+        Self::require_matches(
+            "isolation_backend",
+            &self.isolation_backend,
+            &request.isolation_backend,
+        )?;
+        Self::require_matches(
+            "isolation_instance_id",
+            &self.isolation_instance_id,
+            &request.isolation_instance_id,
+        )?;
+        Self::require_vec_matches(
+            "required_gateway_capabilities",
+            &self.required_gateway_capabilities,
+            &request.required_gateway_capabilities,
+        )?;
+        Self::require_matches(
+            "network_policy",
+            &self.network_policy,
+            &request.network_policy,
+        )?;
+        Self::require_matches(
+            "filesystem_policy",
+            &self.filesystem_policy,
+            &request.filesystem_policy,
+        )?;
+        Self::require_matches(
+            "artifact_policy",
+            &self.artifact_policy,
+            &request.artifact_policy,
+        )?;
+        Self::require_matches(
+            "checkpoint_policy",
+            &self.checkpoint_policy,
+            &request.checkpoint_policy,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -1523,7 +1876,7 @@ impl FirecrackerGuestAdapterLaunchProfile {
 }
 
 impl FirecrackerGuestAgentLaunchAttemptError {
-    fn new(outcome: &'static str, reason: String) -> Self {
+    pub(crate) fn new(outcome: &'static str, reason: String) -> Self {
         Self { outcome, reason }
     }
 
@@ -1977,6 +2330,12 @@ pub(crate) struct FirecrackerMicroVm {
 impl FirecrackerMicroVm {
     pub(crate) fn is_running(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_none()
+    }
+
+    /// Host-side Unix socket of the microVM's `guest-rpc` vsock device — the
+    /// transport anchor for real guest execution (#280).
+    pub(crate) fn guest_rpc_socket_path(&self) -> PathBuf {
+        self.artifacts.guest_rpc_socket.clone()
     }
 
     pub(crate) fn artifact_results(&self) -> Vec<AgentWorkerFrameworkArtifactResult> {

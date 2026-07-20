@@ -481,12 +481,71 @@ policy, and checkpoint policy. Identity, capability, or policy mismatches fail
 closed and leave the retained microVM available for later lifecycle actions.
 Spawn, write, timeout, non-zero exit, malformed response, identity mismatch,
 capability/policy mismatch, unsupported status, or a response claiming handler
-execution return `outcome=guest_handler_rpc_unavailable`. The only accepted
-response status today is `not_implemented`, which returns
-`outcome=guest_handler_rpc_not_implemented`; this proves the request/response
-contract can be exercised for the current worker/session/run/isolation
-instance and exact gateway-mediated execution envelope, not that
-Codex/Claude/Hermes handler execution inside the microVM exists.
+execution return `outcome=guest_handler_rpc_unavailable`. On the
+command-bridge transport the only accepted response status is
+`not_implemented`, which returns `outcome=guest_handler_rpc_not_implemented`;
+this proves the request/response contract can be exercised for the current
+worker/session/run/isolation instance and exact gateway-mediated execution
+envelope on hosts that have not opted into the real guest channel.
+
+Real guest execution over the microVM vsock channel (#280) supersedes the
+command-bridge probe when the host sets
+`AGENT_WORKER_FIRECRACKER_GUEST_VSOCK_PORT`. The retained microVM's
+`guest-rpc` vsock device host socket becomes the live transport:
+`exec_or_attach` connects to it, performs the Firecracker vsock mux
+handshake (`CONNECT <port>` / `OK <port>`), validates the guest agent's
+versioned handshake (`rpc_channel=vsock-json-lines`), and sends the same
+identity/policy-bound `start_handler` request extended with two fields: a
+bounded command envelope (`workload`: capability action, command, args,
+timeout, output limit) and a gateway capability envelope
+(`capability_envelope`: envelope id, granted capability list, and
+`enforcement=enforced_at_microvm_boundary`). The guest side is the same
+`agent-worker` binary staged in the rootfs, started by guest init with the
+hidden `--ferrogate-guest-agent-serve-vsock` entrypoint listening on the
+AF_VSOCK port (`FERROGATE_AGENT_WORKER_GUEST_VSOCK_PORT`, default 5252).
+The guest agent is the enforcement point INSIDE the VM boundary: a workload
+whose capability action is not in the granted list — or whose envelope
+declares any enforcement mode other than `enforced_at_microvm_boundary` —
+is denied before any process is spawned, and the denial is returned as
+enforced evidence (`status=capability_denied`,
+`workload_result.capability_denial_enforced=true`,
+`workload_result.executed=false`, plus a streamed `capability.denied`
+event), never as report-only telemetry. Granted workloads execute with a
+cleared environment inside the prepared guest workspace and stream
+normalized framework events (`capability.allowed`, `run.started`, then
+`run.completed`/`run.failed`) back over the channel before the final
+response. Under managed mode the granted capability list comes from a real
+gateway authorizer decision for the workload's typed action; a denied,
+approval-required, or unavailable gateway yields an empty grant set that
+the guest enforces. Under self-hosted mode the grant is issued regardless
+(the #242 report-only contract) and every returned event is stamped with
+the `self_hosted_report_only` marker metadata. The host verifies the
+response echoes the full request identity/policy shape and applies a strict
+status policy: `completed` requires `executed=true`, `exit_code=0`, and
+`proves_handler_execution=true`; `capability_denied` requires
+`executed=false` and an enforced denial; anything else fails closed with
+`outcome=guest_handler_rpc_unavailable`. Transport failures fail closed
+with `outcome=guest_vsock_unavailable` and leave the retained microVM
+available. Successful executions and enforced denials return
+`result.kind=handler_events` carrying the guest-streamed evidence. The
+KVM-host acceptance procedure — including staging the guest agent into the
+rootfs — is `docs/sandbox/firecracker-agent-execution.md`, exercised by
+`agent-worker firecracker-agent-exec-smoke` and the gated
+`firecracker_agent_execution` integration harness.
+
+MicroVM-required workloads degrade explicitly, never silently (#280
+acceptance 2). Setting `AGENT_WORKER_REQUIRE_MICROVM_ISOLATION=1` on a
+worker pins the provision-time isolation selection policy to
+`firecracker_micro_vm` only. When Firecracker is unselectable (bundle not
+configured) or the host preflight fails (no KVM), `provision` is rejected
+with a non-retryable `incompatible_backend` error whose message carries the
+stable `microvm_required_backend_unavailable` marker plus the exact
+preflight reason — it never falls back to local_process or docker, even
+when those backends are enabled and ready, and no workload is executed on
+any backend. Without the marker the existing behavior is unchanged: the
+registry-ranked selection may choose an enabled weaker backend, and a
+configured-but-preflight-failed Firecracker still returns the soft
+`outcome=host_preflight_failed` lifecycle record.
 `snapshot_or_checkpoint` is now a first-class management action; before
 provision it returns `outcome=not_started`, and with a retained running
 Firecracker microVM it calls the Firecracker API to pause the VM, create a full

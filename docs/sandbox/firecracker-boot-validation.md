@@ -166,10 +166,11 @@ A skip is a green test — it never fake-passes a boot it did not run.
 The automated harness proves the read-only rootfs layout **boots** and that the
 kernel mounted the rootfs read-only. Asserting the two final in-guest
 properties — an in-guest write to the rootfs *fails* and `/dev/vdb` *is
-writable* — requires executing commands **inside** the guest, which the guest
-RPC start entrypoint does not yet run (tracked separately). A maintainer can
-confirm them manually by booting an interactive microVM with the same drive
-layout and running:
+writable* — requires executing commands **inside** the guest. Since #280 the
+worker CAN execute commands inside the guest over the vsock channel once the
+guest agent is staged (see `docs/sandbox/firecracker-agent-execution.md`);
+alternatively a maintainer can confirm them manually by booting an
+interactive microVM with the same drive layout and running:
 
 ```sh
 # Inside the guest (root shell):

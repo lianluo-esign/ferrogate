@@ -13,6 +13,7 @@ mod backends;
 mod docker_backend;
 mod events;
 mod external_actions;
+mod firecracker_guest_exec;
 mod handler_runtime;
 mod handlers;
 mod lifecycle;
@@ -92,6 +93,11 @@ struct Cli {
     /// Hidden compatibility entrypoint used by Firecracker guest-agent start RPC.
     #[arg(long = "ferrogate-guest-agent-start", hide = true)]
     ferrogate_guest_agent_start: bool,
+    /// Hidden guest-side entrypoint: serve real execution sessions on the
+    /// microVM AF_VSOCK port (#280). Started by the guest init from the
+    /// agent-worker binary staged in the rootfs.
+    #[arg(long = "ferrogate-guest-agent-serve-vsock", hide = true)]
+    ferrogate_guest_agent_serve_vsock: bool,
     /// Worker deployment type for this shared binary: `cloud` (FerroGate-managed
     /// runtime) or `self-hosted` (customer-operated). One binary, mode-selected
     /// (issue #132).
@@ -165,6 +171,26 @@ enum Command {
     },
     /// Provision, status-check, and cleanup a real Firecracker microVM in one worker process.
     FirecrackerLifecycleSmoke,
+    /// Boot a Firecracker microVM and execute real allowed + denied agent
+    /// workloads inside the guest over the vsock channel, asserting the
+    /// capability envelope is enforced at the VM boundary (#280). Requires a
+    /// KVM host with the guest agent staged in the rootfs; fails closed with
+    /// microvm_required_backend_unavailable evidence anywhere else.
+    FirecrackerAgentExecSmoke {
+        /// Maximum time to wait for boot plus the guest agent to accept.
+        #[arg(long, default_value_t = 90_000)]
+        timeout_millis: u64,
+        /// vCPU count for the smoke microVM.
+        #[arg(long, default_value_t = 1)]
+        vcpu_count: u8,
+        /// Guest memory in MiB for the smoke microVM.
+        #[arg(long, default_value_t = 256)]
+        mem_size_mib: u32,
+        /// vsock port the staged guest agent listens on (defaults to
+        /// AGENT_WORKER_FIRECRACKER_GUEST_VSOCK_PORT, then 5252).
+        #[arg(long)]
+        vsock_port: Option<u32>,
+    },
     /// Execute the configured framework handler binary smoke inside agent-worker ownership.
     SmokeHandlerBinary {
         /// Adapter to smoke: codex, claude-code, or hermes.
@@ -421,7 +447,15 @@ fn reject_unsupported_self_hosted_execution(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.ferrogate_guest_agent_probe && cli.ferrogate_guest_agent_start {
+    let guest_entrypoints = [
+        cli.ferrogate_guest_agent_probe,
+        cli.ferrogate_guest_agent_start,
+        cli.ferrogate_guest_agent_serve_vsock,
+    ]
+    .iter()
+    .filter(|selected| **selected)
+    .count();
+    if guest_entrypoints > 1 {
         bail!("only one Firecracker guest-agent entrypoint may be selected");
     }
     if cli.ferrogate_guest_agent_probe {
@@ -429,6 +463,9 @@ fn main() -> Result<()> {
     }
     if cli.ferrogate_guest_agent_start {
         return backends::firecracker_guest_agent_start_entrypoint();
+    }
+    if cli.ferrogate_guest_agent_serve_vsock {
+        return firecracker_guest_exec::firecracker_guest_agent_serve_vsock_entrypoint();
     }
     let Some(command) = cli.command else {
         bail!("no agent-worker command provided");
@@ -469,6 +506,17 @@ fn main() -> Result<()> {
             mem_size_mib,
         } => backends::firecracker_boot_smoke_command(timeout_millis, vcpu_count, mem_size_mib),
         Command::FirecrackerLifecycleSmoke => management::firecracker_lifecycle_smoke_command(),
+        Command::FirecrackerAgentExecSmoke {
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+            vsock_port,
+        } => backends::firecracker_agent_exec_smoke_command(
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+            vsock_port,
+        ),
         Command::SmokeHandlerBinary {
             adapter,
             timeout_millis,
