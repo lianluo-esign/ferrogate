@@ -14,6 +14,10 @@ import ToolApprovalsPage from "@/pages/tool-approvals";
 import AgentRunsPage from "@/pages/agent-runs";
 import AgentRunDetailPage from "@/pages/agent-run-detail";
 import AgentSchedulesPage from "@/pages/agent-schedules";
+import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
+import GuardrailPoliciesPage from "@/pages/guardrail-policies";
+import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
+import InvestigationsPage from "@/pages/investigations";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -45,6 +49,16 @@ function App() {
                 <Route path="/app/agent-runs" element={<AgentRunsPage />} />
                 <Route path="/app/agent-runs/:runId" element={<AgentRunDetailPage />} />
                 <Route path="/app/agent-schedules" element={<AgentSchedulesPage />} />
+                <Route path="/app/guardrail-policies" element={<GuardrailPoliciesPage />} />
+                <Route
+                  path="/app/guardrail-policies/:policyId"
+                  element={<GuardrailPolicyDetailPage />}
+                />
+                <Route
+                  path="/app/guardrail-evaluations"
+                  element={<GuardrailEvaluationsPage />}
+                />
+                <Route path="/app/investigations" element={<InvestigationsPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

@@ -95,6 +95,15 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Agent schedules", url: "/app/agent-schedules" },
     ],
   },
+  {
+    title: "Guardrails",
+    icon: ShieldAlert,
+    items: [
+      { title: "Guardrail policies", url: "/app/guardrail-policies" },
+      { title: "Guardrail evaluations", url: "/app/guardrail-evaluations" },
+      { title: "Investigations", url: "/app/investigations" },
+    ],
+  },
 ];
 
 export const RESOURCE_ICONS: Record<string, LucideIcon> = {
