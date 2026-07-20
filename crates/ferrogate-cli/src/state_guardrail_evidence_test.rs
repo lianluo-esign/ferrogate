@@ -83,6 +83,9 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
         id: "approval-1".into(),
         request_id: "request-1".into(),
         trace_id: None,
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_node_id: None,
         tenant: ferrogate_core::TenantContext::default(),
         actor_api_key_id: None,
         tool_name: "tool".into(),
@@ -135,6 +138,138 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
     ] {
         assert!(!encoded.contains(forbidden));
     }
+}
+
+fn matcher_approval(
+    request_id: &str,
+    agent_run_id: Option<&str>,
+) -> crate::approval::ToolApprovalRecord {
+    crate::approval::ToolApprovalRecord {
+        id: "approval-matcher".into(),
+        request_id: request_id.into(),
+        trace_id: None,
+        agent_run_id: agent_run_id.map(str::to_string),
+        workflow_id: None,
+        workflow_node_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        actor_api_key_id: None,
+        tool_name: "tool".into(),
+        server_name: None,
+        route: None,
+        approval_policy: ferrogate_core::ApprovalPolicy::Always,
+        approval_timeout_secs: 60,
+        fingerprint: "fingerprint".into(),
+        arguments_summary: "{}".into(),
+        risk_reason: "test".into(),
+        status: ApprovalStatus::Pending,
+        reviewer_api_key_id: None,
+        reviewer_authority: None,
+        terminal_reason: None,
+        requested_at_unix: 1,
+        expires_at_unix: 61,
+        decided_at_unix: None,
+    }
+}
+
+/// #305 acceptance: an approval that carries agent_run_id matches an
+/// investigation by that run id DIRECTLY — with zero request-id/trace-id
+/// overlap against any related row (empty back-fill sets).
+#[test]
+fn investigation_by_agent_run_id_matches_approval_without_related_id_overlap() {
+    let filter = GuardrailEvidenceFilter {
+        agent_run_id: Some("run-corr".into()),
+        ..GuardrailEvidenceFilter::default()
+    };
+    let approval = matcher_approval("request-only-on-approval", Some("run-corr"));
+    assert!(investigation_matches_approval(
+        &filter,
+        &approval,
+        &HashSet::new(),
+        &HashSet::new(),
+    ));
+}
+
+/// #305: legacy approvals (no agent_run_id) keep the related-id back-fill.
+#[test]
+fn investigation_by_agent_run_id_backfills_legacy_approvals_via_related_ids() {
+    let filter = GuardrailEvidenceFilter {
+        agent_run_id: Some("run-corr".into()),
+        ..GuardrailEvidenceFilter::default()
+    };
+    let legacy = matcher_approval("request-shared", None);
+    assert!(investigation_matches_approval(
+        &filter,
+        &legacy,
+        &HashSet::from(["request-shared"]),
+        &HashSet::new(),
+    ));
+    // Without any overlap, a legacy approval still does not match.
+    assert!(!investigation_matches_approval(
+        &filter,
+        &legacy,
+        &HashSet::new(),
+        &HashSet::new(),
+    ));
+}
+
+/// #305: an approval bound to a DIFFERENT run must not leak into another run's
+/// investigation through the related-id back-fill.
+#[test]
+fn investigation_by_agent_run_id_excludes_approvals_bound_to_other_runs() {
+    let filter = GuardrailEvidenceFilter {
+        agent_run_id: Some("run-corr".into()),
+        ..GuardrailEvidenceFilter::default()
+    };
+    let other_run = matcher_approval("request-shared", Some("run-other"));
+    assert!(!investigation_matches_approval(
+        &filter,
+        &other_run,
+        &HashSet::from(["request-shared"]),
+        &HashSet::new(),
+    ));
+}
+
+/// #305 acceptance (full investigation path): investigating by agent_run_id
+/// surfaces an approval whose request id appears on NO other evidence row —
+/// before this change the approval only appeared via related-request-id
+/// back-fill and this investigation returned nothing.
+#[test]
+fn full_investigation_by_agent_run_id_finds_the_approval_directly() {
+    let state = AppState::new(crate::config::Config::default());
+    state
+        .create_tool_approval(crate::state::ToolApprovalCreateRequest {
+            tool: &crate::state::ToolExecutionRequest {
+                name: "tool.echo".into(),
+                arguments: serde_json::json!({"message":"hello"}),
+                route: None,
+                session_id: None,
+            },
+            request_id: "fg-approval-only",
+            trace_id: None,
+            agent_run_id: Some("run-corr".into()),
+            workflow_id: None,
+            workflow_node_id: None,
+            tenant: ferrogate_core::TenantContext::default(),
+            actor_api_key_id: None,
+            server_name: None,
+            approval_policy: ferrogate_core::ApprovalPolicy::Always,
+            can_log_bodies: false,
+        })
+        .expect("create approval");
+
+    let timeline = state
+        .guardrail_investigation(GuardrailEvidenceFilter {
+            agent_run_id: Some("run-corr".into()),
+            ..GuardrailEvidenceFilter::default()
+        })
+        .expect("investigation query succeeds")
+        .expect("the approval alone must surface the investigation");
+    assert_eq!(timeline.approvals.len(), 1);
+    assert_eq!(timeline.approvals[0].request_id, "fg-approval-only");
+    assert_eq!(
+        timeline.approvals[0].agent_run_id.as_deref(),
+        Some("run-corr")
+    );
 }
 
 #[test]

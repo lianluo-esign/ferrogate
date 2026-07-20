@@ -257,6 +257,16 @@ pub struct SelfHostedRunDispatch {
     pub required_capabilities: Vec<String>,
     pub workload_ref: String,
     pub queued_at_unix: u64,
+    /// #305 correlation keys of the dispatching context, all optional so a
+    /// dispatch created outside any inbound request (e.g. a background
+    /// scheduler tick) carries None instead of a fabricated id:
+    /// `request_id`/`trace_id` identify the request that triggered the
+    /// dispatch (admin run-now, registration), `agent_run_id` the agent run
+    /// this dispatch starts/controls (normally equal to `run_id`, carried
+    /// explicitly so lease/evidence joins are uniform across tables).
+    pub request_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +303,16 @@ pub struct SelfHostedRunLease {
     pub attempt: u32,
     pub lease_expires_at_unix: u64,
     pub trust_level: SelfHostedTelemetryTrustLevel,
+    /// #305: the dispatch's correlation keys ride the lease so the worker can
+    /// stamp its telemetry/evidence with the same
+    /// {request_id, trace_id, agent_run_id} triple the control plane stored.
+    /// `serde(default)` keeps older gateways/workers wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1029,6 +1049,10 @@ impl InMemorySelfHostedRunQueue {
             attempt: queued.attempt,
             lease_expires_at_unix,
             trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+            // #305: correlation keys ride the lease verbatim from the dispatch.
+            request_id: queued.dispatch.request_id.clone(),
+            trace_id: queued.dispatch.trace_id.clone(),
+            agent_run_id: queued.dispatch.agent_run_id.clone(),
         }))
     }
 
@@ -2206,6 +2230,10 @@ mod tests {
             lease.trust_level,
             SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker
         );
+        // #305: the dispatch's correlation triple rides the lease verbatim.
+        assert_eq!(lease.request_id.as_deref(), Some("fg-dispatch-1"));
+        assert_eq!(lease.trace_id.as_deref(), Some("trace-dispatch-1"));
+        assert_eq!(lease.agent_run_id.as_deref(), Some("run-1"));
 
         let ack = transport
             .ack_run(
@@ -2855,6 +2883,9 @@ mod tests {
             attempt: 1,
             lease_expires_at_unix: 1_725_000_040,
             trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+            request_id: Some("fg-dispatch-1".to_string()),
+            trace_id: Some("trace-dispatch-1".to_string()),
+            agent_run_id: Some("run-1".to_string()),
         };
         let ack = SelfHostedRunAck {
             dispatch_id: lease.dispatch_id.clone(),
@@ -3116,6 +3147,9 @@ mod tests {
             required_capabilities: vec!["artifacts".to_string(), "logs".to_string()],
             workload_ref: "queue://runs/run-1".to_string(),
             queued_at_unix: 1_725_000_000,
+            request_id: Some("fg-dispatch-1".to_string()),
+            trace_id: Some("trace-dispatch-1".to_string()),
+            agent_run_id: Some("run-1".to_string()),
         }
     }
 

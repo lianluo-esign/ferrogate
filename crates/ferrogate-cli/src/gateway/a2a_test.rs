@@ -226,6 +226,7 @@ fn a2a_exchange_is_metered_into_usage_aggregates() {
     block_on(state.record_a2a_exchange_event(
         "fg-a2a-meter",
         Some("trace-a2a"),
+        Some("agent-run-a2a"),
         &tenant(),
         "planner",
         false,
@@ -240,6 +241,8 @@ fn a2a_exchange_is_metered_into_usage_aggregates() {
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.provider, "a2a");
+    // #305: the declared agent-run context survives onto billing evidence.
+    assert_eq!(event.agent_run_id.as_deref(), Some("agent-run-a2a"));
     assert_eq!(event.logical_model, "a2a:planner");
     assert_eq!(event.usage.total_tokens, 0, "a2a carries no token usage");
     assert_eq!(

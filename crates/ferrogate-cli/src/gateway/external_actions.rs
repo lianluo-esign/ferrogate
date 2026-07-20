@@ -136,6 +136,13 @@ impl GatewayExternalActionAuthorizerService {
         // evaluated on the allow path below.
         let action_binding = ManagedActionGuardrailBinding::from_action(&managed_request.action);
         let run_id = managed_request.session.run_id.clone();
+        // #305: the worker transport frames carry no trace id, but the run the
+        // action executes under was created by a dispatching request that did.
+        // Resolve that trace from the stored agent-run record so every
+        // persisted governance row below carries the run's real trace_id
+        // instead of a hard-coded None (None only when the run is unknown or
+        // genuinely traceless — never fabricated).
+        let run_trace_id = state.agent_run_trace_id(&run_id);
         match authorize_managed_external_action(
             &SimpleCapabilityAuthorizer::new(policy),
             managed_request,
@@ -156,6 +163,7 @@ impl GatewayExternalActionAuthorizerService {
                     if let Some(matched) = Self::evaluate_managed_action_input_guardrail(
                         &state,
                         transport_request_id,
+                        run_trace_id.as_deref(),
                         &timeline_tenant,
                         &run_id,
                         &action_binding,
@@ -185,7 +193,7 @@ impl GatewayExternalActionAuthorizerService {
                             id: format!("managed-action-guardrail:{run_id}:{transport_request_id}"),
                             run_id: run_id.clone(),
                             request_id: transport_request_id.to_string(),
-                            trace_id: None,
+                            trace_id: run_trace_id.clone(),
                             tenant: timeline_tenant.clone(),
                             turn: 0,
                             kind: "guardrail.blocked".to_string(),
@@ -209,6 +217,7 @@ impl GatewayExternalActionAuthorizerService {
                 Self::record_timeline_event(
                     &state,
                     transport_request_id,
+                    run_trace_id,
                     timeline_tenant,
                     event.clone(),
                 );
@@ -228,6 +237,7 @@ impl GatewayExternalActionAuthorizerService {
     fn evaluate_managed_action_input_guardrail(
         state: &AppState,
         request_id: &str,
+        trace_id: Option<&str>,
         tenant: &TenantContext,
         run_id: &str,
         binding: &ManagedActionGuardrailBinding,
@@ -237,7 +247,7 @@ impl GatewayExternalActionAuthorizerService {
             GuardrailStage::Request,
             &ManagedActionGuardrailRequest {
                 request_id,
-                trace_id: None,
+                trace_id,
                 agent_run_id: Some(run_id),
                 tenant,
                 class: binding.class,
@@ -250,6 +260,7 @@ impl GatewayExternalActionAuthorizerService {
     fn record_timeline_event(
         state: &AppState,
         transport_request_id: &str,
+        run_trace_id: Option<String>,
         tenant: TenantContext,
         event: NormalizedFrameworkEvent,
     ) {
@@ -267,7 +278,9 @@ impl GatewayExternalActionAuthorizerService {
             id: record.event_id,
             run_id: record.run_id,
             request_id: transport_request_id.to_string(),
-            trace_id: None,
+            // #305: the run's dispatching-request trace id (resolved from the
+            // stored agent-run record) — no longer hard-coded None.
+            trace_id: run_trace_id,
             tenant,
             turn: 0,
             kind: record.kind,
@@ -1008,6 +1021,82 @@ mod tests {
             stored.decision_reason.as_deref(),
             Some(ferrogate_runtime::decision_codes::CAPABILITY_ALLOWED)
         );
+    }
+
+    /// #305: the authorizer transport frames carry no trace id, so the
+    /// persisted timeline row must inherit the trace id of the dispatching
+    /// request that created the run (resolved from the stored agent-run
+    /// record) instead of hard-coding None.
+    #[test]
+    fn timeline_row_inherits_trace_id_from_the_dispatching_runs_record() {
+        let state = AppState::new(crate::config::Config::default());
+        state.record_agent_run(ferrogate_storage::StoredAgentRun {
+            id: "run-1".to_string(),
+            request_id: "fg-dispatch-1".to_string(),
+            trace_id: Some("trace-dispatch-1".to_string()),
+            tenant: TenantContext {
+                organization_id: Some("tenant-1".to_string()),
+                ..TenantContext::default()
+            },
+            status: "running".to_string(),
+            provider: "ferrogate.external".to_string(),
+            turns_executed: 0,
+            output_recorded: false,
+            started_at_unix: Some(1),
+            completed_at_unix: None,
+        });
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+                ..CapabilityPolicy::default()
+            },
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(response.response.accepted);
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("allowed external action should record timeline evidence");
+        assert_eq!(timeline.agent_events.len(), 1);
+        assert_eq!(
+            timeline.agent_events[0].trace_id.as_deref(),
+            Some("trace-dispatch-1"),
+            "the persisted timeline row must carry the dispatching run's trace id"
+        );
+    }
+
+    /// #305: when the run is unknown (no stored agent-run record), the trace
+    /// id stays None — nothing is fabricated.
+    #[test]
+    fn timeline_row_trace_id_stays_none_for_unknown_runs() {
+        let state = AppState::new(crate::config::Config::default());
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+                ..CapabilityPolicy::default()
+            },
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(response.response.accepted);
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("allowed external action should record timeline evidence");
+        assert_eq!(timeline.agent_events[0].trace_id, None);
     }
 
     #[test]

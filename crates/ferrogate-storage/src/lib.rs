@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 45;
-const POSTGRES_SCHEMA_NAME: &str = "045_action_identity";
+const POSTGRES_SCHEMA_VERSION: u64 = 46;
+const POSTGRES_SCHEMA_NAME: &str = "046_dispatch_correlation";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -1182,6 +1182,20 @@ pub struct StoredSelfHostedRunDispatch {
     pub attempt: u32,
     pub acknowledged_status: Option<String>,
     pub acknowledged_at_unix: Option<u64>,
+    /// #305 correlation keys (migration 046, all optional; NULL on rows
+    /// persisted before the migration and on dispatches created outside any
+    /// inbound request): `request_id`/`trace_id` of the dispatching request
+    /// (e.g. the admin run-now trigger), `agent_run_id` of the agent run this
+    /// dispatch starts/controls — so dispatch leases join timeline/audit/
+    /// approval evidence on the same {request_id, trace_id, agent_run_id}
+    /// triple. `serde(default)` keeps legacy snapshots readable;
+    /// `skip_serializing_if` keeps legacy JSON byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_run_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -7234,8 +7248,9 @@ impl PostgresControlPlaneStore {
                  (dispatch_id, action, tenant, workspace_id, session_id, run_id, \
                   framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
                   lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                  acknowledged_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                  acknowledged_at_unix, request_id, trace_id, agent_run_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+                         $16, $17, $18) \
                  ON CONFLICT (dispatch_id) DO UPDATE SET \
                  action = EXCLUDED.action, \
                  tenant = EXCLUDED.tenant, \
@@ -7250,7 +7265,10 @@ impl PostgresControlPlaneStore {
                  lease_expires_at_unix = EXCLUDED.lease_expires_at_unix, \
                  attempt = EXCLUDED.attempt, \
                  acknowledged_status = EXCLUDED.acknowledged_status, \
-                 acknowledged_at_unix = EXCLUDED.acknowledged_at_unix",
+                 acknowledged_at_unix = EXCLUDED.acknowledged_at_unix, \
+                 request_id = EXCLUDED.request_id, \
+                 trace_id = EXCLUDED.trace_id, \
+                 agent_run_id = EXCLUDED.agent_run_id",
                 &[
                     &dispatch.dispatch_id,
                     &dispatch.action,
@@ -7267,6 +7285,9 @@ impl PostgresControlPlaneStore {
                     &attempt,
                     &dispatch.acknowledged_status,
                     &acknowledged_at_unix,
+                    &dispatch.request_id,
+                    &dispatch.trace_id,
+                    &dispatch.agent_run_id,
                 ],
             )
             .await
@@ -7316,7 +7337,7 @@ impl PostgresControlPlaneStore {
                 "SELECT dispatch_id, action, tenant, workspace_id, session_id, run_id, \
                     framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
                     lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
-                    acknowledged_at_unix \
+                    acknowledged_at_unix, request_id, trace_id, agent_run_id \
                  FROM self_hosted_run_dispatches \
                  ORDER BY queued_at_unix ASC, dispatch_id ASC",
                 &[],
@@ -7789,7 +7810,19 @@ where
         ("audit_events", "decision_reason"),
         ("audit_events", "output_disposition"),
     ];
-    for (table, column) in ACTION_IDENTITY_COLUMNS {
+    // #305 (migration 46): nullable correlation-key columns on the self-hosted
+    // dispatch queue table, validated with the same presence + type pin as the
+    // #304 action-identity set (nullable by design: pre-migration rows and
+    // dispatches created outside any inbound request carry NULL).
+    const DISPATCH_CORRELATION_COLUMNS: &[(&str, &str)] = &[
+        ("self_hosted_run_dispatches", "request_id"),
+        ("self_hosted_run_dispatches", "trace_id"),
+        ("self_hosted_run_dispatches", "agent_run_id"),
+    ];
+    for (table, column) in ACTION_IDENTITY_COLUMNS
+        .iter()
+        .chain(DISPATCH_CORRELATION_COLUMNS)
+    {
         let data_type = client
             .query_opt(
                 "SELECT data_type FROM information_schema.columns \
@@ -7802,7 +7835,7 @@ where
             .map(|row| row.get::<_, String>(0));
         if data_type.as_deref() != Some("text") {
             return Err(StorageError::Postgres(format!(
-                "required action-identity column {table}.{column} must be text (#304)"
+                "required action-identity/correlation column {table}.{column} must be text (#304/#305)"
             )));
         }
     }
@@ -9122,6 +9155,9 @@ fn self_hosted_run_dispatch_from_row(
         attempt: nonnegative_u32(row.get(12)),
         acknowledged_status: row.get(13),
         acknowledged_at_unix: row.get::<_, Option<i64>>(14).map(nonnegative_u64),
+        request_id: row.get(15),
+        trace_id: row.get(16),
+        agent_run_id: row.get(17),
     }
 }
 
@@ -16200,6 +16236,9 @@ mod tests {
                 attempt: 1,
                 acknowledged_status: Some("accepted".into()),
                 acknowledged_at_unix: Some(29),
+                request_id: Some("fg-dispatch-1".into()),
+                trace_id: Some("trace-dispatch-1".into()),
+                agent_run_id: Some("self-hosted-run-1".into()),
             }),
         )
         .unwrap();

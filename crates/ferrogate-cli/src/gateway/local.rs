@@ -3420,6 +3420,13 @@ impl FerroGateway {
                     tool: &request,
                     request_id: &ctx.request_id,
                     trace_id: ctx.trace_id.clone(),
+                    // #305: bind the approval to its agent-run / workflow
+                    // execution context so investigations can join approvals
+                    // on agent_run_id directly instead of back-filling via
+                    // related request/trace ids.
+                    agent_run_id: execution.agent_run_id.map(str::to_string),
+                    workflow_id: execution.workflow_id.map(str::to_string),
+                    workflow_node_id: execution.workflow_node_id.map(str::to_string),
                     tenant: auth.tenant_context(),
                     actor_api_key_id: auth.api_key_id.clone(),
                     server_name: mcp_audit_details
@@ -8991,12 +8998,31 @@ impl FerroGateway {
         let message_count = super::a2a::a2a_message_count(&payload);
         let agent_id = upstream.id.clone();
 
+        // #305: when the A2A exchange happens in the context of a known agent
+        // run, the caller declares it via the same `x-ferrogate-agent-run-id`
+        // header the chat/agent-run ingresses accept; every governance row this
+        // handler records then joins on that run id. Absent the header the id
+        // stays None — never fabricated.
+        let agent_run_id = match a2a_agent_run_id(&headers) {
+            Ok(agent_run_id) => agent_run_id,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_run_id_header",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
         // #278: per-upstream policy context, identical shape to the RequestContext
         // fed to evaluate_policy / match_guardrail on the inference ingresses.
         let policy_request = ferrogate_core::RequestContext {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
-            agent_run_id: None,
+            agent_run_id: agent_run_id.clone(),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,
@@ -9013,7 +9039,7 @@ impl FerroGateway {
                 crate::state::GuardrailEvaluationContext {
                     request_id: &ctx.request_id,
                     trace_id: ctx.trace_id.as_deref(),
-                    agent_run_id: None,
+                    agent_run_id: agent_run_id.as_deref(),
                     workflow_id: None,
                     workflow_version: None,
                     workflow_node_id: None,
@@ -9035,7 +9061,7 @@ impl FerroGateway {
                 action_identity: Default::default(),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
-                agent_run_id: None,
+                agent_run_id: agent_run_id.clone(),
                 workflow_id: None,
                 workflow_version: None,
                 workflow_node_id: None,
@@ -9055,6 +9081,7 @@ impl FerroGateway {
                 ctx,
                 &tenant,
                 &agent_id,
+                agent_run_id.as_deref(),
                 StatusCode::FORBIDDEN,
                 &guardrail.code,
                 started_at_unix,
@@ -9078,7 +9105,7 @@ impl FerroGateway {
                 action_identity: Default::default(),
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
-                agent_run_id: None,
+                agent_run_id: agent_run_id.clone(),
                 workflow_id: None,
                 workflow_version: None,
                 workflow_node_id: None,
@@ -9093,6 +9120,7 @@ impl FerroGateway {
                 ctx,
                 &tenant,
                 &agent_id,
+                agent_run_id.as_deref(),
                 StatusCode::FORBIDDEN,
                 &code,
                 started_at_unix,
@@ -9126,6 +9154,7 @@ impl FerroGateway {
                     ctx,
                     &tenant,
                     &agent_id,
+                    agent_run_id.as_deref(),
                     StatusCode::BAD_GATEWAY,
                     "agent_upstream_error",
                     started_at_unix,
@@ -9154,7 +9183,7 @@ impl FerroGateway {
                 crate::state::GuardrailEvaluationContext {
                     request_id: &ctx.request_id,
                     trace_id: ctx.trace_id.as_deref(),
-                    agent_run_id: None,
+                    agent_run_id: agent_run_id.as_deref(),
                     workflow_id: None,
                     workflow_version: None,
                     workflow_node_id: None,
@@ -9178,7 +9207,7 @@ impl FerroGateway {
                         action_identity: Default::default(),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
-                        agent_run_id: None,
+                        agent_run_id: agent_run_id.clone(),
                         workflow_id: None,
                         workflow_version: None,
                         workflow_node_id: None,
@@ -9198,6 +9227,7 @@ impl FerroGateway {
                         ctx,
                         &tenant,
                         &agent_id,
+                        agent_run_id.as_deref(),
                         StatusCode::FORBIDDEN,
                         &guardrail.code,
                         started_at_unix,
@@ -9219,7 +9249,7 @@ impl FerroGateway {
                         action_identity: Default::default(),
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
-                        agent_run_id: None,
+                        agent_run_id: agent_run_id.clone(),
                         workflow_id: None,
                         workflow_version: None,
                         workflow_node_id: None,
@@ -9246,6 +9276,7 @@ impl FerroGateway {
             .record_a2a_exchange_event(
                 &ctx.request_id,
                 ctx.trace_id.as_deref(),
+                agent_run_id.as_deref(),
                 &tenant,
                 &agent_id,
                 stream,
@@ -9270,7 +9301,9 @@ impl FerroGateway {
         state.record_request_log(ferrogate_storage::StoredRequestLog {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
-            agent_run_id: None,
+            // #305: A2A exchanges made in the context of a known agent run
+            // (declared via x-ferrogate-agent-run-id) join request logs on it.
+            agent_run_id: agent_run_id.clone(),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,
@@ -9324,11 +9357,13 @@ impl FerroGateway {
     /// successful upstream reply (guardrail block, policy deny, upstream error),
     /// so denials appear in the request-log/usage views the same way the
     /// inference ingresses record their governance rejections.
+    #[allow(clippy::too_many_arguments)]
     fn record_a2a_error_log(
         &self,
         ctx: &ProxyContext,
         tenant: &ferrogate_core::TenantContext,
         agent_id: &str,
+        agent_run_id: Option<&str>,
         status: StatusCode,
         error_code: &str,
         started_at_unix: u64,
@@ -9338,7 +9373,9 @@ impl FerroGateway {
             .record_request_log(ferrogate_storage::StoredRequestLog {
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
-                agent_run_id: None,
+                // #305: rejected A2A exchanges keep the caller-declared run
+                // correlation too.
+                agent_run_id: agent_run_id.map(str::to_string),
                 workflow_id: None,
                 workflow_version: None,
                 workflow_node_id: None,
@@ -9627,6 +9664,38 @@ fn agent_upstream_discovery<'a>(
 
 /// #278: wall-clock seconds for A2A request-log timestamps, matching the
 /// `now_unix_seconds` helpers the other gateway modules use for the same field.
+/// #305: optional `x-ferrogate-agent-run-id` declaration on the A2A ingress —
+/// the same header (and validation rules) the chat/agent-run ingresses accept.
+/// Returns `Ok(None)` when absent/empty (nothing is fabricated) and an error
+/// message for a malformed value, mirroring `requested_agent_run_id`.
+fn a2a_agent_run_id(headers: &http::HeaderMap) -> Result<Option<String>, String> {
+    const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
+    let Some(value) = headers.get(AGENT_RUN_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        format!("{AGENT_RUN_ID_HEADER} must be valid visible ASCII/UTF-8 header text")
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 128 {
+        return Err(format!(
+            "{AGENT_RUN_ID_HEADER} must be at most 128 characters"
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(format!(
+            "{AGENT_RUN_ID_HEADER} may only contain letters, numbers, _, -, ., or :"
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn a2a_now_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

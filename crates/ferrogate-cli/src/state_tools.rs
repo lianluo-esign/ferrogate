@@ -109,6 +109,9 @@ impl AppState {
         let record = self.approvals.create_pending(ToolApprovalDraft {
             request_id: request.request_id.to_string(),
             trace_id: request.trace_id,
+            agent_run_id: request.agent_run_id,
+            workflow_id: request.workflow_id,
+            workflow_node_id: request.workflow_node_id,
             tenant: request.tenant,
             actor_api_key_id: request.actor_api_key_id,
             tool_name: request.tool.name.clone(),

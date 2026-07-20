@@ -102,7 +102,11 @@ impl AppState {
         // or create an agent run), then claim the fire slot idempotently and
         // advance regardless of the action's outcome so a failing target still
         // fast-forwards past the slot instead of re-firing it every tick.
-        let result = self.dispatch_schedule_target(schedule, slot, now).await;
+        // A background tick has no dispatching request — no correlation
+        // context is fabricated for it (#305).
+        let result = self
+            .dispatch_schedule_target(schedule, slot, now, None)
+            .await;
         self.record_fire(schedule, slot, now, result).await;
         self.advance_schedule_past_now(schedule, slot, now).await;
     }
@@ -118,10 +122,11 @@ impl AppState {
         schedule: &StoredAgentSchedule,
         slot: i64,
         now: i64,
+        correlation: Option<&ScheduleFireCorrelation<'_>>,
     ) -> ScheduleFireResult {
         match schedule.target_kind {
             ScheduleTargetKind::SelfHostedDispatch => {
-                let dispatch = match build_self_hosted_dispatch(schedule, slot, now) {
+                let dispatch = match build_self_hosted_dispatch(schedule, slot, now, correlation) {
                     Ok(dispatch) => dispatch,
                     Err(message) => return ScheduleFireResult::error(message),
                 };
@@ -148,7 +153,7 @@ impl AppState {
                 // scheduler is a control-plane trigger, so it registers the run
                 // (status `running`) and records the linked run id; the managed
                 // runtime drives the run to completion out of band.
-                let run = build_scheduled_agent_run(schedule, slot, now, &self.config);
+                let run = build_scheduled_agent_run(schedule, slot, now, &self.config, correlation);
                 let run_id = run.id.clone();
                 if let Err(error) = self.repositories.upsert_agent_run(run).await {
                     warn!(
@@ -172,9 +177,12 @@ impl AppState {
     pub(crate) async fn run_agent_schedule_now(
         &self,
         schedule: &StoredAgentSchedule,
+        correlation: Option<&ScheduleFireCorrelation<'_>>,
     ) -> Result<StoredAgentScheduleFire, StorageError> {
         let now = now_unix_seconds().unwrap_or_default() as i64;
-        let result = self.dispatch_schedule_target(schedule, now, now).await;
+        let result = self
+            .dispatch_schedule_target(schedule, now, now, correlation)
+            .await;
         let fire = StoredAgentScheduleFire {
             // A `manual:` prefix keeps a run-now fire id distinct from the
             // scheduler's deterministic per-slot id for the same second.
@@ -444,17 +452,31 @@ fn scheduled_agent_run_provider(config: &Config) -> &'static str {
 /// target. The run id is deterministic per `(schedule, slot)` so a peer
 /// instance racing the same slot upserts the SAME row rather than creating a
 /// duplicate run.
+/// #305: correlation context of the request that manually triggered a schedule
+/// fire (the admin `run-now` endpoint). Background tick fires pass `None` — a
+/// tick has no dispatching request, so nothing is fabricated for it.
+pub(crate) struct ScheduleFireCorrelation<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) trace_id: Option<&'a str>,
+}
+
 fn build_scheduled_agent_run(
     schedule: &StoredAgentSchedule,
     slot: i64,
     now: i64,
     config: &Config,
+    correlation: Option<&ScheduleFireCorrelation<'_>>,
 ) -> StoredAgentRun {
     let run_id = format!("schedule-run-{}-{slot}", schedule.schedule_id);
     StoredAgentRun {
         id: run_id.clone(),
-        request_id: format!("schedule:{}:{slot}", schedule.schedule_id),
-        trace_id: None,
+        // #305: a manual run-now fire records the triggering admin request's
+        // real ids; a tick fire keeps the deterministic `schedule:` request id
+        // it always had (and no trace — none exists).
+        request_id: correlation
+            .map(|correlation| correlation.request_id.to_string())
+            .unwrap_or_else(|| format!("schedule:{}:{slot}", schedule.schedule_id)),
+        trace_id: correlation.and_then(|correlation| correlation.trace_id.map(str::to_string)),
         tenant: ferrogate_core::TenantContext {
             organization_id: Some(schedule.tenant_id.clone()),
             workspace_id: Some(schedule.workspace_id.clone()),
@@ -477,6 +499,7 @@ fn build_self_hosted_dispatch(
     schedule: &StoredAgentSchedule,
     slot: i64,
     now: i64,
+    correlation: Option<&ScheduleFireCorrelation<'_>>,
 ) -> Result<SelfHostedRunDispatch, String> {
     let target: serde_json::Value = serde_json::from_str(&schedule.target_json)
         .map_err(|error| format!("target_json is not valid JSON: {error}"))?;
@@ -520,19 +543,27 @@ fn build_self_hosted_dispatch(
         .map(str::to_string)
         .unwrap_or_else(|| format!("schedule-session-{}", schedule.schedule_id));
 
+    let run_id = format!("schedule-run-{}-{slot}", schedule.schedule_id);
     Ok(SelfHostedRunDispatch {
         dispatch_id: scheduled_dispatch_id(&schedule.schedule_id, slot),
         action: SelfHostedRunAction::StartRun,
         tenant_id: schedule.tenant_id.clone(),
         workspace_id: schedule.workspace_id.clone(),
         session_id,
-        run_id: format!("schedule-run-{}-{slot}", schedule.schedule_id),
+        run_id: run_id.clone(),
         framework_adapter,
         required_capabilities,
         workload_ref,
         // `now`, not `slot`: the queue rejects queued_at_unix == 0, and a
         // catch-up slot could in principle be 0 for a misconfigured schedule.
         queued_at_unix: now.max(1) as u64,
+        // #305: a manual run-now fire carries the triggering admin request's
+        // ids; a background tick fire carries None (nothing is fabricated).
+        // The agent run this dispatch starts is its own run_id, recorded
+        // explicitly so dispatch leases join run evidence uniformly.
+        request_id: correlation.map(|correlation| correlation.request_id.to_string()),
+        trace_id: correlation.and_then(|correlation| correlation.trace_id.map(str::to_string)),
+        agent_run_id: Some(run_id),
     })
 }
 
@@ -677,8 +708,14 @@ mod tests {
         )
         .expect("seed schedule");
 
-        let fire = crate::gateway::block_on_sync_bridge(state.run_agent_schedule_now(&schedule))
-            .expect("run-now succeeds");
+        let fire = crate::gateway::block_on_sync_bridge(state.run_agent_schedule_now(
+            &schedule,
+            Some(&ScheduleFireCorrelation {
+                request_id: "fg-run-now-1",
+                trace_id: Some("trace-run-now-1"),
+            }),
+        ))
+        .expect("run-now succeeds");
         assert_eq!(fire.outcome, ScheduleFireOutcome::Dispatched);
         assert!(
             fire.fire_id.starts_with("manual:"),
@@ -687,6 +724,57 @@ mod tests {
         );
         let dispatch_id = fire.dispatch_id.clone().expect("dispatch linked");
         assert!(state.self_hosted_dispatch_unacked(&dispatch_id));
+
+        // #305: the durable dispatch row carries the manual trigger's
+        // {request_id, trace_id} and the agent run it starts, so the lease
+        // joins timeline/audit/approval evidence on the same triple.
+        let dispatches =
+            crate::gateway::block_on_sync_bridge(state.repositories.self_hosted_run_dispatches());
+        let dispatch = dispatches
+            .iter()
+            .find(|dispatch| dispatch.dispatch_id == dispatch_id)
+            .expect("dispatch persisted durably");
+        assert_eq!(dispatch.request_id.as_deref(), Some("fg-run-now-1"));
+        assert_eq!(dispatch.trace_id.as_deref(), Some("trace-run-now-1"));
+        assert_eq!(
+            dispatch.agent_run_id.as_deref(),
+            Some(dispatch.run_id.as_str()),
+            "the dispatch's agent run correlation is the run it starts"
+        );
+    }
+
+    /// #305: a background tick fire has no dispatching request — the dispatch
+    /// row must carry None for request/trace (nothing fabricated) while still
+    /// recording the agent run it starts.
+    #[test]
+    fn tick_fired_dispatch_carries_no_fabricated_request_context() {
+        let state = AppState::new(scheduler_enabled_config());
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        crate::gateway::block_on_sync_bridge(
+            state
+                .repositories
+                .upsert_agent_schedule(interval_schedule("tick-corr", now - 1)),
+        )
+        .expect("seed schedule");
+
+        crate::gateway::block_on_sync_bridge(state.sweep_agent_schedules_once());
+
+        let dispatches =
+            crate::gateway::block_on_sync_bridge(state.repositories.self_hosted_run_dispatches());
+        let dispatch = dispatches
+            .iter()
+            .find(|dispatch| {
+                dispatch
+                    .dispatch_id
+                    .starts_with("schedule-dispatch-tick-corr-")
+            })
+            .expect("tick fire enqueued a dispatch");
+        assert_eq!(dispatch.request_id, None);
+        assert_eq!(dispatch.trace_id, None);
+        assert_eq!(
+            dispatch.agent_run_id.as_deref(),
+            Some(dispatch.run_id.as_str())
+        );
     }
 
     #[test]

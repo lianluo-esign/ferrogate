@@ -274,12 +274,17 @@ fn investigation_matches_approval(
             .trace_id
             .as_deref()
             .is_none_or(|expected| approval.trace_id.as_deref() == Some(expected))
-        && filter.agent_run_id.as_ref().is_none_or(|_| {
-            related_request_ids.contains(approval.request_id.as_str())
-                || approval
-                    .trace_id
-                    .as_deref()
-                    .is_some_and(|trace_id| related_trace_ids.contains(trace_id))
+        && filter.agent_run_id.as_deref().is_none_or(|expected| {
+            // #305: approvals now carry agent_run_id directly — match on it
+            // first. The related-id back-fill below is kept ONLY as a
+            // fallback for legacy records persisted before the field existed.
+            approval.agent_run_id.as_deref() == Some(expected)
+                || (approval.agent_run_id.is_none()
+                    && (related_request_ids.contains(approval.request_id.as_str())
+                        || approval
+                            .trace_id
+                            .as_deref()
+                            .is_some_and(|trace_id| related_trace_ids.contains(trace_id))))
         })
 }
 
@@ -353,6 +358,9 @@ fn sanitize_investigation_approval(approval: ToolApprovalRecord) -> Investigatio
         id: approval.id,
         request_id: approval.request_id,
         trace_id: approval.trace_id,
+        agent_run_id: approval.agent_run_id,
+        workflow_id: approval.workflow_id,
+        workflow_node_id: approval.workflow_node_id,
         tenant: approval.tenant,
         actor_api_key_id: approval.actor_api_key_id,
         tool_name: approval.tool_name,

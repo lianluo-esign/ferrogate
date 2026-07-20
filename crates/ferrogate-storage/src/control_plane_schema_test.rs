@@ -586,6 +586,9 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
             attempt: 0,
             acknowledged_status: None,
             acknowledged_at_unix: None,
+            request_id: Some("fg-cp-239".into()),
+            trace_id: Some("trace-cp-239".into()),
+            agent_run_id: Some("run-cp-239".into()),
         }),
     )
     .expect("upsert self-hosted run dispatch must not error");
@@ -612,6 +615,22 @@ fn live_self_hosted_run_dispatch_writes_to_configured_schema_not_public() {
         ),
         2,
         "the dispatch capabilities must be persisted in the configured schema",
+    );
+    // #305 (migration 46): the correlation-key columns land populated in the
+    // configured schema.
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".self_hosted_run_dispatches \
+                 WHERE dispatch_id = '{dispatch_id}' \
+                   AND request_id = 'fg-cp-239' \
+                   AND trace_id = 'trace-cp-239' \
+                   AND agent_run_id = 'run-cp-239'"
+            )
+        ),
+        1,
+        "the dispatch correlation keys must be persisted in the configured schema (#305)",
     );
     assert_eq!(
         count_rows(
@@ -691,6 +710,9 @@ fn live_self_hosted_lease_state_survives_gateway_restart() {
             attempt: 1,
             acknowledged_status: None,
             acknowledged_at_unix: None,
+            request_id: Some("fg-lease-restart".into()),
+            trace_id: Some("trace-lease-restart".into()),
+            agent_run_id: Some("run-lease".into()),
         }),
     )
     .expect("persist in-flight lease must not error");
@@ -738,6 +760,10 @@ fn live_self_hosted_lease_state_survives_gateway_restart() {
         vec!["logs".to_string()],
         "the dispatch capabilities must survive the restart",
     );
+    // #305: the correlation triple survives the restart round-trip too.
+    assert_eq!(restored.request_id.as_deref(), Some("fg-lease-restart"));
+    assert_eq!(restored.trace_id.as_deref(), Some("trace-lease-restart"));
+    assert_eq!(restored.agent_run_id.as_deref(), Some("run-lease"));
 
     // No double-deliver: while the deadline holds, exactly one active lease row
     // remains bound to the original worker -- there is no second, unassigned copy

@@ -2190,3 +2190,24 @@ ALTER TABLE audit_events
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (45, '045_action_identity')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 46 (#305): correlation keys on the self-hosted dispatch queue so a
+-- dispatch lease joins timeline (agent_run_events), audit (audit_events),
+-- approval, guardrail and billing evidence on the same
+-- {request_id, trace_id, agent_run_id} triple. Additive, nullable projection
+-- columns (pre-migration rows and dispatches created outside any inbound
+-- request -- e.g. a background scheduler tick -- stay NULL; nothing is
+-- fabricated):
+--   * request_id   -- id of the request that triggered the dispatch (e.g. the
+--     admin schedules run-now trigger).
+--   * trace_id     -- W3C trace id of that request, when it carried one.
+--   * agent_run_id -- the agent run this dispatch starts/controls (normally
+--     equal to run_id, carried explicitly so evidence joins are uniform).
+ALTER TABLE self_hosted_run_dispatches
+    ADD COLUMN IF NOT EXISTS request_id TEXT,
+    ADD COLUMN IF NOT EXISTS trace_id TEXT,
+    ADD COLUMN IF NOT EXISTS agent_run_id TEXT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (46, '046_dispatch_correlation')
+ON CONFLICT (version) DO NOTHING;

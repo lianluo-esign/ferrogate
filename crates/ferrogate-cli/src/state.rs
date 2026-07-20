@@ -119,6 +119,11 @@ pub(crate) struct ToolApprovalCreateRequest<'a> {
     pub(crate) tool: &'a ToolExecutionRequest,
     pub(crate) request_id: &'a str,
     pub(crate) trace_id: Option<String>,
+    /// #305 correlation context from the tool-governance execution context;
+    /// carried onto the approval record (never part of its fingerprint).
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) server_name: Option<String>,
@@ -2814,6 +2819,12 @@ pub(crate) struct InvestigationApprovalEvidence {
     pub(crate) id: String,
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
+    /// #305: correlation context carried by the approval record itself, so an
+    /// investigation joins approvals directly instead of via related-id
+    /// back-fill. None on legacy records.
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -3948,19 +3959,27 @@ impl SelfHostedWorkerDispatchRuntime {
             .or_else(|| capabilities.first().cloned())
             .into_iter()
             .collect::<Vec<_>>();
+        let run_id = format!("self-hosted-run-{}", registration.id);
         match self.queue.enqueue_run(SelfHostedRunDispatch {
             dispatch_id,
             action: SelfHostedRunAction::StartRun,
             tenant_id: self_hosted_tenant_id(&registration.tenant),
             workspace_id: registration.workspace_id.clone(),
             session_id: format!("self-hosted-session-{}", registration.id),
-            run_id: format!("self-hosted-run-{}", registration.id),
+            run_id: run_id.clone(),
             framework_adapter: self_hosted_framework_adapter(
                 &registration.capability_envelope_json,
             ),
             required_capabilities,
             workload_ref: format!("self-hosted-workload://{}", registration.id),
             queued_at_unix: registration.registered_at_unix.unwrap_or_default(),
+            // #305: a seed dispatch is (re)created from the stored registration
+            // during registry rebuilds, where no dispatching request context
+            // exists — request/trace stay None (never fabricated); the agent
+            // run this dispatch starts is its own run_id.
+            request_id: None,
+            trace_id: None,
+            agent_run_id: Some(run_id),
         }) {
             Ok(()) => Ok(()),
             Err(SelfHostedWorkerError::InvalidTransport(message))
@@ -4070,6 +4089,11 @@ fn self_hosted_queue_record_to_storage(
             .map(self_hosted_run_ack_status_as_str)
             .map(str::to_string),
         acknowledged_at_unix: record.acknowledged_at_unix,
+        // #305: correlation keys of the dispatching context survive into the
+        // durable dispatch row.
+        request_id: record.dispatch.request_id,
+        trace_id: record.dispatch.trace_id,
+        agent_run_id: record.dispatch.agent_run_id,
     }
 }
 
@@ -4088,6 +4112,9 @@ fn self_hosted_queue_record_from_storage(
             required_capabilities: record.required_capabilities,
             workload_ref: record.workload_ref,
             queued_at_unix: record.queued_at_unix.unwrap_or_default(),
+            request_id: record.request_id,
+            trace_id: record.trace_id,
+            agent_run_id: record.agent_run_id,
         },
         assigned_worker_id: record.assigned_worker_id,
         lease_id: record.lease_id,
@@ -6567,6 +6594,8 @@ mod state_agent_runtime;
 mod state_guardrail_evidence;
 #[path = "state_scheduler.rs"]
 mod state_scheduler;
+// #305: the run-now correlation context is constructed by the gateway handler.
+pub(crate) use state_scheduler::ScheduleFireCorrelation;
 // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
 #[path = "state_asset_lifecycle.rs"]
 mod state_asset_lifecycle;
@@ -6837,6 +6866,9 @@ mod tests {
                 },
                 request_id: "request-test",
                 trace_id: Some("trace-test".into()),
+                agent_run_id: Some("agent-run-test".into()),
+                workflow_id: None,
+                workflow_node_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
                 actor_api_key_id: Some("key_initial".into()),
                 server_name: Some("mcp.github".into()),
@@ -6848,6 +6880,11 @@ mod tests {
         let stored_approval = state.tool_approval(&approval.id).unwrap();
         assert_eq!(stored_approval.id, approval.id);
         assert_eq!(stored_approval.status, ApprovalStatus::Pending);
+        // #305: the correlation context survives durable persistence.
+        assert_eq!(
+            stored_approval.agent_run_id.as_deref(),
+            Some("agent-run-test")
+        );
         assert!(state
             .repositories
             .control_plane_tool_approvals()

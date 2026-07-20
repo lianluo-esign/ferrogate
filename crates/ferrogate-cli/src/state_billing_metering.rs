@@ -721,10 +721,12 @@ impl AppState {
     /// — the event is metered and audited but carries no `cost_usd` and never
     /// debits a wallet.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_a2a_exchange_event(
         &self,
         request_id: &str,
         trace_id: Option<&str>,
+        agent_run_id: Option<&str>,
         tenant: &ferrogate_core::TenantContext,
         agent_id: &str,
         stream: bool,
@@ -743,7 +745,9 @@ impl AppState {
             request_id: request_id.to_string(),
             trace_id: trace_id.map(str::to_string),
             provider_attempt: ProviderAttempt::for_request(request_id, 0),
-            agent_run_id: None,
+            // #305: A2A exchanges made in a declared agent-run context carry
+            // the run id on their billing evidence too.
+            agent_run_id: agent_run_id.map(str::to_string),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,

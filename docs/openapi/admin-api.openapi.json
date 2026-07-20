@@ -12051,6 +12051,27 @@
               "null"
             ]
           },
+          "agent_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the agent run this approval was requested inside, carried from the tool-governance execution context at approval-creation time. Null/absent on records persisted before the field existed and on approvals created outside an agent run. Never part of the approval fingerprint."
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the workflow whose node requested the tool, when the execution was workflow-bound."
+          },
+          "workflow_node_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the workflow node that requested the tool, when the execution was workflow-bound."
+          },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
           },
@@ -19976,6 +19997,27 @@
               "string",
               "null"
             ]
+          },
+          "agent_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the agent run this approval was requested inside, carried from the tool-governance execution context at approval-creation time. Null/absent on records persisted before the field existed and on approvals created outside an agent run. Never part of the approval fingerprint."
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the workflow whose node requested the tool, when the execution was workflow-bound."
+          },
+          "workflow_node_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #305: id of the workflow node that requested the tool, when the execution was workflow-bound."
           },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"

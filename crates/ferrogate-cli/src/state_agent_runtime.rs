@@ -1203,6 +1203,17 @@ impl AppState {
         })
     }
 
+    /// #305: the trace id of the request that created/dispatched an agent run.
+    /// Used by seams that only receive a `run_id` (e.g. the managed-worker
+    /// external-action authorizer, whose transport frames carry no trace id) to
+    /// stamp persisted governance rows with the run's real trace instead of a
+    /// hard-coded None. Returns None when the run is unknown or was created
+    /// without a trace (nothing is fabricated).
+    pub(crate) fn agent_run_trace_id(&self, run_id: &str) -> Option<String> {
+        crate::gateway::block_on_sync_bridge(self.repositories.agent_run(run_id))
+            .and_then(|run| run.trace_id)
+    }
+
     pub(crate) fn agent_run_timeline(
         &self,
         id: &str,

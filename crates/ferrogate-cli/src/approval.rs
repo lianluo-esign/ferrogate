@@ -39,6 +39,18 @@ pub(crate) struct ToolApprovalRecord {
     pub(crate) id: String,
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
+    /// #305 correlation context (all optional; absent on records persisted
+    /// before the fields existed and on approvals created outside an agent
+    /// run / workflow execution). `serde(default)` keeps legacy persisted
+    /// records readable; `skip_serializing_if` keeps legacy JSON byte-stable.
+    /// Deliberately NOT part of `fingerprint_for` — the invocation-level
+    /// approval binding fingerprint is unchanged by these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) tenant: TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -62,6 +74,12 @@ pub(crate) struct ToolApprovalRecord {
 pub(crate) struct ToolApprovalDraft {
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
+    /// #305 correlation context from the tool-governance execution context
+    /// (`ToolExecutionContext`). Carried onto the record verbatim; NEVER part
+    /// of the fingerprint input.
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) tenant: TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -131,6 +149,9 @@ impl ApprovalRegistry {
             id: id.clone(),
             request_id: draft.request_id,
             trace_id: draft.trace_id,
+            agent_run_id: draft.agent_run_id,
+            workflow_id: draft.workflow_id,
+            workflow_node_id: draft.workflow_node_id,
             tenant: draft.tenant,
             actor_api_key_id: draft.actor_api_key_id,
             tool_name: draft.tool_name,
@@ -500,6 +521,101 @@ pub(crate) fn approval_status_from_action_decision(
 mod tests {
     use super::*;
     use ferrogate_runtime::{decision_codes, ActionDecision};
+
+    fn fingerprint_regression_draft(
+        agent_run_id: Option<&str>,
+        workflow_id: Option<&str>,
+        workflow_node_id: Option<&str>,
+    ) -> ToolApprovalDraft {
+        ToolApprovalDraft {
+            request_id: "fg-fingerprint-regression".into(),
+            trace_id: Some("trace-fingerprint-regression".into()),
+            agent_run_id: agent_run_id.map(str::to_string),
+            workflow_id: workflow_id.map(str::to_string),
+            workflow_node_id: workflow_node_id.map(str::to_string),
+            tenant: TenantContext {
+                organization_id: Some("org-1".into()),
+                team_id: None,
+                project_id: Some("proj-1".into()),
+                workspace_id: Some("ws-1".into()),
+                user_id: None,
+                api_key_id: Some("key-1".into()),
+            },
+            actor_api_key_id: Some("key-1".into()),
+            tool_name: "github.search".into(),
+            server_name: Some("mcp.github".into()),
+            route: Some("tools.execute".into()),
+            approval_policy: ApprovalPolicy::Always,
+            approval_timeout_secs: 60,
+            config_snapshot: "config-snapshot-regression".into(),
+            arguments: serde_json::json!({"query": "ferrogate", "page": 2}),
+            can_log_bodies: false,
+        }
+    }
+
+    /// #305 regression: the invocation-level approval binding fingerprint must
+    /// stay byte-identical after the correlation fields were added. The pinned
+    /// literal was captured by running `fingerprint_for` on this exact draft
+    /// BEFORE `agent_run_id`/`workflow_id`/`workflow_node_id` existed on
+    /// `ToolApprovalDraft`; any drift here breaks the fingerprint binding of
+    /// already-granted approvals.
+    #[test]
+    fn approval_fingerprint_is_byte_identical_to_pre_correlation_contract() {
+        let draft = fingerprint_regression_draft(None, None, None);
+        assert_eq!(fingerprint_for(&draft), "8b1210f2fe1c907a");
+    }
+
+    /// #305: the correlation context fields must not influence the approval
+    /// fingerprint — an approval created inside an agent run binds to exactly
+    /// the same invocation fingerprint as one created outside it.
+    #[test]
+    fn approval_fingerprint_ignores_correlation_context_fields() {
+        let without_context = fingerprint_regression_draft(None, None, None);
+        let with_context =
+            fingerprint_regression_draft(Some("run-1"), Some("workflow-1"), Some("node-1"));
+        assert_eq!(
+            fingerprint_for(&without_context),
+            fingerprint_for(&with_context)
+        );
+        assert_eq!(fingerprint_for(&with_context), "8b1210f2fe1c907a");
+    }
+
+    /// #305 backward compatibility: a persisted approval record from before
+    /// the correlation fields deserializes with the fields defaulted to None,
+    /// and a record without them serializes byte-stable (no new keys).
+    #[test]
+    fn approval_record_json_is_backward_compatible_with_legacy_records() {
+        let legacy = serde_json::json!({
+            "id": "approval-1",
+            "request_id": "fg-legacy",
+            "trace_id": null,
+            "tenant": TenantContext::default(),
+            "actor_api_key_id": null,
+            "tool_name": "tool.echo",
+            "server_name": null,
+            "route": null,
+            "approval_policy": "always",
+            "approval_timeout_secs": 60,
+            "fingerprint": "deadbeefdeadbeef",
+            "arguments_summary": "{}",
+            "risk_reason": "approval_policy=always",
+            "status": "pending",
+            "reviewer_api_key_id": null,
+            "reviewer_authority": null,
+            "terminal_reason": null,
+            "requested_at_unix": 1,
+            "expires_at_unix": 2,
+            "decided_at_unix": null
+        });
+        let record: ToolApprovalRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(record.agent_run_id, None);
+        assert_eq!(record.workflow_id, None);
+        assert_eq!(record.workflow_node_id, None);
+        let serialized = serde_json::to_value(&record).unwrap();
+        assert!(serialized.get("agent_run_id").is_none());
+        assert!(serialized.get("workflow_id").is_none());
+        assert!(serialized.get("workflow_node_id").is_none());
+    }
 
     #[test]
     fn approval_status_maps_losslessly_to_canonical_action_decision() {

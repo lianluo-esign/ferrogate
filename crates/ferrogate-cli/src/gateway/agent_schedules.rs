@@ -405,7 +405,18 @@ impl FerroGateway {
             Some(schedule) => schedule,
             None => return Ok(()),
         };
-        match state.run_agent_schedule_now(&schedule).await {
+        // #305: the manual trigger's request/trace ids become the dispatch's
+        // correlation keys, so the resulting lease joins this admin request.
+        match state
+            .run_agent_schedule_now(
+                &schedule,
+                Some(&crate::state::ScheduleFireCorrelation {
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.as_deref(),
+                }),
+            )
+            .await
+        {
             Ok(fire) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
