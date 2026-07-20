@@ -87,6 +87,14 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Billing events", url: "/app/billing-events" },
     ],
   },
+  {
+    title: "Agent Ops",
+    icon: Bot,
+    items: [
+      { title: "Agent runs", url: "/app/agent-runs" },
+      { title: "Agent schedules", url: "/app/agent-schedules" },
+    ],
+  },
 ];
 
 export const RESOURCE_ICONS: Record<string, LucideIcon> = {
