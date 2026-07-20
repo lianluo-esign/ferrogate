@@ -3250,6 +3250,30 @@ impl PostgresControlPlaneStore {
         Ok(rows.iter().map(project_from_row).collect())
     }
 
+    async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.tenancy_operation("delete project");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute("DELETE FROM projects WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected > 0)
+    }
+
     async fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
         let operation = self.tenancy_operation("upsert workspace");
         let mut client = self
@@ -3348,6 +3372,30 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(workspace_from_row).collect())
+    }
+
+    async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        let operation = self.tenancy_operation("delete workspace");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let affected = transaction
+            .execute("DELETE FROM workspaces WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(affected > 0)
     }
 
     async fn resolve_workspace_scope(
@@ -12545,6 +12593,18 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    pub async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_project(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_project(id).await
+            }
+        }
+    }
+
     pub async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
@@ -12579,6 +12639,18 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_workspaces().await
+            }
+        }
+    }
+
+    pub async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_workspace(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_workspace(id).await
             }
         }
     }

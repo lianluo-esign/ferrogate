@@ -339,7 +339,15 @@
       "group": "tenant_hierarchy"
     },
     {
+      "pattern": "/admin/v1/projects/{*rest}",
+      "group": "tenant_hierarchy"
+    },
+    {
       "pattern": "/admin/v1/workspaces",
+      "group": "tenant_hierarchy"
+    },
+    {
+      "pattern": "/admin/v1/workspaces/{*rest}",
       "group": "tenant_hierarchy"
     },
     {
@@ -2215,6 +2223,94 @@
       "path": "/admin/v1/workspaces",
       "method": "post",
       "operation_id": "createWorkspace",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/projects/{project_id}",
+      "method": "get",
+      "operation_id": "getProject",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/projects/{project_id}",
+      "method": "put",
+      "operation_id": "replaceProject",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/projects/{project_id}",
+      "method": "patch",
+      "operation_id": "updateProject",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/projects/{project_id}",
+      "method": "delete",
+      "operation_id": "deleteProject",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/workspaces/{workspace_id}",
+      "method": "get",
+      "operation_id": "getWorkspace",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/workspaces/{workspace_id}",
+      "method": "put",
+      "operation_id": "replaceWorkspace",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/workspaces/{workspace_id}",
+      "method": "patch",
+      "operation_id": "updateWorkspace",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/workspaces/{workspace_id}",
+      "method": "delete",
+      "operation_id": "deleteWorkspace",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

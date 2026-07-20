@@ -561,7 +561,26 @@ impl FerroGateway {
         ctx: &super::ProxyContext,
         headers: &http::HeaderMap,
         method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
+        if path != "/admin/v1/projects" {
+            let Some(id) = path
+                .strip_prefix("/admin/v1/projects/")
+                .filter(|id| !id.is_empty() && !id.contains('/'))
+            else {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "project endpoint not found",
+                    &ctx.request_id,
+                )
+                .await;
+            };
+            return self
+                .handle_admin_project_by_id(session, ctx, headers, method, id)
+                .await;
+        }
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
@@ -744,13 +763,359 @@ impl FerroGateway {
         }
     }
 
+    /// `/admin/v1/projects/{id}` (issue #326): GET reads a single project;
+    /// PUT/PATCH merge its mutable fields (name/slug/status); DELETE removes
+    /// it. Every verb is tenant-scoped -- a tenant-scoped caller may only
+    /// touch a project it owns (the row's `tenant_id` must match the caller's
+    /// organization, fail-closed per #185/#232); the platform operator is
+    /// unrestricted. DELETE is reject-if-referenced: a project that still owns
+    /// workspaces or virtual keys cannot be deleted, so a destructive DB-level
+    /// `ON DELETE CASCADE` can never silently take out live credentials.
+    async fn handle_admin_project_by_id(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match *method {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Ok(auth) => match state.get_project(id).await {
+                    Ok(Some(project)) => {
+                        if let Err(error) =
+                            crate::auth::authorize_tenant_scope(&auth, &project.tenant_id)
+                        {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        let body = AdminProjectMutationResponse {
+                            object: "project",
+                            project: admin_project(&project),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Ok(None) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "project_not_found",
+                            format!("no project with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                },
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            },
+            // PUT and PATCH share the same merge semantics: every field is
+            // optional and falls back to the existing value.
+            Method::PUT | Method::PATCH => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload = match read_json_body::<AdminProjectCreateRequest>(
+                    session,
+                    state.limits().admin_body_max_bytes(),
+                    &ctx.request_id,
+                )
+                .await?
+                {
+                    Ok(payload) => payload,
+                    Err(()) => return Ok(()),
+                };
+                let Some(existing) = state.get_project(id).await.ok().flatten() else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "project_not_found",
+                        format!("no project with id {id}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                // Reassigning a project to a different tenant is not a mutation
+                // this endpoint offers: there is no owning-tenant re-attribution
+                // for the project's workspaces/keys, so a cross-tenant move
+                // would strand them. Reject it outright (fail-closed) rather
+                // than silently ignoring the field.
+                if let Some(tenant_id) = payload.tenant_id.as_deref() {
+                    if !tenant_id.trim().is_empty() && tenant_id != existing.tenant_id {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_project",
+                            "a project's tenant_id is immutable",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
+                let project = StoredProject {
+                    id: existing.id,
+                    tenant_id: existing.tenant_id,
+                    name: payload
+                        .name
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(existing.name),
+                    slug: payload
+                        .slug
+                        .filter(|slug| !slug.trim().is_empty())
+                        .unwrap_or(existing.slug),
+                    status: payload
+                        .status
+                        .filter(|status| !status.trim().is_empty())
+                        .unwrap_or(existing.status),
+                    created_at_unix: existing.created_at_unix,
+                    updated_at_unix: now_unix_seconds(),
+                };
+                match state.upsert_project(project.clone()).await {
+                    Ok(()) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "project.update",
+                            id,
+                            "committed",
+                            format!("project {id} updated"),
+                        ));
+                        let body = AdminProjectMutationResponse {
+                            object: "project",
+                            project: admin_project(&project),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            Method::DELETE => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let Some(existing) = state.get_project(id).await.ok().flatten() else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "project_not_found",
+                        format!("no project with id {id}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                // Reject-if-referenced: refuse to delete a project that still
+                // owns workspaces or virtual keys. The Postgres schema declares
+                // ON DELETE CASCADE on both, so a bare DELETE would silently
+                // destroy live workspaces and API credentials; this guard keeps
+                // the operation fail-closed and forces the caller to tear the
+                // children down first.
+                let child_workspaces = match state.list_workspaces().await {
+                    Ok(workspaces) => workspaces
+                        .into_iter()
+                        .filter(|workspace| workspace.project_id == id)
+                        .count(),
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                if child_workspaces > 0 {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "project_has_workspaces",
+                        format!(
+                            "project {id} still has {child_workspaces} workspace(s); delete them first"
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                let child_keys = match state.list_virtual_api_keys().await {
+                    Ok(keys) => keys.into_iter().filter(|key| key.project_id == id).count(),
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                if child_keys > 0 {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "project_has_virtual_keys",
+                        format!(
+                            "project {id} still has {child_keys} virtual key(s); delete them first"
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                match state.delete_project(id).await {
+                    Ok(true) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "project.delete",
+                            id,
+                            "committed",
+                            format!("project {id} deleted"),
+                        ));
+                        let body = crate::responses::AdminDeleteResponse {
+                            object: "project",
+                            id: id.to_string(),
+                            deleted: true,
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Ok(false) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "project_not_found",
+                            format!("no project with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "project endpoint supports GET, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_workspaces(
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,
         headers: &http::HeaderMap,
         method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
+        if path != "/admin/v1/workspaces" {
+            let Some(id) = path
+                .strip_prefix("/admin/v1/workspaces/")
+                .filter(|id| !id.is_empty() && !id.contains('/'))
+            else {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "workspace endpoint not found",
+                    &ctx.request_id,
+                )
+                .await;
+            };
+            return self
+                .handle_admin_workspace_by_id(session, ctx, headers, method, id)
+                .await;
+        }
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
@@ -922,6 +1287,306 @@ impl FerroGateway {
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
                     "workspaces endpoint supports GET and POST",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// `/admin/v1/workspaces/{id}` (issue #326): GET reads a single workspace;
+    /// PUT/PATCH merge its mutable fields (name/slug/environment/status);
+    /// DELETE removes it. Tenant-scoped throughout -- a tenant-scoped caller
+    /// may only touch a workspace it owns (fail-closed per #185/#232). DELETE
+    /// is reject-if-referenced: a workspace that still owns virtual keys cannot
+    /// be deleted, so the schema's `ON DELETE CASCADE` never silently destroys
+    /// live credentials.
+    async fn handle_admin_workspace_by_id(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match *method {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Ok(auth) => match state.get_workspace(id).await {
+                    Ok(Some(workspace)) => {
+                        if let Err(error) =
+                            crate::auth::authorize_tenant_scope(&auth, &workspace.tenant_id)
+                        {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        let body = AdminWorkspaceMutationResponse {
+                            object: "workspace",
+                            workspace: admin_workspace(&workspace),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Ok(None) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "workspace_not_found",
+                            format!("no workspace with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                },
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            },
+            Method::PUT | Method::PATCH => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload = match read_json_body::<AdminWorkspaceCreateRequest>(
+                    session,
+                    state.limits().admin_body_max_bytes(),
+                    &ctx.request_id,
+                )
+                .await?
+                {
+                    Ok(payload) => payload,
+                    Err(()) => return Ok(()),
+                };
+                let Some(existing) = state.get_workspace(id).await.ok().flatten() else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "workspace_not_found",
+                        format!("no workspace with id {id}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                // Reassigning a workspace to a different project (and thereby
+                // potentially a different tenant) is not offered here: its
+                // virtual keys carry a denormalized project_id/tenant_id that
+                // would be left inconsistent. Reject the move fail-closed.
+                if let Some(project_id) = payload.project_id.as_deref() {
+                    if !project_id.trim().is_empty() && project_id != existing.project_id {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_workspace",
+                            "a workspace's project_id is immutable",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
+                let workspace = StoredWorkspace {
+                    id: existing.id,
+                    project_id: existing.project_id,
+                    tenant_id: existing.tenant_id,
+                    name: payload
+                        .name
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(existing.name),
+                    slug: payload
+                        .slug
+                        .filter(|slug| !slug.trim().is_empty())
+                        .unwrap_or(existing.slug),
+                    environment: payload
+                        .environment
+                        .filter(|environment| !environment.trim().is_empty())
+                        .unwrap_or(existing.environment),
+                    status: payload
+                        .status
+                        .filter(|status| !status.trim().is_empty())
+                        .unwrap_or(existing.status),
+                    created_at_unix: existing.created_at_unix,
+                    updated_at_unix: now_unix_seconds(),
+                };
+                match state.upsert_workspace(workspace.clone()).await {
+                    Ok(()) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "workspace.update",
+                            id,
+                            "committed",
+                            format!("workspace {id} updated"),
+                        ));
+                        let body = AdminWorkspaceMutationResponse {
+                            object: "workspace",
+                            workspace: admin_workspace(&workspace),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            Method::DELETE => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let Some(existing) = state.get_workspace(id).await.ok().flatten() else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "workspace_not_found",
+                        format!("no workspace with id {id}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                // Reject-if-referenced: a workspace that still owns virtual keys
+                // cannot be deleted (the schema's ON DELETE CASCADE would
+                // silently destroy live credentials otherwise).
+                let child_keys = match state.list_virtual_api_keys().await {
+                    Ok(keys) => keys
+                        .into_iter()
+                        .filter(|key| key.workspace_id == id)
+                        .count(),
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                if child_keys > 0 {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "workspace_has_virtual_keys",
+                        format!(
+                            "workspace {id} still has {child_keys} virtual key(s); delete them first"
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                match state.delete_workspace(id).await {
+                    Ok(true) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "workspace.delete",
+                            id,
+                            "committed",
+                            format!("workspace {id} deleted"),
+                        ));
+                        let body = crate::responses::AdminDeleteResponse {
+                            object: "workspace",
+                            id: id.to_string(),
+                            deleted: true,
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Ok(false) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "workspace_not_found",
+                            format!("no workspace with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "workspace endpoint supports GET, PUT, PATCH, and DELETE",
                     &ctx.request_id,
                 )
                 .await

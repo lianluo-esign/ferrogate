@@ -65,6 +65,10 @@ impl AppState {
         Ok(self.repositories.upsert_project(project).await?)
     }
 
+    pub(crate) async fn delete_project(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_project(id).await?)
+    }
+
     pub(crate) async fn list_workspaces(&self) -> anyhow::Result<Vec<StoredWorkspace>> {
         Ok(self.repositories.list_workspaces().await?)
     }
@@ -75,6 +79,10 @@ impl AppState {
 
     pub(crate) async fn upsert_workspace(&self, workspace: StoredWorkspace) -> anyhow::Result<()> {
         Ok(self.repositories.upsert_workspace(workspace).await?)
+    }
+
+    pub(crate) async fn delete_workspace(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_workspace(id).await?)
     }
 
     pub(crate) async fn resolve_workspace_scope(

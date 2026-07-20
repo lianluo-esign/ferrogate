@@ -1157,3 +1157,209 @@ fn tenant_scoped_admin_key_cannot_mutate_global_platform_config() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+/// Issue #326: project/workspace update+delete completes their admin CRUD.
+/// The by-id verbs must enforce the same tenant-scoped ownership as the rest
+/// of the surface (a tenant-scoped caller may only touch its OWN tenant's
+/// rows), and DELETE must be reject-if-referenced (fail-closed) so a project
+/// or workspace that still owns child rows cannot be torn down -- otherwise
+/// the schema's `ON DELETE CASCADE` would silently destroy live workspaces
+/// and virtual-key credentials.
+#[test]
+fn project_and_workspace_update_delete_are_tenant_scoped_and_reject_if_referenced() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    register_tenant(&gateway_addr, "tenant-iso-a");
+    register_tenant(&gateway_addr, "tenant-iso-b");
+
+    // Tenant A's hierarchy: project -> workspace -> virtual key.
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/projects",
+        &ADMIN,
+        r#"{"id":"project-crud-a","tenant_id":"tenant-iso-a","name":"Project A","slug":"project-crud-a"}"#,
+    ));
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/workspaces",
+        &ADMIN,
+        r#"{"id":"workspace-crud-a","project_id":"project-crud-a","name":"Workspace A","slug":"workspace-crud-a"}"#,
+    ));
+    let created_key = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/virtual-keys",
+        &ADMIN,
+        r#"{"name":"Tenant A key","workspace_id":"workspace-crud-a","scopes":["chat.completions"]}"#,
+    ));
+    let _key_id = created_key["key"]["id"].as_str().unwrap().to_string();
+
+    // --- Cross-tenant reads/mutations are denied (fail-closed) ---
+    for (method, path, body) in [
+        ("GET", "/admin/v1/projects/project-crud-a", ""),
+        (
+            "PUT",
+            "/admin/v1/projects/project-crud-a",
+            r#"{"name":"pwned"}"#,
+        ),
+        (
+            "PATCH",
+            "/admin/v1/projects/project-crud-a",
+            r#"{"name":"pwned"}"#,
+        ),
+        ("DELETE", "/admin/v1/projects/project-crud-a", ""),
+        ("GET", "/admin/v1/workspaces/workspace-crud-a", ""),
+        (
+            "PUT",
+            "/admin/v1/workspaces/workspace-crud-a",
+            r#"{"name":"pwned"}"#,
+        ),
+        (
+            "PATCH",
+            "/admin/v1/workspaces/workspace-crud-a",
+            r#"{"name":"pwned"}"#,
+        ),
+        ("DELETE", "/admin/v1/workspaces/workspace-crud-a", ""),
+    ] {
+        let denied = http_request(&gateway_addr, method, path, &TENANT_B, body);
+        assert!(
+            status_line(&denied).contains("403"),
+            "tenant B must not {method} tenant A's {path}: {denied}"
+        );
+    }
+
+    // The tenant A project must be untouched by tenant B's attempts.
+    let untouched = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/projects/project-crud-a",
+        &TENANT_A,
+        "",
+    ));
+    assert_eq!(untouched["project"]["name"], "Project A");
+
+    // --- Reject-if-referenced: cannot delete a referenced project/workspace ---
+    let delete_project_referenced = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/projects/project-crud-a",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&delete_project_referenced).contains("409"),
+        "deleting a project that still owns a workspace must be rejected: {delete_project_referenced}"
+    );
+    assert!(delete_project_referenced.contains("project_has_workspaces"));
+
+    let delete_workspace_referenced = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/workspaces/workspace-crud-a",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&delete_workspace_referenced).contains("409"),
+        "deleting a workspace that still owns a virtual key must be rejected: {delete_workspace_referenced}"
+    );
+    assert!(delete_workspace_referenced.contains("workspace_has_virtual_keys"));
+
+    // --- Tenant A can update its own project (name/slug/status merge) ---
+    let updated = response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/projects/project-crud-a",
+        &TENANT_A,
+        r#"{"name":"Renamed Project A","status":"archived"}"#,
+    ));
+    assert_eq!(updated["project"]["name"], "Renamed Project A");
+    assert_eq!(updated["project"]["status"], "archived");
+    assert_eq!(
+        updated["project"]["slug"], "project-crud-a",
+        "unspecified fields must keep their existing value"
+    );
+
+    // Cross-tenant re-attribution is rejected fail-closed.
+    let move_tenant = http_request(
+        &gateway_addr,
+        "PUT",
+        "/admin/v1/projects/project-crud-a",
+        &TENANT_A,
+        r#"{"tenant_id":"tenant-iso-b","name":"Moved"}"#,
+    );
+    assert!(
+        status_line(&move_tenant).contains("400"),
+        "a project's tenant_id must be immutable: {move_tenant}"
+    );
+
+    // --- A workspace with no virtual keys can be updated and then deleted ---
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/workspaces",
+        &ADMIN,
+        r#"{"id":"workspace-empty-a","project_id":"project-crud-a","name":"Empty","slug":"workspace-empty-a"}"#,
+    ));
+    let updated_ws = response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/workspaces/workspace-empty-a",
+        &TENANT_A,
+        r#"{"environment":"staging"}"#,
+    ));
+    assert_eq!(updated_ws["workspace"]["environment"], "staging");
+    assert_eq!(updated_ws["workspace"]["name"], "Empty");
+
+    let delete_empty_workspace = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/workspaces/workspace-empty-a",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&delete_empty_workspace).contains("200"),
+        "deleting a workspace with no virtual keys must succeed: {delete_empty_workspace}"
+    );
+    let deleted_body = response_json(delete_empty_workspace);
+    assert_eq!(deleted_body["object"], "workspace");
+    assert_eq!(deleted_body["deleted"], true);
+
+    // Deleting an already-gone workspace is a 404.
+    let delete_missing = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/workspaces/workspace-empty-a",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        status_line(&delete_missing).contains("404"),
+        "deleting a missing workspace must be a 404: {delete_missing}"
+    );
+
+    // The platform operator retains unrestricted cross-tenant access.
+    let operator_get = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/projects/project-crud-a",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        operator_get.contains("HTTP/1.1 200"),
+        "the platform operator must read any tenant's project: {operator_get}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
