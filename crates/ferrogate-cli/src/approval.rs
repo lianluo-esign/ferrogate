@@ -404,6 +404,14 @@ fn canonicalize_json(value: &Value) -> Value {
     }
 }
 
+/// INVOCATION-level approval binding fingerprint (issue #303 two-level
+/// contract): Blake2b512 over the canonicalized 9-field invocation struct
+/// below, binding one granted approval to one concrete invocation including
+/// its arguments and config snapshot. This is deliberately DISTINCT from the
+/// TARGET-level `canonical_target_sha256` action fingerprint
+/// (`ferrogate_runtime::ActionIdentity::action_fingerprint`), which identifies
+/// the external action independent of caller and arguments. Both keep their
+/// semantics; see `ferrogate_runtime::action_identity` module docs.
 fn fingerprint_for(draft: &ToolApprovalDraft) -> String {
     #[derive(Serialize)]
     struct FingerprintInput<'a> {
@@ -445,4 +453,93 @@ fn now_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// Lossless mapping into the canonical governance decision (issue #303). The
+/// impl lives here — next to the source vocabulary — because ferrogate-cli
+/// depends on ferrogate-runtime, never the reverse.
+///
+/// * `Pending` → `ask` (`approval_pending`): the gate is open, awaiting a
+///   reviewer.
+/// * `Approved` → `allow` (`approval_approved`).
+/// * `Denied` → `deny` (`approval_denied`).
+/// * `Expired` → `deny` (`approval_expired`): the window elapsed without a
+///   grant, which is a terminal refusal at the chokepoint. `Denied` and
+///   `Expired` collapse onto `deny` but stay distinguishable (lossless) via
+///   the reason code — see [`approval_status_from_action_decision`].
+impl From<ApprovalStatus> for ferrogate_runtime::ActionDecision {
+    fn from(status: ApprovalStatus) -> Self {
+        use ferrogate_runtime::decision_codes;
+        match status {
+            ApprovalStatus::Pending => Self::ask(decision_codes::APPROVAL_PENDING),
+            ApprovalStatus::Approved => Self::allow(decision_codes::APPROVAL_APPROVED),
+            ApprovalStatus::Denied => Self::deny(decision_codes::APPROVAL_DENIED),
+            ApprovalStatus::Expired => Self::deny(decision_codes::APPROVAL_EXPIRED),
+        }
+    }
+}
+
+/// Reverse of `From<ApprovalStatus> for ActionDecision`, keyed on the reason
+/// code. Returns `None` for decisions that did not originate from an approval
+/// status.
+#[allow(dead_code)] // consumed by #306 (guardrails/approvals adoption); tested below
+pub(crate) fn approval_status_from_action_decision(
+    decision: &ferrogate_runtime::ActionDecision,
+) -> Option<ApprovalStatus> {
+    use ferrogate_runtime::decision_codes;
+    match decision.code() {
+        decision_codes::APPROVAL_PENDING => Some(ApprovalStatus::Pending),
+        decision_codes::APPROVAL_APPROVED => Some(ApprovalStatus::Approved),
+        decision_codes::APPROVAL_DENIED => Some(ApprovalStatus::Denied),
+        decision_codes::APPROVAL_EXPIRED => Some(ApprovalStatus::Expired),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrogate_runtime::{decision_codes, ActionDecision};
+
+    #[test]
+    fn approval_status_maps_losslessly_to_canonical_action_decision() {
+        for status in [
+            ApprovalStatus::Pending,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Denied,
+            ApprovalStatus::Expired,
+        ] {
+            let canonical = ActionDecision::from(status);
+            assert_eq!(
+                approval_status_from_action_decision(&canonical),
+                Some(status),
+                "status {status:?} must round-trip through the canonical decision"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_status_decision_classes_and_codes() {
+        assert_eq!(
+            ActionDecision::from(ApprovalStatus::Pending),
+            ActionDecision::ask(decision_codes::APPROVAL_PENDING)
+        );
+        assert_eq!(
+            ActionDecision::from(ApprovalStatus::Approved),
+            ActionDecision::allow(decision_codes::APPROVAL_APPROVED)
+        );
+        // Denied and Expired both refuse, but remain distinguishable by code.
+        let denied = ActionDecision::from(ApprovalStatus::Denied);
+        let expired = ActionDecision::from(ApprovalStatus::Expired);
+        assert!(matches!(denied, ActionDecision::Deny { .. }));
+        assert!(matches!(expired, ActionDecision::Deny { .. }));
+        assert_ne!(denied.code(), expired.code());
+        // Foreign codes never masquerade as approval statuses.
+        assert_eq!(
+            approval_status_from_action_decision(&ActionDecision::deny(
+                decision_codes::CAPABILITY_DENIED
+            )),
+            None
+        );
+    }
 }

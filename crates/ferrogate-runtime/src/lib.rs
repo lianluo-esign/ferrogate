@@ -6,6 +6,7 @@
 
 //! Pingora runtime boundary.
 
+mod action_identity;
 mod agent;
 mod capability_boundary;
 mod framework_adapter;
@@ -20,6 +21,13 @@ mod self_hosted_worker;
 mod supabase_edge_function;
 mod target_capability;
 
+pub use action_identity::{
+    audit_outcome_from_action_decision, capability_decision_from_action_decision, decision_codes,
+    guardrail_outcome_from_action_decision, ActingPrincipal, ActionContext, ActionDecision,
+    ActionIdentity, ActionReceipt, AuditOutcome, DecisionReason, GuardrailEnforcement,
+    GuardrailOutcome, GuardrailOutcomeParseError, GuardrailTriggeredAction, GuardrailVerdict,
+    OutputDisposition, UnknownAuditOutcome, ACTION_FINGERPRINT_CONTRACT,
+};
 pub use agent::{
     AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,
     AgentRunEvent, AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome,
