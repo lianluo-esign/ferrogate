@@ -156,16 +156,41 @@ fn asset_push_is_denied_once_the_tenants_storage_quota_is_exceeded() {
         "a quota-rejected push must not land any row: {list}"
     );
 
-    // 5. Overwriting the SAME asset (same type/name/version) with content
-    // that still fits once its own prior size is excluded from the "used
-    // by others" calculation must succeed -- proves the quota check
-    // doesn't double-count an asset against itself on replace.
+    // 5. Published versions are immutable since the #260 registry semantics:
+    // re-pushing the SAME type/name/version must be rejected with 409, not
+    // silently replaced (this test predated #260 and used to expect an
+    // in-place overwrite; the immutability contract supersedes that).
     let replacement_content = "c".repeat(40);
     let replace_push = push_asset(&gateway_addr, "one", &replacement_content);
     assert!(
-        status_line(&replace_push).contains("200 OK"),
-        "replacing the only existing asset with 40/50 bytes must succeed \
-         (its own prior 30 bytes must not count against itself): {replace_push}"
+        status_line(&replace_push).contains("409"),
+        "re-publishing an existing version must be rejected as immutable: {replace_push}"
+    );
+    assert!(
+        replace_push.contains("asset_version_immutable"),
+        "expected the asset_version_immutable error code: {replace_push}"
+    );
+
+    // 5b. The supported replace flow is delete-then-republish. After the
+    // delete frees the original 30 bytes, a 40-byte republish of the same
+    // name/version fits 40/50 -- proving the quota calculation no longer
+    // counts the deleted asset's bytes (no double-counting on replace).
+    let delete = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/v1/assets/config_file/one/1.0.0",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert!(
+        status_line(&delete).contains("200 OK"),
+        "deleting the published asset must succeed: {delete}"
+    );
+    let republish = push_asset(&gateway_addr, "one", &replacement_content);
+    assert!(
+        status_line(&republish).contains("200 OK"),
+        "republishing 40/50 bytes after the delete freed 30 must succeed \
+         (freed bytes must not count against the quota): {republish}"
     );
 
     // 6. But now that "one" is 40 bytes, adding a second 30-byte asset
