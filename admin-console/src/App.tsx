@@ -22,6 +22,11 @@ import BillingWalletsPage from "@/pages/billing-wallets";
 import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
 import BillingDeadLettersPage from "@/pages/billing-dead-letters";
 import BillingMeteringPage from "@/pages/billing-metering";
+// Worker ops (#320): self-hosted lifecycle + runs + managed sessions.
+import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
+import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
+import SelfHostedRunsPage from "@/pages/self-hosted-runs";
+import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -73,6 +78,23 @@ function App() {
                   element={<BillingDeadLettersPage />}
                 />
                 <Route path="/app/metering" element={<BillingMeteringPage />} />
+                {/* Worker ops (#320) */}
+                <Route
+                  path="/app/workers/self-hosted"
+                  element={<SelfHostedWorkersOpsPage />}
+                />
+                <Route
+                  path="/app/workers/self-hosted/:workerId"
+                  element={<SelfHostedWorkerDetailPage />}
+                />
+                <Route
+                  path="/app/workers/self-hosted-runs"
+                  element={<SelfHostedRunsPage />}
+                />
+                <Route
+                  path="/app/workers/managed-sessions"
+                  element={<ManagedWorkerSessionsPage />}
+                />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

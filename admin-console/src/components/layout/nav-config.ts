@@ -114,6 +114,16 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Metering & usage", url: "/app/metering" },
     ],
   },
+  // Worker ops (#320): self-hosted lifecycle + runs + managed sessions.
+  {
+    title: "Worker ops",
+    icon: Boxes,
+    items: [
+      { title: "Self-hosted lifecycle", url: "/app/workers/self-hosted" },
+      { title: "Self-hosted runs", url: "/app/workers/self-hosted-runs" },
+      { title: "Managed sessions", url: "/app/workers/managed-sessions" },
+    ],
+  },
 ];
 
 export const RESOURCE_ICONS: Record<string, LucideIcon> = {
