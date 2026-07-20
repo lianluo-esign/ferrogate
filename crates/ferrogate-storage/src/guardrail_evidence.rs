@@ -36,6 +36,26 @@ pub struct StoredGuardrailEvaluation {
     pub transformed: bool,
     pub input_fingerprint: String,
     pub occurred_at_unix: u64,
+    /// #306 shared action identity (all optional; `None` on rows recorded
+    /// before migration 047 and on evaluations without a resolvable canonical
+    /// capability target — e.g. model-content evaluations): the target-level
+    /// fingerprint under the `canonical_target_sha256` contract
+    /// (`"sha256:<hex>"`, `ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`).
+    /// The SAME value the #304 timeline/audit rows carry for the same action.
+    /// Deliberately distinct from `input_fingerprint` (guardrail HMAC content
+    /// identity, unchanged) and from the invocation-level approval fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_fingerprint: Option<String>,
+    /// #306 canonical decision class stored AT WRITE TIME via the #303
+    /// `GuardrailOutcome` mapping over the recorded
+    /// verdict/action/enforcement_status triple:
+    /// `"allow"` / `"deny"` / `"ask"` / `"degrade"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    /// #306 lossless #303 reason code carrying the full triple:
+    /// `"guardrail:<verdict>:<action>:<enforcement_status>"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,9 +164,10 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO guardrail_evaluations \
                  (id, request_id, trace_id, agent_run_id, subject_id, tenant_id, \
                   scope_type, scope_id, target, stage, mode, policy_id, policy_revision, \
-                  verdict, action, enforcement_status, occurred_at_unix, evaluation_json) \
+                  verdict, action, enforcement_status, occurred_at_unix, \
+                  action_fingerprint, decision, decision_reason, evaluation_json) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-                         $14, $15, $16, $17, $18::text::jsonb)",
+                         $14, $15, $16, $17, $18, $19, $20, $21::text::jsonb)",
                 &[
                     &evaluation.id,
                     &evaluation.request_id,
@@ -165,6 +186,9 @@ impl PostgresControlPlaneStore {
                     &evaluation.action,
                     &evaluation.enforcement_status,
                     &occurred_at_unix,
+                    &evaluation.action_fingerprint,
+                    &evaluation.decision,
+                    &evaluation.decision_reason,
                     &evaluation_json,
                 ],
             )

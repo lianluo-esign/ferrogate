@@ -3345,6 +3345,41 @@ impl FerroGateway {
                     .unwrap_or_else(|| format!("mcp:{}", request.name)),
             ),
         };
+        // #306: construct the canonical capability target AT the in-process
+        // chokepoint (deferred by #304) where one exists in the runtime
+        // taxonomy. For the MCP backend that is `canonical_mcp_target` — the
+        // exact builder `canonical_target_for_managed_action` uses for
+        // `ManagedExternalAction::McpTool`, so the resulting
+        // `canonical_target_sha256` fingerprint is bit-identical to the one
+        // the managed-worker authorizer computes (and #304 persists on
+        // timeline/audit rows) for the same server/tool/arguments. Extension
+        // and builtin tools (Tool-class) deliberately stay `None`: the
+        // runtime has NO canonical target form for them
+        // (`canonical_target_for_managed_action` returns `None`), and
+        // inventing one here would mint fingerprints no other layer can ever
+        // match. Construction is pure JSON canonicalization — no I/O — so it
+        // is cheap; a non-object/unparseable argument set yields `None`
+        // rather than failing the request.
+        let action_fingerprint: Option<String> = match backend {
+            ToolExecuteBackend::Mcp => mcp_audit_details.as_ref().and_then(|(server, tool)| {
+                ferrogate_runtime::canonical_mcp_target(
+                    server,
+                    tool,
+                    &request.arguments.to_string(),
+                    false,
+                )
+                .ok()
+                .map(|target| target.fingerprint())
+            }),
+            ToolExecuteBackend::Extension | ToolExecuteBackend::Builtin => None,
+        };
+        // #306: stamp the shared action identity onto every audit row this
+        // chokepoint records (the fingerprint column #304 deferred), without
+        // touching the per-outcome decision/disposition columns already set.
+        let with_action_identity = |mut draft: AdminAuditEventDraft| {
+            draft.action_identity.action_fingerprint = action_fingerprint.clone();
+            draft
+        };
         let guardrail_request = ManagedActionGuardrailRequest {
             request_id: &ctx.request_id,
             trace_id: ctx.trace_id.as_deref(),
@@ -3352,6 +3387,9 @@ impl FerroGateway {
             tenant: &guardrail_tenant,
             class: guardrail_class,
             target: &guardrail_target,
+            // #306: the guardrail evaluation evidence rows (input + output
+            // stage) carry the same fingerprint.
+            action_fingerprint: action_fingerprint.as_deref(),
         };
         // INPUT guardrail — evaluated after capability, before approval and
         // execution (matching the decision order in #200). A Block/Quarantine
@@ -3369,16 +3407,18 @@ impl FerroGateway {
         {
             match matched.action_kind {
                 GuardrailActionKind::RequireApproval => {
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                        ctx,
-                        auth,
-                        execution,
-                        "tool.guardrail",
-                        guardrail_target.clone(),
-                        "approval_required",
-                        format!(
-                            "managed action requires approval by guardrail policy {} ({}): {}",
-                            matched.rule_id, matched.code, matched.message
+                    state.record_admin_audit_event(with_action_identity(
+                        tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "tool.guardrail",
+                            guardrail_target.clone(),
+                            "approval_required",
+                            format!(
+                                "managed action requires approval by guardrail policy {} ({}): {}",
+                                matched.rule_id, matched.code, matched.message
+                            ),
                         ),
                     ));
                     guardrail_requires_approval = true;
@@ -3388,16 +3428,18 @@ impl FerroGateway {
                         GuardrailActionKind::Quarantine => "guardrail_quarantined",
                         _ => "guardrail_blocked",
                     };
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                        ctx,
-                        auth,
-                        execution,
-                        "tool.guardrail",
-                        guardrail_target.clone(),
-                        "rejected",
-                        format!(
-                            "tool input {} by guardrail policy {} ({}): {}",
-                            code, matched.rule_id, matched.code, matched.message
+                    state.record_admin_audit_event(with_action_identity(
+                        tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "tool.guardrail",
+                            guardrail_target.clone(),
+                            "rejected",
+                            format!(
+                                "tool input {} by guardrail policy {} ({}): {}",
+                                code, matched.rule_id, matched.code, matched.message
+                            ),
                         ),
                     ));
                     return Err(ToolExecutionHttpError {
@@ -3427,6 +3469,12 @@ impl FerroGateway {
                     agent_run_id: execution.agent_run_id.map(str::to_string),
                     workflow_id: execution.workflow_id.map(str::to_string),
                     workflow_node_id: execution.workflow_node_id.map(str::to_string),
+                    // #306: the approval record carries the same target-level
+                    // action fingerprint as the guardrail/audit evidence of
+                    // this action. The invocation-binding Blake2b fingerprint
+                    // is computed inside create_tool_approval and remains
+                    // authoritative for verification.
+                    action_fingerprint: action_fingerprint.clone(),
                     tenant: auth.tenant_context(),
                     actor_api_key_id: auth.api_key_id.clone(),
                     server_name: mcp_audit_details
@@ -3438,14 +3486,16 @@ impl FerroGateway {
                 }) {
                     Ok(approval) => approval,
                     Err(error) => {
-                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                            ctx,
-                            auth,
-                            execution,
-                            "tool.approval_requested",
-                            format!("tool:{}", request.name),
-                            "error",
-                            format!("tool approval persistence failed: {error}"),
+                        state.record_admin_audit_event(with_action_identity(
+                            tool_audit_event_draft_for_target(
+                                ctx,
+                                auth,
+                                execution,
+                                "tool.approval_requested",
+                                format!("tool:{}", request.name),
+                                "error",
+                                format!("tool approval persistence failed: {error}"),
+                            ),
                         ));
                         return Err(ToolExecutionHttpError {
                             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -3454,30 +3504,37 @@ impl FerroGateway {
                         });
                     }
                 };
-            state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                ctx,
-                auth,
-                execution,
-                "tool.approval_requested",
-                format!("tool_approval:{}", approval.id),
-                "pending",
-                format!(
-                    "approval {} fingerprint={} tool={} expires_at_unix={}",
-                    approval.id, approval.fingerprint, approval.tool_name, approval.expires_at_unix
+            state.record_admin_audit_event(with_action_identity(
+                tool_audit_event_draft_for_target(
+                    ctx,
+                    auth,
+                    execution,
+                    "tool.approval_requested",
+                    format!("tool_approval:{}", approval.id),
+                    "pending",
+                    format!(
+                        "approval {} fingerprint={} tool={} expires_at_unix={}",
+                        approval.id,
+                        approval.fingerprint,
+                        approval.tool_name,
+                        approval.expires_at_unix
+                    ),
                 ),
             ));
             match state.wait_for_tool_approval(&approval).await {
                 Ok(resolved) => {
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                        ctx,
-                        auth,
-                        execution,
-                        "tool.approval_granted",
-                        format!("tool_approval:{}", resolved.id),
-                        "approved",
-                        format!(
-                            "approval {} fingerprint={} tool={} granted before execution",
-                            resolved.id, resolved.fingerprint, resolved.tool_name
+                    state.record_admin_audit_event(with_action_identity(
+                        tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "tool.approval_granted",
+                            format!("tool_approval:{}", resolved.id),
+                            "approved",
+                            format!(
+                                "approval {} fingerprint={} tool={} granted before execution",
+                                resolved.id, resolved.fingerprint, resolved.tool_name
+                            ),
                         ),
                     ));
                 }
@@ -3488,19 +3545,21 @@ impl FerroGateway {
                         ApprovalStatus::Expired => "tool.approval_expired",
                         _ => "tool.approval_rejected",
                     };
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                        ctx,
-                        auth,
-                        execution,
-                        action,
-                        format!("tool_approval:{}", latest.id),
-                        "rejected",
-                        format!(
-                            "approval {} fingerprint={} tool={} ended before execution: {}",
-                            latest.id,
-                            latest.fingerprint,
-                            latest.tool_name,
-                            error.message()
+                    state.record_admin_audit_event(with_action_identity(
+                        tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            action,
+                            format!("tool_approval:{}", latest.id),
+                            "rejected",
+                            format!(
+                                "approval {} fingerprint={} tool={} ended before execution: {}",
+                                latest.id,
+                                latest.fingerprint,
+                                latest.tool_name,
+                                error.message()
+                            ),
                         ),
                     ));
                     return Err(ToolExecutionHttpError {
@@ -3552,7 +3611,7 @@ impl FerroGateway {
                     Ok(identity) => identity,
                     Err(error) => {
                         state.record_mcp_identity_resolution_metric(false);
-                        let audit = tool_audit_event_draft_for_target(
+                        let audit = with_action_identity(tool_audit_event_draft_for_target(
                             ctx,
                             auth,
                             execution,
@@ -3563,7 +3622,7 @@ impl FerroGateway {
                                 "server={server_name} tool={} decision=deny code={}",
                                 request.name, error.code
                             ),
-                        );
+                        ));
                         let error = state.record_mcp_identity_error_audit(audit, error).await;
                         return Err(ToolExecutionHttpError {
                             status: error.status,
@@ -3573,18 +3632,20 @@ impl FerroGateway {
                     }
                 };
                 state.record_mcp_identity_resolution_metric(true);
-                state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                    ctx,
-                    auth,
-                    execution,
-                    "mcp.identity.resolve",
-                    audit_target.clone(),
-                    "allowed",
-                    format!(
-                        "server={server_name} tool={} source={} subject={} decision=allow",
-                        request.name,
-                        identity.credential_source,
-                        identity.subject.as_deref().unwrap_or("none")
+                state.record_admin_audit_event(with_action_identity(
+                    tool_audit_event_draft_for_target(
+                        ctx,
+                        auth,
+                        execution,
+                        "mcp.identity.resolve",
+                        audit_target.clone(),
+                        "allowed",
+                        format!(
+                            "server={server_name} tool={} source={} subject={} decision=allow",
+                            request.name,
+                            identity.credential_source,
+                            identity.subject.as_deref().unwrap_or("none")
+                        ),
                     ),
                 ));
                 state
@@ -3644,7 +3705,7 @@ impl FerroGateway {
                 success_audit.action_identity = success_audit
                     .action_identity
                     .with_output_disposition(output_disposition);
-                state.record_admin_audit_event(success_audit);
+                state.record_admin_audit_event(with_action_identity(success_audit));
                 if let Some(matched) = output_guardrail_match {
                     if matched.effect == GuardrailEffect::Redact {
                         let redacted = matched.redact_text(&payload_text(&response.content));
@@ -3666,7 +3727,7 @@ impl FerroGateway {
                             redacted_audit.action_identity.with_output_disposition(
                                 ferrogate_runtime::OutputDisposition::Redacted,
                             );
-                        state.record_admin_audit_event(redacted_audit);
+                        state.record_admin_audit_event(with_action_identity(redacted_audit));
                         return Ok(ToolExecutionResponse {
                             content: serde_json::Value::String(redacted),
                             is_error: false,
@@ -3690,7 +3751,7 @@ impl FerroGateway {
                     withheld_audit.action_identity = withheld_audit
                         .action_identity
                         .with_output_disposition(ferrogate_runtime::OutputDisposition::Withheld);
-                    state.record_admin_audit_event(withheld_audit);
+                    state.record_admin_audit_event(with_action_identity(withheld_audit));
                     return Ok(ToolExecutionResponse {
                         content: serde_json::json!({
                             "error": "tool_output_blocked_by_guardrail",
@@ -3722,7 +3783,7 @@ impl FerroGateway {
                 error_audit.action_identity = error_audit
                     .action_identity
                     .with_output_disposition(ferrogate_runtime::OutputDisposition::Errored);
-                state.record_admin_audit_event(error_audit);
+                state.record_admin_audit_event(with_action_identity(error_audit));
                 Err(ToolExecutionHttpError {
                     status: error.status(),
                     code: error.code(),
@@ -9052,6 +9113,7 @@ impl FerroGateway {
                     streaming: stream,
                     envelope: &input_envelope,
                     managed_action: None,
+                    action_fingerprint: None,
                 },
             )
             .await
@@ -9196,6 +9258,7 @@ impl FerroGateway {
                     streaming: stream,
                     envelope: &output_envelope,
                     managed_action: None,
+                    action_fingerprint: None,
                 },
             )
             .await

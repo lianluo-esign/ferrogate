@@ -32,6 +32,28 @@ impl ApprovalStatus {
     pub(crate) fn is_terminal(self) -> bool {
         !matches!(self, Self::Pending)
     }
+
+    /// #306: the stored canonical decision column pair for this status, via
+    /// the #303 `From<ApprovalStatus> for ActionDecision` mapping — stored on
+    /// the record at every status transition, never re-derived at read time.
+    fn stored_decision(self) -> (Option<String>, Option<String>) {
+        let decision = ferrogate_runtime::ActionDecision::from(self);
+        (
+            Some(decision.class_label().to_string()),
+            Some(decision.code().to_string()),
+        )
+    }
+}
+
+impl ToolApprovalRecord {
+    /// Transition `status` and keep the #306 stored canonical decision
+    /// columns in lockstep. Every status mutation must go through here.
+    fn apply_status(&mut self, status: ApprovalStatus) {
+        let (decision, decision_reason) = status.stored_decision();
+        self.status = status;
+        self.decision = decision;
+        self.decision_reason = decision_reason;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +73,26 @@ pub(crate) struct ToolApprovalRecord {
     pub(crate) workflow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) workflow_node_id: Option<String>,
+    /// #306 shared action identity: the TARGET-level fingerprint under the
+    /// `canonical_target_sha256` contract
+    /// (`ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`, `"sha256:<hex>"`),
+    /// carried alongside — never instead of — the invocation-level Blake2b
+    /// `fingerprint` below, which stays authoritative for approval
+    /// verification. `None` on legacy records and on tools without a
+    /// resolvable canonical capability target (e.g. Extension/Builtin tools).
+    /// Deliberately NOT part of `fingerprint_for`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) action_fingerprint: Option<String>,
+    /// #306 canonical decision class for the current `status`, maintained on
+    /// every status transition via the #303 `From<ApprovalStatus>` mapping:
+    /// `"ask"` / `"allow"` / `"deny"`. `None` only on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decision: Option<String>,
+    /// #306 stable decision reason code for the current `status`
+    /// (`approval_pending` / `approval_approved` / `approval_denied` /
+    /// `approval_expired`). `None` only on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decision_reason: Option<String>,
     pub(crate) tenant: TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -80,6 +122,9 @@ pub(crate) struct ToolApprovalDraft {
     pub(crate) agent_run_id: Option<String>,
     pub(crate) workflow_id: Option<String>,
     pub(crate) workflow_node_id: Option<String>,
+    /// #306 target-level action fingerprint (`canonical_target_sha256`),
+    /// carried onto the record verbatim; NEVER part of the fingerprint input.
+    pub(crate) action_fingerprint: Option<String>,
     pub(crate) tenant: TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -145,6 +190,8 @@ impl ApprovalRegistry {
         );
         let fingerprint = fingerprint_for(&draft);
         let arguments_summary = summarize_arguments(&draft.arguments, draft.can_log_bodies);
+        // #306: pending records are born with their stored canonical decision.
+        let (decision, decision_reason) = ApprovalStatus::Pending.stored_decision();
         let record = ToolApprovalRecord {
             id: id.clone(),
             request_id: draft.request_id,
@@ -152,6 +199,9 @@ impl ApprovalRegistry {
             agent_run_id: draft.agent_run_id,
             workflow_id: draft.workflow_id,
             workflow_node_id: draft.workflow_node_id,
+            action_fingerprint: draft.action_fingerprint,
+            decision,
+            decision_reason,
             tenant: draft.tenant,
             actor_api_key_id: draft.actor_api_key_id,
             tool_name: draft.tool_name,
@@ -261,7 +311,7 @@ impl ApprovalRegistry {
                     return Ok(entry.record.clone());
                 }
                 if now_unix_seconds() >= entry.record.expires_at_unix {
-                    entry.record.status = ApprovalStatus::Expired;
+                    entry.record.apply_status(ApprovalStatus::Expired);
                     entry.record.decided_at_unix = Some(now_unix_seconds());
                     entry.record.terminal_reason = Some("approval_expired".into());
                     let record = entry.record.clone();
@@ -314,7 +364,7 @@ impl ApprovalRegistry {
             )));
         }
         if now >= entry.record.expires_at_unix {
-            entry.record.status = ApprovalStatus::Expired;
+            entry.record.apply_status(ApprovalStatus::Expired);
             entry.record.reviewer_api_key_id = reviewer_api_key_id;
             entry.record.reviewer_authority = Some("admin.write".into());
             entry.record.terminal_reason = Some("approval_expired".into());
@@ -325,7 +375,7 @@ impl ApprovalRegistry {
         }
         if let Some(provided) = fingerprint {
             if entry.record.fingerprint != provided {
-                entry.record.status = ApprovalStatus::Denied;
+                entry.record.apply_status(ApprovalStatus::Denied);
                 entry.record.reviewer_api_key_id = reviewer_api_key_id;
                 entry.record.reviewer_authority = Some("admin.write".into());
                 entry.record.terminal_reason = Some("approval_fingerprint_mismatch".into());
@@ -339,7 +389,7 @@ impl ApprovalRegistry {
                 });
             }
         }
-        entry.record.status = status;
+        entry.record.apply_status(status);
         entry.record.reviewer_api_key_id = reviewer_api_key_id;
         entry.record.reviewer_authority = Some("admin.write".into());
         entry.record.terminal_reason = Some(reason.unwrap_or_else(|| match status {
@@ -361,7 +411,7 @@ impl ApprovalRegistry {
         if entry.record.status.is_terminal() {
             return Some(entry.record.clone());
         }
-        entry.record.status = ApprovalStatus::Expired;
+        entry.record.apply_status(ApprovalStatus::Expired);
         entry.record.decided_at_unix = Some(now);
         entry.record.terminal_reason = Some("approval_expired".into());
         let record = entry.record.clone();
@@ -533,6 +583,7 @@ mod tests {
             agent_run_id: agent_run_id.map(str::to_string),
             workflow_id: workflow_id.map(str::to_string),
             workflow_node_id: workflow_node_id.map(str::to_string),
+            action_fingerprint: None,
             tenant: TenantContext {
                 organization_id: Some("org-1".into()),
                 team_id: None,
@@ -611,10 +662,123 @@ mod tests {
         assert_eq!(record.agent_run_id, None);
         assert_eq!(record.workflow_id, None);
         assert_eq!(record.workflow_node_id, None);
+        // #306: legacy records also predate the shared action identity and
+        // the stored canonical decision — both default to None.
+        assert_eq!(record.action_fingerprint, None);
+        assert_eq!(record.decision, None);
+        assert_eq!(record.decision_reason, None);
         let serialized = serde_json::to_value(&record).unwrap();
         assert!(serialized.get("agent_run_id").is_none());
         assert!(serialized.get("workflow_id").is_none());
         assert!(serialized.get("workflow_node_id").is_none());
+        assert!(serialized.get("action_fingerprint").is_none());
+        assert!(serialized.get("decision").is_none());
+        assert!(serialized.get("decision_reason").is_none());
+    }
+
+    /// #306: the invocation-level fingerprint must ignore the target-level
+    /// action fingerprint — an approval created with the shared identity
+    /// binds to exactly the same invocation fingerprint as one without it,
+    /// and the pre-#305 pinned literal still holds.
+    #[test]
+    fn approval_fingerprint_ignores_the_target_level_action_fingerprint() {
+        let mut with_identity = fingerprint_regression_draft(None, None, None);
+        with_identity.action_fingerprint = Some(format!("sha256:{}", "ef".repeat(32)));
+        assert_eq!(fingerprint_for(&with_identity), "8b1210f2fe1c907a");
+    }
+
+    /// #306 regression: the invocation-level Blake2b fingerprint stays
+    /// authoritative for approval verification — approving with a fingerprint
+    /// computed over MUTATED arguments is still rejected as a mismatch and
+    /// terminally denies the approval, action_fingerprint or not.
+    #[test]
+    fn approving_with_a_fingerprint_of_mutated_arguments_is_still_rejected() {
+        let registry = ApprovalRegistry::new();
+        let mut draft = fingerprint_regression_draft(Some("run-306"), None, None);
+        draft.action_fingerprint = Some(format!("sha256:{}", "ef".repeat(32)));
+        let pending = registry.create_pending(draft.clone());
+        assert_eq!(pending.status, ApprovalStatus::Pending);
+        assert_eq!(pending.decision.as_deref(), Some("ask"));
+        assert_eq!(pending.decision_reason.as_deref(), Some("approval_pending"));
+        assert_eq!(
+            pending.action_fingerprint.as_deref(),
+            draft.action_fingerprint.as_deref()
+        );
+
+        // The reviewer approves what they believe is the original invocation,
+        // but the fingerprint they present was computed over mutated args.
+        let mut mutated = draft.clone();
+        mutated.arguments = serde_json::json!({"query": "ferrogate", "page": 999});
+        let mutated_fingerprint = fingerprint_for(&mutated);
+        assert_ne!(mutated_fingerprint, pending.fingerprint);
+        let error = registry
+            .approve(&pending.id, &mutated_fingerprint, None, None)
+            .expect_err("args mutation after approval request must be rejected");
+        match error {
+            ApprovalDecisionError::FingerprintMismatch {
+                id,
+                expected,
+                provided,
+            } => {
+                assert_eq!(id, pending.id);
+                assert_eq!(expected, pending.fingerprint);
+                assert_eq!(provided, mutated_fingerprint);
+            }
+            other => panic!("expected FingerprintMismatch, got {other:?}"),
+        }
+        // The mismatch terminally denies the approval, and the stored
+        // canonical decision follows the transition.
+        let denied = registry.get(&pending.id).expect("record still present");
+        assert_eq!(denied.status, ApprovalStatus::Denied);
+        assert_eq!(
+            denied.terminal_reason.as_deref(),
+            Some("approval_fingerprint_mismatch")
+        );
+        assert_eq!(denied.decision.as_deref(), Some("deny"));
+        assert_eq!(denied.decision_reason.as_deref(), Some("approval_denied"));
+
+        // The matching invocation fingerprint (the record's own) would have
+        // been accepted had the arguments not been mutated: prove on a fresh
+        // registry so the terminal denial above cannot mask acceptance.
+        let registry = ApprovalRegistry::new();
+        let pending = registry.create_pending(draft);
+        let approved = registry
+            .approve(&pending.id, &pending.fingerprint, None, None)
+            .expect("the unmutated invocation fingerprint is accepted");
+        assert_eq!(approved.status, ApprovalStatus::Approved);
+        assert_eq!(approved.decision.as_deref(), Some("allow"));
+        assert_eq!(
+            approved.decision_reason.as_deref(),
+            Some("approval_approved")
+        );
+        assert_eq!(
+            approved.action_fingerprint, pending.action_fingerprint,
+            "the target-level identity survives the status transition"
+        );
+    }
+
+    /// #306: every status transition keeps the stored canonical decision in
+    /// lockstep via the #303 From<ApprovalStatus> mapping — including expiry.
+    #[test]
+    fn stored_decision_follows_every_status_transition() {
+        for (status, class, code) in [
+            (ApprovalStatus::Pending, "ask", "approval_pending"),
+            (ApprovalStatus::Approved, "allow", "approval_approved"),
+            (ApprovalStatus::Denied, "deny", "approval_denied"),
+            (ApprovalStatus::Expired, "deny", "approval_expired"),
+        ] {
+            let mut record = ApprovalRegistry::new()
+                .create_pending(fingerprint_regression_draft(None, None, None));
+            record.apply_status(status);
+            assert_eq!(record.decision.as_deref(), Some(class));
+            assert_eq!(record.decision_reason.as_deref(), Some(code));
+            // The stored pair reverses to the exact status (lossless).
+            let decision = ferrogate_runtime::ActionDecision::from(status);
+            assert_eq!(
+                approval_status_from_action_decision(&decision),
+                Some(status)
+            );
+        }
     }
 
     #[test]

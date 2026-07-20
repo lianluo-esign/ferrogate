@@ -1300,10 +1300,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 46",
+         FROM {}.storage_schema_migrations WHERE version = 47",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "46:046_dispatch_correlation" {
+    if migration_version.trim() != "47:047_guardrail_action_identity" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 

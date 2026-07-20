@@ -97,6 +97,12 @@ pub(super) struct ManagedActionGuardrailRequest<'a> {
     pub(super) tenant: &'a TenantContext,
     pub(super) class: ManagedActionClass,
     pub(super) target: &'a str,
+    /// #306 shared action identity: the target-level
+    /// `canonical_target_sha256` fingerprint of the action under evaluation,
+    /// when the seam has one (managed-worker capability evidence; chokepoint
+    /// MCP canonical target). Persisted verbatim on the guardrail evaluation
+    /// evidence row so the row joins approvals/timeline/audit by fingerprint.
+    pub(super) action_fingerprint: Option<&'a str>,
 }
 
 /// Evaluate a managed action against managed-action guardrail policies at a
@@ -143,6 +149,7 @@ pub(super) async fn evaluate_managed_action_guardrail_async(
                     class: request.class,
                     target: Some(request.target),
                 }),
+                action_fingerprint: request.action_fingerprint,
             },
         )
         .await
@@ -391,6 +398,7 @@ mod tests {
             tenant: &tenant,
             class: ManagedActionClass::Tool,
             target: "native.reader",
+            action_fingerprint: None,
         };
 
         // A flagged tool result at the Response stage is blocked.
@@ -441,6 +449,7 @@ mod tests {
             tenant: &tenant,
             class: ManagedActionClass::Mcp,
             target: "mcp:github:create_issue",
+            action_fingerprint: None,
         };
         assert!(evaluate_managed_action_guardrail(
             &state,
@@ -491,6 +500,7 @@ mod tests {
             tenant: &tenant,
             class: ManagedActionClass::Tool,
             target: "native.reader",
+            action_fingerprint: None,
         };
         let matched = evaluate_managed_action_guardrail(
             &state,

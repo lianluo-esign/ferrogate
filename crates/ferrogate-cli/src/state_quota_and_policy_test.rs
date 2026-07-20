@@ -79,6 +79,7 @@ fn match_guardrail_for_test_with_streaming<'a>(
                 streaming,
                 envelope: &envelope,
                 managed_action: None,
+                action_fingerprint: None,
             },
         ))
 }
@@ -659,6 +660,7 @@ fn streaming_buffer_limits_use_configured_error_action_and_sanitized_evidence() 
                     streaming: true,
                     envelope: &envelope,
                     managed_action: None,
+                    action_fingerprint: None,
                 },
                 error_code,
             ))
@@ -1126,6 +1128,7 @@ fn match_guardrail_for_response_envelope(
                 streaming: false,
                 envelope,
                 managed_action: None,
+                action_fingerprint: None,
             },
         ))
 }
@@ -1984,6 +1987,7 @@ fn managed_action_context_selects_managed_action_scoped_policy() {
                 streaming: false,
                 envelope: &envelope,
                 managed_action: managed,
+                action_fingerprint: None,
             },
         ))
     };

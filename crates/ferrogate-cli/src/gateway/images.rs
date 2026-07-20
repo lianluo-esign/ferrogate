@@ -291,6 +291,7 @@ impl FerroGateway {
                         streaming: false,
                         envelope: &guardrail_envelope,
                         managed_action: None,
+                        action_fingerprint: None,
                     },
                 )
                 .await

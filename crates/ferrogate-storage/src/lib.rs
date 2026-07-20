@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 46;
-const POSTGRES_SCHEMA_NAME: &str = "046_dispatch_correlation";
+const POSTGRES_SCHEMA_VERSION: u64 = 47;
+const POSTGRES_SCHEMA_NAME: &str = "047_guardrail_action_identity";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -7819,9 +7819,19 @@ where
         ("self_hosted_run_dispatches", "trace_id"),
         ("self_hosted_run_dispatches", "agent_run_id"),
     ];
+    // #306 (migration 47): the shared action identity + stored canonical
+    // decision on guardrail evidence rows, same presence + type pin (nullable
+    // by design: pre-migration rows and evaluations without a resolvable
+    // canonical capability target carry NULL).
+    const GUARDRAIL_ACTION_IDENTITY_COLUMNS: &[(&str, &str)] = &[
+        ("guardrail_evaluations", "action_fingerprint"),
+        ("guardrail_evaluations", "decision"),
+        ("guardrail_evaluations", "decision_reason"),
+    ];
     for (table, column) in ACTION_IDENTITY_COLUMNS
         .iter()
         .chain(DISPATCH_CORRELATION_COLUMNS)
+        .chain(GUARDRAIL_ACTION_IDENTITY_COLUMNS)
     {
         let data_type = client
             .query_opt(
@@ -7835,7 +7845,7 @@ where
             .map(|row| row.get::<_, String>(0));
         if data_type.as_deref() != Some("text") {
             return Err(StorageError::Postgres(format!(
-                "required action-identity/correlation column {table}.{column} must be text (#304/#305)"
+                "required action-identity/correlation column {table}.{column} must be text (#304/#305/#306)"
             )));
         }
     }

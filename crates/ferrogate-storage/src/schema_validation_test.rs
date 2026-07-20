@@ -31,8 +31,8 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 46);
-    assert_eq!(POSTGRES_SCHEMA_NAME, "046_dispatch_correlation");
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 47);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "047_guardrail_action_identity");
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (33, '033_usage_metadata_rollups_per_tenant')"));
@@ -66,6 +66,10 @@ fn schema_contract_includes_latest_asset_egress_migration() {
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS request_id TEXT"));
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS trace_id TEXT"));
     assert!(POSTGRES_SCHEMA_SQL.contains("ADD COLUMN IF NOT EXISTS agent_run_id TEXT"));
+    // #306: shared action identity + stored canonical decisions on guardrail
+    // evidence rows (047).
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (47, '047_guardrail_action_identity')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("ALTER TABLE guardrail_evaluations"));
     assert!(
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")

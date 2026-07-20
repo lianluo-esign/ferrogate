@@ -2211,3 +2211,33 @@ ALTER TABLE self_hosted_run_dispatches
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (46, '046_dispatch_correlation')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 47 (#306): shared action identity + stored canonical decisions on
+-- guardrail evidence, completing the #303/#304 adoption for the
+-- guardrail_evaluations table. Additive, nullable projection columns
+-- (pre-migration rows and evaluations without a resolvable canonical
+-- capability target -- e.g. model-content evaluations and Extension/Builtin
+-- Tool-class actions -- stay NULL; nothing is fabricated):
+--   * action_fingerprint -- target-level fingerprint under the
+--     canonical_target_sha256 contract ("sha256:<hex>",
+--     ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT). The SAME value the
+--     #304 timeline/audit rows carry for the same action, so one action joins
+--     guardrail evidence + approvals + timeline + audit by fingerprint. NOT
+--     the guardrail HMAC input_fingerprint (content identity, unchanged) and
+--     NOT the invocation-level tool-approval fingerprint.
+--   * decision          -- canonical decision class STORED AT WRITE TIME via
+--     the #303 GuardrailOutcome mapping over the recorded
+--     verdict/action/enforcement_status triple:
+--     'allow' | 'deny' | 'ask' | 'degrade'.
+--   * decision_reason   -- the lossless #303 reason code
+--     'guardrail:<verdict>:<action>:<enforcement_status>'.
+-- Investigations read the STORED decision for new rows; the read-side
+-- heuristic over verdict/action/enforcement remains only for legacy rows.
+ALTER TABLE guardrail_evaluations
+    ADD COLUMN IF NOT EXISTS action_fingerprint TEXT,
+    ADD COLUMN IF NOT EXISTS decision TEXT,
+    ADD COLUMN IF NOT EXISTS decision_reason TEXT;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (47, '047_guardrail_action_identity')
+ON CONFLICT (version) DO NOTHING;

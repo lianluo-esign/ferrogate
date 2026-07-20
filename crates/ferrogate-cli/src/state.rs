@@ -124,6 +124,12 @@ pub(crate) struct ToolApprovalCreateRequest<'a> {
     pub(crate) agent_run_id: Option<String>,
     pub(crate) workflow_id: Option<String>,
     pub(crate) workflow_node_id: Option<String>,
+    /// #306 shared action identity: the target-level
+    /// `canonical_target_sha256` fingerprint of the action this approval
+    /// gates, when a canonical capability target is resolvable at the
+    /// chokepoint (MCP-backend tools). Carried onto the approval record
+    /// verbatim; never part of its invocation-binding fingerprint.
+    pub(crate) action_fingerprint: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) server_name: Option<String>,
@@ -2137,6 +2143,15 @@ pub(crate) struct GuardrailEvaluationContext<'a> {
     /// selecting managed-action guardrail policies instead of model-content
     /// ones; `None` for model-content (chat/responses/embeddings) evaluation.
     pub(crate) managed_action: Option<ferrogate_guardrails::ManagedActionContext<'a>>,
+    /// #306 shared action identity: the target-level
+    /// `canonical_target_sha256` fingerprint of the governed action, when the
+    /// evaluating seam has one (the managed-worker authorizer's capability
+    /// evidence; the in-process chokepoint's MCP canonical target). Persisted
+    /// verbatim on the guardrail evaluation row so one action joins guardrail
+    /// evidence + approvals + timeline + audit by fingerprint. `None` for
+    /// model-content evaluations and Tool-class actions without a canonical
+    /// target form.
+    pub(crate) action_fingerprint: Option<&'a str>,
 }
 
 impl RequestLogExportFilter {
@@ -2825,6 +2840,19 @@ pub(crate) struct InvestigationApprovalEvidence {
     pub(crate) agent_run_id: Option<String>,
     pub(crate) workflow_id: Option<String>,
     pub(crate) workflow_node_id: Option<String>,
+    /// #306: target-level `canonical_target_sha256` action fingerprint —
+    /// joins this approval to guardrail/timeline/audit evidence of the same
+    /// action. None on legacy records and non-canonical targets. This is NOT
+    /// the invocation-binding approval fingerprint (which stays redacted from
+    /// investigation DTOs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) action_fingerprint: Option<String>,
+    /// #306: the stored canonical decision class + reason for the approval's
+    /// current status (`ask`/`allow`/`deny`; `approval_*` codes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) decision_reason: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tool_name: String,
@@ -2857,6 +2885,25 @@ pub(crate) struct InvestigationBillingEvidence {
     pub(crate) wallet_balance_after_credits: Option<i64>,
 }
 
+/// #306: one shared-action-identity join group inside an investigation — all
+/// evidence rows (guardrail evaluations, approvals, timeline events, audit
+/// events) carrying the SAME target-level `canonical_target_sha256`
+/// fingerprint describe the SAME external action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct InvestigationActionCorrelation {
+    /// The shared `"sha256:<hex>"` action fingerprint
+    /// (`ferrogate_runtime::ACTION_FINGERPRINT_CONTRACT`).
+    pub(crate) action_fingerprint: String,
+    /// Ids of guardrail evaluation rows carrying the fingerprint.
+    pub(crate) guardrail_evaluation_ids: Vec<String>,
+    /// Ids of approval records carrying the fingerprint.
+    pub(crate) approval_ids: Vec<String>,
+    /// Ids of timeline (agent-run event) rows carrying the fingerprint.
+    pub(crate) agent_event_ids: Vec<String>,
+    /// Ids of audit-event rows carrying the fingerprint.
+    pub(crate) audit_event_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GuardrailInvestigationTimeline {
     pub(crate) object: &'static str,
@@ -2869,6 +2916,9 @@ pub(crate) struct GuardrailInvestigationTimeline {
     pub(crate) audit_events: Vec<StoredAuditEvent>,
     pub(crate) approvals: Vec<InvestigationApprovalEvidence>,
     pub(crate) billing_events: Vec<InvestigationBillingEvidence>,
+    /// #306: fingerprint-based joining across the evidence types above.
+    /// Empty when no row in the investigation carries an action fingerprint.
+    pub(crate) action_correlations: Vec<InvestigationActionCorrelation>,
     pub(crate) total_cost_usd: f64,
     pub(crate) final_outcome: String,
 }
@@ -6869,6 +6919,7 @@ mod tests {
                 agent_run_id: Some("agent-run-test".into()),
                 workflow_id: None,
                 workflow_node_id: None,
+                action_fingerprint: Some("sha256:test-action-fingerprint".into()),
                 tenant: ferrogate_core::TenantContext::default(),
                 actor_api_key_id: Some("key_initial".into()),
                 server_name: Some("mcp.github".into()),
@@ -6884,6 +6935,17 @@ mod tests {
         assert_eq!(
             stored_approval.agent_run_id.as_deref(),
             Some("agent-run-test")
+        );
+        // #306: the shared action identity + stored canonical decision
+        // survive durable persistence.
+        assert_eq!(
+            stored_approval.action_fingerprint.as_deref(),
+            Some("sha256:test-action-fingerprint")
+        );
+        assert_eq!(stored_approval.decision.as_deref(), Some("ask"));
+        assert_eq!(
+            stored_approval.decision_reason.as_deref(),
+            Some("approval_pending")
         );
         assert!(state
             .repositories

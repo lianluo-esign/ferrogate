@@ -159,6 +159,7 @@ fn a2a_guardrail_blocks_secret_in_request_and_response() {
             streaming: false,
             envelope: &input_envelope,
             managed_action: None,
+            action_fingerprint: None,
         },
     ));
     assert!(blocked.is_some(), "secret in A2A request must be blocked");
@@ -187,6 +188,7 @@ fn a2a_guardrail_blocks_secret_in_request_and_response() {
             streaming: false,
             envelope: &output_envelope,
             managed_action: None,
+            action_fingerprint: None,
         },
     ));
     assert!(
@@ -215,6 +217,7 @@ fn a2a_guardrail_blocks_secret_in_request_and_response() {
             streaming: false,
             envelope: &clean_envelope,
             managed_action: None,
+            action_fingerprint: None,
         },
     ));
     assert!(allowed.is_none(), "clean A2A content must pass");

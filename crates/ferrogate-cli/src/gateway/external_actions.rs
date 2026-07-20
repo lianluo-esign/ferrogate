@@ -160,6 +160,12 @@ impl GatewayExternalActionAuthorizerService {
                 // policy this is a no-op; a configured policy that errors fails
                 // closed inside `match_guardrail`.
                 if evidence.decision == CapabilityAuthorizationDecision::Allowed {
+                    // #306: the capability evidence fingerprint
+                    // (canonical_target_sha256) rides the guardrail evaluation
+                    // so the persisted evidence row carries the same action
+                    // identity as the timeline/audit rows.
+                    let evidence_fingerprint = Some(evidence.action_fingerprint.as_str())
+                        .filter(|fingerprint| !fingerprint.is_empty());
                     if let Some(matched) = Self::evaluate_managed_action_input_guardrail(
                         &state,
                         transport_request_id,
@@ -167,6 +173,7 @@ impl GatewayExternalActionAuthorizerService {
                         &timeline_tenant,
                         &run_id,
                         &action_binding,
+                        evidence_fingerprint,
                     ) {
                         // Record timeline evidence for the guardrail block so the
                         // fail-closed decision is auditable (issue #200) — the
@@ -234,6 +241,7 @@ impl GatewayExternalActionAuthorizerService {
     /// guardrail policies (issue #200). Returns the matched policy when the
     /// action must be blocked, or `None` when no managed-action policy applies.
     /// Delegates to the shared fail-closed evaluator used by every seam.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_managed_action_input_guardrail(
         state: &AppState,
         request_id: &str,
@@ -241,6 +249,7 @@ impl GatewayExternalActionAuthorizerService {
         tenant: &TenantContext,
         run_id: &str,
         binding: &ManagedActionGuardrailBinding,
+        action_fingerprint: Option<&str>,
     ) -> Option<GuardrailMatch> {
         evaluate_managed_action_guardrail(
             state,
@@ -252,6 +261,10 @@ impl GatewayExternalActionAuthorizerService {
                 tenant,
                 class: binding.class,
                 target: &binding.target,
+                // #306: the capability-evidence action fingerprint joins the
+                // persisted guardrail evaluation row to the timeline/audit
+                // rows of the same action.
+                action_fingerprint,
             },
             binding.input_text.clone(),
         )

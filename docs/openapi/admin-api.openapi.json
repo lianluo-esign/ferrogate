@@ -12072,6 +12072,40 @@
             ],
             "description": "Issue #305: id of the workflow node that requested the tool, when the execution was workflow-bound."
           },
+          "action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #306: target-level canonical_target_sha256 action fingerprint of the action this approval gates, carried alongside - never instead of - the invocation-binding `fingerprint`, which stays authoritative for approval verification. Null/absent on legacy records and on tools without a resolvable canonical capability target. Never part of the approval fingerprint input."
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "allow",
+              "deny",
+              "ask",
+              null
+            ],
+            "description": "Issue #306: stored canonical decision class for the current status, maintained on every status transition via the issue #303 From<ApprovalStatus> mapping (pending=ask, approved=allow, denied/expired=deny). Null/absent only on legacy records."
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "approval_pending",
+              "approval_approved",
+              "approval_denied",
+              "approval_expired",
+              null
+            ],
+            "description": "Issue #306: stored issue #303 decision reason code for the current status (the lossless discriminator: denied vs expired both map to deny). Null/absent only on legacy records."
+          },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
           },
@@ -19808,6 +19842,34 @@
             "type": "string",
             "pattern": "^hmac-sha256:"
           },
+          "action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #306: target-level action fingerprint under the canonical_target_sha256 contract (\"sha256:<hex>\"), the SAME value carried by timeline/audit rows of the same action, so guardrail evidence, approvals, timeline and audit evidence join by fingerprint. Null/absent on records persisted before the field existed and on actions without a resolvable canonical capability target (e.g. model-content guardrail evaluations, Extension/Builtin tools). Distinct from the guardrail HMAC input_fingerprint (content identity) and from the invocation-binding tool-approval fingerprint, which both keep their semantics."
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "allow",
+              "deny",
+              "ask",
+              "degrade",
+              null
+            ],
+            "description": "Issue #306: canonical decision class STORED AT WRITE TIME via the issue #303 GuardrailOutcome mapping over the recorded verdict/action/enforcement_status triple. Null/absent on rows persisted before migration 047; readers fall back to the verdict/action/enforcement heuristic only for those legacy rows."
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #306: lossless issue #303 reason code carrying the full recorded triple: guardrail:<verdict>:<action>:<enforcement_status>. Null/absent on legacy rows."
+          },
           "occurred_at_unix": {
             "type": "integer",
             "minimum": 0
@@ -20018,6 +20080,40 @@
               "null"
             ],
             "description": "Issue #305: id of the workflow node that requested the tool, when the execution was workflow-bound."
+          },
+          "action_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue #306: target-level canonical_target_sha256 action fingerprint of the action this approval gates, carried alongside - never instead of - the invocation-binding `fingerprint`, which stays authoritative for approval verification. Null/absent on legacy records and on tools without a resolvable canonical capability target. Never part of the approval fingerprint input."
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "allow",
+              "deny",
+              "ask",
+              null
+            ],
+            "description": "Issue #306: stored canonical decision class for the current status, maintained on every status transition via the issue #303 From<ApprovalStatus> mapping (pending=ask, approved=allow, denied/expired=deny). Null/absent only on legacy records."
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "approval_pending",
+              "approval_approved",
+              "approval_denied",
+              "approval_expired",
+              null
+            ],
+            "description": "Issue #306: stored issue #303 decision reason code for the current status (the lossless discriminator: denied vs expired both map to deny). Null/absent only on legacy records."
           },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
@@ -20240,6 +20336,13 @@
               "$ref": "#/components/schemas/InvestigationBillingEvidence"
             }
           },
+          "action_correlations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InvestigationActionCorrelation"
+            },
+            "description": "Issue #306: fingerprint-based joining across the evidence arrays above. Empty when no row in the investigation carries an action fingerprint. Additive-optional: absent on responses from older gateways."
+          },
           "total_cost_usd": {
             "type": "number",
             "minimum": 0
@@ -20252,6 +20355,53 @@
               "succeeded",
               "decision_only"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvestigationActionCorrelation": {
+        "type": "object",
+        "description": "Issue #306: one shared-action-identity join group inside an investigation. Every evidence row (guardrail evaluations, approvals, timeline events, audit events) carrying the SAME target-level canonical_target_sha256 fingerprint describes the SAME external action.",
+        "required": [
+          "action_fingerprint",
+          "guardrail_evaluation_ids",
+          "approval_ids",
+          "agent_event_ids",
+          "audit_event_ids"
+        ],
+        "properties": {
+          "action_fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:",
+            "description": "The shared \"sha256:<hex>\" action fingerprint (action_fingerprint_contract: canonical_target_sha256)."
+          },
+          "guardrail_evaluation_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of guardrail evaluation rows carrying the fingerprint."
+          },
+          "approval_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of approval records carrying the fingerprint."
+          },
+          "agent_event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of timeline (agent-run event) rows carrying the fingerprint."
+          },
+          "audit_event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of audit-event rows carrying the fingerprint."
           }
         },
         "additionalProperties": false

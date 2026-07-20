@@ -112,6 +112,7 @@ impl AppState {
             agent_run_id: request.agent_run_id,
             workflow_id: request.workflow_id,
             workflow_node_id: request.workflow_node_id,
+            action_fingerprint: request.action_fingerprint,
             tenant: request.tenant,
             actor_api_key_id: request.actor_api_key_id,
             tool_name: request.tool.name.clone(),

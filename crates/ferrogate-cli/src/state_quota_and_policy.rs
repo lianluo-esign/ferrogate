@@ -875,7 +875,25 @@ impl AppState {
             );
         }
         let (scope_type, scope_id) = guardrail_evidence_scope(context.tenant);
+        // #306: store the canonical decision AT WRITE TIME via the #303
+        // GuardrailOutcome mapping over the exact verdict/action/enforcement
+        // triple this row records ("stored decisions, not heuristics"). The
+        // triple vocabulary is closed at this seam, so the parse cannot fail;
+        // `ok()` keeps the write path total should a new value ever appear
+        // before the mapping learns it (the row then simply carries no stored
+        // decision and readers fall back to the legacy heuristic).
+        let stored_decision =
+            ferrogate_runtime::GuardrailOutcome::parse(verdict, action, enforcement_status)
+                .map(ferrogate_runtime::ActionDecision::from)
+                .ok();
         let evaluation = StoredGuardrailEvaluation {
+            action_fingerprint: context.action_fingerprint.map(str::to_string),
+            decision: stored_decision
+                .as_ref()
+                .map(|decision| decision.class_label().to_string()),
+            decision_reason: stored_decision
+                .as_ref()
+                .map(|decision| decision.code().to_string()),
             id: evaluation_id.clone(),
             request_id: context.request_id.to_string(),
             trace_id: context.trace_id.map(str::to_string),

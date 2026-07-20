@@ -126,6 +126,16 @@ impl AppState {
                 .sum(),
         );
         let final_outcome = investigation_final_outcome(&requests, &guardrail_evaluations);
+        // #306: fingerprint-based joining — group every evidence row that
+        // carries the shared canonical_target_sha256 action fingerprint, so
+        // "same fingerprint across guardrail evidence + approval + timeline +
+        // audit = same action" is surfaced instead of left to the caller.
+        let action_correlations = investigation_action_correlations(
+            &guardrail_evaluations,
+            &approvals,
+            &agent_events,
+            &audit_events,
+        );
         let requests = requests
             .into_iter()
             .map(sanitize_investigation_request)
@@ -149,6 +159,7 @@ impl AppState {
             audit_events,
             approvals,
             billing_events,
+            action_correlations,
             total_cost_usd,
             final_outcome,
         }))
@@ -310,15 +321,31 @@ fn investigation_selector(filter: &GuardrailEvidenceFilter) -> String {
     }
 }
 
+/// Whether a guardrail evaluation row terminally refused its action.
+///
+/// #306: new rows carry the canonical decision STORED AT WRITE TIME
+/// (`decision` = the #303 `ActionDecision` class), so the answer is simply
+/// `decision == "deny"` — no re-derivation. The verdict/action/enforcement
+/// string heuristic below remains ONLY as the fallback for legacy rows
+/// persisted before migration 047 (`decision` is `None`).
+fn guardrail_evaluation_denied(view: &GuardrailEvaluationView) -> bool {
+    match view.evaluation.decision.as_deref() {
+        Some(decision) => decision == "deny",
+        None => {
+            // Legacy heuristic (pre-#306 rows only): an enforced non-pass
+            // block gated the traffic.
+            view.evaluation.action == "block"
+                && view.evaluation.enforcement_status == "enforced"
+                && view.evaluation.verdict != "pass"
+        }
+    }
+}
+
 fn investigation_final_outcome(
     requests: &[StoredRequestLog],
     guardrails: &[GuardrailEvaluationView],
 ) -> String {
-    if guardrails.iter().any(|view| {
-        view.evaluation.action == "block"
-            && view.evaluation.enforcement_status == "enforced"
-            && view.evaluation.verdict != "pass"
-    }) {
+    if guardrails.iter().any(guardrail_evaluation_denied) {
         return "blocked".to_string();
     }
     if requests.iter().any(|request| request.status_code >= 500) {
@@ -330,6 +357,68 @@ fn investigation_final_outcome(
     } else {
         "succeeded".to_string()
     }
+}
+
+/// #306: group every investigation evidence row carrying a shared
+/// `canonical_target_sha256` action fingerprint. Rows with the SAME
+/// fingerprint across guardrail evidence, approvals, timeline events and
+/// audit events describe the SAME external action. Deterministic order
+/// (sorted by fingerprint); rows without a fingerprint never appear.
+fn investigation_action_correlations(
+    guardrails: &[GuardrailEvaluationView],
+    approvals: &[ToolApprovalRecord],
+    agent_events: &[StoredAgentRunEvent],
+    audit_events: &[StoredAuditEvent],
+) -> Vec<InvestigationActionCorrelation> {
+    fn correlation_entry<'map>(
+        correlations: &'map mut BTreeMap<String, InvestigationActionCorrelation>,
+        fingerprint: Option<&str>,
+    ) -> Option<&'map mut InvestigationActionCorrelation> {
+        let fingerprint = fingerprint?.to_string();
+        Some(correlations.entry(fingerprint.clone()).or_insert_with(|| {
+            InvestigationActionCorrelation {
+                action_fingerprint: fingerprint,
+                guardrail_evaluation_ids: Vec::new(),
+                approval_ids: Vec::new(),
+                agent_event_ids: Vec::new(),
+                audit_event_ids: Vec::new(),
+            }
+        }))
+    }
+
+    let mut correlations: BTreeMap<String, InvestigationActionCorrelation> = BTreeMap::new();
+    for view in guardrails {
+        if let Some(correlation) = correlation_entry(
+            &mut correlations,
+            view.evaluation.action_fingerprint.as_deref(),
+        ) {
+            correlation
+                .guardrail_evaluation_ids
+                .push(view.evaluation.id.clone());
+        }
+    }
+    for approval in approvals {
+        if let Some(correlation) =
+            correlation_entry(&mut correlations, approval.action_fingerprint.as_deref())
+        {
+            correlation.approval_ids.push(approval.id.clone());
+        }
+    }
+    for event in agent_events {
+        if let Some(correlation) =
+            correlation_entry(&mut correlations, event.action_fingerprint.as_deref())
+        {
+            correlation.agent_event_ids.push(event.id.clone());
+        }
+    }
+    for event in audit_events {
+        if let Some(correlation) =
+            correlation_entry(&mut correlations, event.action_fingerprint.as_deref())
+        {
+            correlation.audit_event_ids.push(event.id.clone());
+        }
+    }
+    correlations.into_values().collect()
 }
 
 fn sanitize_investigation_request(log: StoredRequestLog) -> InvestigationRequestEvidence {
@@ -361,6 +450,12 @@ fn sanitize_investigation_approval(approval: ToolApprovalRecord) -> Investigatio
         agent_run_id: approval.agent_run_id,
         workflow_id: approval.workflow_id,
         workflow_node_id: approval.workflow_node_id,
+        // #306: the TARGET-level action fingerprint is investigation-safe (it
+        // is the shared join key); the invocation-binding approval
+        // fingerprint stays redacted from investigation DTOs.
+        action_fingerprint: approval.action_fingerprint,
+        decision: approval.decision,
+        decision_reason: approval.decision_reason,
         tenant: approval.tenant,
         actor_api_key_id: approval.actor_api_key_id,
         tool_name: approval.tool_name,

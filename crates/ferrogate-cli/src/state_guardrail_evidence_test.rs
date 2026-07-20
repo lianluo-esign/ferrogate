@@ -36,6 +36,9 @@ fn evaluation(tenant_id: &str) -> StoredGuardrailEvaluation {
         transformed: false,
         input_fingerprint: "hmac-sha256:test".into(),
         occurred_at_unix: 1,
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
     }
 }
 
@@ -86,6 +89,9 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
         agent_run_id: None,
         workflow_id: None,
         workflow_node_id: None,
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
         tenant: ferrogate_core::TenantContext::default(),
         actor_api_key_id: None,
         tool_name: "tool".into(),
@@ -151,6 +157,9 @@ fn matcher_approval(
         agent_run_id: agent_run_id.map(str::to_string),
         workflow_id: None,
         workflow_node_id: None,
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
         tenant: ferrogate_core::TenantContext::default(),
         actor_api_key_id: None,
         tool_name: "tool".into(),
@@ -249,6 +258,7 @@ fn full_investigation_by_agent_run_id_finds_the_approval_directly() {
             agent_run_id: Some("run-corr".into()),
             workflow_id: None,
             workflow_node_id: None,
+            action_fingerprint: None,
             tenant: ferrogate_core::TenantContext::default(),
             actor_api_key_id: None,
             server_name: None,
@@ -292,4 +302,204 @@ fn investigation_cost_normalizes_negative_zero_to_positive_zero() {
 
     // A real cost is passed through unchanged.
     assert_eq!(normalize_investigation_cost(0.0375), 0.0375);
+}
+
+fn evaluation_view(evaluation: StoredGuardrailEvaluation) -> GuardrailEvaluationView {
+    GuardrailEvaluationView {
+        evaluation,
+        checks: Vec::new(),
+    }
+}
+
+/// #306 stored-decision path: a NEW row (stored `decision` present) drives
+/// `final_outcome` from the stored canonical decision, NOT from the
+/// verdict/action/enforcement heuristic. A shadow-only "block" records
+/// verdict=fail/action=block but decision=allow — the heuristic would call
+/// the legacy-shaped equivalent "blocked" (verdict!=pass && action=block, but
+/// enforcement=shadow_only saves it)… so pin the sharper case: an ENFORCED
+/// triple whose stored decision says allow must NOT read as blocked, and a
+/// stored deny must read as blocked even when the string triple alone would
+/// not trip the legacy heuristic.
+#[test]
+fn final_outcome_reads_the_stored_decision_for_new_rows() {
+    // Stored deny → blocked, regardless of the recorded action string (a
+    // require-approval policy surfaces action="block" only via the stored
+    // decision mapping; here the strings alone would NOT trip the heuristic).
+    let mut denied = evaluation("tenant-allowed");
+    denied.verdict = "fail".into();
+    denied.action = "record".into();
+    denied.enforcement_status = "enforced".into();
+    denied.decision = Some("deny".into());
+    denied.decision_reason = Some("guardrail:fail:block:enforced".into());
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(denied)]),
+        "blocked"
+    );
+
+    // Stored allow → NOT blocked, even though the string triple
+    // (fail/block/enforced) would trip the legacy heuristic.
+    let mut allowed = evaluation("tenant-allowed");
+    allowed.verdict = "fail".into();
+    allowed.action = "block".into();
+    allowed.enforcement_status = "enforced".into();
+    allowed.decision = Some("allow".into());
+    allowed.decision_reason = Some("guardrail:fail:block:shadow_only".into());
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(allowed)]),
+        "decision_only"
+    );
+
+    // Stored degrade (enforced redaction) is not a terminal refusal.
+    let mut degraded = evaluation("tenant-allowed");
+    degraded.verdict = "fail".into();
+    degraded.action = "redact".into();
+    degraded.enforcement_status = "enforced".into();
+    degraded.decision = Some("degrade".into());
+    degraded.decision_reason = Some("guardrail:fail:redact:enforced".into());
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(degraded)]),
+        "decision_only"
+    );
+}
+
+/// #306 legacy fallback: rows persisted before migration 047 carry NO stored
+/// decision — `final_outcome` keeps deriving from the
+/// verdict/action/enforcement heuristic for exactly those rows.
+#[test]
+fn final_outcome_falls_back_to_the_heuristic_for_legacy_rows() {
+    // Legacy enforced non-pass block → blocked (heuristic path).
+    let legacy_blocked = evaluation("tenant-allowed");
+    assert_eq!(legacy_blocked.decision, None, "precondition: legacy row");
+    assert_eq!(legacy_blocked.verdict, "fail");
+    assert_eq!(legacy_blocked.action, "block");
+    assert_eq!(legacy_blocked.enforcement_status, "enforced");
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(legacy_blocked)]),
+        "blocked"
+    );
+
+    // Legacy shadow-only block did not gate traffic → not blocked.
+    let mut legacy_shadow = evaluation("tenant-allowed");
+    legacy_shadow.enforcement_status = "shadow_only".into();
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(legacy_shadow)]),
+        "decision_only"
+    );
+
+    // Legacy pass never blocks.
+    let mut legacy_pass = evaluation("tenant-allowed");
+    legacy_pass.verdict = "pass".into();
+    assert_eq!(
+        investigation_final_outcome(&[], &[evaluation_view(legacy_pass)]),
+        "decision_only"
+    );
+}
+
+/// #306 fingerprint-based joining: rows sharing one
+/// `canonical_target_sha256` fingerprint across guardrail evidence,
+/// approvals, timeline events and audit events group into ONE correlation;
+/// rows without a fingerprint never appear; distinct fingerprints stay
+/// distinct (sorted deterministically).
+#[test]
+fn investigation_groups_evidence_rows_by_shared_action_fingerprint() {
+    let shared = format!("sha256:{}", "aa".repeat(32));
+    let other = format!("sha256:{}", "bb".repeat(32));
+
+    let mut guardrail_row = evaluation("tenant-allowed");
+    guardrail_row.id = "eval-shared".into();
+    guardrail_row.action_fingerprint = Some(shared.clone());
+    let mut legacy_guardrail_row = evaluation("tenant-allowed");
+    legacy_guardrail_row.id = "eval-legacy".into();
+
+    let mut approval = matcher_approval("request-shared", Some("run-corr"));
+    approval.id = "approval-shared".into();
+    approval.action_fingerprint = Some(shared.clone());
+
+    let agent_event = ferrogate_storage::StoredAgentRunEvent {
+        id: "agent-event-shared".into(),
+        run_id: "run-corr".into(),
+        request_id: "request-shared".into(),
+        trace_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        turn: 0,
+        kind: "capability.allowed".into(),
+        target: "mcp:local:echo".into(),
+        outcome: "allowed".into(),
+        tool_call_id: None,
+        message: None,
+        occurred_at_unix: Some(1),
+        action_fingerprint: Some(shared.clone()),
+        decision: Some("allow".into()),
+        decision_reason: Some("capability_allowed".into()),
+        output_disposition: None,
+    };
+    let audit_event = ferrogate_storage::StoredAuditEvent {
+        id: "audit-shared".into(),
+        request_id: "request-shared".into(),
+        trace_id: None,
+        agent_run_id: Some("run-corr".into()),
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        actor_api_key_id: None,
+        tenant: ferrogate_core::TenantContext::default(),
+        action: "tool.execute".into(),
+        target: "mcp:local:echo".into(),
+        outcome: "success".into(),
+        message: "executed".into(),
+        occurred_at_unix: Some(1),
+        action_fingerprint: Some(shared.clone()),
+        decision: Some("allow".into()),
+        decision_reason: Some("audit_success".into()),
+        output_disposition: Some("returned".into()),
+    };
+    let mut other_audit_event = audit_event.clone();
+    other_audit_event.id = "audit-other".into();
+    other_audit_event.action_fingerprint = Some(other.clone());
+
+    let correlations = investigation_action_correlations(
+        &[
+            evaluation_view(guardrail_row),
+            evaluation_view(legacy_guardrail_row),
+        ],
+        &[approval],
+        &[agent_event],
+        &[audit_event, other_audit_event],
+    );
+    assert_eq!(correlations.len(), 2, "{correlations:?}");
+    let shared_group = &correlations[0];
+    assert_eq!(shared_group.action_fingerprint, shared);
+    assert_eq!(shared_group.guardrail_evaluation_ids, vec!["eval-shared"]);
+    assert_eq!(shared_group.approval_ids, vec!["approval-shared"]);
+    assert_eq!(shared_group.agent_event_ids, vec!["agent-event-shared"]);
+    assert_eq!(shared_group.audit_event_ids, vec!["audit-shared"]);
+    let other_group = &correlations[1];
+    assert_eq!(other_group.action_fingerprint, other);
+    assert_eq!(other_group.audit_event_ids, vec!["audit-other"]);
+    assert!(other_group.guardrail_evaluation_ids.is_empty());
+    assert!(other_group.approval_ids.is_empty());
+    assert!(other_group.agent_event_ids.is_empty());
+}
+
+/// #306: investigation approval DTOs surface the shared action identity and
+/// stored decision, while the invocation-binding approval fingerprint stays
+/// redacted.
+#[test]
+fn investigation_approval_dto_surfaces_the_action_identity_but_not_the_binding_fingerprint() {
+    let mut approval = matcher_approval("request-1", Some("run-corr"));
+    approval.fingerprint = "invocation-binding-fingerprint".into();
+    approval.action_fingerprint = Some(format!("sha256:{}", "cc".repeat(32)));
+    approval.decision = Some("ask".into());
+    approval.decision_reason = Some("approval_pending".into());
+    let sanitized = sanitize_investigation_approval(approval.clone());
+    assert_eq!(sanitized.action_fingerprint, approval.action_fingerprint);
+    assert_eq!(sanitized.decision.as_deref(), Some("ask"));
+    assert_eq!(
+        sanitized.decision_reason.as_deref(),
+        Some("approval_pending")
+    );
+    let encoded = serde_json::to_string(&sanitized).unwrap();
+    assert!(!encoded.contains("invocation-binding-fingerprint"));
 }
