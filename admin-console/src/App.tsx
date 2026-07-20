@@ -27,6 +27,13 @@ import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
 import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
 import SelfHostedRunsPage from "@/pages/self-hosted-runs";
 import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
+// Operations cockpit pages (#322).
+import OpsStatusPage from "@/pages/ops-status";
+import OpsConfigPage from "@/pages/ops-config";
+import OpsDrainPage from "@/pages/ops-drain";
+import OpsGatewayConfigsPage from "@/pages/ops-gateway-configs";
+import OpsProviderHealthPage from "@/pages/ops-provider-health";
+import OpsObservabilityPage from "@/pages/ops-observability";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -94,6 +101,22 @@ function App() {
                 <Route
                   path="/app/workers/managed-sessions"
                   element={<ManagedWorkerSessionsPage />}
+                />
+                {/* Operations cockpit (#322). */}
+                <Route path="/app/ops/status" element={<OpsStatusPage />} />
+                <Route path="/app/ops/config" element={<OpsConfigPage />} />
+                <Route path="/app/ops/drain" element={<OpsDrainPage />} />
+                <Route
+                  path="/app/ops/gateway-configs"
+                  element={<OpsGatewayConfigsPage />}
+                />
+                <Route
+                  path="/app/ops/provider-health"
+                  element={<OpsProviderHealthPage />}
+                />
+                <Route
+                  path="/app/ops/observability"
+                  element={<OpsObservabilityPage />}
                 />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />

@@ -19,6 +19,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  TerminalSquare,
   Wrench,
 } from "lucide-react";
 
@@ -122,6 +123,20 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Self-hosted lifecycle", url: "/app/workers/self-hosted" },
       { title: "Self-hosted runs", url: "/app/workers/self-hosted-runs" },
       { title: "Managed sessions", url: "/app/workers/managed-sessions" },
+    ],
+  },
+  // Operations cockpit (#322): status/config-reload/drain/gateway-configs +
+  // provider & observability status views.
+  {
+    title: "Operations",
+    icon: TerminalSquare,
+    items: [
+      { title: "Ops status", url: "/app/ops/status" },
+      { title: "Config reload", url: "/app/ops/config" },
+      { title: "Graceful drain", url: "/app/ops/drain" },
+      { title: "Gateway config profiles", url: "/app/ops/gateway-configs" },
+      { title: "Provider & runtime health", url: "/app/ops/provider-health" },
+      { title: "Observability & exports", url: "/app/ops/observability" },
     ],
   },
 ];
