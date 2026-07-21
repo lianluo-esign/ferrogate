@@ -19,7 +19,9 @@ export const permissionsConfig: ResourceConfig<AdminPermission> = {
   basePath: "/admin/v1/permissions",
   idField: "id",
   noUpdate: true,
-  fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/permissions"),
+  pagination: "offset",
+  fetchList: (apiKey, request) =>
+    adminGet(apiKey, "/admin/v1/permissions", { query: request }),
   columns: [
     { key: "key", header: "Key" },
     { key: "name", header: "Name" },

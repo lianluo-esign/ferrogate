@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +13,10 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import type { FieldConfig } from "@/lib/resource-config";
+import {
+  clearDependentReferenceValues,
+  type FieldConfig,
+} from "@/lib/resource-config";
 
 interface ResourceFormProps {
   fields: FieldConfig[];
@@ -32,9 +36,19 @@ function normalizeInitialValues(
     const raw = normalized[field.name];
     if (field.type === "json" && raw !== undefined && typeof raw !== "string") {
       normalized[field.name] = JSON.stringify(raw, null, 2);
+    } else if (field.type === "entities" && !Array.isArray(raw)) {
+      normalized[field.name] = [];
     }
   }
   return normalized;
+}
+
+function fieldValuesEqual(previous: unknown, next: unknown): boolean {
+  if (!Array.isArray(previous) || !Array.isArray(next)) return previous === next;
+  return (
+    previous.length === next.length &&
+    previous.every((value, index) => value === next[index])
+  );
 }
 
 export function ResourceForm({
@@ -59,7 +73,10 @@ export function ResourceForm({
   const visibleFields = fields.filter((field) => !(isEdit && field.createOnly));
 
   function setField(name: string, value: unknown) {
-    setValues((prev) => ({ ...prev, [name]: value }));
+    setValues((previous) => {
+      if (fieldValuesEqual(previous[name], value)) return previous;
+      return clearDependentReferenceValues(fields, { ...previous, [name]: value }, name);
+    });
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -70,6 +87,12 @@ export function ResourceForm({
       const payload: Record<string, unknown> = {};
       for (const field of visibleFields) {
         const raw = values[field.name];
+        if (
+          field.required &&
+          (raw === "" || raw === undefined || (Array.isArray(raw) && raw.length === 0))
+        ) {
+          throw new Error(`${field.label} is required`);
+        }
         if (field.type === "json" && typeof raw === "string" && raw.trim() !== "") {
           try {
             payload[field.name] = JSON.parse(raw);
@@ -127,6 +150,18 @@ export function ResourceForm({
                 ))}
               </SelectContent>
             </Select>
+          ) : field.type === "entity" || field.type === "entities" ? (
+            <EntityReferencePicker
+              id={field.name}
+              label={field.label}
+              reference={field.reference}
+              value={values[field.name]}
+              dependencyValues={values}
+              multiple={field.type === "entities"}
+              required={field.required}
+              placeholder={field.placeholder}
+              onChange={(value) => setField(field.name, value)}
+            />
           ) : field.type === "textarea" || field.type === "json" ? (
             <Textarea
               id={field.name}

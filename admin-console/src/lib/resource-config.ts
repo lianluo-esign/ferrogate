@@ -1,17 +1,58 @@
 import type { ReactNode } from "react";
 
-export type FieldType = "text" | "number" | "boolean" | "select" | "textarea" | "json" | "csv";
+export type ScalarFieldType =
+  | "text"
+  | "number"
+  | "boolean"
+  | "select"
+  | "textarea"
+  | "json"
+  | "csv";
+
+export type EntityReferenceTarget =
+  | "tenant-accounts"
+  | "projects"
+  | "workspaces"
+  | "permissions";
 
 export interface FieldOption {
   label: string;
   value: string;
 }
 
-export interface FieldConfig {
+export interface EntityReferenceDependency {
+  /** Name of another field in the same form. */
+  field: string;
+  /** Query parameter used to scope this lookup, for example `tenant_id`. */
+  queryKey: string;
+  /** Human label used when the parent must be selected first. */
+  label?: string;
+}
+
+export interface EntityReferenceConfig {
+  /** Adapter key from the shared entity-reference registry. */
+  target: EntityReferenceTarget;
+  /** Canonical property submitted to the Admin API. */
+  valueKey: string;
+  /** Human-readable property shown as the option's primary label. */
+  primaryLabelKey: string;
+  /** Additional properties shown below the primary label when present. */
+  secondaryLabelKeys?: string[];
+  /** Server-side search query parameter. */
+  queryKey?: string;
+  /** Offset pagination query parameter. */
+  offsetKey?: string;
+  /** Page-size query parameter. */
+  limitKey?: string;
+  pageSize?: number;
+  dependencies?: EntityReferenceDependency[];
+  /** Escape hatch for references that legitimately have no list/get API. */
+  allowRawValue?: boolean;
+}
+
+interface FieldConfigBase {
   name: string;
   label: string;
-  type: FieldType;
-  options?: FieldOption[];
   required?: boolean;
   placeholder?: string;
   description?: string;
@@ -21,6 +62,20 @@ export interface FieldConfig {
   /** Excluded from the edit form (e.g. immutable identifiers). */
   createOnly?: boolean;
 }
+
+export interface ScalarFieldConfig extends FieldConfigBase {
+  type: ScalarFieldType;
+  options?: FieldOption[];
+  reference?: never;
+}
+
+export interface EntityReferenceFieldConfig extends FieldConfigBase {
+  type: "entity" | "entities";
+  reference: EntityReferenceConfig;
+  options?: never;
+}
+
+export type FieldConfig = ScalarFieldConfig | EntityReferenceFieldConfig;
 
 export interface ColumnConfig<T> {
   key: string;
@@ -114,9 +169,39 @@ export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknow
       case "number":
         values[field.name] = undefined;
         break;
+      case "entities":
+        values[field.name] = [];
+        break;
       default:
         values[field.name] = "";
     }
   }
   return values;
+}
+
+export function clearDependentReferenceValues(
+  fields: FieldConfig[],
+  values: Record<string, unknown>,
+  changedField: string,
+): Record<string, unknown> {
+  const next = { ...values };
+  const pending = [changedField];
+  const cleared = new Set<string>();
+
+  while (pending.length > 0) {
+    const parent = pending.shift()!;
+    for (const field of fields) {
+      if (
+        cleared.has(field.name) ||
+        !field.reference?.dependencies?.some((dependency) => dependency.field === parent)
+      ) {
+        continue;
+      }
+      next[field.name] = field.type === "entities" ? [] : "";
+      cleared.add(field.name);
+      pending.push(field.name);
+    }
+  }
+
+  return next;
 }

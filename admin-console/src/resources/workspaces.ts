@@ -1,3 +1,4 @@
+import { adminGet } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminWorkspace extends Record<string, unknown> {
@@ -18,6 +19,9 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
   description: "Workspaces are the scope virtual API keys are issued against.",
   basePath: "/admin/v1/workspaces",
   idField: "id",
+  pagination: "offset",
+  fetchList: (apiKey, request) =>
+    adminGet(apiKey, "/admin/v1/workspaces", { query: request }),
   columns: [
     { key: "name", header: "Name" },
     { key: "slug", header: "Slug" },
@@ -28,9 +32,15 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
   fields: [
     {
       name: "project_id",
-      label: "Project ID",
-      type: "text",
+      label: "Project",
+      type: "entity",
       required: true,
+      reference: {
+        target: "projects",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "tenant_id"],
+      },
       // Immutable after create (#326: the backend rejects project re-attribution
       // with 400 to avoid stranding child rows), so it is hidden on edit.
       createOnly: true,

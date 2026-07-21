@@ -1,3 +1,4 @@
+import { adminGet } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminProject extends Record<string, unknown> {
@@ -16,6 +17,9 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
   description: "Projects group workspaces under a tenant.",
   basePath: "/admin/v1/projects",
   idField: "id",
+  pagination: "offset",
+  fetchList: (apiKey, request) =>
+    adminGet(apiKey, "/admin/v1/projects", { query: request }),
   rowLabel: (row) => row.name,
   columns: [
     { key: "name", header: "Name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
@@ -26,9 +30,15 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
   fields: [
     {
       name: "tenant_id",
-      label: "Tenant ID",
-      type: "text",
+      label: "Tenant",
+      type: "entity",
       required: true,
+      reference: {
+        target: "tenant-accounts",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug"],
+      },
       // Immutable after create (#326: the backend rejects tenant re-attribution
       // with 400 to avoid stranding child rows), so it is hidden on edit.
       createOnly: true,

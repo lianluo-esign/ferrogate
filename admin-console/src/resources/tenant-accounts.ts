@@ -15,7 +15,9 @@ export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
   description: "Top-level organizations in the control plane.",
   basePath: "/admin/v1/tenant-accounts",
   idField: "id",
-  fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/tenant-accounts"),
+  pagination: "offset",
+  fetchList: (apiKey, request) =>
+    adminGet(apiKey, "/admin/v1/tenant-accounts", { query: request }),
   // Deleting a tenant is a large, cascading, destructive operation this
   // console deliberately never offers -- the backend has no DELETE
   // handler for /admin/v1/tenant-accounts/{id} either (GET/PUT/PATCH

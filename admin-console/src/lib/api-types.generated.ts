@@ -1988,6 +1988,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        /** Get a project. */
+        get: operations["getProject"];
+        /** Replace a project. */
+        put: operations["replaceProject"];
+        post?: never;
+        /** Delete a project. */
+        delete: operations["deleteProject"];
+        options?: never;
+        head?: never;
+        /** Update a project. */
+        patch: operations["updateProject"];
+        trace?: never;
+    };
     "/admin/v1/workspaces": {
         parameters: {
             query?: never;
@@ -2004,6 +2026,28 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/workspaces/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        /** Get a workspace. */
+        get: operations["getWorkspace"];
+        /** Replace a workspace. */
+        put: operations["replaceWorkspace"];
+        post?: never;
+        /** Delete a workspace. */
+        delete: operations["deleteWorkspace"];
+        options?: never;
+        head?: never;
+        /** Update a workspace. */
+        patch: operations["updateWorkspace"];
         trace?: never;
     };
     "/admin/v1/virtual-keys": {
@@ -5390,6 +5434,14 @@ export interface components {
             object: "list";
             data: components["schemas"]["AdminSiteDomain"][];
         };
+        DeleteProjectResponse: components["schemas"]["DeleteResponse"] & {
+            /** @constant */
+            object?: "project";
+        };
+        DeleteWorkspaceResponse: components["schemas"]["DeleteResponse"] & {
+            /** @constant */
+            object?: "workspace";
+        };
     };
     responses: {
         /** @description API key mutation response. */
@@ -5606,6 +5658,24 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["DeleteResponse"];
+            };
+        };
+        /** @description Project delete response. */
+        DeleteProjectOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["DeleteProjectResponse"];
+            };
+        };
+        /** @description Workspace delete response. */
+        DeleteWorkspaceOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["DeleteWorkspaceResponse"];
             };
         };
     };
@@ -9343,7 +9413,12 @@ export interface operations {
     };
     listTenantAccounts: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive match against tenant ID, name, or slug. */
+                search?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9360,6 +9435,9 @@ export interface operations {
                         /** @constant */
                         object: "list";
                         data: components["schemas"]["AdminTenantAccount"][];
+                        total?: number;
+                        offset?: number;
+                        limit?: number;
                     };
                 };
             };
@@ -9502,7 +9580,14 @@ export interface operations {
     };
     listProjects: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive match against project ID, name, or slug. */
+                search?: string;
+                /** @description Restrict projects to one tenant. */
+                tenant_id?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9519,6 +9604,9 @@ export interface operations {
                         /** @constant */
                         object: "list";
                         data: components["schemas"]["AdminProject"][];
+                        total?: number;
+                        offset?: number;
+                        limit?: number;
                     };
                 };
             };
@@ -9553,9 +9641,122 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
-    listWorkspaces: {
+    getProject: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Get a project. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminProjectMutationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminProjectCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Replace a project. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminProjectMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["DeleteProjectOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminProjectCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Update a project. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminProjectMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listWorkspaces: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive match against workspace ID, name, or slug. */
+                search?: string;
+                /** @description Restrict workspaces to one tenant. */
+                tenant_id?: string;
+                /** @description Restrict workspaces to one project. */
+                project_id?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9572,6 +9773,9 @@ export interface operations {
                         /** @constant */
                         object: "list";
                         data: components["schemas"]["AdminWorkspace"][];
+                        total?: number;
+                        offset?: number;
+                        limit?: number;
                     };
                 };
             };
@@ -9604,6 +9808,110 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Get a workspace. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWorkspaceMutationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminWorkspaceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Replace a workspace. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWorkspaceMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["DeleteWorkspaceOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminWorkspaceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Update a workspace. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWorkspaceMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listVirtualKeys: {
@@ -10419,7 +10727,12 @@ export interface operations {
     };
     listPermissions: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive match against permission ID, key, name, or description. */
+                search?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -10436,6 +10749,9 @@ export interface operations {
                         /** @constant */
                         object: "list";
                         data: components["schemas"]["AdminPermission"][];
+                        total?: number;
+                        offset?: number;
+                        limit?: number;
                     };
                 };
             };

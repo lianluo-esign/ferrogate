@@ -20,6 +20,7 @@ use ferrogate_storage::{
     StoredWorkspace,
 };
 
+use super::admin_list_query::{list_response, matches_search, query_value};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
@@ -42,6 +43,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
         method: &Method,
         path: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         if path != "/admin/v1/tenant-accounts" {
             let Some(id) = path
@@ -85,8 +87,18 @@ impl FerroGateway {
                             crate::auth::filter_by_tenant_scope(&auth, tenants, |tenant| {
                                 tenant.id.as_str()
                             });
-                        let body =
-                            AdminList::new(tenants.iter().map(admin_tenant_account).collect());
+                        let search = query_value(query, "search");
+                        let tenants = tenants
+                            .into_iter()
+                            .filter(|tenant| {
+                                matches_search(
+                                    search.as_deref(),
+                                    &[&tenant.id, &tenant.name, &tenant.slug],
+                                )
+                            })
+                            .map(|tenant| admin_tenant_account(&tenant))
+                            .collect();
+                        let body = list_response(tenants, query, state.admin_pagination(query));
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
                     Err(error) => {
@@ -565,6 +577,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
         method: &Method,
         path: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         if path != "/admin/v1/projects" {
             let Some(id) = path
@@ -593,7 +606,22 @@ impl FerroGateway {
                             crate::auth::filter_by_tenant_scope(&auth, projects, |project| {
                                 project.tenant_id.as_str()
                             });
-                        let body = AdminList::new(projects.iter().map(admin_project).collect());
+                        let search = query_value(query, "search");
+                        let tenant_id = query_value(query, "tenant_id");
+                        let projects = projects
+                            .into_iter()
+                            .filter(|project| {
+                                tenant_id
+                                    .as_deref()
+                                    .is_none_or(|tenant_id| project.tenant_id == tenant_id)
+                                    && matches_search(
+                                        search.as_deref(),
+                                        &[&project.id, &project.name, &project.slug],
+                                    )
+                            })
+                            .map(|project| admin_project(&project))
+                            .collect();
+                        let body = list_response(projects, query, state.admin_pagination(query));
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
                     Err(error) => {
@@ -1105,6 +1133,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
         method: &Method,
         path: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         if path != "/admin/v1/workspaces" {
             let Some(id) = path
@@ -1133,7 +1162,26 @@ impl FerroGateway {
                             crate::auth::filter_by_tenant_scope(&auth, workspaces, |workspace| {
                                 workspace.tenant_id.as_str()
                             });
-                        let body = AdminList::new(workspaces.iter().map(admin_workspace).collect());
+                        let search = query_value(query, "search");
+                        let tenant_id = query_value(query, "tenant_id");
+                        let project_id = query_value(query, "project_id");
+                        let workspaces = workspaces
+                            .into_iter()
+                            .filter(|workspace| {
+                                tenant_id
+                                    .as_deref()
+                                    .is_none_or(|tenant_id| workspace.tenant_id == tenant_id)
+                                    && project_id
+                                        .as_deref()
+                                        .is_none_or(|project_id| workspace.project_id == project_id)
+                                    && matches_search(
+                                        search.as_deref(),
+                                        &[&workspace.id, &workspace.name, &workspace.slug],
+                                    )
+                            })
+                            .map(|workspace| admin_workspace(&workspace))
+                            .collect();
+                        let body = list_response(workspaces, query, state.admin_pagination(query));
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
                     Err(error) => {

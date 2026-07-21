@@ -76,6 +76,7 @@ interface TypedRequestOptions<Op> {
   /** Values substituted into `{placeholder}` segments of the path template. */
   params?: PathParamsFor<Op>;
   query?: QueryFor<Op>;
+  signal?: AbortSignal;
 }
 
 /** Substitutes `{name}` placeholders; throws if a placeholder has no value. */
@@ -106,7 +107,10 @@ function typedRequest<P extends keyof paths & string, M extends HttpMethod>(
       body: body !== undefined ? JSON.stringify(body) : undefined,
     },
     apiKey,
-    { query: options?.query as GatewayRequestOptions["query"] },
+    {
+      query: options?.query as GatewayRequestOptions["query"],
+      signal: options?.signal,
+    },
   );
 }
 
@@ -160,6 +164,7 @@ export function adminDelete<P extends AdminPathWith<"delete"> & string>(
 
 export interface GatewayRequestOptions {
   query?: Record<string, string | number | boolean | undefined>;
+  signal?: AbortSignal;
 }
 
 function buildUrl(path: string, query?: GatewayRequestOptions["query"]): string {
@@ -178,8 +183,20 @@ async function gatewayRequest<T>(
   apiKey: string,
   options?: GatewayRequestOptions,
 ): Promise<T> {
+  let signal = options?.signal;
+  if (signal) {
+    try {
+      // Embedded/test DOMs can expose Request and AbortSignal from different
+      // realms. Browsers accept this path; incompatible realms must not turn
+      // an otherwise valid Admin API request into a synchronous TypeError.
+      new Request("data:,", { signal });
+    } catch {
+      signal = undefined;
+    }
+  }
   const response = await fetch(buildUrl(path, options?.query), {
     ...init,
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,

@@ -738,18 +738,39 @@ impl FerroGateway {
         if req.path == "/admin/v1/tenant-accounts"
             || req.path.starts_with("/admin/v1/tenant-accounts/")
         {
-            self.handle_admin_tenant_accounts(session, ctx, &req.headers, &req.method, &req.path)
-                .await?;
+            self.handle_admin_tenant_accounts(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         if req.path == "/admin/v1/projects" || req.path.starts_with("/admin/v1/projects/") {
-            self.handle_admin_projects(session, ctx, &req.headers, &req.method, &req.path)
-                .await?;
+            self.handle_admin_projects(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         if req.path == "/admin/v1/workspaces" || req.path.starts_with("/admin/v1/workspaces/") {
-            self.handle_admin_workspaces(session, ctx, &req.headers, &req.method, &req.path)
-                .await?;
+            self.handle_admin_workspaces(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         if req.path == "/admin/v1/tenants" {
@@ -902,8 +923,15 @@ impl FerroGateway {
         req: &RequestParts,
     ) -> PingoraResult<bool> {
         if req.path == "/admin/v1/permissions" || req.path.starts_with("/admin/v1/permissions/") {
-            self.handle_admin_permissions(session, ctx, &req.headers, &req.method, &req.path)
-                .await?;
+            self.handle_admin_permissions(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         if req.path == "/admin/v1/roles" || req.path.starts_with("/admin/v1/roles/") {

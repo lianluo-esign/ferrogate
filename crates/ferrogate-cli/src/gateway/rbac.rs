@@ -13,6 +13,7 @@ use pingora::{proxy::Session, Result as PingoraResult};
 
 use ferrogate_storage::{StoredPermission, StoredRole, StoredTenantRoleBinding};
 
+use super::admin_list_query::{list_response, matches_search, query_value};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
@@ -34,6 +35,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
         method: &Method,
         path: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
 
@@ -42,8 +44,24 @@ impl FerroGateway {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
                     Ok(_) => match state.list_permissions().await {
                         Ok(permissions) => {
+                            let search = query_value(query, "search");
+                            let permissions = permissions
+                                .into_iter()
+                                .filter(|permission| {
+                                    matches_search(
+                                        search.as_deref(),
+                                        &[
+                                            &permission.id,
+                                            &permission.key,
+                                            &permission.name,
+                                            &permission.description,
+                                        ],
+                                    )
+                                })
+                                .map(|permission| admin_permission(&permission))
+                                .collect();
                             let body =
-                                AdminList::new(permissions.iter().map(admin_permission).collect());
+                                list_response(permissions, query, state.admin_pagination(query));
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                                 .await
                         }

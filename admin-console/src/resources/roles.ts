@@ -38,10 +38,14 @@ export const rolesConfig: ResourceConfig<AdminRole> = {
     { name: "description", label: "Description", type: "textarea" },
     {
       name: "permission_keys",
-      label: "Permission keys (comma-separated)",
-      type: "csv",
-      placeholder: "admin.read,admin.write",
-      description: "Keys from the Permissions page granted to this role.",
+      label: "Permissions",
+      type: "entities",
+      reference: {
+        target: "permissions",
+        valueKey: "key",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["key", "description"],
+      },
     },
   ],
 };

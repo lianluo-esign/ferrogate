@@ -1,0 +1,384 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { keepPreviousData, useInfiniteQuery, useQueries } from "@tanstack/react-query";
+import { Check, ChevronsUpDown, Copy, LoaderCircle, Search, X } from "lucide-react";
+import { AsyncStatus } from "@/components/ui/async-status";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { useAuth } from "@/hooks/use-auth";
+import {
+  hydrateEntityReference,
+  loadEntityReferencePage,
+  type EntityReferenceOption,
+} from "@/lib/entity-reference-registry";
+import type { EntityReferenceConfig } from "@/lib/resource-config";
+import { cn } from "@/lib/utils";
+
+interface EntityReferencePickerProps {
+  id: string;
+  label: string;
+  reference: EntityReferenceConfig;
+  value: unknown;
+  dependencyValues: Record<string, unknown>;
+  multiple?: boolean;
+  required?: boolean;
+  placeholder?: string;
+  onChange: (value: string | string[]) => void;
+}
+
+function useDebouncedValue(value: string, delayMs: number): string {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return debounced;
+}
+
+function normalizedValues(value: unknown, multiple: boolean): string[] {
+  if (multiple) {
+    return Array.isArray(value)
+      ? [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))]
+      : [];
+  }
+  const single = typeof value === "string" ? value.trim() : "";
+  return single ? [single] : [];
+}
+
+function moveOptionFocus(container: HTMLElement | null, current: HTMLElement, delta: number) {
+  const options = Array.from(
+    container?.querySelectorAll<HTMLElement>("[role='option']") ?? [],
+  );
+  const index = options.indexOf(current);
+  options[index + delta]?.focus();
+}
+
+export function EntityReferencePicker({
+  id,
+  label,
+  reference,
+  value,
+  dependencyValues,
+  multiple = false,
+  required,
+  placeholder,
+  onChange,
+}: EntityReferencePickerProps) {
+  const { session } = useAuth();
+  const apiKey = session!.gatewayApiKey;
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim(), 250);
+  const listboxRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const selectedValues = useMemo(() => normalizedValues(value, multiple), [multiple, value]);
+  const selectedValuesRef = useRef(selectedValues);
+  selectedValuesRef.current = selectedValues;
+  const filters = useMemo(
+    () => {
+      const next: Record<string, string> = {};
+      for (const dependency of reference.dependencies ?? []) {
+        const dependencyValue = String(dependencyValues[dependency.field] ?? "").trim();
+        if (dependencyValue) next[dependency.queryKey] = dependencyValue;
+      }
+      return next;
+    },
+    [dependencyValues, reference.dependencies],
+  );
+  const missingDependency = (reference.dependencies ?? []).find(
+    (dependency) => !String(dependencyValues[dependency.field] ?? "").trim(),
+  );
+  const filtersKey = JSON.stringify(filters);
+  const referenceKey = JSON.stringify({
+    target: reference.target,
+    valueKey: reference.valueKey,
+    primaryLabelKey: reference.primaryLabelKey,
+    secondaryLabelKeys: reference.secondaryLabelKeys,
+    queryKey: reference.queryKey,
+    offsetKey: reference.offsetKey,
+    limitKey: reference.limitKey,
+    pageSize: reference.pageSize,
+  });
+
+  const selectedQueries = useQueries({
+    queries: selectedValues.map((selectedValue) => ({
+      queryKey: [
+        "entity-reference",
+        "hydrate",
+        referenceKey,
+        filtersKey,
+        selectedValue,
+      ],
+      queryFn: ({ signal }) =>
+        hydrateEntityReference(apiKey, reference, selectedValue, filters, signal),
+      staleTime: 60_000,
+    })),
+  });
+
+  const listQuery = useInfiniteQuery({
+    queryKey: [
+      "entity-reference",
+      "list",
+      referenceKey,
+      filtersKey,
+      debouncedSearch,
+    ],
+    queryFn: ({ pageParam, signal }) =>
+      loadEntityReferencePage(apiKey, reference, {
+        search: debouncedSearch,
+        offset: pageParam,
+        filters,
+        signal,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
+    placeholderData: keepPreviousData,
+    enabled: open && !missingDependency,
+    staleTime: 30_000,
+  });
+
+  const options = useMemo(() => {
+    const unique = new Map<string, EntityReferenceOption>();
+    for (const page of listQuery.data?.pages ?? []) {
+      for (const option of page.options) unique.set(option.value, option);
+    }
+    return [...unique.values()];
+  }, [listQuery.data?.pages]);
+
+  const selectedOptions = selectedValues.map((selectedValue, index) => {
+    const query = selectedQueries[index];
+    if (query.data) return query.data;
+    return {
+      value: selectedValue,
+      primaryLabel: selectedValue,
+      unresolved: !query.isPending && !query.error,
+      resolutionError: Boolean(query.error),
+    } satisfies EntityReferenceOption;
+  });
+
+  function selectOption(optionValue: string) {
+    if (!multiple) {
+      selectedValuesRef.current = [optionValue];
+      onChange(optionValue);
+      setOpen(false);
+      return;
+    }
+    const currentValues = selectedValuesRef.current;
+    const nextValues = currentValues.includes(optionValue)
+      ? currentValues.filter((selected) => selected !== optionValue)
+      : [...currentValues, optionValue];
+    selectedValuesRef.current = nextValues;
+    onChange(nextValues);
+  }
+
+  function removeOption(optionValue: string) {
+    const nextValue = multiple
+      ? selectedValuesRef.current.filter((selected) => selected !== optionValue)
+      : "";
+    selectedValuesRef.current = Array.isArray(nextValue) ? nextValue : [];
+    onChange(nextValue);
+  }
+
+  function restoreOptionFocus(optionValue: string) {
+    window.requestAnimationFrame(() => optionRefs.current.get(optionValue)?.focus());
+  }
+
+  const listboxId = `${id}-options`;
+  const dialogId = `${id}-picker`;
+  const dependencyLabel = missingDependency
+    ? missingDependency.label ?? missingDependency.field.replaceAll("_", " ")
+    : undefined;
+
+  return (
+    <div className="grid gap-2">
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger asChild>
+          <Button
+            id={id}
+            type="button"
+            variant="outline"
+            role="combobox"
+            aria-controls={dialogId}
+            aria-expanded={open}
+            aria-required={required}
+            disabled={Boolean(missingDependency)}
+            className="h-auto min-h-10 w-full justify-between gap-2 px-3 py-2 font-normal"
+          >
+            <span className={cn("truncate", selectedValues.length === 0 && "text-muted-foreground")}>
+              {missingDependency
+                ? `Select ${dependencyLabel} first`
+                : selectedValues.length === 0
+                  ? placeholder ?? `Select ${label.toLowerCase()}`
+                  : multiple
+                    ? `${selectedValues.length} selected`
+                    : selectedOptions[0]?.primaryLabel}
+            </span>
+            <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          </Button>
+        </DialogTrigger>
+        <DialogContent id={dialogId} className="max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100%-2rem)] gap-3 overflow-hidden p-4 sm:max-w-xl sm:p-6">
+          <DialogHeader>
+            <DialogTitle>Select {label}</DialogTitle>
+            <DialogDescription className="sr-only">
+              Search and select {label.toLowerCase()}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input
+              autoFocus
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  listboxRef.current?.querySelector<HTMLElement>("[role='option']")?.focus();
+                }
+              }}
+              className="pl-9"
+              placeholder="Search by name or ID"
+              aria-label={`Search ${label}`}
+              aria-controls={listboxId}
+            />
+          </div>
+          <div
+            ref={listboxRef}
+            id={listboxId}
+            role="listbox"
+            aria-label={`${label} options`}
+            aria-multiselectable={multiple || undefined}
+            className="min-h-40 flex-1 overflow-y-auto rounded-md border p-1"
+          >
+            {listQuery.isPending ? (
+              <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground" role="status">
+                <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                Loading…
+              </div>
+            ) : listQuery.error ? (
+              <div className="grid gap-2 p-3">
+                <AsyncStatus tone="error">
+                  Could not load options: {listQuery.error.message}
+                </AsyncStatus>
+                <Button type="button" variant="outline" size="sm" onClick={() => listQuery.refetch()}>
+                  Retry
+                </Button>
+              </div>
+            ) : options.length === 0 ? (
+              <p className="flex min-h-40 items-center justify-center text-sm text-muted-foreground" role="status">
+                No matching records.
+              </p>
+            ) : (
+              options.map((option) => {
+                const selected = selectedValues.includes(option.value);
+                return (
+                  <button
+                    key={option.value}
+                    ref={(element) => {
+                      if (element) optionRefs.current.set(option.value, element);
+                      else optionRefs.current.delete(option.value);
+                    }}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    onClick={(event) => {
+                      selectOption(option.value);
+                      if (event.detail === 0) restoreOptionFocus(option.value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowDown") {
+                        event.preventDefault();
+                        moveOptionFocus(listboxRef.current, event.currentTarget, 1);
+                      } else if (event.key === "ArrowUp") {
+                        event.preventDefault();
+                        moveOptionFocus(listboxRef.current, event.currentTarget, -1);
+                      }
+                    }}
+                    className="flex min-h-11 w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Check className={cn("size-4 shrink-0", selected ? "opacity-100" : "opacity-0")} aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{option.primaryLabel}</span>
+                      <span className="block truncate text-xs text-muted-foreground" translate="no">
+                        {[option.secondaryLabel, option.value].filter(Boolean).join(" · ")}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          {reference.allowRawValue && search.trim() && !options.some((option) => option.value === search.trim()) ? (
+            <Button type="button" variant="outline" onClick={() => selectOption(search.trim())}>
+              Use exact ID <code className="ml-1 max-w-52 truncate" translate="no">{search.trim()}</code>
+            </Button>
+          ) : null}
+          {listQuery.hasNextPage ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={listQuery.isFetchingNextPage}
+              onClick={() => listQuery.fetchNextPage()}
+            >
+              {listQuery.isFetchingNextPage ? "Loading…" : "Load more"}
+            </Button>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {selectedOptions.length > 0 ? (
+        <ul className="grid gap-1" aria-label={`Selected ${label}`}>
+          {selectedOptions.map((option) => (
+            <li key={option.value} className="flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-sm">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-medium">{option.primaryLabel}</span>
+                  {option.resolutionError ? (
+                    <Badge variant="outline">Resolution unavailable</Badge>
+                  ) : option.unresolved ? (
+                    <Badge variant="outline">Unresolved reference</Badge>
+                  ) : null}
+                </div>
+                <code className="block truncate text-xs text-muted-foreground" translate="no">
+                  {option.value}
+                </code>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-9 shrink-0"
+                aria-label={`Copy ${option.value}`}
+                title="Copy ID"
+                onClick={() => void navigator.clipboard.writeText(option.value)}
+              >
+                <Copy className="size-4" aria-hidden="true" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-9 shrink-0"
+                aria-label={`Remove ${option.primaryLabel}`}
+                title="Remove"
+                onClick={() => removeOption(option.value)}
+              >
+                <X className="size-4" aria-hidden="true" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}

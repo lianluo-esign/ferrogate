@@ -4,6 +4,9 @@ import type { StoredSession } from "../../src/lib/session-storage";
 import { adminStatus, providerHealth } from "../../src/test/fixtures/ops";
 
 type AdminProject = components["schemas"]["AdminProject"];
+type AdminTenantAccount = components["schemas"]["AdminTenantAccount"];
+type AdminPermission = components["schemas"]["AdminPermission"];
+type AdminRole = components["schemas"]["AdminRole"];
 type AdminApiKey = components["schemas"]["AdminApiKey"];
 type AdminWorkspace = components["schemas"]["AdminWorkspace"];
 type McpServerStatus = components["schemas"]["McpServerStatus"];
@@ -39,6 +42,40 @@ const projects: AdminProject[] = Array.from({ length: 52 }, (_, index) => {
     updated_at_unix: 1_720_086_400 + index,
   };
 });
+
+const tenantAccounts: AdminTenantAccount[] = Array.from({ length: 24 }, (_, index) => {
+  const sequence = index + 1;
+  return {
+    id: `tenant-${sequence}`,
+    name: `Tenant ${sequence} operations`,
+    slug: `tenant-${sequence}`,
+    status: "active",
+    plan_id: "enterprise",
+    created_at_unix: 1_720_000_000 + index,
+    updated_at_unix: 1_720_086_400 + index,
+  };
+});
+
+const permissions: AdminPermission[] = [
+  {
+    id: "permission-admin-read",
+    key: "admin.read",
+    name: "Read administration",
+    description: "Read control-plane resources",
+    created_at_unix: 1_720_000_000,
+    updated_at_unix: 1_720_086_400,
+  },
+  {
+    id: "permission-admin-write",
+    key: "admin.write",
+    name: "Write administration",
+    description: "Change control-plane resources",
+    created_at_unix: 1_720_000_001,
+    updated_at_unix: 1_720_086_401,
+  },
+];
+
+const roles: AdminRole[] = [];
 
 const mcpServers: McpServerStatus[] = [
   {
@@ -290,16 +327,111 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
   if (request.method() === "GET" && url.pathname === "/admin/v1/projects") {
     const offset = Number(url.searchParams.get("offset") ?? 0);
     const limit = Number(url.searchParams.get("limit") ?? 25);
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const tenantId = url.searchParams.get("tenant_id");
+    const filtered = projects.filter(
+      (project) =>
+        (!tenantId || project.tenant_id === tenantId) &&
+        `${project.id} ${project.name} ${project.slug}`.toLowerCase().includes(search),
+    );
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         object: "list",
-        data: projects.slice(offset, offset + limit),
-        total: projects.length,
+        data: filtered.slice(offset, offset + limit),
+        total: filtered.length,
         offset,
         limit,
       }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname.startsWith("/admin/v1/projects/")) {
+    const projectId = decodeURIComponent(url.pathname.slice("/admin/v1/projects/".length));
+    const project = projects.find((item) => item.id === projectId);
+    await route.fulfill({
+      status: project ? 200 : 404,
+      contentType: "application/json",
+      body: JSON.stringify(
+        project
+          ? { object: "project", project }
+          : { error: { code: "project_not_found", message: "project not found" } },
+      ),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/tenant-accounts") {
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? tenantAccounts.length);
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const filtered = tenantAccounts.filter((tenant) =>
+      `${tenant.id} ${tenant.name} ${tenant.slug}`.toLowerCase().includes(search),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        offset,
+        limit,
+      }),
+    });
+    return;
+  }
+
+  if (
+    request.method() === "GET" &&
+    url.pathname.startsWith("/admin/v1/tenant-accounts/")
+  ) {
+    const tenantId = decodeURIComponent(
+      url.pathname.slice("/admin/v1/tenant-accounts/".length),
+    );
+    const tenant = tenantAccounts.find((item) => item.id === tenantId);
+    await route.fulfill({
+      status: tenant ? 200 : 404,
+      contentType: "application/json",
+      body: JSON.stringify(
+        tenant
+          ? { object: "tenant", tenant }
+          : { error: { code: "tenant_not_found", message: "tenant not found" } },
+      ),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/permissions") {
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? permissions.length);
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const filtered = permissions.filter((permission) =>
+      `${permission.id} ${permission.key} ${permission.name} ${permission.description}`
+        .toLowerCase()
+        .includes(search),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        offset,
+        limit,
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/roles") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: roles }),
     });
     return;
   }
