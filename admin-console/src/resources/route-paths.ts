@@ -1,0 +1,28 @@
+export const RESOURCE_ROUTE_PATHS = {
+  tenantAccounts: "/app/tenants",
+  projects: "/app/projects",
+  workspaces: "/app/workspaces",
+  quotaPolicies: "/app/quota-policies",
+  plans: "/app/plans",
+  providers: "/app/providers",
+  models: "/app/models",
+  agentUpstreams: "/app/agent-upstreams",
+  agentWorkflows: "/app/agent-workflows",
+  skillPackages: "/app/skill-packages",
+  promptTemplates: "/app/prompt-templates",
+  plugins: "/app/plugins",
+  mcpServers: "/app/mcp-servers",
+  selfHostedWorkers: "/app/self-hosted-workers",
+  managedWorkers: "/app/managed-workers",
+  requestLogs: "/app/request-logs",
+  auditEvents: "/app/audit-events",
+  usageReports: "/app/usage-reports",
+  billingEvents: "/app/billing-events",
+  apiKeys: "/app/api-keys-native",
+  roles: "/app/roles",
+  permissions: "/app/permissions",
+  policies: "/app/policies",
+} as const;
+
+export type ResourceRoutePath =
+  (typeof RESOURCE_ROUTE_PATHS)[keyof typeof RESOURCE_ROUTE_PATHS];

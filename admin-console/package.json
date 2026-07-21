@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && npm run check:bundle",
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest",

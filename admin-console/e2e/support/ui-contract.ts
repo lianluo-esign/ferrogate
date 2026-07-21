@@ -10,6 +10,7 @@ import {
 type AxeImpact = "minor" | "moderate" | "serious" | "critical";
 interface UiContractOptions {
   expectedConsoleErrors: RegExp[];
+  expectedPageErrors: RegExp[];
 }
 
 function browserContext(page: Page, testInfo: TestInfo): string {
@@ -23,7 +24,8 @@ function browserContext(page: Page, testInfo: TestInfo): string {
 
 export const test = base.extend<UiContractOptions>({
   expectedConsoleErrors: [[], { option: true }],
-  page: async ({ page, expectedConsoleErrors }, runTest, testInfo) => {
+  expectedPageErrors: [[], { option: true }],
+  page: async ({ page, expectedConsoleErrors, expectedPageErrors }, runTest, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
 
@@ -38,7 +40,10 @@ export const test = base.extend<UiContractOptions>({
     const unexpectedConsoleErrors = consoleErrors.filter(
       (message) => !expectedConsoleErrors.some((pattern) => pattern.test(message)),
     );
-    expect.soft(pageErrors, `Uncaught page errors (${context})`).toEqual([]);
+    const unexpectedPageErrors = pageErrors.filter(
+      (message) => !expectedPageErrors.some((pattern) => pattern.test(message)),
+    );
+    expect.soft(unexpectedPageErrors, `Uncaught page errors (${context})`).toEqual([]);
     expect.soft(unexpectedConsoleErrors, `Browser console errors (${context})`).toEqual([]);
   },
 });

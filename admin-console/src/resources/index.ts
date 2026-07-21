@@ -24,6 +24,7 @@ import { apiKeysConfig } from "@/resources/api-keys";
 import { permissionsConfig } from "@/resources/permissions";
 import { policiesConfig } from "@/resources/policies";
 import { rolesConfig } from "@/resources/roles";
+import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 
 export interface ResourceRoute {
   path: string;
@@ -32,28 +33,28 @@ export interface ResourceRoute {
 }
 
 export const RESOURCE_ROUTES: ResourceRoute[] = [
-  { path: "/app/tenants", config: tenantAccountsConfig },
-  { path: "/app/projects", config: projectsConfig },
-  { path: "/app/workspaces", config: workspacesConfig },
-  { path: "/app/quota-policies", config: quotaPoliciesConfig },
-  { path: "/app/plans", config: plansConfig },
-  { path: "/app/providers", config: providersConfig },
-  { path: "/app/models", config: modelsConfig },
-  { path: "/app/agent-upstreams", config: agentUpstreamsConfig },
-  { path: "/app/agent-workflows", config: agentWorkflowsConfig },
-  { path: "/app/skill-packages", config: skillPackagesConfig },
-  { path: "/app/prompt-templates", config: promptTemplatesConfig },
-  { path: "/app/plugins", config: pluginsConfig },
-  { path: "/app/mcp-servers", config: mcpServersConfig },
-  { path: "/app/self-hosted-workers", config: selfHostedWorkersConfig },
-  { path: "/app/managed-workers", config: managedWorkersConfig },
-  { path: "/app/request-logs", config: requestLogsConfig },
-  { path: "/app/audit-events", config: auditEventsConfig },
-  { path: "/app/usage-reports", config: usageReportsConfig },
-  { path: "/app/billing-events", config: billingEventsConfig },
+  { path: RESOURCE_ROUTE_PATHS.tenantAccounts, config: tenantAccountsConfig },
+  { path: RESOURCE_ROUTE_PATHS.projects, config: projectsConfig },
+  { path: RESOURCE_ROUTE_PATHS.workspaces, config: workspacesConfig },
+  { path: RESOURCE_ROUTE_PATHS.quotaPolicies, config: quotaPoliciesConfig },
+  { path: RESOURCE_ROUTE_PATHS.plans, config: plansConfig },
+  { path: RESOURCE_ROUTE_PATHS.providers, config: providersConfig },
+  { path: RESOURCE_ROUTE_PATHS.models, config: modelsConfig },
+  { path: RESOURCE_ROUTE_PATHS.agentUpstreams, config: agentUpstreamsConfig },
+  { path: RESOURCE_ROUTE_PATHS.agentWorkflows, config: agentWorkflowsConfig },
+  { path: RESOURCE_ROUTE_PATHS.skillPackages, config: skillPackagesConfig },
+  { path: RESOURCE_ROUTE_PATHS.promptTemplates, config: promptTemplatesConfig },
+  { path: RESOURCE_ROUTE_PATHS.plugins, config: pluginsConfig },
+  { path: RESOURCE_ROUTE_PATHS.mcpServers, config: mcpServersConfig },
+  { path: RESOURCE_ROUTE_PATHS.selfHostedWorkers, config: selfHostedWorkersConfig },
+  { path: RESOURCE_ROUTE_PATHS.managedWorkers, config: managedWorkersConfig },
+  { path: RESOURCE_ROUTE_PATHS.requestLogs, config: requestLogsConfig },
+  { path: RESOURCE_ROUTE_PATHS.auditEvents, config: auditEventsConfig },
+  { path: RESOURCE_ROUTE_PATHS.usageReports, config: usageReportsConfig },
+  { path: RESOURCE_ROUTE_PATHS.billingEvents, config: billingEventsConfig },
   // IAM completion (#321): appended so sibling agents' additions stay conflict-free.
-  { path: "/app/api-keys-native", config: apiKeysConfig },
-  { path: "/app/roles", config: rolesConfig },
-  { path: "/app/permissions", config: permissionsConfig },
-  { path: "/app/policies", config: policiesConfig },
+  { path: RESOURCE_ROUTE_PATHS.apiKeys, config: apiKeysConfig },
+  { path: RESOURCE_ROUTE_PATHS.roles, config: rolesConfig },
+  { path: RESOURCE_ROUTE_PATHS.permissions, config: permissionsConfig },
+  { path: RESOURCE_ROUTE_PATHS.policies, config: policiesConfig },
 ];

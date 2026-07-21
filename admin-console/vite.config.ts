@@ -5,6 +5,31 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    manifest: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            id.includes("/react/") ||
+            id.includes("/react-dom/") ||
+            id.includes("/react-router/") ||
+            id.includes("/react-router-dom/") ||
+            id.includes("/@remix-run/router/") ||
+            id.includes("/scheduler/")
+          ) {
+            return "react-runtime";
+          }
+          if (id.includes("/@tanstack/react-query/") || id.includes("/@tanstack/query-core/")) {
+            return "query-runtime";
+          }
+          if (id.includes("/@radix-ui/")) return "radix-runtime";
+          return undefined;
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

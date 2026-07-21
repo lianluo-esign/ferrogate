@@ -370,6 +370,19 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
     return;
   }
 
+  if (
+    request.method() === "GET" &&
+    (url.pathname === "/admin/v1/guardrail-policies" ||
+      url.pathname === "/admin/v1/wallets")
+  ) {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: [] }),
+    });
+    return;
+  }
+
   if (request.method() === "GET" && url.pathname === "/admin/v1/workspaces") {
     await route.fulfill({
       status: 200,

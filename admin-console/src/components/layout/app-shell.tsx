@@ -21,6 +21,15 @@ function currentPageTitle(pathname: string): string {
   return findNavigationLeaf(pathname)?.title ?? "Dashboard";
 }
 
+function prepareMainHeading(container: HTMLElement | null) {
+  const heading = container?.querySelector<HTMLElement>("h1") ?? null;
+  if (!heading) return null;
+
+  heading.id = "main-content";
+  heading.tabIndex = -1;
+  return heading;
+}
+
 export function AppShell() {
   const location = useLocation();
   const title = currentPageTitle(location.pathname);
@@ -30,14 +39,21 @@ export function AppShell() {
   );
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const heading = pageContentRef.current?.querySelector<HTMLElement>("h1");
-      if (!heading) return;
-      heading.id = "main-content";
-      heading.tabIndex = -1;
+    let preparedHeading: HTMLElement | null = null;
+    const prepareAndFocus = () => {
+      const heading = prepareMainHeading(pageContentRef.current);
+      if (!heading || heading === preparedHeading) return;
+      preparedHeading = heading;
       if (shouldFocusMainHeading) heading.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
+    };
+
+    const content = pageContentRef.current;
+    if (!content) return;
+
+    const observer = new MutationObserver(prepareAndFocus);
+    observer.observe(content, { childList: true, subtree: true });
+    prepareAndFocus();
+    return () => observer.disconnect();
   }, [location.key, shouldFocusMainHeading]);
 
   return (
@@ -46,7 +62,7 @@ export function AppShell() {
         href="#main-content"
         className="fixed left-3 top-3 z-[100] -translate-y-20 rounded-md bg-background px-3 py-2 text-sm font-medium shadow ring-2 ring-ring transition-transform focus:translate-y-0"
         onClick={(event) => {
-          const heading = pageContentRef.current?.querySelector<HTMLElement>("h1");
+          const heading = prepareMainHeading(pageContentRef.current);
           if (!heading) return;
           event.preventDefault();
           heading.focus();
