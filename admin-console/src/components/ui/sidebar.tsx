@@ -35,7 +35,8 @@ type SidebarContextProps = {
   open: boolean
   setOpen: (open: boolean) => void
   openMobile: boolean
-  setOpenMobile: (open: boolean) => void
+  setOpenMobile: React.Dispatch<React.SetStateAction<boolean>>
+  triggerRef: React.MutableRefObject<HTMLButtonElement | null>
   isMobile: boolean
   toggleSidebar: () => void
 }
@@ -72,7 +73,17 @@ const SidebarProvider = React.forwardRef<
     ref
   ) => {
     const isMobile = useIsMobile()
-    const [openMobile, setOpenMobile] = React.useState(false)
+    const [openMobile, setOpenMobileState] = React.useState(false)
+    const triggerRef = React.useRef<HTMLButtonElement | null>(null)
+    const setOpenMobile = React.useCallback<React.Dispatch<React.SetStateAction<boolean>>>((value) => {
+      setOpenMobileState((current) => {
+        const next = typeof value === "function" ? value(current) : value
+        if (current && !next) {
+          window.requestAnimationFrame(() => triggerRef.current?.focus())
+        }
+        return next
+      })
+    }, [])
 
     // This is the internal state of the sidebar.
     // We use openProp and setOpenProp for control from outside the component.
@@ -128,6 +139,7 @@ const SidebarProvider = React.forwardRef<
         isMobile,
         openMobile,
         setOpenMobile,
+        triggerRef,
         toggleSidebar,
       }),
       [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar]
@@ -271,11 +283,15 @@ const SidebarTrigger = React.forwardRef<
   React.ElementRef<typeof Button>,
   React.ComponentProps<typeof Button>
 >(({ className, onClick, ...props }, ref) => {
-  const { toggleSidebar } = useSidebar()
+  const { toggleSidebar, triggerRef } = useSidebar()
 
   return (
     <Button
-      ref={ref}
+      ref={(node) => {
+        triggerRef.current = node
+        if (typeof ref === "function") ref(node)
+        else if (ref) ref.current = node
+      }}
       data-sidebar="trigger"
       variant="ghost"
       size="icon"
@@ -447,7 +463,7 @@ const SidebarGroupLabel = React.forwardRef<
       ref={ref}
       data-sidebar="group-label"
       className={cn(
-        "flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium text-sidebar-foreground/70 outline-none ring-sidebar-ring transition-[margin,opacity] duration-200 ease-linear focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
+        "flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium text-sidebar-foreground outline-none ring-sidebar-ring transition-[margin,opacity] duration-200 ease-linear focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
         "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
         className
       )}

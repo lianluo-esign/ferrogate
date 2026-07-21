@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
@@ -7,8 +7,8 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
@@ -23,6 +23,11 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus();
+  }, [error]);
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -44,21 +49,24 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-background p-6">
+    <main className="flex min-h-svh flex-col items-center justify-center gap-6 bg-background p-6">
       <div className="w-full max-w-sm">
         <Card>
           <CardHeader className="text-center">
-            <CardTitle className="text-xl">Create your organization</CardTitle>
+            <h1 className="text-xl font-semibold leading-none">Create your organization</h1>
             <CardDescription>
               Sets up a new tenant with you as the owner
             </CardDescription>
           </CardHeader>
-          <form onSubmit={onSubmit}>
+          <form onSubmit={onSubmit} aria-describedby={error ? "register-error" : undefined}>
             <CardContent className="flex flex-col gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="organization_name">Organization name</Label>
                 <Input
                   id="organization_name"
+                  name="organization_name"
+                  autoComplete="organization"
+                  spellCheck={false}
                   placeholder="Acme Inc."
                   required
                   value={organizationName}
@@ -69,6 +77,8 @@ export default function RegisterPage() {
                 <Label htmlFor="display_name">Your name (optional)</Label>
                 <Input
                   id="display_name"
+                  name="display_name"
+                  autoComplete="name"
                   placeholder="Jane Doe"
                   value={displayName}
                   onChange={(event) => setDisplayName(event.target.value)}
@@ -78,7 +88,10 @@ export default function RegisterPage() {
                 <Label htmlFor="email">Email</Label>
                 <Input
                   id="email"
+                  name="email"
                   type="email"
+                  inputMode="email"
+                  spellCheck={false}
                   placeholder="you@example.com"
                   autoComplete="email"
                   required
@@ -90,6 +103,7 @@ export default function RegisterPage() {
                 <Label htmlFor="password">Password</Label>
                 <Input
                   id="password"
+                  name="password"
                   type="password"
                   autoComplete="new-password"
                   required
@@ -98,11 +112,15 @@ export default function RegisterPage() {
                   onChange={(event) => setPassword(event.target.value)}
                 />
               </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
+              {error ? (
+                <AsyncStatus id="register-error" ref={errorRef} tone="error">
+                  {error}
+                </AsyncStatus>
+              ) : null}
             </CardContent>
             <CardFooter className="flex flex-col gap-4">
               <Button type="submit" className="w-full" disabled={submitting}>
-                {submitting ? "Creating..." : "Create organization"}
+                {submitting ? "Creating…" : "Create organization"}
               </Button>
               <p className="text-center text-sm text-muted-foreground">
                 Already have an account?{" "}
@@ -114,6 +132,6 @@ export default function RegisterPage() {
           </form>
         </Card>
       </div>
-    </div>
+    </main>
   );
 }

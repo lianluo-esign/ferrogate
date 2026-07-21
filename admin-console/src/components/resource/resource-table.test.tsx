@@ -55,7 +55,7 @@ describe("ResourceTable", () => {
 
   it("shows the loading state", () => {
     render(<ResourceTable columns={columns} rows={[]} isLoading readOnly />);
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
   it("shows the empty state when there are no rows", () => {
@@ -91,10 +91,10 @@ describe("ResourceTable", () => {
     const dataRows = screen.getAllByRole("row").slice(1);
     await user.click(within(dataRows[1]).getByRole("button"));
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    expect(onEdit).toHaveBeenCalledWith(rows[1]);
+    expect(onEdit).toHaveBeenCalledWith(rows[1], expect.any(HTMLElement));
 
     await user.click(within(dataRows[0]).getByRole("button"));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    expect(onDelete).toHaveBeenCalledWith(rows[0]);
+    expect(onDelete).toHaveBeenCalledWith(rows[0], expect.any(HTMLElement));
   });
 });

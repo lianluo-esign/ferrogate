@@ -177,7 +177,7 @@ export default function OpsGatewayConfigsPage() {
       </div>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load gateway configs: {(error as Error).message}
         </p>
       ) : null}
@@ -199,7 +199,7 @@ export default function OpsGatewayConfigsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={7} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : profiles.length === 0 ? (
@@ -350,7 +350,7 @@ export default function OpsGatewayConfigsPage() {
               disabled={saveMutation.isPending || idInvalid || nameInvalid}
               onClick={() => saveMutation.mutate(form)}
             >
-              {saveMutation.isPending ? "Saving..." : "Save"}
+              {saveMutation.isPending ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

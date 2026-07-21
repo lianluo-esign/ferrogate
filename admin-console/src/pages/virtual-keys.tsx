@@ -197,7 +197,7 @@ export default function VirtualKeysPage() {
       </div>
 
       {listError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load virtual keys: {(listError as Error).message}
         </p>
       ) : null}
@@ -306,7 +306,7 @@ export default function VirtualKeysPage() {
                     actionMutation.mutate(pendingAction);
                   }}
                 >
-                  {actionMutation.isPending ? "Working..." : actionCopy.confirmLabel}
+                  {actionMutation.isPending ? "Working…" : actionCopy.confirmLabel}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </>

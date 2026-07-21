@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -52,6 +53,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const [editingRow, setEditingRow] = useState<T | null>(null);
   const [deletingRow, setDeletingRow] = useState<T | null>(null);
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
+  const newButtonRef = useRef<HTMLButtonElement>(null);
+  const formReturnFocusRef = useRef<HTMLElement | null>(null);
+  const deleteReturnFocusRef = useRef<HTMLElement | null>(null);
 
   const {
     data,
@@ -124,7 +128,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
         </div>
         {!config.readOnly && (
           <Button
+            ref={newButtonRef}
             onClick={() => {
+              formReturnFocusRef.current = newButtonRef.current;
               setEditingRow(null);
               setFormOpen(true);
             }}
@@ -136,9 +142,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
       </div>
 
       {listError && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <AsyncStatus tone="error">
           Failed to load {config.title.toLowerCase()}: {listError.message}
-        </p>
+        </AsyncStatus>
       )}
 
       <ResourceTable
@@ -150,13 +156,17 @@ export function ResourcePage<T extends Record<string, unknown>>({
         rowLabel={config.rowLabel}
         onEdit={
           canEdit
-            ? (row) => {
+            ? (row, trigger) => {
+                formReturnFocusRef.current = trigger ?? null;
                 setEditingRow(row);
                 setFormOpen(true);
               }
             : undefined
         }
-        onDelete={canDelete ? (row) => setDeletingRow(row) : undefined}
+        onDelete={canDelete ? (row, trigger) => {
+          deleteReturnFocusRef.current = trigger ?? null;
+          setDeletingRow(row);
+        } : undefined}
       />
 
       <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={`${config.title} pagination`}>
@@ -200,7 +210,14 @@ export function ResourcePage<T extends Record<string, unknown>>({
       </nav>
 
       <Sheet open={formOpen} onOpenChange={setFormOpen}>
-        <SheetContent className="overflow-y-auto sm:max-w-lg">
+        <SheetContent
+          className="overflow-y-auto sm:max-w-lg"
+          onCloseAutoFocus={(event) => {
+            if (!formReturnFocusRef.current) return;
+            event.preventDefault();
+            formReturnFocusRef.current.focus();
+          }}
+        >
           <SheetHeader>
             <SheetTitle>
               {editingRow ? `Edit ${config.title}` : `New ${config.title}`}
@@ -237,7 +254,13 @@ export function ResourcePage<T extends Record<string, unknown>>({
       </Sheet>
 
       <AlertDialog open={Boolean(deletingRow)} onOpenChange={(open) => !open && setDeletingRow(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            if (!deleteReturnFocusRef.current) return;
+            event.preventDefault();
+            deleteReturnFocusRef.current.focus();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {config.title.toLowerCase()}?</AlertDialogTitle>
             <AlertDialogDescription>

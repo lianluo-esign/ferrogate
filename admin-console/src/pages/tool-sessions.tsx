@@ -86,13 +86,13 @@ export default function ToolSessionsPage() {
             />
           </div>
           <Button type="button" onClick={lookup} disabled={sessionInput.trim() === ""}>
-            {isFetching ? "Loading..." : "Inspect"}
+            {isFetching ? "Loading…" : "Inspect"}
           </Button>
         </CardContent>
       </Card>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load session {sessionId}: {error.message}
         </p>
       ) : null}
@@ -116,7 +116,7 @@ export default function ToolSessionsPage() {
               {isLoading ? (
                 <TableRow>
                   <TableCell colSpan={6} className="h-24 text-center">
-                    Loading...
+                    Loading…
                   </TableCell>
                 </TableRow>
               ) : events.length === 0 ? (

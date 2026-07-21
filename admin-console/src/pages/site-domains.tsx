@@ -195,14 +195,14 @@ export default function SiteDomainsPage() {
               onClick={submitBind}
               disabled={bindMutation.isPending || hostnameInvalid}
             >
-              {bindMutation.isPending ? "Binding..." : "Bind hostname"}
+              {bindMutation.isPending ? "Binding…" : "Bind hostname"}
             </Button>
           </div>
         </CardContent>
       </Card>
 
       {listError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load site domains: {listError.message}
         </p>
       ) : null}
@@ -223,7 +223,7 @@ export default function SiteDomainsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : domains.length === 0 ? (

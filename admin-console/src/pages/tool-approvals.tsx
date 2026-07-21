@@ -446,7 +446,7 @@ export default function ToolApprovalsPage() {
       </div>
 
       {listError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load tool approvals: {listError.message}
         </p>
       ) : null}
@@ -548,7 +548,7 @@ export default function ToolApprovalsPage() {
                   />
                 </div>
                 {decisionError ? (
-                  <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                     {decisionError}
                   </p>
                 ) : null}
@@ -572,7 +572,7 @@ export default function ToolApprovalsPage() {
                   }
                 >
                   {decisionMutation.isPending
-                    ? "Submitting..."
+                    ? "Submitting…"
                     : decisionCopy.confirmLabel}
                 </Button>
               </DialogFooter>

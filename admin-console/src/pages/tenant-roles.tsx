@@ -140,7 +140,7 @@ export default function TenantRolesPage() {
       </form>
 
       {listError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load tenant roles: {(listError as Error).message}
         </p>
       ) : null}
@@ -158,7 +158,7 @@ export default function TenantRolesPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={3} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : bindings.length === 0 ? (
@@ -215,7 +215,7 @@ export default function TenantRolesPage() {
                 if (removing) removeMutation.mutate(removing);
               }}
             >
-              {removeMutation.isPending ? "Removing..." : "Remove"}
+              {removeMutation.isPending ? "Removing…" : "Remove"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

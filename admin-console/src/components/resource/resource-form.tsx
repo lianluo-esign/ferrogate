@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -49,6 +50,11 @@ export function ResourceForm({
   );
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus();
+  }, [error]);
 
   const visibleFields = fields.filter((field) => !(isEdit && field.createOnly));
 
@@ -100,11 +106,13 @@ export function ResourceForm({
           {field.type === "boolean" ? (
             <Switch
               id={field.name}
+              name={field.name}
               checked={Boolean(values[field.name])}
               onCheckedChange={(checked) => setField(field.name, checked)}
             />
           ) : field.type === "select" ? (
             <Select
+              name={field.name}
               value={String(values[field.name] ?? "")}
               onValueChange={(value) => setField(field.name, value)}
             >
@@ -122,6 +130,10 @@ export function ResourceForm({
           ) : field.type === "textarea" || field.type === "json" ? (
             <Textarea
               id={field.name}
+              name={field.name}
+              autoComplete={field.autoComplete ?? "off"}
+              inputMode={field.inputMode}
+              spellCheck={field.spellCheck ?? field.type === "textarea"}
               required={field.required}
               placeholder={field.placeholder}
               value={String(values[field.name] ?? "")}
@@ -131,7 +143,11 @@ export function ResourceForm({
           ) : (
             <Input
               id={field.name}
+              name={field.name}
               type={field.type === "number" ? "number" : "text"}
+              autoComplete={field.autoComplete ?? "off"}
+              inputMode={field.inputMode ?? (field.type === "number" ? "decimal" : "text")}
+              spellCheck={field.spellCheck ?? false}
               required={field.required}
               placeholder={field.placeholder}
               value={String(values[field.name] ?? "")}
@@ -143,13 +159,17 @@ export function ResourceForm({
           )}
         </div>
       ))}
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {error ? (
+        <AsyncStatus ref={errorRef} tone="error">
+          {error}
+        </AsyncStatus>
+      ) : null}
       <div className="flex justify-end gap-2 pt-2">
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
         </Button>
         <Button type="submit" disabled={submitting}>
-          {submitting ? "Saving..." : submitLabel}
+          {submitting ? "Saving…" : submitLabel}
         </Button>
       </div>
     </form>

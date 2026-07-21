@@ -162,7 +162,7 @@ export default function GuardrailPolicyDetailPage() {
       </div>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load revisions: {error.message}
         </p>
       )}
@@ -176,32 +176,32 @@ export default function GuardrailPolicyDetailPage() {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
+            <p className="text-sm text-muted-foreground">Loading…</p>
           ) : active ? (
             <div className="grid gap-2 text-sm sm:grid-cols-2">
-              <p>
+              <div>
                 <span className="text-muted-foreground">Revision:</span>{" "}
                 <Badge variant="secondary">r{active.revision}</Badge>
-              </p>
-              <p>
+              </div>
+              <div>
                 <span className="text-muted-foreground">Name:</span> {active.name}
-              </p>
-              <p>
+              </div>
+              <div>
                 <span className="text-muted-foreground">Mode:</span> {active.mode}
                 {active.enforced ? " (enforced)" : " (not enforced)"}
-              </p>
-              <p>
+              </div>
+              <div>
                 <span className="text-muted-foreground">Execution:</span> {active.execution},
                 streaming {active.streaming}, deadline {active.deadline_ms} ms
-              </p>
-              <p>
+              </div>
+              <div>
                 <span className="text-muted-foreground">Checks:</span>{" "}
                 {active.checks.map((check) => check.id).join(", ") || "—"}
-              </p>
-              <p>
+              </div>
+              <div>
                 <span className="text-muted-foreground">On fail:</span>{" "}
                 {describeActions(active.on_fail)}
-              </p>
+              </div>
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
@@ -237,7 +237,7 @@ export default function GuardrailPolicyDetailPage() {
                 {revisions.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={7} className="h-24 text-center">
-                      {isLoading ? "Loading..." : "No revisions."}
+                      {isLoading ? "Loading…" : "No revisions."}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -299,7 +299,7 @@ export default function GuardrailPolicyDetailPage() {
                 {JSON.stringify(revisionQuery.data.policy, null, 2)}
               </pre>
             ) : (
-              <p className="text-sm text-muted-foreground">Loading...</p>
+              <p className="text-sm text-muted-foreground">Loading…</p>
             )}
           </CardContent>
         </Card>
@@ -378,7 +378,7 @@ export default function GuardrailPolicyDetailPage() {
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={dryRunMutation.isPending}>
-                {dryRunMutation.isPending ? "Running..." : "Run dry-run"}
+                {dryRunMutation.isPending ? "Running…" : "Run dry-run"}
               </Button>
             </div>
           </form>

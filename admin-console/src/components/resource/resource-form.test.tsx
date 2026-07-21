@@ -46,6 +46,9 @@ describe("ResourceForm", () => {
       settings: { active: true },
       // slug omitted: empty values are not sent
     });
+    expect(screen.getByLabelText("Name *")).toHaveAttribute("name", "name");
+    expect(screen.getByLabelText("Name *")).toHaveAttribute("autocomplete", "off");
+    expect(screen.getByLabelText("Size")).toHaveAttribute("inputmode", "decimal");
   });
 
   it("shows a validation error (and does not submit) when a JSON field is invalid", async () => {
@@ -56,7 +59,9 @@ describe("ResourceForm", () => {
     await user.type(screen.getByLabelText("Settings"), "not-json");
     await user.click(screen.getByRole("button", { name: "Create" }));
 
-    expect(await screen.findByText("Settings must be valid JSON")).toBeInTheDocument();
+    const error = await screen.findByRole("alert");
+    expect(error).toHaveTextContent("Settings must be valid JSON");
+    expect(error).toHaveFocus();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -68,7 +73,9 @@ describe("ResourceForm", () => {
     await user.type(screen.getByLabelText("Name *"), "Sprocket");
     await user.click(screen.getByRole("button", { name: "Create" }));
 
-    expect(await screen.findByText("slug already exists")).toBeInTheDocument();
+    const error = await screen.findByRole("alert");
+    expect(error).toHaveTextContent("slug already exists");
+    expect(error).toHaveFocus();
   });
 
   it("hides createOnly fields in edit mode and calls onCancel from the Cancel button", async () => {

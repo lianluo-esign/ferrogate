@@ -47,7 +47,7 @@ function MeteringEventsTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load metering events: {(error as Error).message}
         </p>
       ) : null}
@@ -151,7 +151,7 @@ function ExportStatusTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load export status: {(error as Error).message}
         </p>
       ) : null}
@@ -221,7 +221,7 @@ function UsageAggregatesTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load usage aggregates: {(error as Error).message}
         </p>
       ) : null}

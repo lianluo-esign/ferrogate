@@ -77,7 +77,7 @@ export default function ManagedWorkerSessionsPage() {
       </div>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load managed worker sessions: {error.message}
         </p>
       ) : null}
@@ -100,7 +100,7 @@ export default function ManagedWorkerSessionsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : sessions.length === 0 ? (

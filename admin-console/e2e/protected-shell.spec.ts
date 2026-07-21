@@ -15,13 +15,24 @@ test.beforeEach(async ({ page }) => {
 test("protected shell renders and exposes a keyboard entry point", async ({ page }, testInfo) => {
   await page.goto("/app");
 
-  await expect(page.getByRole("heading", { name: "Operations overview" })).toBeVisible();
-  const firstKeyboardTarget = testInfo.project.name === "mobile-390"
-    ? page.getByRole("button", { name: "Toggle Sidebar" })
-    : page.getByRole("link", { name: /FerroGate Admin Console/ });
-  await expectKeyboardFocus(page, firstKeyboardTarget, testInfo);
+  const heading = page.getByRole("heading", { name: "Operations overview" });
+  await expect(heading).toBeVisible();
+  const skipLink = page.getByRole("link", { name: "Skip to main content" });
+  await expectKeyboardFocus(page, skipLink, testInfo);
+  await page.keyboard.press("Enter");
+  await expect(heading).toBeFocused();
+
+  if (testInfo.project.name === "mobile-390") {
+    const sidebarTrigger = page.getByRole("button", { name: "Toggle Sidebar" });
+    await sidebarTrigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: "Sidebar" })).toBeVisible();
+    await page.keyboard.press("Control+b");
+    await expect(page.getByRole("dialog", { name: "Sidebar" })).toBeHidden();
+    await expect(sidebarTrigger).toBeFocused();
+  }
   await expectNoDocumentOverflow(page, testInfo);
-  await expectNoAxeViolations(page, testInfo, ["critical"]);
+  await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
   await attachViewportScreenshot(page, testInfo, "protected-shell");
 });
 

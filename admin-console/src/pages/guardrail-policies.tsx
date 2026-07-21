@@ -69,7 +69,7 @@ export default function GuardrailPoliciesPage() {
       </div>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load guardrail policies: {error.message}
         </p>
       )}
@@ -92,7 +92,7 @@ export default function GuardrailPoliciesPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : policies.length === 0 ? (

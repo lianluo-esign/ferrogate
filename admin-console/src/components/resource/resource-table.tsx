@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { MoreHorizontal } from "lucide-react";
 import { TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
 import { Button } from "@/components/ui/button";
@@ -26,8 +27,8 @@ interface ResourceTableProps<T extends Record<string, unknown>> {
   readOnly?: boolean;
   emptyLabel?: string;
   rowLabel?: (row: T) => string;
-  onEdit?: (row: T) => void;
-  onDelete?: (row: T) => void;
+  onEdit?: (row: T, trigger?: HTMLElement | null) => void;
+  onDelete?: (row: T, trigger?: HTMLElement | null) => void;
   renderActions?: (row: T) => ReactNode;
 }
 
@@ -54,16 +55,18 @@ function RowActions<T extends Record<string, unknown>>({
 }: {
   row: T;
   label: string;
-  onEdit?: (row: T) => void;
-  onDelete?: (row: T) => void;
+  onEdit?: (row: T, trigger?: HTMLElement | null) => void;
+  onDelete?: (row: T, trigger?: HTMLElement | null) => void;
   renderActions?: (row: T) => ReactNode;
 }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
   if (renderActions) return <>{renderActions(row)}</>;
   if (!onEdit && !onDelete) return null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
+          ref={triggerRef}
           variant="ghost"
           size="icon"
           className="size-11 lg:size-8"
@@ -74,10 +77,10 @@ function RowActions<T extends Record<string, unknown>>({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {onEdit ? (
-          <DropdownMenuItem onSelect={() => onEdit(row)}>Edit</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onEdit(row, triggerRef.current)}>Edit</DropdownMenuItem>
         ) : null}
         {onDelete ? (
-          <DropdownMenuItem className="text-destructive" onSelect={() => onDelete(row)}>
+          <DropdownMenuItem className="text-destructive" onSelect={() => onDelete(row, triggerRef.current)}>
             Delete
           </DropdownMenuItem>
         ) : null}
@@ -104,8 +107,8 @@ export function ResourceTable<T extends Record<string, unknown>>({
   if (!isDesktop) {
     if (isLoading) {
       return (
-        <div className="flex min-h-24 items-center justify-center rounded-md border text-sm text-muted-foreground">
-          Loading...
+        <div className="flex min-h-24 items-center justify-center rounded-md border">
+          <AsyncStatus>Loading…</AsyncStatus>
         </div>
       );
     }
@@ -191,7 +194,9 @@ export function ResourceTable<T extends Record<string, unknown>>({
         <TableBody>
           {isLoading ? (
             <TableRow>
-              <TableCell colSpan={colSpan} className="h-24 text-center">Loading...</TableCell>
+              <TableCell colSpan={colSpan} className="h-24 text-center">
+                <AsyncStatus>Loading…</AsyncStatus>
+              </TableCell>
             </TableRow>
           ) : rows.length === 0 ? (
             <TableRow>

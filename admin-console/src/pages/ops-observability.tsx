@@ -126,7 +126,7 @@ export default function OpsObservabilityPage() {
       </div>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load observability: {(error as Error).message}
         </p>
       ) : null}
@@ -152,7 +152,7 @@ export default function OpsObservabilityPage() {
                 {isLoading ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-24 text-center">
-                      Loading...
+                      Loading…
                     </TableCell>
                   </TableRow>
                 ) : exporters.length === 0 ? (
@@ -250,7 +250,7 @@ export default function OpsObservabilityPage() {
           </div>
           <div className="flex gap-2">
             <Button onClick={runExport} disabled={exporting}>
-              {exporting ? "Fetching..." : "Fetch export"}
+              {exporting ? "Fetching…" : "Fetch export"}
             </Button>
             <Button
               variant="outline"

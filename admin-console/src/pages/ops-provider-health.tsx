@@ -26,7 +26,7 @@ type ExtensionPlugin = AdminSchema<"AdminPlugin">;
 function ErrorLine({ error }: { error: unknown }) {
   if (!error) return null;
   return (
-    <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
       {(error as Error).message}
     </p>
   );
@@ -58,7 +58,7 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
@@ -124,7 +124,7 @@ function ProviderModelsTab({ apiKey }: { apiKey: string }) {
     <div className="flex flex-col gap-3">
       <ErrorLine error={error} />
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading...</p>
+        <p className="text-sm text-muted-foreground">Loading…</p>
       ) : catalogs.length === 0 ? (
         <p className="text-sm text-muted-foreground">No provider catalogs.</p>
       ) : (
@@ -186,7 +186,7 @@ function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
@@ -246,7 +246,7 @@ function ExtensionsTab({ apiKey }: { apiKey: string }) {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (

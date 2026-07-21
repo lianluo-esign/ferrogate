@@ -185,11 +185,11 @@ export default function InvestigationsPage() {
       </form>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Investigation failed: {error.message}
         </p>
       )}
-      {isLoading && <p className="text-sm text-muted-foreground">Loading investigation...</p>}
+      {isLoading && <p className="text-sm text-muted-foreground">Loading investigation…</p>}
       {!applied && !data && (
         <p className="text-sm text-muted-foreground">
           Enter a request, trace or agent run id to load its investigation timeline.

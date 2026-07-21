@@ -241,7 +241,7 @@ export default function AssetsPage() {
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={uploadMutation.isPending}>
-                {uploadMutation.isPending ? "Pushing..." : "Push"}
+                {uploadMutation.isPending ? "Pushing…" : "Push"}
               </Button>
             </div>
           </form>
@@ -249,7 +249,7 @@ export default function AssetsPage() {
       </Card>
 
       {listError && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load assets: {listError.message}
         </p>
       )}
@@ -272,7 +272,7 @@ export default function AssetsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (

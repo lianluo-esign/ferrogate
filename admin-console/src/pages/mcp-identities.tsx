@@ -169,7 +169,7 @@ export default function McpIdentitiesPage() {
       </Card>
 
       {statusError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load identity for {server}: {statusError.message}
         </p>
       ) : null}
@@ -179,7 +179,7 @@ export default function McpIdentitiesPage() {
           Pick or enter a server name to view its identity status.
         </p>
       ) : isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading identity...</p>
+        <p className="text-sm text-muted-foreground">Loading identity…</p>
       ) : status ? (
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2 pb-3">
@@ -215,7 +215,7 @@ export default function McpIdentitiesPage() {
                 onClick={() => queryClient.invalidateQueries({ queryKey: identityQueryKey })}
                 disabled={isFetching}
               >
-                {isFetching ? "Refreshing..." : "Refresh status"}
+                {isFetching ? "Refreshing…" : "Refresh status"}
               </Button>
               {canOauth ? (
                 <Button
@@ -224,7 +224,7 @@ export default function McpIdentitiesPage() {
                   disabled={authorizeMutation.isPending}
                 >
                   {authorizeMutation.isPending
-                    ? "Initiating..."
+                    ? "Initiating…"
                     : status.connected
                       ? "Reconnect (OAuth)"
                       : "Connect (OAuth)"}
@@ -242,7 +242,7 @@ export default function McpIdentitiesPage() {
                   onClick={() => revokeMutation.mutate()}
                   disabled={revokeMutation.isPending}
                 >
-                  {revokeMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                  {revokeMutation.isPending ? "Disconnecting…" : "Disconnect"}
                 </Button>
               ) : null}
             </div>

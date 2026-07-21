@@ -140,7 +140,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
             <Label htmlFor="pm-default">Set as tenant default</Label>
           </div>
           {error ? (
-            <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {error}
             </p>
           ) : null}
@@ -233,7 +233,7 @@ export default function BillingPaymentMethodsPage() {
       </form>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load payment methods: {(error as Error).message}
         </p>
       ) : null}

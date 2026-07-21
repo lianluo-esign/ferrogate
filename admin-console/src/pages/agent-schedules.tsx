@@ -269,7 +269,7 @@ export default function AgentSchedulesPage() {
       </div>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load agent schedules: {error.message}
         </p>
       )}
@@ -321,7 +321,7 @@ export default function AgentSchedulesPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
@@ -411,7 +411,7 @@ export default function AgentSchedulesPage() {
                   {firesQuery.isLoading ? (
                     <TableRow>
                       <TableCell colSpan={7} className="h-16 text-center">
-                        Loading...
+                        Loading…
                       </TableCell>
                     </TableRow>
                   ) : fires.length === 0 ? (
@@ -636,7 +636,7 @@ export default function AgentSchedulesPage() {
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={saveMutation.isPending}>
-                {saveMutation.isPending ? "Saving..." : editing ? "Save" : "Create"}
+                {saveMutation.isPending ? "Saving…" : editing ? "Save" : "Create"}
               </Button>
             </div>
           </form>

@@ -115,9 +115,9 @@ function Metric({
       >
         {value}
       </dd>
-      <p className="mt-1 truncate text-xs text-muted-foreground" title={detail}>
+      <dd className="mt-1 truncate text-xs text-muted-foreground" title={detail}>
         {detail}
-      </p>
+      </dd>
     </div>
   );
 }
@@ -373,7 +373,7 @@ export default function DashboardPage() {
                         error={requestsQuery.error}
                         isLoading={requestsQuery.isLoading}
                         empty={requests.length === 0}
-                        loadingLabel="Loading recent requests..."
+                        loadingLabel="Loading recent requests…"
                         emptyLabel="No retained requests yet."
                       />
                     </TableCell>
@@ -421,7 +421,7 @@ export default function DashboardPage() {
               error={usageQuery.error}
               isLoading={usageQuery.isLoading}
               empty={!usage}
-              loadingLabel="Loading usage report..."
+              loadingLabel="Loading usage report…"
               emptyLabel="No usage report is available yet."
             />
             {usage ? (

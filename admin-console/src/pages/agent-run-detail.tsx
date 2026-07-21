@@ -118,11 +118,11 @@ export default function AgentRunDetailPage() {
   const entries = useMemo(() => (data ? mergeTimeline(data) : []), [data]);
 
   if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading run timeline...</p>;
+    return <p className="text-sm text-muted-foreground">Loading run timeline…</p>;
   }
   if (error) {
     return (
-      <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
         Failed to load agent run: {error.message}
       </p>
     );

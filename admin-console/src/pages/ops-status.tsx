@@ -188,13 +188,13 @@ export default function OpsStatusPage() {
       </div>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load status: {(error as Error).message}
         </p>
       ) : null}
 
       {isLoading || !data ? (
-        <p className="text-sm text-muted-foreground">Loading status...</p>
+        <p className="text-sm text-muted-foreground">Loading status…</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">

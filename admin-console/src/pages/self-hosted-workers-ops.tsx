@@ -200,17 +200,17 @@ export default function SelfHostedWorkersOpsPage() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold">Self-hosted worker lifecycle</h1>
-          <p className="text-sm text-muted-foreground">
+          <div className="text-sm text-muted-foreground">
             Register, inspect, and rotate customer-infrastructure agent workers. All
             worker telemetry is customer-reported evidence (
             <ReportedTrustBadge />) — not managed-worker enforcement proof.
-          </p>
+          </div>
         </div>
         <Button onClick={() => setRegisterOpen(true)}>Register worker</Button>
       </div>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load self-hosted workers: {error.message}
         </p>
       ) : null}
@@ -325,7 +325,7 @@ export default function SelfHostedWorkersOpsPage() {
               />
             </div>
             {formError ? (
-              <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 {formError}
               </p>
             ) : null}
@@ -343,7 +343,7 @@ export default function SelfHostedWorkersOpsPage() {
               disabled={registerMutation.isPending}
               onClick={submitRegister}
             >
-              {registerMutation.isPending ? "Registering..." : "Register"}
+              {registerMutation.isPending ? "Registering…" : "Register"}
             </Button>
           </DialogFooter>
         </DialogContent>

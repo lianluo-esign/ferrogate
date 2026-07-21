@@ -223,7 +223,7 @@ export default function OpsConfigPage() {
               onClick={() => validateMutation.mutate()}
               disabled={validateMutation.isPending || inlineEmpty}
             >
-              {validateMutation.isPending ? "Validating..." : "Validate"}
+              {validateMutation.isPending ? "Validating…" : "Validate"}
             </Button>
             <Button
               variant="destructive"

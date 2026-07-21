@@ -192,7 +192,7 @@ export default function GuardrailEvaluationsPage() {
       </form>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load guardrail evaluations: {error.message}
         </p>
       )}
@@ -224,7 +224,7 @@ export default function GuardrailEvaluationsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={11} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (

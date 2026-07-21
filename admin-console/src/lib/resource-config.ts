@@ -15,6 +15,9 @@ export interface FieldConfig {
   required?: boolean;
   placeholder?: string;
   description?: string;
+  autoComplete?: string;
+  inputMode?: "none" | "text" | "decimal" | "numeric" | "tel" | "search" | "email" | "url";
+  spellCheck?: boolean;
   /** Excluded from the edit form (e.g. immutable identifiers). */
   createOnly?: boolean;
 }

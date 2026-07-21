@@ -75,11 +75,11 @@ export default function SelfHostedRunsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">Self-hosted runs</h1>
-        <p className="text-sm text-muted-foreground">
+        <div className="text-sm text-muted-foreground">
           Inspect a customer-reported run timeline (<ReportedTrustBadge />) by its
           run id. The correlation triple and parent action fingerprint are lifted from
           the worker's reported event documents.
-        </p>
+        </div>
       </div>
 
       <form
@@ -104,7 +104,7 @@ export default function SelfHostedRunsPage() {
       </form>
 
       {error ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load run {activeRunId}: {error.message}
         </p>
       ) : null}
@@ -114,7 +114,7 @@ export default function SelfHostedRunsPage() {
           Enter a run id reported by a self-hosted worker to inspect its timeline.
         </p>
       ) : isLoading || isFetching ? (
-        <p className="text-sm text-muted-foreground">Loading run {activeRunId}...</p>
+        <p className="text-sm text-muted-foreground">Loading run {activeRunId}…</p>
       ) : data ? (
         <>
           <Card>

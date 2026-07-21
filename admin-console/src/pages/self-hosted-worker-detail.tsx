@@ -179,13 +179,13 @@ export default function SelfHostedWorkerDetailPage() {
       </div>
 
       {workerError ? (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load worker: {workerError.message}
         </p>
       ) : null}
 
       {workerLoading ? (
-        <p className="text-sm text-muted-foreground">Loading worker...</p>
+        <p className="text-sm text-muted-foreground">Loading worker…</p>
       ) : worker ? (
         <>
           <div className="flex items-start justify-between gap-4">
@@ -296,7 +296,7 @@ export default function SelfHostedWorkerDetailPage() {
                     {eventsLoading ? (
                       <TableRow>
                         <TableCell colSpan={5} className="h-24 text-center">
-                          Loading events...
+                          Loading events…
                         </TableCell>
                       </TableRow>
                     ) : events.length === 0 ? (
@@ -394,7 +394,7 @@ export default function SelfHostedWorkerDetailPage() {
               />
             </div>
             {rotateError ? (
-              <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 {rotateError}
               </p>
             ) : null}
@@ -408,7 +408,7 @@ export default function SelfHostedWorkerDetailPage() {
               disabled={rotateMutation.isPending}
               onClick={submitRotate}
             >
-              {rotateMutation.isPending ? "Rotating..." : "Rotate"}
+              {rotateMutation.isPending ? "Rotating…" : "Rotate"}
             </Button>
           </DialogFooter>
         </DialogContent>

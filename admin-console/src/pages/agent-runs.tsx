@@ -111,7 +111,7 @@ export default function AgentRunsPage() {
       </div>
 
       {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Failed to load agent runs: {error.message}
         </p>
       )}
@@ -135,7 +135,7 @@ export default function AgentRunsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={9} className="h-24 text-center">
-                  Loading...
+                  Loading…
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (

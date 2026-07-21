@@ -47,7 +47,7 @@ export function ToolsTable({
           {isLoading ? (
             <TableRow>
               <TableCell colSpan={6} className="h-24 text-center">
-                Loading...
+                Loading…
               </TableCell>
             </TableRow>
           ) : tools.length === 0 ? (
