@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/layout/app-shell";
 import { ProtectedRoute } from "@/components/protected-route";
 import { RouteLoadBoundary } from "@/components/route-load-boundary";
+import { AppThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/hooks/use-auth";
 import { APP_ROUTES } from "@/lib/app-routes";
@@ -64,10 +65,11 @@ function routeElement(Component: LazyExoticComponent<ComponentType>) {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <Routes>
+    <AppThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <AuthProvider>
+            <Routes>
             <Route path="/login" element={routeElement(LoginPage)} />
             <Route path="/register" element={routeElement(RegisterPage)} />
             <Route element={<ProtectedRoute />}>
@@ -144,11 +146,12 @@ function App() {
             </Route>
             <Route path="/" element={<Navigate to="/app" replace />} />
             <Route path="*" element={<Navigate to="/app" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-      <Toaster />
-    </QueryClientProvider>
+            </Routes>
+          </AuthProvider>
+        </BrowserRouter>
+        <Toaster />
+      </QueryClientProvider>
+    </AppThemeProvider>
   );
 }
 

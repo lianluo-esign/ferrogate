@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { ThemeSwitcher } from "@/components/theme-switcher";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -74,7 +75,7 @@ export function AppShell() {
       <AppSidebar />
       <SidebarInset>
         <header className="flex h-16 shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear">
-          <div className="flex items-center gap-2 px-4">
+          <div className="flex min-w-0 items-center gap-2 px-4">
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-2 h-4" />
             <Breadcrumb>
@@ -92,6 +93,9 @@ export function AppShell() {
                 </Fragment>
               </BreadcrumbList>
             </Breadcrumb>
+          </div>
+          <div className="ml-auto flex items-center px-4">
+            <ThemeSwitcher />
           </div>
         </header>
         <div ref={pageContentRef} className="flex flex-1 flex-col gap-4 p-4">

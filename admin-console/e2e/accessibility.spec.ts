@@ -1,4 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
+import { chooseTheme } from "./support/theme";
 import {
   expect,
   expectNoAxeViolations,
@@ -19,11 +20,11 @@ test("@desktop representative routes pass serious axe checks in both themes", as
   ];
 
   for (const theme of ["light", "dark"] as const) {
-    await page.locator("html").evaluate((element, nextTheme) => {
-      element.classList.toggle("dark", nextTheme === "dark");
-    }, theme);
+    await page.goto(routes[0].path);
+    await chooseTheme(page, theme === "dark" ? "Dark" : "Light");
     for (const route of routes) {
       await page.goto(route.path);
+      await expect(page.locator("html")).toHaveClass(new RegExp(theme));
       await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible();
       await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
     }

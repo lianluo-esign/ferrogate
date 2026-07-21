@@ -4,7 +4,32 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#ffffff" />
     <title>FerroGate Admin Console</title>
+    <script>
+      (() => {
+        const storageKey = "ferrogate-admin-theme-v1";
+        let preference = "system";
+        try {
+          const stored = localStorage.getItem(storageKey);
+          if (stored === "light" || stored === "dark" || stored === "system") {
+            preference = stored;
+          }
+        } catch {
+          // Storage can be unavailable in privacy-restricted contexts.
+        }
+
+        const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+        const resolved = preference === "system" ? (systemDark ? "dark" : "light") : preference;
+        const root = document.documentElement;
+        root.classList.remove("light", "dark");
+        root.classList.add(resolved);
+        root.style.colorScheme = resolved;
+        document
+          .querySelector('meta[name="theme-color"]')
+          ?.setAttribute("content", resolved === "dark" ? "#09090b" : "#ffffff");
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

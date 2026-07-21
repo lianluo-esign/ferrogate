@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { ThemeSwitcher } from "@/components/theme-switcher";
 import {
   Card,
   CardContent,
@@ -45,8 +46,12 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center gap-6 bg-background p-6">
-      <div className="w-full max-w-sm">
+    <div className="relative min-h-svh bg-background">
+      <div className="absolute right-4 top-4 z-10">
+        <ThemeSwitcher />
+      </div>
+      <main className="flex min-h-svh flex-col items-center justify-center gap-6 p-6">
+        <div className="w-full max-w-sm">
         <Card>
           <CardHeader className="text-center">
             <h1 className="text-xl font-semibold leading-none">FerroGate Admin Console</h1>
@@ -100,7 +105,8 @@ export default function LoginPage() {
             </CardFooter>
           </form>
         </Card>
-      </div>
-    </main>
+        </div>
+      </main>
+    </div>
   );
 }

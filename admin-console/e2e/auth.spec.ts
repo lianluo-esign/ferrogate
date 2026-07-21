@@ -6,6 +6,7 @@ import {
   expectNoDocumentOverflow,
   test,
 } from "./support/ui-contract";
+import { chooseTheme } from "./support/theme";
 
 test.describe("public auth routes", () => {
   test.use({
@@ -19,11 +20,18 @@ test.describe("public auth routes", () => {
     await expect(page.getByLabel("Email")).toBeVisible();
     await expect(page.getByLabel("Email")).toHaveAttribute("name", "email");
     await expect(page.getByLabel("Email")).toHaveAttribute("autocomplete", "email");
-    await expectKeyboardFocus(page, page.getByLabel("Email"), testInfo);
+    await expectKeyboardFocus(
+      page,
+      page.getByRole("button", { name: "Theme: System. Change theme" }),
+      testInfo,
+    );
+    await page.keyboard.press("Tab");
+    await expect(page.getByLabel("Email")).toBeFocused();
     await expectNoDocumentOverflow(page, testInfo);
     await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
 
-    await page.locator("html").evaluate((element) => element.classList.add("dark"));
+    await chooseTheme(page, "Dark");
+    await expect(page.locator("html")).toHaveClass(/dark/);
     await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
     await attachViewportScreenshot(page, testInfo, "login");
   });
@@ -40,7 +48,8 @@ test.describe("public auth routes", () => {
     await expectNoDocumentOverflow(page, testInfo);
     await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
 
-    await page.locator("html").evaluate((element) => element.classList.add("dark"));
+    await chooseTheme(page, "Dark");
+    await expect(page.locator("html")).toHaveClass(/dark/);
     await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);
     await attachViewportScreenshot(page, testInfo, "register");
   });
