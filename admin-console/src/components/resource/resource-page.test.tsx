@@ -1,8 +1,11 @@
-import { screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { HttpResponse, http } from "msw";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ResourcePage } from "@/components/resource/resource-page";
+import { AuthProvider } from "@/hooks/use-auth";
 import type { ResourceConfig } from "@/lib/resource-config";
 import { plansConfig, type AdminPlan } from "@/resources/plans";
 import {
@@ -11,7 +14,7 @@ import {
   mockAdminList,
   server,
 } from "@/test/msw";
-import { renderWithProviders, seedSession, TEST_GATEWAY_API_KEY } from "@/test/test-utils";
+import { createTestQueryClient, renderWithProviders, seedSession, TEST_GATEWAY_API_KEY } from "@/test/test-utils";
 
 interface WidgetRow extends Record<string, unknown> {
   id: string;
@@ -46,6 +49,24 @@ function plan(overrides: Partial<AdminPlan> = {}): AdminPlan {
 beforeEach(() => {
   seedSession();
 });
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-search">{location.search}</output>;
+}
+
+function renderAt(entry: string) {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <AuthProvider>
+        <QueryClientProvider client={createTestQueryClient()}>
+          <ResourcePage config={widgetsConfig} />
+          <LocationProbe />
+        </QueryClientProvider>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
 
 describe("ResourcePage", () => {
   it("lists rows fetched with the session's gateway API key", async () => {
@@ -114,5 +135,39 @@ describe("ResourcePage", () => {
     expect(
       await screen.findByText(/Failed to load widgets: missing admin scope/),
     ).toBeInTheDocument();
+  });
+
+  it("loads an offset page from the URL and preserves unrelated query state", async () => {
+    const user = userEvent.setup();
+    const offsets: string[] = [];
+    server.use(
+      http.get(gatewayUrl("/admin/v1/widgets"), ({ request }) => {
+        const url = new URL(request.url);
+        const offset = url.searchParams.get("offset") ?? "0";
+        offsets.push(offset);
+        const secondPage = offset === "25";
+        return HttpResponse.json({
+          object: "list",
+          data: [
+            secondPage
+              ? { id: "w26", name: "Page two widget" }
+              : { id: "w1", name: "Page one widget" },
+          ],
+          total: 60,
+          offset: Number(offset),
+          limit: 25,
+        });
+      }),
+    );
+
+    renderAt("/app/widgets?filter=active&page=2");
+
+    expect(await screen.findByText("Page two widget")).toBeInTheDocument();
+    expect(screen.getByText("Showing 26-26 of 60")).toBeInTheDocument();
+    expect(offsets).toContain("25");
+
+    await user.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await screen.findByText("Page one widget")).toBeInTheDocument();
+    expect(screen.getByTestId("location-search")).toHaveTextContent("?filter=active");
   });
 });

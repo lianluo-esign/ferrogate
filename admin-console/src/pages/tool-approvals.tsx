@@ -9,7 +9,9 @@
 // but are never part of the decision payload.
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
+import { ResourceTable } from "@/components/resource/resource-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,17 +24,16 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import type { ColumnConfig } from "@/lib/resource-config";
 
 type ToolApprovalRecord = AdminSchema<"ToolApprovalRecord">;
 type ApprovalAction = "approve" | "deny" | "expire";
@@ -386,6 +387,53 @@ export default function ToolApprovalsPage() {
 
   const decisionCopy = pendingDecision ? ACTION_COPY[pendingDecision.action] : null;
 
+  const pendingColumns: ColumnConfig<ToolApprovalRecord>[] = [
+    {
+      key: "tool_name",
+      header: "Tool",
+      priority: "primary",
+      minWidth: 180,
+      mobileVisibility: "always",
+      render: (record) => (
+        <div>
+          <div className="font-medium">{toolLabel(record)}</div>
+          {record.route ? <div className="text-xs text-muted-foreground">route {record.route}</div> : null}
+        </div>
+      ),
+    },
+    { key: "actor", header: "Requested by", priority: "secondary", minWidth: 220, mobileVisibility: "always", render: actorSummary },
+    {
+      key: "arguments_summary",
+      header: "Arguments",
+      priority: "detail",
+      minWidth: 220,
+      mobileVisibility: "details",
+      render: (record) => <code className="line-clamp-2 break-all font-mono text-xs">{record.arguments_summary}</code>,
+    },
+    { key: "run_context", header: "Run context", priority: "detail", minWidth: 220, mobileVisibility: "details", render: runContextSummary },
+    { key: "age", header: "Age", priority: "secondary", minWidth: 90, mobileVisibility: "always", render: (record) => formatDuration(nowUnix - record.requested_at_unix) },
+    {
+      key: "expires",
+      header: "Expires in",
+      priority: "secondary",
+      minWidth: 100,
+      mobileVisibility: "always",
+      render: (record) => {
+        const remaining = record.expires_at_unix - nowUnix;
+        return remaining > 0 ? formatDuration(remaining) : <span className="text-destructive">overdue</span>;
+      },
+    },
+  ];
+
+  const historyColumns: ColumnConfig<ToolApprovalRecord>[] = [
+    { key: "tool_name", header: "Tool", priority: "primary", minWidth: 190, mobileVisibility: "always", render: toolLabel },
+    { key: "status", header: "Status", priority: "secondary", minWidth: 110, mobileVisibility: "always", render: (record) => <Badge variant={statusVariant(record.status)}>{record.status}</Badge> },
+    { key: "decision", header: "Decision", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (record) => record.decision ?? "-" },
+    { key: "decision_reason", header: "Decision reason", priority: "detail", minWidth: 180, mobileVisibility: "details", render: (record) => record.decision_reason ?? "-" },
+    { key: "reviewer_api_key_id", header: "Reviewer", priority: "detail", minWidth: 180, mobileVisibility: "details", copyable: true },
+    { key: "decided_at_unix", header: "Decided at", priority: "secondary", minWidth: 170, mobileVisibility: "always", render: (record) => formatUnix(record.decided_at_unix) },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -412,171 +460,45 @@ export default function ToolApprovalsPage() {
         </TabsList>
 
         <TabsContent value="pending">
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Tool</TableHead>
-                  <TableHead>Requested by</TableHead>
-                  <TableHead>Arguments</TableHead>
-                  <TableHead>Run context</TableHead>
-                  <TableHead>Age</TableHead>
-                  <TableHead>Expires in</TableHead>
-                  <TableHead className="w-64" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-24 text-center">
-                      Loading...
-                    </TableCell>
-                  </TableRow>
-                ) : pending.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-24 text-center">
-                      No pending approvals.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  pending.map((record) => {
-                    const remaining = record.expires_at_unix - nowUnix;
-                    return (
-                      <TableRow key={record.id}>
-                        <TableCell>
-                          <div className="font-medium">{toolLabel(record)}</div>
-                          {record.route ? (
-                            <div className="text-xs text-muted-foreground">
-                              route {record.route}
-                            </div>
-                          ) : null}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {actorSummary(record)}
-                        </TableCell>
-                        <TableCell className="max-w-56">
-                          <code className="line-clamp-2 break-all font-mono text-xs">
-                            {record.arguments_summary}
-                          </code>
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {runContextSummary(record)}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {formatDuration(nowUnix - record.requested_at_unix)}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {remaining > 0 ? (
-                            formatDuration(remaining)
-                          ) : (
-                            <span className="text-destructive">overdue</span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setDetailRecord(record)}
-                            >
-                              Details
-                            </Button>
-                            <Button
-                              size="sm"
-                              onClick={() => openDecision(record, "approve")}
-                            >
-                              Approve
-                            </Button>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => openDecision(record, "deny")}
-                            >
-                              Deny
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openDecision(record, "expire")}
-                            >
-                              Expire
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                )}
-              </TableBody>
-            </Table>
-          </div>
+          <ResourceTable
+            columns={pendingColumns}
+            rows={pending}
+            isLoading={isLoading}
+            readOnly={false}
+            emptyLabel="No pending approvals."
+            rowLabel={(record) => toolLabel(record)}
+            renderActions={(record) => (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon" className="size-11 lg:size-8" aria-label={`Actions for ${toolLabel(record)}`}>
+                    <MoreHorizontal className="size-4" aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => setDetailRecord(record)}>Details</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openDecision(record, "approve")}>Approve</DropdownMenuItem>
+                  <DropdownMenuItem className="text-destructive" onSelect={() => openDecision(record, "deny")}>Deny</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openDecision(record, "expire")}>Expire</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          />
         </TabsContent>
 
         <TabsContent value="history">
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Tool</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Decision</TableHead>
-                  <TableHead>Decision reason</TableHead>
-                  <TableHead>Reviewer</TableHead>
-                  <TableHead>Decided at</TableHead>
-                  <TableHead className="w-24" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-24 text-center">
-                      Loading...
-                    </TableCell>
-                  </TableRow>
-                ) : history.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-24 text-center">
-                      No decided approvals yet.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  history.map((record) => (
-                    <TableRow key={record.id}>
-                      <TableCell className="font-medium">
-                        {toolLabel(record)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={statusVariant(record.status)}>
-                          {record.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {record.decision ?? "-"}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {record.decision_reason ?? "-"}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {record.reviewer_api_key_id ?? "-"}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {formatUnix(record.decided_at_unix)}
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setDetailRecord(record)}
-                        >
-                          Details
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+          <ResourceTable
+            columns={historyColumns}
+            rows={history}
+            isLoading={isLoading}
+            readOnly={false}
+            emptyLabel="No decided approvals yet."
+            rowLabel={(record) => toolLabel(record)}
+            renderActions={(record) => (
+              <Button variant="outline" size="sm" className="min-h-11 lg:min-h-9" onClick={() => setDetailRecord(record)}>
+                Details
+              </Button>
+            )}
+          />
         </TabsContent>
       </Tabs>
 

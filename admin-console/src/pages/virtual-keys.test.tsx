@@ -61,7 +61,8 @@ describe("VirtualKeysPage", () => {
     renderWithProviders(<VirtualKeysPage />);
     await screen.findByText("primary");
 
-    await user.click(screen.getByRole("button", { name: "Disable" }));
+    await user.click(screen.getByRole("button", { name: "Actions for primary" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Disable" }));
     await user.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", {
         name: "Disable",
@@ -85,7 +86,8 @@ describe("VirtualKeysPage", () => {
     renderWithProviders(<VirtualKeysPage />);
     await screen.findByText("primary");
 
-    await user.click(screen.getByRole("button", { name: "Enable" }));
+    await user.click(screen.getByRole("button", { name: "Actions for primary" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Enable" }));
     await user.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", {
         name: "Enable",
@@ -107,7 +109,8 @@ describe("VirtualKeysPage", () => {
     renderWithProviders(<VirtualKeysPage />);
     await screen.findByText("primary");
 
-    await user.click(screen.getByRole("button", { name: "Rotate" }));
+    await user.click(screen.getByRole("button", { name: "Actions for primary" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Rotate" }));
     await user.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", {
         name: "Rotate",

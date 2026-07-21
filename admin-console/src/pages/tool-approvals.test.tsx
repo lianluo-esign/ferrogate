@@ -16,6 +16,14 @@ import { renderWithProviders, seedSession } from "@/test/test-utils";
 type ToolApprovalRecord = AdminSchema<"ToolApprovalRecord">;
 
 const LIST_PATH = "/admin/v1/tool-approvals";
+
+async function choosePendingAction(
+  user: ReturnType<typeof userEvent.setup>,
+  action: "Details" | "Approve" | "Deny" | "Expire",
+) {
+  await user.click(screen.getByRole("button", { name: "Actions for github/delete_repo" }));
+  await user.click(await screen.findByRole("menuitem", { name: action }));
+}
 const NOW_UNIX = Math.floor(Date.now() / 1000);
 
 function approval(overrides: Partial<ToolApprovalRecord> = {}): ToolApprovalRecord {
@@ -152,7 +160,7 @@ describe("ToolApprovalsPage detail", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Details" }));
+    await choosePendingAction(user, "Details");
 
     const dialog = await screen.findByRole("dialog");
     expect(
@@ -188,7 +196,7 @@ describe("ToolApprovalsPage actions", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Approve" }));
+    await choosePendingAction(user, "Approve");
     const dialog = await screen.findByRole("dialog");
     // Confirmation dialog restates the binding fingerprint before submit.
     expect(
@@ -226,7 +234,7 @@ describe("ToolApprovalsPage actions", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Approve" }));
+    await choosePendingAction(user, "Approve");
     const dialog = await screen.findByRole("dialog");
     await user.type(
       within(dialog).getByLabelText("Reviewer comment (optional)"),
@@ -263,7 +271,7 @@ describe("ToolApprovalsPage actions", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Approve" }));
+    await choosePendingAction(user, "Approve");
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Approve" }));
 
@@ -300,7 +308,7 @@ describe("ToolApprovalsPage actions", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Deny" }));
+    await choosePendingAction(user, "Deny");
     const dialog = await screen.findByRole("dialog");
     await user.type(
       within(dialog).getByLabelText("Reviewer comment (optional)"),
@@ -341,7 +349,7 @@ describe("ToolApprovalsPage actions", () => {
     renderWithProviders(<ToolApprovalsPage />);
     await screen.findByText("github/delete_repo");
 
-    await user.click(screen.getByRole("button", { name: "Expire" }));
+    await choosePendingAction(user, "Expire");
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Expire" }));
 

@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ResourceTable } from "@/components/resource/resource-table";
 import type { ColumnConfig } from "@/lib/resource-config";
 
@@ -19,6 +19,24 @@ const rows: WidgetRow[] = [
   { id: "w1", name: "Sprocket", size: 12 },
   { id: "w2", name: "Flange", size: 30 },
 ];
+
+function setDesktopViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockImplementation(() => ({
+      matches,
+      media: "(min-width: 1024px)",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
+beforeEach(() => setDesktopViewport(true));
 
 describe("ResourceTable", () => {
   it("renders column headers and one row per record (custom render applied)", () => {
@@ -45,6 +63,15 @@ describe("ResourceTable", () => {
       <ResourceTable columns={columns} rows={[]} isLoading={false} readOnly />,
     );
     expect(screen.getByText("No records yet.")).toBeInTheDocument();
+  });
+
+  it("uses a prioritized record layout below the desktop breakpoint", () => {
+    setDesktopViewport(false);
+    render(<ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />);
+
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByText("Sprocket")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
   it("invokes onEdit/onDelete with the row from the actions menu", async () => {

@@ -7,7 +7,7 @@
 // sync with the OpenAPI contract (#314).
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { MoreHorizontal, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -19,23 +19,21 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
 import {
   adminDelete,
@@ -204,101 +202,59 @@ export default function VirtualKeysPage() {
         </p>
       ) : null}
 
-      <div className="rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {virtualKeysConfig.columns.map((column) => (
-                <TableHead key={column.key}>{column.header}</TableHead>
-              ))}
-              <TableHead className="w-[360px] text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading ? (
-              <TableRow>
-                <TableCell
-                  colSpan={virtualKeysConfig.columns.length + 1}
-                  className="h-24 text-center"
+      <ResourceTable
+        columns={virtualKeysConfig.columns}
+        rows={rows}
+        isLoading={isLoading}
+        readOnly={false}
+        emptyLabel="No virtual keys yet."
+        rowLabel={virtualKeysConfig.rowLabel}
+        renderActions={(row) => {
+          const revoked = row.revoked_at_unix != null;
+          return (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="size-11 lg:size-8"
+                  aria-label={`Actions for ${row.name}`}
                 >
-                  Loading...
-                </TableCell>
-              </TableRow>
-            ) : rows.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={virtualKeysConfig.columns.length + 1}
-                  className="h-24 text-center"
+                  <MoreHorizontal className="size-4" aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={revoked}
+                  onSelect={() =>
+                    setPendingAction({ row, action: row.enabled ? "disable" : "enable" })
+                  }
                 >
-                  No virtual keys yet.
-                </TableCell>
-              </TableRow>
-            ) : (
-              rows.map((row) => {
-                const revoked = row.revoked_at_unix != null;
-                return (
-                  <TableRow key={row.id}>
-                    {virtualKeysConfig.columns.map((column) => (
-                      <TableCell key={column.key}>
-                        {column.render
-                          ? column.render(row)
-                          : String(row[column.key] ?? "")}
-                      </TableCell>
-                    ))}
-                    <TableCell>
-                      <div className="flex flex-wrap justify-end gap-2">
-                        {revoked ? (
-                          <Badge variant="destructive">revoked</Badge>
-                        ) : row.enabled ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setPendingAction({ row, action: "disable" })}
-                          >
-                            Disable
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setPendingAction({ row, action: "enable" })}
-                          >
-                            Enable
-                          </Button>
-                        )}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={revoked}
-                          onClick={() => setPendingAction({ row, action: "rotate" })}
-                        >
-                          Rotate
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={revoked}
-                          onClick={() => setPendingAction({ row, action: "revoke" })}
-                        >
-                          Revoke
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-destructive"
-                          onClick={() => setPendingAction({ row, action: "delete" })}
-                        >
-                          Delete
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            )}
-          </TableBody>
-        </Table>
-      </div>
+                  {row.enabled ? "Disable" : "Enable"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={revoked}
+                  onSelect={() => setPendingAction({ row, action: "rotate" })}
+                >
+                  Rotate
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={revoked}
+                  onSelect={() => setPendingAction({ row, action: "revoke" })}
+                >
+                  Revoke
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-destructive"
+                  onSelect={() => setPendingAction({ row, action: "delete" })}
+                >
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          );
+        }}
+      />
 
       <Sheet open={formOpen} onOpenChange={setFormOpen}>
         <SheetContent className="overflow-y-auto sm:max-w-lg">

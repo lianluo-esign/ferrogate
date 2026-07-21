@@ -10,6 +10,9 @@ type McpServerStatus = components["schemas"]["McpServerStatus"];
 type ToolApprovalRecord = components["schemas"]["ToolApprovalRecord"];
 type RequestLog = components["schemas"]["RequestLog"];
 type AdminUsageReportRow = components["schemas"]["AdminUsageReportRow"];
+type AdminVirtualApiKey = components["schemas"]["AdminVirtualApiKey"];
+type AdminSelfHostedWorkerRecord = components["schemas"]["AdminSelfHostedWorkerRecord"];
+type TokenMeteringEvent = components["schemas"]["TokenMeteringEvent"];
 
 interface AdminApiOptions {
   failPaths?: string[];
@@ -18,17 +21,24 @@ interface AdminApiOptions {
 const ADMIN_API_PATTERN = "http://localhost:8080/admin/v1/**";
 const SESSION_KEY = "ferrogate-admin-session";
 
-const projects: AdminProject[] = [
-  {
-    id: "project_prod_payments_01HZZZZZZZZZZZZZZZZZZZZZZZ",
+const projects: AdminProject[] = Array.from({ length: 52 }, (_, index) => {
+  const sequence = String(index + 1).padStart(2, "0");
+  return {
+    id:
+      index === 0
+        ? "project_prod_payments_01HZZZZZZZZZZZZZZZZZZZZZZZ"
+        : `project_${sequence}_cross_region_01HZZZZZZZZZZZZZZZZZZ`,
     tenant_id: "tenant_enterprise_acme_01HZZZZZZZZZZZZZZZZZZZZ",
-    name: "Production payments routing",
-    slug: "production-payments-routing",
+    name:
+      index === 0
+        ? "Production payments routing with long operator-visible context"
+        : `Project ${sequence} cross-region inference operations`,
+    slug: index === 0 ? "production-payments-routing" : `project-${sequence}-cross-region-inference`,
     status: "active",
-    created_at_unix: 1_720_000_000,
-    updated_at_unix: 1_720_086_400,
-  },
-];
+    created_at_unix: 1_720_000_000 + index,
+    updated_at_unix: 1_720_086_400 + index,
+  };
+});
 
 const mcpServers: McpServerStatus[] = [
   {
@@ -44,8 +54,84 @@ const mcpServers: McpServerStatus[] = [
   },
 ];
 
-const apiKeys: AdminApiKey[] = [];
+const apiKeys: AdminApiKey[] = [
+  {
+    id: "gateway-key-production-automation-01HZZZZZZZZZZZZZZZZZZ",
+    name: "Production automation gateway key",
+    enabled: true,
+    key_source: "env",
+    scopes: ["admin.read", "gateway.invoke", "billing.read"],
+    allowed_models: [],
+    denied_models: [],
+    allowed_providers: [],
+    denied_providers: [],
+    log_bodies: false,
+  },
+];
 const workspaces: AdminWorkspace[] = [];
+
+const virtualKeys: AdminVirtualApiKey[] = [
+  {
+    id: "virtual-key-production-automation-01HZZZZZZZZZZZZZZZ",
+    workspace_id: "workspace-enterprise-production-01HZZZZZZZZZZZZZZ",
+    tenant_id: "tenant-e2e",
+    project_id: "project-e2e",
+    name: "Production deployment automation",
+    key_prefix: "fg-live-production",
+    last4: "9xyz",
+    enabled: true,
+    scopes: ["admin.read", "gateway.invoke"],
+    allowed_models: [],
+    allowed_providers: [],
+    monthly_token_budget: 2_000_000,
+    request_limit_per_minute: 600,
+    created_at_unix: 1_752_000_000,
+    updated_at_unix: 1_752_000_100,
+    rotated_at_unix: null,
+    expires_at_unix: null,
+    revoked_at_unix: null,
+  },
+];
+
+const workerRecords: AdminSelfHostedWorkerRecord[] = [
+  {
+    id: "self-hosted-worker-enterprise-edge-01HZZZZZZZZZZZZZZZZ",
+    tenant: { organization_id: "organization-enterprise-acme-01HZZZZZZZZZZ" },
+    workspace_id: "workspace-enterprise-production-01HZZZZZZZZZZZZZZ",
+    worker_name: "enterprise-edge-runner-us-east-production",
+    status: "active",
+    identity_fingerprint: "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999",
+    identity_expires_at_unix: null,
+    orchestration_enabled: true,
+    registered_at_unix: 1_752_000_000,
+    last_seen_at_unix: 1_752_000_200,
+    trust_level: "reported_by_self_hosted_worker",
+    latest_heartbeat: null,
+    telemetry_event_count: 142,
+    artifact_count: 8,
+    checkpoint_count: 17,
+    latest_event_at_unix: 1_752_000_200,
+    latest_artifact_at_unix: 1_752_000_190,
+    latest_checkpoint_at_unix: 1_752_000_195,
+    stale: false,
+    stale_after_unix: 1_752_000_500,
+    stale_threshold_secs: 300,
+  },
+];
+
+const billingEvents: TokenMeteringEvent[] = [
+  {
+    request_id: "request-billing-enterprise-01HZZZZZZZZZZZZZZZZZZZZZZ",
+    tenant: { organization_id: "organization-enterprise-acme-01HZZZZZZZZZZ" },
+    logical_model: "production-reasoning-model-with-long-name",
+    provider: "openai",
+    provider_model: "gpt-4.1-2026-07-01",
+    usage: { prompt_tokens: 12_000, completion_tokens: 4_000, total_tokens: 16_000 },
+    usage_source: "provider_usage",
+    status_code: 200,
+    occurred_at_unix: 1_752_000_200,
+  },
+];
 
 const toolApprovals: ToolApprovalRecord[] = [
   {
@@ -202,15 +288,17 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
   }
 
   if (request.method() === "GET" && url.pathname === "/admin/v1/projects") {
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? 25);
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         object: "list",
-        data: projects,
+        data: projects.slice(offset, offset + limit),
         total: projects.length,
-        offset: 0,
-        limit: 200,
+        offset,
+        limit,
       }),
     });
     return;
@@ -236,6 +324,48 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ object: "list", data: apiKeys }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/virtual-keys") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: virtualKeys }),
+    });
+    return;
+  }
+
+  if (
+    request.method() === "GET" &&
+    url.pathname === "/admin/v1/self-hosted-worker-records"
+  ) {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: workerRecords,
+        total: workerRecords.length,
+        offset: 0,
+        limit: 25,
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/billing-events") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: billingEvents,
+        total: billingEvents.length,
+        offset: 0,
+        limit: 25,
+      }),
     });
     return;
   }

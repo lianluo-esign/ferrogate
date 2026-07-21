@@ -22,11 +22,12 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
   basePath: "/admin/v1/api-keys",
   idField: "id",
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/api-keys"),
+  rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name" },
-    { key: "key_source", header: "Source" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "scopes", header: "Scopes", render: (row) => (row.scopes ?? []).join(", ") || "-" },
+    { key: "name", header: "Name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
+    { key: "key_source", header: "Source", priority: "secondary", minWidth: 140, mobileVisibility: "always" },
+    { key: "enabled", header: "Enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "scopes", header: "Scopes", priority: "detail", minWidth: 240, mobileVisibility: "details", render: (row) => (row.scopes ?? []).join(", ") || "-" },
   ],
   fields: [
     {

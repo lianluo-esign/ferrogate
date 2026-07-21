@@ -12,6 +12,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { ResourceTable } from "@/components/resource/resource-table";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,14 +27,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { formatUnix, TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
 import {
   CredentialRevealDialog,
@@ -42,6 +35,7 @@ import {
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import type { ColumnConfig } from "@/lib/resource-config";
 
 type SelfHostedWorkerRecord = AdminSchema<"AdminSelfHostedWorkerRecord">;
 
@@ -106,6 +100,67 @@ export default function SelfHostedWorkersOpsPage() {
   });
 
   const workers = useMemo<SelfHostedWorkerRecord[]>(() => data?.data ?? [], [data]);
+  const workerColumns: ColumnConfig<SelfHostedWorkerRecord>[] = [
+    {
+      key: "worker_name",
+      header: "Worker",
+      priority: "primary",
+      minWidth: 200,
+      mobileVisibility: "always",
+      render: (worker) => (
+        <div>
+          <div className="font-medium">{worker.worker_name}</div>
+          <TruncatedCopyable value={worker.id} label="Worker id" />
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      priority: "secondary",
+      minWidth: 130,
+      mobileVisibility: "always",
+      render: (worker) => (
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={workerStatusVariant(worker.status)}>{worker.status}</Badge>
+          {worker.stale ? <Badge variant="outline" className="text-destructive">stale</Badge> : null}
+        </div>
+      ),
+    },
+    {
+      key: "identity_fingerprint",
+      header: "Identity fingerprint",
+      priority: "detail",
+      minWidth: 210,
+      mobileVisibility: "details",
+      copyable: true,
+    },
+    {
+      key: "orchestration_enabled",
+      header: "Orchestration",
+      priority: "secondary",
+      minWidth: 130,
+      mobileVisibility: "always",
+      render: (worker) => (worker.orchestration_enabled ? "Enabled" : "Disabled"),
+    },
+    {
+      key: "activity",
+      header: "Activity",
+      priority: "secondary",
+      minWidth: 190,
+      mobileVisibility: "always",
+      render: (worker) => `${worker.telemetry_event_count} events / ${worker.checkpoint_count} checkpoints / ${worker.artifact_count} artifacts`,
+      compactRender: (worker) => `${worker.telemetry_event_count} events · ${worker.checkpoint_count} checkpoints · ${worker.artifact_count} artifacts`,
+    },
+    {
+      key: "last_seen_at_unix",
+      header: "Last seen",
+      priority: "detail",
+      minWidth: 170,
+      mobileVisibility: "details",
+      render: (worker) => formatUnix(worker.last_seen_at_unix),
+    },
+  ];
 
   const registerMutation = useMutation({
     mutationFn: (body: AdminSchema<"AdminSelfHostedWorkerRegistrationRequest">) =>
@@ -160,79 +215,19 @@ export default function SelfHostedWorkersOpsPage() {
         </p>
       ) : null}
 
-      <div className="rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Identity fingerprint</TableHead>
-              <TableHead>Orchestration</TableHead>
-              <TableHead>Events</TableHead>
-              <TableHead>Checkpoints</TableHead>
-              <TableHead>Artifacts</TableHead>
-              <TableHead>Last seen</TableHead>
-              <TableHead className="w-24" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center">
-                  Loading...
-                </TableCell>
-              </TableRow>
-            ) : workers.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center">
-                  No self-hosted workers registered yet.
-                </TableCell>
-              </TableRow>
-            ) : (
-              workers.map((worker) => (
-                <TableRow key={worker.id}>
-                  <TableCell>
-                    <div className="font-medium">{worker.worker_name}</div>
-                    <div className="text-xs text-muted-foreground">{worker.id}</div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <Badge variant={workerStatusVariant(worker.status)}>
-                        {worker.status}
-                      </Badge>
-                      {worker.stale ? (
-                        <Badge variant="outline" className="text-destructive">
-                          stale
-                        </Badge>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <TruncatedCopyable
-                      value={worker.identity_fingerprint}
-                      label="Identity fingerprint"
-                    />
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {worker.orchestration_enabled ? "Enabled" : "Disabled"}
-                  </TableCell>
-                  <TableCell className="text-xs">{worker.telemetry_event_count}</TableCell>
-                  <TableCell className="text-xs">{worker.checkpoint_count}</TableCell>
-                  <TableCell className="text-xs">{worker.artifact_count}</TableCell>
-                  <TableCell className="text-xs">
-                    {formatUnix(worker.last_seen_at_unix)}
-                  </TableCell>
-                  <TableCell>
-                    <Button asChild variant="outline" size="sm">
-                      <Link to={`/app/workers/self-hosted/${worker.id}`}>Inspect</Link>
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <ResourceTable
+        columns={workerColumns}
+        rows={workers}
+        isLoading={isLoading}
+        readOnly={false}
+        emptyLabel="No self-hosted workers registered yet."
+        rowLabel={(worker) => worker.worker_name}
+        renderActions={(worker) => (
+          <Button asChild variant="outline" size="sm" className="min-h-11 lg:min-h-9">
+            <Link to={`/app/workers/self-hosted/${worker.id}`}>Inspect</Link>
+          </Button>
+        )}
+      />
 
       <Dialog
         open={registerOpen}

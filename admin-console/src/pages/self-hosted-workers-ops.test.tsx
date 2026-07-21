@@ -80,12 +80,9 @@ describe("SelfHostedWorkersOpsPage", () => {
     renderPage();
 
     expect(await screen.findByText("edge-runner-01")).toBeInTheDocument();
-    const row = screen.getByText("edge-runner-01").closest("tr")!;
-    expect(within(row).getByText("active")).toBeInTheDocument();
-    // telemetry / checkpoint / artifact counts
-    expect(within(row).getByText("4")).toBeInTheDocument();
-    expect(within(row).getByText("3")).toBeInTheDocument();
-    expect(within(row).getByText("2")).toBeInTheDocument();
+    const record = screen.getByText("edge-runner-01").closest("article")!;
+    expect(within(record).getByText("active")).toBeInTheDocument();
+    expect(within(record).getByText("4 events · 3 checkpoints · 2 artifacts")).toBeInTheDocument();
   });
 
   it("shows the empty state when no workers are registered", async () => {

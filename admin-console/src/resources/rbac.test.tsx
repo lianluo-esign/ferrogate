@@ -93,8 +93,7 @@ describe("RBAC roles resource", () => {
     renderWithProviders(<ResourcePage config={rolesConfig} />);
 
     await screen.findByText("Administrator");
-    const dataRow = screen.getAllByRole("row")[1];
-    await user.click(within(dataRow).getByRole("button"));
+    await user.click(screen.getByRole("button", { name: "Actions for Administrator" }));
     expect(await screen.findByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
   });
@@ -172,8 +171,7 @@ describe("native api-keys resource", () => {
 
     renderWithProviders(<ResourcePage config={apiKeysConfig} />);
     await screen.findByText("CI key");
-    const dataRow = screen.getAllByRole("row")[1];
-    await user.click(within(dataRow).getByRole("button"));
+    await user.click(screen.getByRole("button", { name: "Actions for CI key" }));
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
 
     const nameInput = await screen.findByLabelText("Name *");
@@ -197,8 +195,7 @@ describe("native api-keys resource", () => {
 
     renderWithProviders(<ResourcePage config={apiKeysConfig} />);
     await screen.findByText("CI key");
-    const dataRow = screen.getAllByRole("row")[1];
-    await user.click(within(dataRow).getByRole("button"));
+    await user.click(screen.getByRole("button", { name: "Actions for CI key" }));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     await user.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", {

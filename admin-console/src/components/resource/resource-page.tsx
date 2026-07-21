@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -39,7 +40,13 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
-  const queryKey = ["resource", config.key];
+  const [searchParams, setSearchParams] = useSearchParams();
+  const paginationMode = config.pagination ?? (config.fetchList ? "none" : "offset");
+  const requestedPage = Number.parseInt(searchParams.get("page") ?? "1", 10);
+  const page = paginationMode === "offset" && requestedPage > 0 ? requestedPage : 1;
+  const pageSize = 25;
+  const offset = (page - 1) * pageSize;
+  const queryKey = ["resource", config.key, paginationMode === "offset" ? offset : 0];
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<T | null>(null);
@@ -49,13 +56,17 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const {
     data,
     isLoading,
+    isFetching,
     error: listError,
   } = useQuery({
     queryKey,
     queryFn: () =>
       config.fetchList
-        ? config.fetchList(apiKey)
-        : gatewayGet<AdminPage<T>>(apiKey, config.basePath, { query: { limit: 200 } }),
+        ? config.fetchList(apiKey, { offset, limit: pageSize })
+        : gatewayGet<AdminPage<T>>(apiKey, config.basePath, {
+            query: { offset, limit: pageSize },
+          }),
+    placeholderData: (previous) => previous,
   });
 
   const createMutation = useMutation({
@@ -95,12 +106,16 @@ export function ResourcePage<T extends Record<string, unknown>>({
   });
 
   const rows = data?.data ?? [];
+  const total = data?.total ?? (paginationMode === "none" ? rows.length : undefined);
+  const rangeStart = rows.length > 0 ? offset + 1 : 0;
+  const rangeEnd = rows.length > 0 ? offset + rows.length : 0;
+  const hasNext = total !== undefined ? rangeEnd < total : rows.length === pageSize;
   const canEdit = !config.readOnly && !config.noEditDelete && !config.noUpdate;
   const canDelete = !config.readOnly && !config.noEditDelete && !config.noDelete;
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">{config.title}</h1>
           {config.description && (
@@ -131,6 +146,8 @@ export function ResourcePage<T extends Record<string, unknown>>({
         rows={rows}
         isLoading={isLoading}
         readOnly={!canEdit && !canDelete}
+        emptyLabel={listError ? "Data unavailable." : "No records yet."}
+        rowLabel={config.rowLabel}
         onEdit={
           canEdit
             ? (row) => {
@@ -141,6 +158,46 @@ export function ResourcePage<T extends Record<string, unknown>>({
         }
         onDelete={canDelete ? (row) => setDeletingRow(row) : undefined}
       />
+
+      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={`${config.title} pagination`}>
+        <span aria-live="polite">
+          {total !== undefined
+            ? `Showing ${rangeStart}-${rangeEnd} of ${total}`
+            : `Showing ${rangeStart}-${rangeEnd}`}
+        </span>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-11 flex-1 sm:min-h-9 sm:flex-none"
+            disabled={page === 1 || isFetching}
+            onClick={() => {
+              const next = new URLSearchParams(searchParams);
+              const previousPage = Math.max(1, page - 1);
+              if (previousPage === 1) next.delete("page");
+              else next.set("page", String(previousPage));
+              setSearchParams(next);
+            }}
+          >
+            <ChevronLeft className="size-4" aria-hidden="true" />
+            Previous
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-11 flex-1 sm:min-h-9 sm:flex-none"
+            disabled={!hasNext || isFetching}
+            onClick={() => {
+              const next = new URLSearchParams(searchParams);
+              next.set("page", String(page + 1));
+              setSearchParams(next);
+            }}
+          >
+            Next
+            <ChevronRight className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
+      </nav>
 
       <Sheet open={formOpen} onOpenChange={setFormOpen}>
         <SheetContent className="overflow-y-auto sm:max-w-lg">

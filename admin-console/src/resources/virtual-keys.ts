@@ -17,12 +17,13 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   idField: "id",
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/virtual-keys"),
   secretResponseKey: "secret",
+  rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name" },
-    { key: "key_prefix", header: "Prefix", render: (row) => `${row.key_prefix}...${row.last4}` },
-    { key: "workspace_id", header: "Workspace" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "scopes", header: "Scopes", render: (row) => row.scopes.join(", ") },
+    { key: "name", header: "Name", priority: "primary", minWidth: 190, mobileVisibility: "always" },
+    { key: "key_prefix", header: "Prefix", priority: "secondary", minWidth: 150, mobileVisibility: "always", render: (row) => `${row.key_prefix}...${row.last4}` },
+    { key: "workspace_id", header: "Workspace", priority: "detail", minWidth: 190, copyable: true, mobileVisibility: "details" },
+    { key: "enabled", header: "Enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "scopes", header: "Scopes", priority: "detail", minWidth: 220, mobileVisibility: "details", render: (row) => row.scopes.join(", ") },
   ],
   fields: [
     { name: "name", label: "Name", type: "text", required: true, createOnly: true },

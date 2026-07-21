@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 export type FieldType = "text" | "number" | "boolean" | "select" | "textarea" | "json" | "csv";
 
 export interface FieldOption {
@@ -20,7 +22,29 @@ export interface FieldConfig {
 export interface ColumnConfig<T> {
   key: string;
   header: string;
-  render?: (row: T) => string;
+  render?: (row: T) => ReactNode;
+  /** Information hierarchy used by the compact record view. */
+  priority?: "primary" | "secondary" | "detail";
+  /** Minimum desktop column width in pixels. */
+  minWidth?: number;
+  /** Alternate value for the compact record view. */
+  compactRender?: (row: T) => ReactNode;
+  /** Truncate the visible value and expose a named copy-full-value action. */
+  copyable?: boolean;
+  /** Explicit small-screen visibility; defaults from priority and column order. */
+  mobileVisibility?: "always" | "details" | "hidden";
+}
+
+export interface ResourceListRequest {
+  offset: number;
+  limit: number;
+}
+
+export interface ResourceListResult<T> {
+  data: T[];
+  total?: number | null;
+  offset?: number | null;
+  limit?: number | null;
 }
 
 export interface ResourceConfig<T extends Record<string, unknown>> {
@@ -60,6 +84,10 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
    * (virtual keys) never expose the plaintext secret again after creation.
    */
   secretResponseKey?: string;
+  /** Offset pagination is the default for legacy list endpoints. */
+  pagination?: "offset" | "none";
+  /** Accessible record label for row actions; defaults to the first column value. */
+  rowLabel?: (row: T) => string;
   /**
    * Typed list fetcher backed by the generated OpenAPI client (#314):
    * migrated resources implement this with `adminGet(apiKey, "<contract
@@ -67,7 +95,10 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
    * back to the untyped `gatewayGet(basePath)` until a resource's slice
    * migrates. Exemplars: tenant-accounts, plans, virtual-keys.
    */
-  fetchList?: (apiKey: string) => Promise<{ data: T[] }>;
+  fetchList?: (
+    apiKey: string,
+    request: ResourceListRequest,
+  ) => Promise<ResourceListResult<T>>;
 }
 
 export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknown> {

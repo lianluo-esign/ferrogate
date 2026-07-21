@@ -16,11 +16,12 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
   description: "Projects group workspaces under a tenant.",
   basePath: "/admin/v1/projects",
   idField: "id",
+  rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name" },
-    { key: "slug", header: "Slug" },
-    { key: "tenant_id", header: "Tenant" },
-    { key: "status", header: "Status" },
+    { key: "name", header: "Name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
+    { key: "slug", header: "Slug", priority: "secondary", minWidth: 180, mobileVisibility: "always" },
+    { key: "tenant_id", header: "Tenant", priority: "detail", minWidth: 220, copyable: true, mobileVisibility: "details" },
+    { key: "status", header: "Status", priority: "secondary", minWidth: 100, mobileVisibility: "always" },
   ],
   fields: [
     {
