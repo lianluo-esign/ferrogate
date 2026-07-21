@@ -73,7 +73,7 @@ test("@desktop collapsed navigation preserves the active page and layout", async
 
   await page.locator('[data-sidebar="trigger"]').click();
   await expect(page.locator('[data-variant="sidebar"][data-state="collapsed"]')).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Welcome/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations overview" })).toBeVisible();
   await expectNoDocumentOverflow(page, testInfo);
   await attachViewportScreenshot(page, testInfo, "collapsed-sidebar");
 });

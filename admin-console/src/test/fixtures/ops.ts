@@ -1,6 +1,8 @@
 // Fixture builders for the Operations cockpit tests (#322). Each returns a
 // contract-shaped object with sensible defaults, overridable per test.
-import type { AdminSchema } from "@/lib/gateway-client";
+import type { components } from "@/lib/api-types.generated";
+
+type AdminSchema<K extends keyof components["schemas"]> = components["schemas"][K];
 
 export function adminStatus(
   overrides: Partial<AdminSchema<"AdminStatus">> = {},

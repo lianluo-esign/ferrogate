@@ -1,11 +1,19 @@
 import type { Page, Route } from "@playwright/test";
 import type { components } from "../../src/lib/api-types.generated";
 import type { StoredSession } from "../../src/lib/session-storage";
+import { adminStatus, providerHealth } from "../../src/test/fixtures/ops";
 
 type AdminProject = components["schemas"]["AdminProject"];
 type AdminApiKey = components["schemas"]["AdminApiKey"];
 type AdminWorkspace = components["schemas"]["AdminWorkspace"];
 type McpServerStatus = components["schemas"]["McpServerStatus"];
+type ToolApprovalRecord = components["schemas"]["ToolApprovalRecord"];
+type RequestLog = components["schemas"]["RequestLog"];
+type AdminUsageReportRow = components["schemas"]["AdminUsageReportRow"];
+
+interface AdminApiOptions {
+  failPaths?: string[];
+}
 
 const ADMIN_API_PATTERN = "http://localhost:8080/admin/v1/**";
 const SESSION_KEY = "ferrogate-admin-session";
@@ -39,6 +47,63 @@ const mcpServers: McpServerStatus[] = [
 const apiKeys: AdminApiKey[] = [];
 const workspaces: AdminWorkspace[] = [];
 
+const toolApprovals: ToolApprovalRecord[] = [
+  {
+    id: "approval-e2e",
+    request_id: "req-approval-e2e",
+    trace_id: "trace-approval-e2e",
+    tenant: { project_id: "project-e2e", api_key_id: "key-e2e" },
+    actor_api_key_id: "key-e2e",
+    tool_name: "deploy_production",
+    server_name: "release-tools",
+    route: "/v1/tools/call",
+    approval_policy: "always",
+    approval_timeout_secs: 300,
+    fingerprint: "sha256:invocation-e2e",
+    arguments_summary: "environment=production",
+    risk_reason: "production mutation",
+    status: "pending",
+    reviewer_api_key_id: null,
+    reviewer_authority: null,
+    terminal_reason: null,
+    requested_at_unix: 1_752_000_000,
+    expires_at_unix: 1_752_000_300,
+    decided_at_unix: null,
+  },
+];
+
+const requestLogs: RequestLog[] = [
+  {
+    request_id: "req-dashboard-success",
+    provider: "openai",
+    logical_model: "gpt-4.1-mini",
+    status_code: 200,
+    started_at_unix: 1_752_000_100,
+  },
+  {
+    request_id: "req-dashboard-failed",
+    provider: "anthropic",
+    logical_model: "claude-sonnet-4",
+    status_code: 503,
+    error_code: "provider_unavailable",
+    started_at_unix: 1_752_000_200,
+  },
+];
+
+const usageReports: AdminUsageReportRow[] = [
+  {
+    period_month: "2026-07",
+    scope_type: "tenant",
+    scope_id: "tenant-e2e",
+    prompt_tokens: 90_000,
+    completion_tokens: 60_000,
+    total_tokens: 150_000,
+    cost_usd: 12.3456,
+    request_count: 860,
+    error_count: 4,
+  },
+];
+
 const session: StoredSession = {
   accessToken: "e2e-access-token",
   refreshToken: "e2e-refresh-token",
@@ -56,9 +121,85 @@ const session: StoredSession = {
   },
 };
 
-async function handleAdminRequest(route: Route): Promise<void> {
+async function handleAdminRequest(route: Route, options: AdminApiOptions): Promise<void> {
   const request = route.request();
   const url = new URL(request.url());
+
+  if (options.failPaths?.includes(url.pathname)) {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "e2e_forced_failure", message: "forced browser-contract failure" },
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/status") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(adminStatus()),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/provider-health") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: [
+          providerHealth(),
+          providerHealth({
+            name: "anthropic",
+            kind: "anthropic",
+            status: "error",
+            reachable: false,
+            circuit_open: true,
+            consecutive_failures: 3,
+            error: "connect timeout",
+          }),
+        ],
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/tool-approvals") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: toolApprovals }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/request-logs") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: requestLogs,
+        total: requestLogs.length,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/usage-reports") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: usageReports }),
+    });
+    return;
+  }
 
   if (request.method() === "GET" && url.pathname === "/admin/v1/projects") {
     await route.fulfill({
@@ -126,10 +267,13 @@ async function handleAdminRequest(route: Route): Promise<void> {
   });
 }
 
-export async function installAuthenticatedAdminApi(page: Page): Promise<void> {
+export async function installAuthenticatedAdminApi(
+  page: Page,
+  options: AdminApiOptions = {},
+): Promise<void> {
   await page.addInitScript(
     ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
     { key: SESSION_KEY, value: session },
   );
-  await page.route(ADMIN_API_PATTERN, handleAdminRequest);
+  await page.route(ADMIN_API_PATTERN, (route) => handleAdminRequest(route, options));
 }

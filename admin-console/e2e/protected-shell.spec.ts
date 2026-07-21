@@ -15,7 +15,7 @@ test.beforeEach(async ({ page }) => {
 test("protected shell renders and exposes a keyboard entry point", async ({ page }, testInfo) => {
   await page.goto("/app");
 
-  await expect(page.getByRole("heading", { name: /Welcome/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations overview" })).toBeVisible();
   const firstKeyboardTarget = testInfo.project.name === "mobile-390"
     ? page.getByRole("button", { name: "Toggle Sidebar" })
     : page.getByRole("link", { name: /FerroGate Admin Console/ });

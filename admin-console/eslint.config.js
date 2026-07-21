@@ -11,6 +11,8 @@ export default [
     ignores: [
       "dist/**",
       "node_modules/**",
+      "playwright-report/**",
+      "test-results/**",
       // Generated from docs/openapi/admin-api.openapi.json (`npm run generate:api`).
       "src/lib/api-types.generated.ts",
     ],

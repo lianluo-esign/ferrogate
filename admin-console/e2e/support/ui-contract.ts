@@ -8,6 +8,9 @@ import {
 } from "@playwright/test";
 
 type AxeImpact = "minor" | "moderate" | "serious" | "critical";
+interface UiContractOptions {
+  expectedConsoleErrors: RegExp[];
+}
 
 function browserContext(page: Page, testInfo: TestInfo): string {
   const viewport = page.viewportSize();
@@ -18,8 +21,9 @@ function browserContext(page: Page, testInfo: TestInfo): string {
   ].join(" ");
 }
 
-export const test = base.extend({
-  page: async ({ page }, runTest, testInfo) => {
+export const test = base.extend<UiContractOptions>({
+  expectedConsoleErrors: [[], { option: true }],
+  page: async ({ page, expectedConsoleErrors }, runTest, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
 
@@ -31,8 +35,11 @@ export const test = base.extend({
     await runTest(page);
 
     const context = browserContext(page, testInfo);
+    const unexpectedConsoleErrors = consoleErrors.filter(
+      (message) => !expectedConsoleErrors.some((pattern) => pattern.test(message)),
+    );
     expect.soft(pageErrors, `Uncaught page errors (${context})`).toEqual([]);
-    expect.soft(consoleErrors, `Browser console errors (${context})`).toEqual([]);
+    expect.soft(unexpectedConsoleErrors, `Browser console errors (${context})`).toEqual([]);
   },
 });
 
