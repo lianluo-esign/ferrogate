@@ -36,6 +36,24 @@ browser is allowed to call `/admin/v1/*` cross-origin.
 npm run build   # tsc -b && vite build, output in dist/
 ```
 
+## Browser contract
+
+The Playwright suite runs against deterministic browser-side Admin API mocks;
+it does not require a local gateway or auth service. Install Chromium once on a
+new machine, then run the contract:
+
+```bash
+npm ci
+npm run test:e2e:install
+npm run test:e2e
+```
+
+The suite covers Chromium at 390x844, 768x1024, and 1440x900. It fails on
+uncaught page/console errors, document-level horizontal overflow, and critical
+axe violations, and attaches viewport screenshots plus axe JSON to the local
+Playwright report. Known serious accessibility defects are tightened to a
+failing threshold by #334 after those defects are fixed.
+
 ## Docker / production
 
 ```bash

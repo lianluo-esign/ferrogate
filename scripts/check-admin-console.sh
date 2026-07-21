@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Admin-console gate (#314): lint + Vitest + production build for admin-console/.
+# Admin-console gate (#314, #331): lint + Vitest + production build + browser
+# contract for admin-console/.
 # Runs standalone for dev use and from scripts/release-local.sh (no GitHub
 # Actions per the release directive). Node 22+ per admin-console/Dockerfile.
 #
@@ -36,5 +37,8 @@ npm run test -- --run
 
 echo "-- build (tsc -b && vite build)"
 npm run build
+
+echo "-- browser contract (Playwright + axe)"
+npm run test:e2e
 
 echo "admin-console gate: OK"

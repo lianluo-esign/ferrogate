@@ -20,6 +20,8 @@ node_modules/
 dist/
 dist-ssr/
 *.tsbuildinfo
+playwright-report/
+test-results/
 
 # Wiki build outputs
 ferrogate-wiki/wiki-site/node_modules/
