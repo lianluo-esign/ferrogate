@@ -3,6 +3,8 @@ import type { components } from "../../src/lib/api-types.generated";
 import type { StoredSession } from "../../src/lib/session-storage";
 
 type AdminProject = components["schemas"]["AdminProject"];
+type AdminApiKey = components["schemas"]["AdminApiKey"];
+type AdminWorkspace = components["schemas"]["AdminWorkspace"];
 type McpServerStatus = components["schemas"]["McpServerStatus"];
 
 const ADMIN_API_PATTERN = "http://localhost:8080/admin/v1/**";
@@ -33,6 +35,9 @@ const mcpServers: McpServerStatus[] = [
     next_reconnect_backoff_secs: 0,
   },
 ];
+
+const apiKeys: AdminApiKey[] = [];
+const workspaces: AdminWorkspace[] = [];
 
 const session: StoredSession = {
   accessToken: "e2e-access-token",
@@ -78,6 +83,30 @@ async function handleAdminRequest(route: Route): Promise<void> {
         object: "list",
         data: mcpServers,
         total: mcpServers.length,
+        offset: 0,
+        limit: 200,
+      }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/api-keys") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: apiKeys }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/workspaces") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        object: "list",
+        data: workspaces,
+        total: workspaces.length,
         offset: 0,
         limit: 200,
       }),

@@ -28,10 +28,12 @@ export default defineConfig({
   projects: [
     {
       name: "mobile-390",
+      grepInvert: /@desktop/,
       use: { viewport: { width: 390, height: 844 } },
     },
     {
       name: "tablet-768",
+      grepInvert: /@desktop/,
       use: { viewport: { width: 768, height: 1024 } },
     },
     {

@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import {
@@ -15,21 +15,30 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { NAV_GROUPS } from "@/components/layout/nav-config";
+import { findNavigationLeaf } from "@/components/layout/nav-config";
 
 function currentPageTitle(pathname: string): string {
-  if (pathname === "/app") return "Dashboard";
-  for (const group of NAV_GROUPS) {
-    for (const item of group.items) {
-      if (pathname.startsWith(item.url)) return item.title;
-    }
-  }
-  return "Dashboard";
+  return findNavigationLeaf(pathname)?.title ?? "Dashboard";
 }
 
 export function AppShell() {
   const location = useLocation();
   const title = currentPageTitle(location.pathname);
+  const pageContentRef = useRef<HTMLDivElement>(null);
+  const shouldFocusMainHeading = Boolean(
+    (location.state as { focusMainHeading?: boolean } | null)?.focusMainHeading,
+  );
+
+  useEffect(() => {
+    if (!shouldFocusMainHeading) return;
+    const frame = window.requestAnimationFrame(() => {
+      const heading = pageContentRef.current?.querySelector<HTMLElement>("h1");
+      if (!heading) return;
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [location.key, shouldFocusMainHeading]);
 
   return (
     <SidebarProvider>
@@ -56,7 +65,7 @@ export function AppShell() {
             </Breadcrumb>
           </div>
         </header>
-        <div className="flex flex-1 flex-col gap-4 p-4">
+        <div ref={pageContentRef} className="flex flex-1 flex-col gap-4 p-4">
           <Outlet />
         </div>
       </SidebarInset>

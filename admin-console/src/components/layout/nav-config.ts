@@ -1,32 +1,23 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
-  Blocks,
   Bot,
-  Boxes,
   Building2,
   CreditCard,
-  FileText,
-  Folder,
-  Gauge,
-  Globe,
-  KeyRound,
   LayoutDashboard,
-  ListTree,
   Network,
-  ReceiptText,
-  ScrollText,
-  Server,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   TerminalSquare,
-  Wrench,
 } from "lucide-react";
+import { APP_ROUTES } from "@/lib/app-routes";
 
 export interface NavLeaf {
   title: string;
   url: string;
+}
+
+export interface NavRoot extends NavLeaf {
+  icon: LucideIcon;
 }
 
 export interface NavGroup {
@@ -35,156 +26,132 @@ export interface NavGroup {
   items: NavLeaf[];
 }
 
-export const NAV_DASHBOARD: NavLeaf = { title: "Dashboard", url: "/app" };
+export const NAV_DASHBOARD: NavRoot = {
+  title: "Dashboard",
+  url: APP_ROUTES.dashboard,
+  icon: LayoutDashboard,
+};
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    title: "Identity & Access",
-    icon: ShieldCheck,
+    title: "Organization",
+    icon: Building2,
     items: [
-      { title: "Tenant accounts", url: "/app/tenants" },
+      { title: "Tenant Accounts", url: "/app/tenants" },
       { title: "Projects", url: "/app/projects" },
       { title: "Workspaces", url: "/app/workspaces" },
-      { title: "API / virtual keys", url: "/app/api-keys" },
-      { title: "Quota policies", url: "/app/quota-policies" },
       { title: "Plans", url: "/app/plans" },
-      { title: "Resolved tenant defaults", url: "/app/tenant-resolved-defaults" },
-      // IAM completion (#321): appended contiguously to keep sibling nav edits conflict-free.
-      { title: "API keys", url: "/app/api-keys-native" },
-      { title: "Roles", url: "/app/roles" },
-      { title: "Permissions", url: "/app/permissions" },
-      { title: "Policies", url: "/app/policies" },
-      { title: "Tenant role bindings", url: "/app/tenant-roles" },
+      { title: "Quota Policies", url: "/app/quota-policies" },
+      { title: "Resolved Defaults", url: APP_ROUTES.tenantResolvedDefaults },
     ],
   },
   {
-    title: "Gateway configuration",
+    title: "Access & Policy",
+    icon: ShieldCheck,
+    items: [
+      { title: "Virtual Keys", url: APP_ROUTES.virtualKeys },
+      { title: "Gateway API Keys", url: "/app/api-keys-native" },
+      { title: "Roles", url: "/app/roles" },
+      { title: "Permissions", url: "/app/permissions" },
+      { title: "Access Policies", url: "/app/policies" },
+      { title: "Tenant Role Bindings", url: APP_ROUTES.tenantRoles },
+      { title: "MCP Identities", url: APP_ROUTES.mcpIdentities },
+    ],
+  },
+  {
+    title: "Gateway Setup",
     icon: Network,
     items: [
       { title: "Providers", url: "/app/providers" },
       { title: "Models", url: "/app/models" },
-      { title: "Agent upstreams", url: "/app/agent-upstreams" },
-      { title: "Agent workflows", url: "/app/agent-workflows" },
-      { title: "Skill packages", url: "/app/skill-packages" },
-      { title: "Prompt templates", url: "/app/prompt-templates" },
+      { title: "Agent Upstreams", url: "/app/agent-upstreams" },
+      { title: "Agent Workflows", url: "/app/agent-workflows" },
+      { title: "Skill Packages", url: "/app/skill-packages" },
+      { title: "Prompt Templates", url: "/app/prompt-templates" },
       { title: "Plugins", url: "/app/plugins" },
-      { title: "MCP servers", url: "/app/mcp-servers" },
+      { title: "MCP Servers", url: "/app/mcp-servers" },
     ],
   },
   {
-    title: "Infrastructure",
-    icon: Server,
-    items: [
-      { title: "Self-hosted workers", url: "/app/self-hosted-workers" },
-      { title: "Managed workers", url: "/app/managed-workers" },
-      { title: "Assets", url: "/app/assets" },
-    ],
-  },
-  {
-    title: "Governance",
-    icon: ShieldAlert,
-    items: [{ title: "Tool approvals", url: "/app/tool-approvals" }],
-  },
-  {
-    title: "Observability & billing",
-    icon: Gauge,
-    items: [
-      { title: "Request logs", url: "/app/request-logs" },
-      { title: "Audit events", url: "/app/audit-events" },
-      { title: "Usage reports", url: "/app/usage-reports" },
-      { title: "Billing events", url: "/app/billing-events" },
-    ],
-  },
-  {
-    title: "Agent Ops",
+    title: "Agents & Tools",
     icon: Bot,
     items: [
-      { title: "Agent runs", url: "/app/agent-runs" },
-      { title: "Agent schedules", url: "/app/agent-schedules" },
+      { title: "Agent Runs", url: APP_ROUTES.agentRuns },
+      { title: "Agent Schedules", url: APP_ROUTES.agentSchedules },
+      { title: "Assets", url: APP_ROUTES.assets },
+      { title: "Worker Registrations", url: "/app/self-hosted-workers" },
+      { title: "Managed Worker Pools", url: "/app/managed-workers" },
+      { title: "Self-hosted Lifecycle", url: APP_ROUTES.selfHostedWorkerOperations },
+      { title: "Self-hosted Runs", url: APP_ROUTES.selfHostedRuns },
+      { title: "Managed Sessions", url: APP_ROUTES.managedWorkerSessions },
+      { title: "Tools Catalog", url: APP_ROUTES.tools },
+      { title: "Tool Sessions", url: APP_ROUTES.toolSessions },
     ],
   },
   {
-    title: "Guardrails",
+    title: "Safety & Evidence",
     icon: ShieldAlert,
     items: [
-      { title: "Guardrail policies", url: "/app/guardrail-policies" },
-      { title: "Guardrail evaluations", url: "/app/guardrail-evaluations" },
-      { title: "Investigations", url: "/app/investigations" },
+      { title: "Tool Approvals", url: APP_ROUTES.toolApprovals },
+      { title: "Guardrail Policies", url: APP_ROUTES.guardrailPolicies },
+      { title: "Guardrail Evaluations", url: APP_ROUTES.guardrailEvaluations },
+      { title: "Investigations", url: APP_ROUTES.investigations },
+      { title: "Request Logs", url: "/app/request-logs" },
+      { title: "Audit Events", url: "/app/audit-events" },
     ],
   },
   {
-    title: "Billing Ops",
-    icon: ReceiptText,
+    title: "Billing",
+    icon: CreditCard,
     items: [
-      { title: "Wallets", url: "/app/wallets" },
-      { title: "Payment methods", url: "/app/payment-methods" },
-      { title: "Billing dead-letters", url: "/app/billing-dead-letters" },
-      { title: "Metering & usage", url: "/app/metering" },
+      { title: "Usage Reports", url: "/app/usage-reports" },
+      { title: "Billing Events", url: "/app/billing-events" },
+      { title: "Wallets", url: APP_ROUTES.wallets },
+      { title: "Payment Methods", url: APP_ROUTES.paymentMethods },
+      { title: "Billing Dead Letters", url: APP_ROUTES.billingDeadLetters },
+      { title: "Metering & Usage", url: APP_ROUTES.metering },
     ],
   },
-  // Worker ops (#320): self-hosted lifecycle + runs + managed sessions.
-  {
-    title: "Worker ops",
-    icon: Boxes,
-    items: [
-      { title: "Self-hosted lifecycle", url: "/app/workers/self-hosted" },
-      { title: "Self-hosted runs", url: "/app/workers/self-hosted-runs" },
-      { title: "Managed sessions", url: "/app/workers/managed-sessions" },
-    ],
-  },
-  // Operations cockpit (#322): status/config-reload/drain/gateway-configs +
-  // provider & observability status views.
   {
     title: "Operations",
     icon: TerminalSquare,
     items: [
-      { title: "Ops status", url: "/app/ops/status" },
-      { title: "Config reload", url: "/app/ops/config" },
-      { title: "Graceful drain", url: "/app/ops/drain" },
-      { title: "Gateway config profiles", url: "/app/ops/gateway-configs" },
-      { title: "Provider & runtime health", url: "/app/ops/provider-health" },
-      { title: "Observability & exports", url: "/app/ops/observability" },
-    ],
-  },
-  // Long-tail surfaces (#323): custom-domain hosting, MCP OAuth identities, and
-  // the plugin-tools catalog + tool-session inspector. Appended as new groups
-  // after the last existing entry to keep sibling nav edits conflict-free.
-  {
-    title: "Hosting",
-    icon: Globe,
-    items: [{ title: "Site domains", url: "/app/site-domains" }],
-  },
-  {
-    title: "Tools & MCP identities",
-    icon: Wrench,
-    items: [
-      { title: "MCP identities", url: "/app/mcp-identities" },
-      { title: "Tools catalog", url: "/app/tools" },
-      { title: "Tool sessions", url: "/app/tool-sessions" },
+      { title: "System Status", url: APP_ROUTES.operationsStatus },
+      { title: "Config Reload", url: APP_ROUTES.operationsConfig },
+      { title: "Graceful Drain", url: APP_ROUTES.operationsDrain },
+      { title: "Gateway Config Profiles", url: APP_ROUTES.operationsGatewayConfigs },
+      { title: "Provider Health", url: APP_ROUTES.operationsProviderHealth },
+      { title: "Telemetry Exports", url: APP_ROUTES.operationsObservability },
+      { title: "Site Domains", url: APP_ROUTES.siteDomains },
     ],
   },
 ];
 
-export const RESOURCE_ICONS: Record<string, LucideIcon> = {
-  tenants: Building2,
-  projects: Folder,
-  workspaces: Boxes,
-  "api-keys": KeyRound,
-  "quota-policies": Gauge,
-  plans: CreditCard,
-  providers: Network,
-  models: Sparkles,
-  "agent-upstreams": Bot,
-  "agent-workflows": ListTree,
-  "skill-packages": Blocks,
-  "prompt-templates": FileText,
-  plugins: Wrench,
-  "mcp-servers": Server,
-  "self-hosted-workers": Server,
-  "managed-workers": Server,
-  "request-logs": ScrollText,
-  "audit-events": Activity,
-  "usage-reports": ReceiptText,
-  "billing-events": CreditCard,
-  dashboard: LayoutDashboard,
-};
+function normalizePath(path: string): string {
+  if (path === "/") return path;
+  return path.replace(/\/+$/, "");
+}
+
+export function isPathActive(pathname: string, itemUrl: string): boolean {
+  const path = normalizePath(pathname);
+  const target = normalizePath(itemUrl);
+  if (target === APP_ROUTES.dashboard) return path === target;
+  return path === target || path.startsWith(`${target}/`);
+}
+
+export function findNavigationLeaf(pathname: string): NavLeaf | undefined {
+  if (isPathActive(pathname, NAV_DASHBOARD.url)) return NAV_DASHBOARD;
+
+  let bestMatch: NavLeaf | undefined;
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (
+        isPathActive(pathname, item.url) &&
+        (!bestMatch || item.url.length > bestMatch.url.length)
+      ) {
+        bestMatch = item;
+      }
+    }
+  }
+  return bestMatch;
+}

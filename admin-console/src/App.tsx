@@ -45,6 +45,7 @@ import McpIdentitiesPage from "@/pages/mcp-identities";
 import ToolsCatalogPage from "@/pages/tools-catalog";
 import PluginToolsPage from "@/pages/plugin-tools";
 import ToolSessionsPage from "@/pages/tool-sessions";
+import { APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -66,81 +67,81 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
-                <Route path="/app" element={<DashboardPage />} />
-                <Route path="/app/assets" element={<AssetsPage />} />
+                <Route path={APP_ROUTES.dashboard} element={<DashboardPage />} />
+                <Route path={APP_ROUTES.assets} element={<AssetsPage />} />
                 <Route
-                  path="/app/tenant-resolved-defaults"
+                  path={APP_ROUTES.tenantResolvedDefaults}
                   element={<TenantResolvedDefaultsPage />}
                 />
-                <Route path="/app/tool-approvals" element={<ToolApprovalsPage />} />
-                <Route path="/app/agent-runs" element={<AgentRunsPage />} />
-                <Route path="/app/agent-runs/:runId" element={<AgentRunDetailPage />} />
-                <Route path="/app/agent-schedules" element={<AgentSchedulesPage />} />
-                <Route path="/app/guardrail-policies" element={<GuardrailPoliciesPage />} />
+                <Route path={APP_ROUTES.toolApprovals} element={<ToolApprovalsPage />} />
+                <Route path={APP_ROUTES.agentRuns} element={<AgentRunsPage />} />
+                <Route path={APP_ROUTES.agentRunDetail} element={<AgentRunDetailPage />} />
+                <Route path={APP_ROUTES.agentSchedules} element={<AgentSchedulesPage />} />
+                <Route path={APP_ROUTES.guardrailPolicies} element={<GuardrailPoliciesPage />} />
                 <Route
-                  path="/app/guardrail-policies/:policyId"
+                  path={APP_ROUTES.guardrailPolicyDetail}
                   element={<GuardrailPolicyDetailPage />}
                 />
                 <Route
-                  path="/app/guardrail-evaluations"
+                  path={APP_ROUTES.guardrailEvaluations}
                   element={<GuardrailEvaluationsPage />}
                 />
-                <Route path="/app/investigations" element={<InvestigationsPage />} />
-                <Route path="/app/wallets" element={<BillingWalletsPage />} />
+                <Route path={APP_ROUTES.investigations} element={<InvestigationsPage />} />
+                <Route path={APP_ROUTES.wallets} element={<BillingWalletsPage />} />
                 <Route
-                  path="/app/payment-methods"
+                  path={APP_ROUTES.paymentMethods}
                   element={<BillingPaymentMethodsPage />}
                 />
                 <Route
-                  path="/app/billing-dead-letters"
+                  path={APP_ROUTES.billingDeadLetters}
                   element={<BillingDeadLettersPage />}
                 />
-                <Route path="/app/metering" element={<BillingMeteringPage />} />
+                <Route path={APP_ROUTES.metering} element={<BillingMeteringPage />} />
                 {/* Worker ops (#320) */}
                 <Route
-                  path="/app/workers/self-hosted"
+                  path={APP_ROUTES.selfHostedWorkerOperations}
                   element={<SelfHostedWorkersOpsPage />}
                 />
                 <Route
-                  path="/app/workers/self-hosted/:workerId"
+                  path={APP_ROUTES.selfHostedWorkerDetail}
                   element={<SelfHostedWorkerDetailPage />}
                 />
                 <Route
-                  path="/app/workers/self-hosted-runs"
+                  path={APP_ROUTES.selfHostedRuns}
                   element={<SelfHostedRunsPage />}
                 />
                 <Route
-                  path="/app/workers/managed-sessions"
+                  path={APP_ROUTES.managedWorkerSessions}
                   element={<ManagedWorkerSessionsPage />}
                 />
                 {/* Operations cockpit (#322). */}
-                <Route path="/app/ops/status" element={<OpsStatusPage />} />
-                <Route path="/app/ops/config" element={<OpsConfigPage />} />
-                <Route path="/app/ops/drain" element={<OpsDrainPage />} />
+                <Route path={APP_ROUTES.operationsStatus} element={<OpsStatusPage />} />
+                <Route path={APP_ROUTES.operationsConfig} element={<OpsConfigPage />} />
+                <Route path={APP_ROUTES.operationsDrain} element={<OpsDrainPage />} />
                 <Route
-                  path="/app/ops/gateway-configs"
+                  path={APP_ROUTES.operationsGatewayConfigs}
                   element={<OpsGatewayConfigsPage />}
                 />
                 <Route
-                  path="/app/ops/provider-health"
+                  path={APP_ROUTES.operationsProviderHealth}
                   element={<OpsProviderHealthPage />}
                 />
                 <Route
-                  path="/app/ops/observability"
+                  path={APP_ROUTES.operationsObservability}
                   element={<OpsObservabilityPage />}
                 />
                 {/* IAM completion (#321) bespoke routes. */}
-                <Route path="/app/api-keys" element={<VirtualKeysPage />} />
-                <Route path="/app/tenant-roles" element={<TenantRolesPage />} />
+                <Route path={APP_ROUTES.virtualKeys} element={<VirtualKeysPage />} />
+                <Route path={APP_ROUTES.tenantRoles} element={<TenantRolesPage />} />
                 {/* Long-tail surfaces (#323). */}
-                <Route path="/app/site-domains" element={<SiteDomainsPage />} />
-                <Route path="/app/mcp-identities" element={<McpIdentitiesPage />} />
-                <Route path="/app/tools" element={<ToolsCatalogPage />} />
+                <Route path={APP_ROUTES.siteDomains} element={<SiteDomainsPage />} />
+                <Route path={APP_ROUTES.mcpIdentities} element={<McpIdentitiesPage />} />
+                <Route path={APP_ROUTES.tools} element={<ToolsCatalogPage />} />
                 <Route
-                  path="/app/plugins/:pluginId/tools"
+                  path={APP_ROUTES.pluginTools}
                   element={<PluginToolsPage />}
                 />
-                <Route path="/app/tool-sessions" element={<ToolSessionsPage />} />
+                <Route path={APP_ROUTES.toolSessions} element={<ToolSessionsPage />} />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}
