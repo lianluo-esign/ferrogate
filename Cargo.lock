@@ -1287,6 +1287,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrogate-payments"
+version = "2026.7.9"
+dependencies = [
+ "base64",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ferrogate-policy"
 version = "2026.7.9"
 dependencies = [

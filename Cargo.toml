@@ -16,6 +16,7 @@ members = [
     "crates/ferrogate-guardrails",
     "crates/ferrogate-mcp",
     "crates/ferrogate-observability",
+    "crates/ferrogate-payments",
     "crates/ferrogate-policy",
     "crates/ferrogate-providers",
     "crates/ferrogate-routing",

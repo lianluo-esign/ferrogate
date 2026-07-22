@@ -1,0 +1,49 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-23
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+[package]
+name = "ferrogate-payments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FerroGate x402 V2 / Solana SVM payment wire contract (exact scheme, client role)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Qualification gate for the `solana-pay-kit` SDK (crates.io 0.2.0).
+#
+# VERDICT 2026-07-23: NOT USABLE YET on the workspace MSRV (Rust 1.88).
+# Enabling this feature only compiles `src/sdk.rs`, which carries the
+# machine-readable qualification record. The dependency itself is
+# deliberately NOT declared because it cannot compile on 1.88:
+#
+#   solana-pay-kit = { version = "=0.2.0", default-features = false, features = ["x402"] }
+#
+# fails `cargo +1.88.0 check` with:
+#   error: rustc 1.88.0 is not supported by the following packages:
+#     solana-address@2.6.1 requires rustc 1.89.0
+#     solana-pubkey@4.2.0 requires rustc 1.89.0
+#     solana-message@4.4.0 requires rustc 1.89.0
+#     ... (16 packages total; cargo-platform@0.3.3 requires 1.91)
+# and no 1.88-compatible pin exists (solana-account-info 3.1.1 requires
+# solana-address ^2.2.0, solana-client 4.1.2 requires solana-pubkey ^4.2.0,
+# all of which require rustc >= 1.89). Even the minimal feature set locks
+# 553 packages including the full Solana RPC client stack. See README.md
+# for the full evidence and re-qualification checklist.
+sdk-solana-pay-kit = []
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
