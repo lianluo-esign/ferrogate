@@ -19,6 +19,19 @@
 // the `stored_assets` row). A replayed client PUT can only replace staging;
 // it can never mutate the object referenced by an already-published version.
 //
+// #368: the presigned staging PUT is *bound* to the declared size +
+// SHA-256. `content-length` and `x-amz-content-sha256` are SigV4 signed
+// headers of the presigned URL (payload hash = the declared checksum, not
+// UNSIGNED-PAYLOAD), and the intent response returns the exact
+// `required_headers` the client must send verbatim -- so an upload whose
+// size or bytes differ from what the gateway approved is rejected at the
+// bucket boundary itself, and staging capacity can no longer be burned
+// beyond the approved object. Scope: a single PUT only -- multipart
+// uploads are out of scope (the per-object ceiling keeps single-PUT
+// objects within what S3-compatible services accept in one request), and
+// orphaned staging objects remain the existing asset-lifecycle GC's job
+// (`state_asset_lifecycle.rs`, audit action `asset.gc.delete`).
+//
 // Private-bucket operator runbook: docs/assets/private-bucket-migration.md.
 //
 // Honest scope note: like asset_bucket.rs, tested against a local mock
@@ -67,9 +80,21 @@ struct PresignUploadIntentResponse {
     upload_id: String,
     upload_url: String,
     method: &'static str,
+    /// URL validity window; after it elapses the bucket rejects the PUT
+    /// (`X-Amz-Expires` is signed) and the client must register a new intent.
     expires_in_seconds: u64,
     size_bytes: u64,
     sha256: String,
+    /// #368: header name -> value the client MUST send verbatim on the
+    /// direct PUT. These are SigV4 signed headers of `upload_url`, so
+    /// omitting or changing any of them -- or uploading bytes whose size or
+    /// SHA-256 differ from the declared intent -- invalidates the upload at
+    /// the bucket boundary.
+    required_headers: std::collections::BTreeMap<&'static str, String>,
+    /// The per-object ceiling the intent was checked against, echoed so
+    /// clients can fail fast without a rejected round-trip. Single PUT
+    /// only: multipart uploads are out of scope.
+    max_object_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +258,21 @@ impl FerroGateway {
         // before, the cumulative tenant quota.
         let max_object_bytes = state.asset_presign_max_object_bytes();
         if intent.size_bytes > max_object_bytes {
+            // #368: outcome `rejected_intent` distinguishes this preflight
+            // rejection from bucket-boundary (`rejected_bucket`) and
+            // commit-time (`rejected_commit`) rejections, and from orphan
+            // GC (`asset.gc.delete`).
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "asset.presign_upload_intent",
+                &id,
+                "rejected_intent",
+                format!(
+                    "rejected upload intent for asset {id}: {} bytes exceeds the {max_object_bytes}-byte per-object ceiling",
+                    intent.size_bytes
+                ),
+            ));
             return write_json_error(
                 session,
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -261,6 +301,17 @@ impl FerroGateway {
         {
             QuotaStatus::Ok => {}
             QuotaStatus::Exceeded(quota) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.presign_upload_intent",
+                    &id,
+                    "rejected_intent",
+                    format!(
+                        "rejected upload intent for asset {id}: {} bytes would exceed the tenant's {quota}-byte asset storage quota",
+                        intent.size_bytes
+                    ),
+                ));
                 return write_json_error(
                     session,
                     StatusCode::FORBIDDEN,
@@ -300,8 +351,17 @@ impl FerroGateway {
         };
         let staging_key = staging_object_key(&id, &upload_id, intent.size_bytes, &expected_sha256);
         let ttl = state.asset_presign_ttl_secs();
-        let upload_url = match bucket.presign_put(&staging_key, ttl, now_unix_seconds_u64()) {
-            Ok(url) => url,
+        // #368: the URL is bound to the declared size + checksum -- the
+        // bucket independently recomputes the signature over those signed
+        // headers, so a PUT with different values (or bytes) fails there.
+        let upload = match bucket.presign_put(
+            &staging_key,
+            ttl,
+            now_unix_seconds_u64(),
+            intent.size_bytes,
+            &expected_sha256,
+        ) {
+            Ok(upload) => upload,
             Err(error) => {
                 return write_json_error(
                     session,
@@ -330,11 +390,13 @@ impl FerroGateway {
             object: "asset_upload_intent",
             key: id,
             upload_id,
-            upload_url,
+            upload_url: upload.url,
             method: "PUT",
             expires_in_seconds: ttl,
             size_bytes: intent.size_bytes,
             sha256: expected_sha256,
+            required_headers: upload.required_headers.into_iter().collect(),
+            max_object_bytes,
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
@@ -495,6 +557,21 @@ impl FerroGateway {
 
                 match verification_failure {
                     Ok(CommitVerification::NotUploaded) => {
+                        // #368: outcome `rejected_bucket` -- no staged object
+                        // exists, meaning the direct PUT never succeeded at
+                        // the bucket boundary (never attempted, URL expired,
+                        // or rejected by the signed size/checksum binding).
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "asset.push",
+                            &id,
+                            "rejected_bucket",
+                            format!(
+                                "asset {id} upload {} has no staged object; the direct PUT never succeeded at the bucket boundary",
+                                commit.upload_id
+                            ),
+                        ));
                         return write_json_error(
                             session,
                             StatusCode::NOT_FOUND,
@@ -505,6 +582,20 @@ impl FerroGateway {
                         .await;
                     }
                     Ok(CommitVerification::Rejected(rejection)) => {
+                        // #368: outcome `rejected_commit` -- the staged
+                        // object existed but failed the gateway's commit
+                        // verification (size, sha256, or content rules).
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "asset.push",
+                            &id,
+                            "rejected_commit",
+                            format!(
+                                "asset {id} upload {} failed commit verification ({}): {}",
+                                commit.upload_id, rejection.code, rejection.message
+                            ),
+                        ));
                         return write_json_error(
                             session,
                             StatusCode::UNPROCESSABLE_ENTITY,
@@ -543,6 +634,18 @@ impl FerroGateway {
         {
             QuotaStatus::Ok => {}
             QuotaStatus::Exceeded(quota) => {
+                // #368: quota is a commit-time verification failure too.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.push",
+                    &id,
+                    "rejected_commit",
+                    format!(
+                        "asset {id} upload {} rejected at commit: {actual_size} bytes would exceed the tenant's {quota}-byte asset storage quota",
+                        commit.upload_id
+                    ),
+                ));
                 return self
                     .reject_staging_object(
                         session,

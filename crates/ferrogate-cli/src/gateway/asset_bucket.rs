@@ -24,8 +24,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferrogate_providers::{
-    presign_sigv4_query, sign_sigv4_with_content_hash_header, AwsCredentials, PresignRequest,
-    SigningRequest,
+    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
+    AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
 };
 
 use super::dispatch::provider_http_client;
@@ -45,6 +45,16 @@ pub(crate) struct AssetBucketConfig {
 
 pub(crate) struct AssetBucketClient {
     config: AssetBucketConfig,
+}
+
+/// A bound presigned upload (issue #368): the URL plus the exact request
+/// headers the holder must send verbatim on the direct PUT. The headers are
+/// inside the URL's SigV4 signature, so they are a contract, not a hint.
+pub(crate) struct PresignedUpload {
+    pub(crate) url: String,
+    /// `(header name, value)` pairs; `host` is also signed but derives from
+    /// the URL itself.
+    pub(crate) required_headers: Vec<(&'static str, String)>,
 }
 
 impl AssetBucketClient {
@@ -259,16 +269,49 @@ impl AssetBucketClient {
     }
 
     /// Issues a short-TTL SigV4 query-string presigned upload URL (issue
-    /// #259). The holder streams the object bytes straight to the bucket
-    /// with a plain `PUT` (no auth headers), bypassing the gateway hot
-    /// path; the gateway later verifies the committed object.
+    /// #259), *bound* to the declared payload size + SHA-256 (issue #368):
+    /// `content-length` and `x-amz-content-sha256` are SigV4 signed headers
+    /// and the canonical request's payload-hash line carries the declared
+    /// checksum instead of `UNSIGNED-PAYLOAD`. The holder PUTs the object
+    /// bytes straight to the bucket (bypassing the gateway hot path) but
+    /// MUST send `required_headers` verbatim -- changing the size, the
+    /// checksum, or the bytes invalidates the upload authorization at the
+    /// bucket boundary itself, before the gateway's commit-time
+    /// verification ever runs.
     pub(crate) fn presign_put(
         &self,
         key: &str,
         expires_secs: u64,
         timestamp_unix: u64,
-    ) -> anyhow::Result<String> {
-        self.presign_url("PUT", key, expires_secs, timestamp_unix)
+        size_bytes: u64,
+        content_sha256_hex: &str,
+    ) -> anyhow::Result<PresignedUpload> {
+        let (scheme, host) = self.scheme_and_host()?;
+        let path = self.object_path(key);
+        let bound = presign_sigv4_query_bound(
+            &PresignRequest {
+                method: "PUT",
+                path: &path,
+                host: &host,
+                region: &self.config.region,
+                service: "s3",
+                expires_secs,
+                timestamp_unix,
+            },
+            &AwsCredentials {
+                access_key_id: self.config.access_key_id.clone(),
+                secret_access_key: self.config.secret_access_key.clone(),
+                session_token: None,
+            },
+            &PresignBoundPayload {
+                content_length: size_bytes,
+                content_sha256_hex,
+            },
+        );
+        Ok(PresignedUpload {
+            url: format!("{scheme}://{host}{path}?{}", bound.query),
+            required_headers: bound.required_headers,
+        })
     }
 
     /// Issues a short-TTL SigV4 query-string presigned download URL (issue
@@ -610,36 +653,82 @@ mod tests {
     }
 
     #[test]
-    fn presign_put_builds_a_path_style_sigv4_query_string_url_with_a_bounded_ttl() {
+    fn presign_put_builds_a_bound_path_style_sigv4_query_string_url_with_a_bounded_ttl() {
         let bucket = client("https://project.supabase.co/storage/v1/s3".into());
-        let url = bucket
-            .presign_put("tenant-a:cli_tool:hello:1.0.0", 900, 1_440_938_160)
+        let sha = "a".repeat(64);
+        let upload = bucket
+            .presign_put(
+                "tenant-a:cli_tool:hello:1.0.0",
+                900,
+                1_440_938_160,
+                42,
+                &sha,
+            )
             .unwrap();
 
         // Path-style URL against the configured endpoint host + bucket/key.
-        assert!(url.starts_with(
+        assert!(upload.url.starts_with(
             "https://project.supabase.co/storage/v1/s3/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0?"
         ));
         // SigV4 query-string presign markers, bounded TTL, and a signature.
-        assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
-        assert!(url.contains("X-Amz-Expires=900"));
-        assert!(url.contains("X-Amz-SignedHeaders=host"));
-        assert!(url.contains("X-Amz-Signature="));
+        assert!(upload.url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(upload.url.contains("X-Amz-Expires=900"));
+        // #368: the declared size + checksum headers join `host` in the
+        // signed set, so the URL only authorizes the exact approved payload.
+        assert!(upload
+            .url
+            .contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256"));
+        assert!(upload.url.contains("X-Amz-Signature="));
+        assert_eq!(
+            upload.required_headers,
+            vec![
+                ("content-length", "42".to_string()),
+                ("x-amz-content-sha256", sha),
+            ]
+        );
         // The secret key never leaks into the URL.
-        assert!(!url.contains("wJalrXUtnFEMI"));
+        assert!(!upload.url.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn presign_put_signature_depends_on_the_declared_size_and_checksum() {
+        // #368: a different declared size or checksum is a different signed
+        // capability -- the bucket rejects a URL replayed against either.
+        let bucket = client("http://127.0.0.1:9999".into());
+        let sig = |size: u64, sha: &str| {
+            bucket
+                .presign_put("k", 300, 1_440_938_160, size, sha)
+                .unwrap()
+                .url
+                .rsplit("X-Amz-Signature=")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let base = sig(42, &"a".repeat(64));
+        assert_ne!(base, sig(43, &"a".repeat(64)), "size is signed");
+        assert_ne!(base, sig(42, &"b".repeat(64)), "checksum is signed");
+        assert_eq!(
+            base,
+            sig(42, &"a".repeat(64)),
+            "same declaration re-signs identically"
+        );
     }
 
     #[test]
     fn presign_get_and_presign_put_sign_the_same_key_differently() {
         let bucket = client("http://127.0.0.1:9999".into());
-        let put = bucket.presign_put("k", 300, 1_440_938_160).unwrap();
+        let put = bucket
+            .presign_put("k", 300, 1_440_938_160, 42, &"a".repeat(64))
+            .unwrap()
+            .url;
         let get = bucket.presign_get("k", 300, 1_440_938_160).unwrap();
         assert!(put.starts_with("http://127.0.0.1:9999/ferrogate-assets/k?"));
         let put_sig = put.rsplit("X-Amz-Signature=").next().unwrap();
         let get_sig = get.rsplit("X-Amz-Signature=").next().unwrap();
         assert_ne!(
             put_sig, get_sig,
-            "PUT and GET presigns of the same key must differ (method is signed)"
+            "PUT and GET presigns of the same key must differ (method and header set are signed)"
         );
     }
 

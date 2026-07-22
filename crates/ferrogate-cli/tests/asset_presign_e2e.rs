@@ -22,8 +22,8 @@ use std::{
 
 use chrono::NaiveDateTime;
 use ferrogate_providers::{
-    presign_sigv4_query, sign_sigv4_with_content_hash_header, AwsCredentials, PresignRequest,
-    SigningRequest,
+    presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
+    AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
 };
 use ferrogate_storage::sha256_hex;
 use support::{http_request, start_ready_gateway};
@@ -280,18 +280,53 @@ fn verify_sigv4(request: &RawHttpRequest, path: &str, query: Option<&str>) -> Re
         let expires_secs = raw_query_value(query, "X-Amz-Expires")
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| "missing or invalid X-Amz-Expires".to_string())?;
-        let expected = presign_sigv4_query(
-            &PresignRequest {
-                method: &request.method,
-                path,
-                host,
-                region: REGION,
-                service: "s3",
-                expires_secs,
-                timestamp_unix: timestamp,
-            },
-            &credentials,
-        );
+        let presign_request = PresignRequest {
+            method: &request.method,
+            path,
+            host,
+            region: REGION,
+            service: "s3",
+            expires_secs,
+            timestamp_unix: timestamp,
+        };
+        let signed_headers = raw_query_value(query, "X-Amz-SignedHeaders")
+            .ok_or_else(|| "missing X-Amz-SignedHeaders".to_string())?;
+        let expected = match signed_headers {
+            // #368: a bound upload URL. The bucket recomputes the signature
+            // over the headers the client ACTUALLY sent, and (like AWS S3
+            // for a concrete x-amz-content-sha256) verifies the received
+            // bytes against the declared hash + length. A request that
+            // omits a signed header, lies about size/checksum, or carries
+            // different bytes therefore never verifies.
+            "content-length%3Bhost%3Bx-amz-content-sha256" => {
+                let declared_length = request
+                    .headers
+                    .get("content-length")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| "bound upload missing content-length".to_string())?;
+                let declared_sha256 = request
+                    .headers
+                    .get("x-amz-content-sha256")
+                    .ok_or_else(|| "bound upload missing x-amz-content-sha256".to_string())?;
+                if request.body.len() as u64 != declared_length {
+                    return Err("bound upload body length mismatch".to_string());
+                }
+                if sha256_hex(&request.body) != *declared_sha256 {
+                    return Err("bound upload payload hash mismatch".to_string());
+                }
+                presign_sigv4_query_bound(
+                    &presign_request,
+                    &credentials,
+                    &PresignBoundPayload {
+                        content_length: declared_length,
+                        content_sha256_hex: declared_sha256,
+                    },
+                )
+                .query
+            }
+            "host" => presign_sigv4_query(&presign_request, &credentials),
+            other => return Err(format!("unexpected X-Amz-SignedHeaders: {other}")),
+        };
         return (query == expected)
             .then_some(())
             .ok_or_else(|| "query signature mismatch".to_string());
@@ -353,7 +388,16 @@ fn write_http_response(
     stream.write_all(body).unwrap();
 }
 
-fn direct_bucket_request(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
+/// Issues a raw direct-to-bucket request. `extra_headers` carries the
+/// intent's `required_headers` (#368) minus `content-length`, which this
+/// helper always derives from the actual body -- exactly like a real HTTP
+/// client, so a tampered body automatically declares its own length.
+fn direct_bucket_request(
+    method: &str,
+    url: &str,
+    body: &[u8],
+    extra_headers: &[(&str, &str)],
+) -> Vec<u8> {
     let authority_and_target = url
         .strip_prefix("http://")
         .expect("the local bucket URL must use http");
@@ -365,9 +409,13 @@ fn direct_bucket_request(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let extra = extra_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     write!(
         stream,
-        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n{extra}\r\n",
         body.len()
     )
     .unwrap();
@@ -596,6 +644,22 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
         .expect("upload intent must include upload_url")
         .to_string();
     assert!(upload_url.starts_with(&bucket_endpoint));
+    // #368: the intent returns the exact signed headers the direct PUT must
+    // send, and echoes the per-object ceiling it was checked against.
+    assert_eq!(
+        intent["required_headers"]["content-length"],
+        content.len().to_string()
+    );
+    assert_eq!(intent["required_headers"]["x-amz-content-sha256"], sha256);
+    assert_eq!(
+        intent["required_headers"]
+            .as_object()
+            .expect("required_headers must be a map")
+            .len(),
+        2
+    );
+    assert_eq!(intent["max_object_bytes"], 1_048_576);
+    assert!(upload_url.contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256"));
     let staging_path = object_path_from_url(&upload_url);
 
     let second_intent_response = http_request(
@@ -624,13 +688,24 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     let second_staging_path = object_path_from_url(&second_upload_url);
     assert_ne!(second_staging_path, staging_path);
 
-    let upload = direct_bucket_request("PUT", &upload_url, content);
+    // #368: a direct PUT that omits the signed checksum header is rejected
+    // at the bucket boundary -- the SigV4 signature covers it.
+    let required_put_headers = [("x-amz-content-sha256", sha256.as_str())];
+    let missing_header_upload = direct_bucket_request("PUT", &upload_url, content, &[]);
+    assert!(
+        String::from_utf8_lossy(&missing_header_upload).contains("HTTP/1.1 403"),
+        "an upload omitting the signed checksum header must be rejected: {}",
+        String::from_utf8_lossy(&missing_header_upload)
+    );
+
+    let upload = direct_bucket_request("PUT", &upload_url, content, &required_put_headers);
     assert!(
         String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
         "direct upload failed: {}",
         String::from_utf8_lossy(&upload)
     );
-    let second_upload = direct_bucket_request("PUT", &second_upload_url, content);
+    let second_upload =
+        direct_bucket_request("PUT", &second_upload_url, content, &required_put_headers);
     assert!(
         String::from_utf8_lossy(&second_upload).contains("HTTP/1.1 200"),
         "second direct upload failed: {}",
@@ -732,19 +807,22 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
         final_path
     };
 
+    // #368: replaying the still-unexpired PUT URL with different bytes is
+    // now rejected AT THE BUCKET -- the signature binds the declared
+    // checksum and length, so the old capability cannot even recreate its
+    // staging object with new content, let alone burn bucket capacity.
     let tampered = b"tampered after commit through the still-valid old PUT URL";
-    let replay = direct_bucket_request("PUT", &upload_url, tampered);
+    let replay = direct_bucket_request("PUT", &upload_url, tampered, &required_put_headers);
     assert!(
-        String::from_utf8_lossy(&replay).contains("HTTP/1.1 200"),
-        "presigned PUT replay failed: {}",
+        String::from_utf8_lossy(&replay).contains("HTTP/1.1 403"),
+        "a replayed PUT with different bytes must be rejected by the bucket: {}",
         String::from_utf8_lossy(&replay)
     );
     {
         let bucket = bucket_state.lock().unwrap();
-        assert_eq!(
-            bucket.objects.get(&staging_path).map(Vec::as_slice),
-            Some(tampered.as_slice()),
-            "the old client capability may only recreate its staging object"
+        assert!(
+            !bucket.objects.contains_key(&staging_path),
+            "a rejected replay must not recreate the staging object"
         );
         assert_eq!(
             bucket.objects.get(&final_path).map(Vec::as_slice),
@@ -911,7 +989,7 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
         .expect("download response must include download_url");
     assert_eq!(object_path_from_url(download_url), final_path);
     assert_ne!(object_path_from_url(download_url), staging_path);
-    let direct_download = direct_bucket_request("GET", download_url, b"");
+    let direct_download = direct_bucket_request("GET", download_url, b"", &[]);
     assert!(
         String::from_utf8_lossy(&direct_download).contains("HTTP/1.1 200"),
         "direct download failed: {}",
@@ -964,13 +1042,27 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     assert_json_error(&immutable_intent, 409, "asset_version_immutable");
 
     let bucket = bucket_state.lock().unwrap();
-    assert!(
-        bucket
-            .requests
-            .iter()
-            .all(|request| request.signature_valid),
-        "every direct and gateway bucket operation must carry a valid SigV4 signature: {:?}",
+    // #368: the ONLY signature-invalid requests are the two deliberately
+    // out-of-contract direct PUTs (omitted signed header, tampered bytes);
+    // both were rejected at the bucket boundary against the staging key.
+    let invalid: Vec<_> = bucket
+        .requests
+        .iter()
+        .filter(|request| !request.signature_valid)
+        .collect();
+    assert_eq!(
+        invalid.len(),
+        2,
+        "exactly the two out-of-contract PUTs must fail verification: {:?}",
         bucket.requests
+    );
+    assert!(
+        invalid.iter().all(|request| {
+            request.method == "PUT"
+                && request.path == staging_path
+                && request.signature_kind == SignatureKind::Query
+        }),
+        "both rejected requests must be query-presigned staging PUTs: {invalid:?}"
     );
     assert!(
         bucket.requests.iter().any(|request| {
@@ -1018,17 +1110,17 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
             .iter()
             .filter(|request| matches!(request.method.as_str(), "PUT" | "DELETE"))
             .count(),
-        6,
-        "lifecycle mutations include two staging uploads, final PUT, winner cleanup, old-URL replay, and loser cleanup"
+        7,
+        "lifecycle mutation attempts: rejected header-less PUT, two staging uploads, final PUT, winner cleanup, rejected tampered replay, and loser cleanup"
     );
     assert_eq!(
         bucket.objects.get(&final_path).map(Vec::as_slice),
         Some(content.as_slice())
     );
-    assert_eq!(
-        bucket.objects.get(&staging_path).map(Vec::as_slice),
-        Some(tampered.as_slice())
-    );
+    // #368: the rejected replay left no staging bytes behind -- the bucket
+    // ends the lifecycle holding exactly the immutable final object.
+    assert!(!bucket.objects.contains_key(&staging_path));
     assert!(!bucket.objects.contains_key(&second_staging_path));
+    assert_eq!(bucket.objects.len(), 1);
     drop(bucket);
 }

@@ -195,6 +195,37 @@ pub struct PresignRequest<'a> {
     pub timestamp_unix: u64,
 }
 
+/// The payload constraints a *bound* presigned upload commits to (issue
+/// #368): the exact `Content-Length` and hex SHA-256 the gateway approved
+/// at upload-intent time. Both become SigV4 *signed headers* and the
+/// canonical request's payload-hash line uses the declared SHA-256 instead
+/// of `UNSIGNED-PAYLOAD`, so changing the declared size, omitting a
+/// required header, or uploading different bytes each produces a different
+/// canonical request -- and therefore a signature the bucket's independent
+/// recomputation rejects at its own boundary.
+#[derive(Clone, Copy)]
+pub struct PresignBoundPayload<'a> {
+    /// Exact byte count of the payload the holder is authorized to upload.
+    pub content_length: u64,
+    /// Lowercase 64-char hex SHA-256 of the exact payload bytes.
+    pub content_sha256_hex: &'a str,
+}
+
+/// A bound presigned upload (issue #368): the signed query string plus the
+/// exact request headers the holder MUST send verbatim on the direct PUT.
+/// The headers are part of the SigV4 `SignedHeaders` set, so they are not
+/// advisory -- a request that omits or alters any of them (or whose actual
+/// bytes hash differently than the signed `x-amz-content-sha256`) fails
+/// signature verification at the bucket.
+pub struct BoundPresignedUpload {
+    /// Full canonical query string with `X-Amz-Signature` appended; the
+    /// caller assembles `scheme://host{path}?{query}`.
+    pub query: String,
+    /// `(header name, value)` pairs to send verbatim. `host` is also
+    /// signed but derives from the URL itself, so it is not listed here.
+    pub required_headers: Vec<(&'static str, String)>,
+}
+
 /// Builds the signed query string (without a leading `?`) for an S3
 /// SigV4 *query-string presigned URL* -- the direct large-object upload /
 /// download path (issue #259) where the signature travels in the query
@@ -206,13 +237,77 @@ pub struct PresignRequest<'a> {
 /// service) verifies it identically. Returns the full canonical query
 /// string with `X-Amz-Signature` appended; the caller assembles
 /// `scheme://host{path}?{returned}`.
+///
+/// For uploads prefer [`presign_query_bound`] (issue #368), which binds the
+/// signature to a declared size + checksum instead of `UNSIGNED-PAYLOAD`.
 pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials) -> String {
+    presign_query_internal(
+        request,
+        credentials,
+        &[("host", request.host.to_string())],
+        "UNSIGNED-PAYLOAD",
+    )
+}
+
+/// Same as [`presign_query`], but *bound* to a declared payload (issue
+/// #368): `content-length` and `x-amz-content-sha256` join `host` in the
+/// SigV4 `SignedHeaders` set, and the canonical request's payload-hash line
+/// carries the declared hex SHA-256 instead of `UNSIGNED-PAYLOAD`. The
+/// binding lives in the signature itself, so it holds for any S3-compatible
+/// verifier regardless of whether that service additionally re-hashes the
+/// received bytes (AWS S3 does for a concrete `x-amz-content-sha256`;
+/// Supabase Storage's S3 compat verifies the SigV4 signed-header set --
+/// either way a mismatched size or checksum can no longer produce an
+/// acceptable request).
+pub fn presign_query_bound(
+    request: &PresignRequest<'_>,
+    credentials: &AwsCredentials,
+    payload: &PresignBoundPayload<'_>,
+) -> BoundPresignedUpload {
+    let content_length = payload.content_length.to_string();
+    let content_sha256 = payload.content_sha256_hex.to_ascii_lowercase();
+    // Signed headers must be lowercase and sorted by name; this literal
+    // ordering is alphabetical already.
+    let signed_headers = [
+        ("content-length", content_length.clone()),
+        ("host", request.host.to_string()),
+        ("x-amz-content-sha256", content_sha256.clone()),
+    ];
+    let query = presign_query_internal(request, credentials, &signed_headers, &content_sha256);
+    BoundPresignedUpload {
+        query,
+        required_headers: vec![
+            ("content-length", content_length),
+            ("x-amz-content-sha256", content_sha256),
+        ],
+    }
+}
+
+/// Shared presign core: signs the `X-Amz-*` query parameters over the given
+/// signed-header set (which must be lowercase, sorted by name, and include
+/// `host`) and payload-hash line, returning the query string with
+/// `X-Amz-Signature` appended.
+fn presign_query_internal(
+    request: &PresignRequest<'_>,
+    credentials: &AwsCredentials,
+    signed_headers: &[(&'static str, String)],
+    payload_hash: &str,
+) -> String {
     let (amz_date, date_stamp) = format_timestamps(request.timestamp_unix);
     let credential_scope = format!(
         "{date_stamp}/{}/{}/aws4_request",
         request.region, request.service
     );
     let credential = format!("{}/{credential_scope}", credentials.access_key_id);
+    let signed_header_names = signed_headers
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_headers = signed_headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect::<String>();
 
     // The canonical query string is sorted by (encoded) key name; the
     // `X-Amz-*` keys here are already alphabetical, and inserting the
@@ -227,7 +322,7 @@ pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials)
     if let Some(token) = &credentials.session_token {
         params.push(("X-Amz-Security-Token", token.clone()));
     }
-    params.push(("X-Amz-SignedHeaders", "host".to_string()));
+    params.push(("X-Amz-SignedHeaders", signed_header_names.clone()));
     let canonical_query = params
         .iter()
         .map(|(name, value)| {
@@ -241,10 +336,9 @@ pub fn presign_query(request: &PresignRequest<'_>, credentials: &AwsCredentials)
         .join("&");
 
     let canonical_request = format!(
-        "{}\n{}\n{canonical_query}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
+        "{}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{payload_hash}",
         request.method,
         canonical_uri(request.path),
-        request.host,
     );
 
     let string_to_sign = format!(
@@ -681,6 +775,371 @@ mod tests {
         let query = presign_query(&request, &credentials);
         // The token is present and URL-encoded (`/` -> %2F, `+` -> %2B).
         assert!(query.contains("X-Amz-Security-Token=temp%2Ftoken%2Bvalue"));
+    }
+
+    /// Recomputes the SigV4 signature exactly the way an S3-compatible
+    /// bucket does for a *received* presigned request (#368): rebuild the
+    /// canonical query from the presented `X-Amz-*` parameters (minus the
+    /// signature), take each header named in `X-Amz-SignedHeaders` from the
+    /// headers the client actually sent (a missing one is an immediate
+    /// rejection -- the canonical request cannot even be reconstructed),
+    /// and derive the payload-hash line from the *actual* received bytes
+    /// when `x-amz-content-sha256` is signed (AWS S3's behavior for a
+    /// concrete payload hash). Returns `(recomputed, presented)` so tests
+    /// can assert mismatches, or `Err` for structurally rejected requests.
+    fn bucket_recompute_signature(
+        method: &str,
+        path: &str,
+        query: &str,
+        sent_headers: &[(&str, &str)],
+        actual_body: &[u8],
+        credentials: &AwsCredentials,
+    ) -> Result<(String, String), String> {
+        let mut presented_signature = None;
+        let mut canonical_params = Vec::new();
+        let mut signed_header_names = None;
+        let mut credential = None;
+        let mut amz_date = None;
+        for pair in query.split('&') {
+            let (name, value) = pair.split_once('=').ok_or("malformed query pair")?;
+            if name == "X-Amz-Signature" {
+                presented_signature = Some(value.to_string());
+                continue;
+            }
+            canonical_params.push(format!("{name}={value}"));
+            match name {
+                "X-Amz-SignedHeaders" => signed_header_names = Some(percent_decode(value)?),
+                "X-Amz-Credential" => credential = Some(percent_decode(value)?),
+                "X-Amz-Date" => amz_date = Some(value.to_string()),
+                _ => {}
+            }
+        }
+        let presented_signature = presented_signature.ok_or("missing X-Amz-Signature")?;
+        let signed_header_names = signed_header_names.ok_or("missing X-Amz-SignedHeaders")?;
+        let amz_date = amz_date.ok_or("missing X-Amz-Date")?;
+        let canonical_query = canonical_params.join("&");
+
+        // Scope pieces come from the presented credential, exactly as a
+        // bucket parses them: access-key/date/region/service/aws4_request.
+        let credential = credential.ok_or("missing X-Amz-Credential")?;
+        let mut scope = credential.split('/');
+        let _access_key = scope.next().ok_or("empty credential")?;
+        let date_stamp = scope.next().ok_or("credential missing date")?.to_string();
+        let region = scope.next().ok_or("credential missing region")?.to_string();
+        let service = scope
+            .next()
+            .ok_or("credential missing service")?
+            .to_string();
+
+        let mut canonical_headers = String::new();
+        for name in signed_header_names.split(';') {
+            let value = sent_headers
+                .iter()
+                .find(|(sent, _)| sent.eq_ignore_ascii_case(name))
+                .map(|(_, value)| *value)
+                .ok_or_else(|| format!("required signed header {name} was not sent"))?;
+            canonical_headers.push_str(&format!("{name}:{}\n", value.trim()));
+        }
+        // For a concrete signed payload hash the bucket hashes the bytes it
+        // actually received; only UNSIGNED-PAYLOAD skips that.
+        let payload_hash = if signed_header_names
+            .split(';')
+            .any(|h| h == "x-amz-content-sha256")
+        {
+            hex_sha256(actual_body)
+        } else {
+            "UNSIGNED-PAYLOAD".to_string()
+        };
+
+        let canonical_request = format!(
+            "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_header_names}\n{payload_hash}",
+            canonical_uri(path),
+        );
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{date_stamp}/{region}/{service}/aws4_request\n{}",
+            hex_sha256(canonical_request.as_bytes())
+        );
+        let signing_key = derive_signing_key(
+            &credentials.secret_access_key,
+            &date_stamp,
+            &region,
+            &service,
+        );
+        Ok((
+            hex_hmac(&signing_key, string_to_sign.as_bytes()),
+            presented_signature,
+        ))
+    }
+
+    /// Minimal percent-decoder for the test verifier (the only escapes the
+    /// presigner emits are %2F and %3B).
+    fn percent_decode(value: &str) -> Result<String, String> {
+        let bytes = value.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = value
+                    .get(index + 1..index + 3)
+                    .ok_or("truncated percent escape")?;
+                out.push(u8::from_str_radix(hex, 16).map_err(|_| "invalid percent escape")?);
+                index += 3;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(out).map_err(|_| "non-UTF8 decoded value".to_string())
+    }
+
+    fn bound_test_credentials() -> AwsCredentials {
+        AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        }
+    }
+
+    fn bound_test_request() -> PresignRequest<'static> {
+        PresignRequest {
+            method: "PUT",
+            path: "/ferrogate-assets/.ferrogate/staging/abc123",
+            host: "project.supabase.co",
+            region: "us-east-1",
+            service: "s3",
+            expires_secs: 900,
+            timestamp_unix: 1_440_938_160,
+        }
+    }
+
+    /// Asserts a received request is NOT acceptable to a bucket-side
+    /// verifier: either it is structurally rejected (missing signed header)
+    /// or its independently recomputed signature mismatches the presented
+    /// one (canonical request differs).
+    fn assert_bucket_rejects(
+        query: &str,
+        sent_headers: &[(&str, &str)],
+        actual_body: &[u8],
+        why: &str,
+    ) {
+        let request = bound_test_request();
+        match bucket_recompute_signature(
+            request.method,
+            request.path,
+            query,
+            sent_headers,
+            actual_body,
+            &bound_test_credentials(),
+        ) {
+            Err(_) => {}
+            Ok((recomputed, presented)) => assert_ne!(recomputed, presented, "{why}"),
+        }
+    }
+
+    #[test]
+    fn bound_presign_verifies_end_to_end_when_size_checksum_and_headers_match() {
+        // #368: both sides recompute the same canonical request when the
+        // holder sends exactly the declared size, checksum header, and bytes.
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let credentials = bound_test_credentials();
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &credentials,
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        // The signed-header set travels in the query (with `;` encoded).
+        assert!(bound
+            .query
+            .contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256"));
+        // The typed required-header map the intent endpoint returns verbatim.
+        assert_eq!(
+            bound.required_headers,
+            vec![
+                ("content-length", body.len().to_string()),
+                ("x-amz-content-sha256", sha.clone()),
+            ]
+        );
+
+        let content_length = body.len().to_string();
+        let sent_headers = [
+            ("host", request.host),
+            ("content-length", content_length.as_str()),
+            ("x-amz-content-sha256", sha.as_str()),
+        ];
+        let (recomputed, presented) = bucket_recompute_signature(
+            request.method,
+            request.path,
+            &bound.query,
+            &sent_headers,
+            body,
+            &credentials,
+        )
+        .expect("a fully matching upload must be verifiable");
+        assert_eq!(
+            recomputed, presented,
+            "matching size + checksum + headers + bytes must verify"
+        );
+    }
+
+    #[test]
+    fn bound_presign_rejects_a_different_declared_size() {
+        // A URL signed for N bytes cannot authorize an upload declaring a
+        // different Content-Length: that header is in the canonical request.
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &bound_test_credentials(),
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        // The writer pads the payload to burn quota, updating the length
+        // header to match its real (larger) upload.
+        let padded = [body.as_slice(), b" plus quota-burning padding"].concat();
+        let padded_length = padded.len().to_string();
+        let padded_sha = hex_sha256(&padded);
+        assert_bucket_rejects(
+            &bound.query,
+            &[
+                ("host", request.host),
+                ("content-length", padded_length.as_str()),
+                ("x-amz-content-sha256", padded_sha.as_str()),
+            ],
+            &padded,
+            "an upload larger than the signed content-length must not verify",
+        );
+    }
+
+    #[test]
+    fn bound_presign_rejects_different_bytes_with_an_honest_checksum() {
+        // Same size, different content, checksum header updated to match
+        // the substituted bytes: the signed x-amz-content-sha256 differs.
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &bound_test_credentials(),
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        let substituted = b"the DIFFERENT same-length payload!";
+        assert_eq!(substituted.len(), body.len());
+        let substituted_sha = hex_sha256(substituted);
+        let content_length = substituted.len().to_string();
+        assert_bucket_rejects(
+            &bound.query,
+            &[
+                ("host", request.host),
+                ("content-length", content_length.as_str()),
+                ("x-amz-content-sha256", substituted_sha.as_str()),
+            ],
+            substituted,
+            "different bytes with a matching self-declared checksum must not verify",
+        );
+    }
+
+    #[test]
+    fn bound_presign_rejects_omitted_required_headers() {
+        // Omitting either signed header leaves the bucket unable to
+        // reconstruct the canonical request -- immediate rejection.
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &bound_test_credentials(),
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        let content_length = body.len().to_string();
+        assert_bucket_rejects(
+            &bound.query,
+            &[
+                ("host", request.host),
+                ("content-length", content_length.as_str()),
+            ],
+            body,
+            "omitting x-amz-content-sha256 must not verify",
+        );
+        assert_bucket_rejects(
+            &bound.query,
+            &[("host", request.host), ("x-amz-content-sha256", &sha)],
+            body,
+            "omitting content-length must not verify",
+        );
+    }
+
+    #[test]
+    fn bound_presign_rejects_a_replay_with_different_bytes() {
+        // A replay sends the ORIGINAL signed headers verbatim but different
+        // bytes. The bucket derives the payload-hash line from the received
+        // bytes, so the canonical request differs and the signature fails --
+        // the replayed capability cannot smuggle new content.
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &bound_test_credentials(),
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        let tampered = b"tampered bytes replayed on the URL";
+        assert_eq!(tampered.len(), body.len());
+        let content_length = body.len().to_string();
+        assert_bucket_rejects(
+            &bound.query,
+            &[
+                ("host", request.host),
+                ("content-length", content_length.as_str()),
+                ("x-amz-content-sha256", sha.as_str()),
+            ],
+            tampered,
+            "a replay with different bytes must not verify",
+        );
+    }
+
+    #[test]
+    fn unbound_presign_still_verifies_with_only_the_host_header() {
+        // Regression guard for the download path (#259): the host-only,
+        // UNSIGNED-PAYLOAD presign is unchanged by the #368 refactor.
+        let credentials = bound_test_credentials();
+        let request = PresignRequest {
+            method: "GET",
+            ..bound_test_request()
+        };
+        let query = presign_query(&request, &credentials);
+        assert!(query.contains("X-Amz-SignedHeaders=host"));
+        let (recomputed, presented) = bucket_recompute_signature(
+            request.method,
+            request.path,
+            &query,
+            &[("host", request.host)],
+            b"",
+            &credentials,
+        )
+        .expect("the host-only presign must remain verifiable");
+        assert_eq!(recomputed, presented);
     }
 
     #[test]

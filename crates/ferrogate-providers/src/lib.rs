@@ -35,9 +35,11 @@ pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use sigv4::{
     canonical_query_string as sigv4_canonical_query_string, presign_query as presign_sigv4_query,
-    sign as sign_sigv4, sign_with_content_hash_header as sign_sigv4_with_content_hash_header,
+    presign_query_bound as presign_sigv4_query_bound, sign as sign_sigv4,
+    sign_with_content_hash_header as sign_sigv4_with_content_hash_header,
     sign_with_content_hash_header_and_query as sign_sigv4_with_content_hash_header_and_query,
-    AwsCredentials, PresignRequest, SignedHeaders, SigningRequest,
+    AwsCredentials, BoundPresignedUpload, PresignBoundPayload, PresignRequest, SignedHeaders,
+    SigningRequest,
 };
 pub use types::{
     canonical_provider_adapter_family, is_openai_compatible_provider_kind,
