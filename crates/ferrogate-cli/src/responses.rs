@@ -1428,6 +1428,26 @@ pub(crate) struct AssetSummary {
     pub(crate) updated_at_unix: i64,
 }
 
+/// Authoritative tenant-level asset storage usage and the effective upload
+/// limits applied by the gateway. Usage comes from the configured repository,
+/// not from summing a client-side page of asset summaries.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetStorageSummary {
+    pub(crate) object: &'static str,
+    pub(crate) used_bytes: u64,
+    pub(crate) quota_bytes: Option<u64>,
+    pub(crate) remaining_bytes: Option<u64>,
+    pub(crate) inline_upload_max_bytes: u64,
+    pub(crate) presigned_upload: AssetPresignedUploadConstraints,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetPresignedUploadConstraints {
+    pub(crate) enabled: bool,
+    pub(crate) max_object_bytes: Option<u64>,
+    pub(crate) url_ttl_seconds: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AssetMutationResponse {
     pub(crate) object: &'static str,

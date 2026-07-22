@@ -31,7 +31,8 @@ use crate::{
         write_cacheable_response, write_json_error, write_json_error_and_close,
         write_json_response, AdminDeleteResponse, AdminList, AssetCacheHeaders,
         AssetChannelMutationResponse, AssetChannelSummary, AssetManifest, AssetManifestVariant,
-        AssetManifestVersion, AssetMutationResponse, AssetSummary,
+        AssetManifestVersion, AssetMutationResponse, AssetPresignedUploadConstraints,
+        AssetStorageSummary, AssetSummary,
     },
 };
 
@@ -43,6 +44,11 @@ pub(super) struct AssetError {
     pub(super) status: StatusCode,
     pub(super) code: &'static str,
     pub(super) message: String,
+}
+
+enum ChannelMoveError {
+    TargetNotFound,
+    Storage(String),
 }
 
 impl AssetError {
@@ -103,6 +109,19 @@ impl FerroGateway {
             [] => match *method {
                 Method::GET => self.handle_asset_list(session, ctx, headers, None).await,
                 _ => method_not_allowed(session, ctx, "/v1/assets supports GET").await,
+            },
+            // This literal operator view must be matched before the generic
+            // asset path segments so `storage/summary` can never be treated as
+            // an asset identity.
+            ["storage", "summary"] => match *method {
+                Method::GET => {
+                    self.handle_asset_storage_summary(session, ctx, headers)
+                        .await
+                }
+                _ => {
+                    method_not_allowed(session, ctx, "/v1/assets/storage/summary supports GET")
+                        .await
+                }
             },
             [asset_type] => match *method {
                 Method::GET => {
@@ -256,6 +275,47 @@ impl FerroGateway {
             }
             Err(error) => storage_unavailable(session, ctx, error.to_string()).await,
         }
+    }
+
+    async fn handle_asset_storage_summary(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let Some(tenant_id) = auth.organization_id.as_deref() else {
+            return tenant_required(session, ctx).await;
+        };
+        let used_bytes = match state.tenant_asset_storage_bytes_used(tenant_id).await {
+            Ok(used_bytes) => used_bytes,
+            Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
+        };
+        let presigned_limits = state.asset_bucket_client().map(|_| {
+            (
+                state.asset_presign_max_object_bytes(),
+                state.asset_presign_ttl_secs(),
+            )
+        });
+        let body = build_asset_storage_summary(
+            used_bytes,
+            auth.effective_quota.asset_storage_quota_bytes,
+            presigned_limits,
+        );
+        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -504,11 +564,12 @@ impl FerroGateway {
         // Optional channel move in the same request (#260): `?channel=stable`
         // points that channel at the just-pushed version.
         if let Some(channel) = query_param(query, "channel") {
-            if let Err(response) = self
+            if let Err(error) = self
                 .move_channel(&state, ctx, &auth, asset_type, name, &channel, version)
                 .await
             {
-                return response;
+                return write_channel_move_error(session, ctx, error, asset_type, name, version)
+                    .await;
             }
         }
 
@@ -918,21 +979,21 @@ impl FerroGateway {
             )
             .await;
         };
-        if let Err(response) = self
+        let record = match self
             .move_channel(&state, ctx, &auth, asset_type, name, channel, &version)
             .await
         {
-            return response;
-        }
+            Ok(record) => record,
+            Err(error) => {
+                return write_channel_move_error(session, ctx, error, asset_type, name, &version)
+                    .await;
+            }
+        };
         let body = AssetChannelMutationResponse {
             object: "asset_channel",
             asset_type: asset_type.to_string(),
             name: name.to_string(),
-            channel: AssetChannelSummary {
-                channel: channel.to_string(),
-                version,
-                updated_at_unix: now_unix_seconds(),
-            },
+            channel: channel_summary(&record),
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
@@ -1079,8 +1140,7 @@ impl FerroGateway {
     }
 
     /// Upsert (create or move) a channel pointer, validating the target
-    /// version exists, and audit the move. Returns `Err(response)` if a
-    /// terminal HTTP response was written.
+    /// version exists and is not yanked, then audit only the durable move.
     #[allow(clippy::too_many_arguments)]
     async fn move_channel(
         &self,
@@ -1091,29 +1151,17 @@ impl FerroGateway {
         name: &str,
         channel: &str,
         version: &str,
-    ) -> Result<(), PingoraResult<()>> {
+    ) -> Result<StoredAssetChannel, ChannelMoveError> {
         // The channel target must be an existing, non-yanked version so a tag
         // never points at an unresolvable artifact.
-        let id = stored_asset_variant_id(&auth_tenant(auth), asset_type, name, version, "");
-        // Any variant of the version is enough to prove it exists; fall back to
-        // scanning if the default-variant row is absent.
-        let exists = match state.get_asset(&id).await {
-            Ok(Some(_)) => true,
-            Ok(None) => match state
-                .list_assets(&auth_tenant(auth), Some(asset_type))
-                .await
-            {
-                Ok(assets) => assets
-                    .iter()
-                    .any(|asset| asset.name == name && asset.version == version),
-                Err(_) => false,
-            },
-            Err(_) => false,
-        };
-        if !exists {
-            return Ok(());
-        }
         let tenant_id = auth_tenant(auth);
+        let assets = self
+            .asset_versions(state, &tenant_id, asset_type, name)
+            .await
+            .map_err(|error| ChannelMoveError::Storage(error.to_string()))?;
+        if !channel_target_is_resolvable(&assets, version) {
+            return Err(ChannelMoveError::TargetNotFound);
+        }
         let channel_id = asset_channel_id(&tenant_id, asset_type, name, channel);
         let record = StoredAssetChannel {
             id: channel_id.clone(),
@@ -1124,17 +1172,19 @@ impl FerroGateway {
             version: version.to_string(),
             updated_at_unix: now_unix_seconds(),
         };
-        if state.upsert_asset_channel(record).await.is_ok() {
-            state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                ctx,
-                auth,
-                "asset.channel.move",
-                &channel_id,
-                "committed",
-                format!("channel {asset_type}/{name}/{channel} -> {version}"),
-            ));
-        }
-        Ok(())
+        state
+            .upsert_asset_channel(record.clone())
+            .await
+            .map_err(|error| ChannelMoveError::Storage(error.to_string()))?;
+        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            ctx,
+            auth,
+            "asset.channel.move",
+            &channel_id,
+            "committed",
+            format!("channel {asset_type}/{name}/{channel} -> {version}"),
+        ));
+        Ok(record)
     }
 
     /// Fetch content (bucket or inline), re-verify its hash, and serve it with
@@ -1289,12 +1339,50 @@ fn asset_summary(asset: &StoredAsset) -> AssetSummary {
     }
 }
 
+fn build_asset_storage_summary(
+    used_bytes: u64,
+    quota_bytes: Option<u64>,
+    presigned_limits: Option<(u64, u64)>,
+) -> AssetStorageSummary {
+    let (enabled, max_object_bytes, url_ttl_seconds) = match presigned_limits {
+        Some((max_object_bytes, url_ttl_seconds)) => {
+            (true, Some(max_object_bytes), Some(url_ttl_seconds))
+        }
+        None => (false, None, None),
+    };
+    AssetStorageSummary {
+        object: "asset_storage_summary",
+        used_bytes,
+        quota_bytes,
+        remaining_bytes: quota_bytes.map(|quota| quota.saturating_sub(used_bytes)),
+        inline_upload_max_bytes: inline_push_byte_limit(quota_bytes) as u64,
+        presigned_upload: AssetPresignedUploadConstraints {
+            enabled,
+            max_object_bytes,
+            url_ttl_seconds,
+        },
+    }
+}
+
 fn channel_summary(channel: &StoredAssetChannel) -> AssetChannelSummary {
     AssetChannelSummary {
         channel: channel.channel.clone(),
         version: channel.version.clone(),
         updated_at_unix: channel.updated_at_unix,
     }
+}
+
+fn channel_target_is_resolvable(assets: &[StoredAsset], version: &str) -> bool {
+    let mut found = false;
+    for asset in assets.iter().filter(|asset| asset.version == version) {
+        found = true;
+        // Resolution treats the whole logical version as yanked when any one
+        // of its variants is yanked, so a channel must reject that state too.
+        if asset.yanked {
+            return false;
+        }
+    }
+    found
 }
 
 /// Build the self-serve manifest: channels + every version with its variants
@@ -1428,6 +1516,29 @@ async fn storage_unavailable(
         &ctx.request_id,
     )
     .await
+}
+
+async fn write_channel_move_error(
+    session: &mut Session,
+    ctx: &super::ProxyContext,
+    error: ChannelMoveError,
+    asset_type: &str,
+    name: &str,
+    version: &str,
+) -> PingoraResult<()> {
+    match error {
+        ChannelMoveError::TargetNotFound => {
+            write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "channel_target_not_found",
+                format!("no non-yanked asset at {asset_type}/{name}/{version}"),
+                &ctx.request_id,
+            )
+            .await
+        }
+        ChannelMoveError::Storage(message) => storage_unavailable(session, ctx, message).await,
+    }
 }
 
 fn now_unix_seconds() -> i64 {

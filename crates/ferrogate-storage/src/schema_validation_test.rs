@@ -31,10 +31,10 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 
 #[test]
 fn schema_contract_includes_latest_asset_egress_migration() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 49);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 50);
     assert_eq!(
         POSTGRES_SCHEMA_NAME,
-        "049_self_hosted_worker_evidence_correlation"
+        "050_bucket_backed_asset_size_constraint"
     );
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
     assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (32, '032_guardrail_policy_binding_generation')"));
@@ -83,6 +83,21 @@ fn schema_contract_includes_latest_asset_egress_migration() {
         POSTGRES_SCHEMA_SQL.contains("VALUES (49, '049_self_hosted_worker_evidence_correlation')")
     );
     assert!(POSTGRES_SCHEMA_SQL.contains("ALTER TABLE self_hosted_worker_telemetry_events"));
+    // #338: presigned bucket objects use their configured per-object ceiling,
+    // while inline BYTEA rows retain the database-level 10 MiB backstop.
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (50, '050_bucket_backed_asset_size_constraint')"));
+    let migration_50 = POSTGRES_SCHEMA_SQL
+        .split("-- Migration 50 (#338)")
+        .nth(1)
+        .expect("migration 50 block present");
+    assert!(migration_50.contains("DO $$"));
+    assert!(migration_50.contains("IF FOUND THEN"));
+    assert!(
+        POSTGRES_SCHEMA_SQL.contains("DROP CONSTRAINT IF EXISTS stored_assets_size_bytes_check")
+    );
+    assert!(POSTGRES_SCHEMA_SQL.contains(
+        "CHECK (size_bytes >= 0 AND (storage_uri IS NOT NULL OR size_bytes <= 10485760))"
+    ));
     assert!(
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")

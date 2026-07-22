@@ -877,8 +877,8 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
          (before={public_before}, after={public_after}); it must pin the configured schema {schema}",
     );
 
-    // Migration 1's most fundamental table plus the current head's newest tables
-    // (037_agent_schedules) must all exist in the CONFIGURED schema.
+    // Migration 1's most fundamental table plus representative later tables
+    // must all exist in the CONFIGURED schema.
     for table in [
         "control_plane_resources",
         "control_plane_replay_floors",
@@ -900,17 +900,17 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
     }
 
     // The migration ledger inside the configured schema must record the
-    // current head (37 / 037_agent_schedules).
+    // current head.
     assert_eq!(
         count_rows(
             &dsn,
             &format!(
                 "SELECT COUNT(*)::BIGINT FROM \"{schema}\".storage_schema_migrations \
-                 WHERE version = 37 AND name = '037_agent_schedules'"
+                 WHERE version = 50 AND name = '050_bucket_backed_asset_size_constraint'"
             )
         ),
         1,
-        "the configured schema's migration ledger must record head 37",
+        "the configured schema's migration ledger must record head 50",
     );
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.

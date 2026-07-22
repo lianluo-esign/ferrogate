@@ -36,6 +36,12 @@ name = "Asset client"
 key = "asset-secret"
 scopes = ["assets.read", "assets.write"]
 organization_id = "tenant-quota-e2e"
+
+[[api_keys]]
+id = "unscoped-asset-client"
+name = "Unscoped asset client"
+key = "unscoped-asset-secret"
+scopes = ["assets.read"]
 "#
         ),
     )
@@ -270,6 +276,54 @@ fn asset_push_quota_tenant_override_is_tighter_than_the_plan_default() {
         "first push (30/50 override bytes) must succeed: {first_push}"
     );
 
+    // The operator summary reads the authoritative repository total and the
+    // already-resolved tenant override. It is not derived from a client-side
+    // asset list (and therefore cannot miss rows because of pagination).
+    let summary = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/storage/summary",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    ));
+    assert_eq!(summary["object"], "asset_storage_summary");
+    assert_eq!(summary["used_bytes"], 30);
+    assert_eq!(summary["quota_bytes"], 50);
+    assert_eq!(summary["remaining_bytes"], 20);
+    assert_eq!(summary["inline_upload_max_bytes"], 50);
+    assert_eq!(summary["presigned_upload"]["enabled"], false);
+    assert_eq!(
+        summary["presigned_upload"]["max_object_bytes"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        summary["presigned_upload"]["url_ttl_seconds"],
+        serde_json::Value::Null
+    );
+
+    let wrong_method = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/storage/summary",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert!(status_line(&wrong_method).contains("405"), "{wrong_method}");
+    assert!(
+        wrong_method.contains("method_not_allowed"),
+        "{wrong_method}"
+    );
+
+    let no_tenant = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/storage/summary",
+        &["Authorization: Bearer unscoped-asset-secret"],
+        "",
+    );
+    assert!(status_line(&no_tenant).contains("403"), "{no_tenant}");
+    assert!(no_tenant.contains("tenant_required"), "{no_tenant}");
+
     let second_push = push_asset(&gateway_addr, "two", &"b".repeat(30));
     assert!(
         status_line(&second_push).contains("403"),
@@ -277,6 +331,34 @@ fn asset_push_quota_tenant_override_is_tighter_than_the_plan_default() {
          the 1000-byte plan default alone would allow it: {second_push}"
     );
     assert!(second_push.contains("asset_storage_quota_exceeded"));
+
+    // Rejected writes are absent from backend accounting.
+    let after_rejection = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/storage/summary",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    ));
+    assert_eq!(after_rejection["used_bytes"], 30);
+    assert_eq!(after_rejection["remaining_bytes"], 20);
+
+    // A channel must never fabricate success when its target does not exist.
+    let missing_channel_target = http_request(
+        &gateway_addr,
+        "PUT",
+        "/v1/assets/config_file/missing/channels/stable?version=9.9.9",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert!(
+        status_line(&missing_channel_target).contains("404"),
+        "{missing_channel_target}"
+    );
+    assert!(
+        missing_channel_target.contains("channel_target_not_found"),
+        "{missing_channel_target}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

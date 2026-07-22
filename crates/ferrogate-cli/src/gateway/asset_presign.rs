@@ -133,6 +133,30 @@ impl FerroGateway {
                 .await?;
                 Ok(true)
             }
+            ("upload", _) | ("commit", _) => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    format!(
+                        "/v1/assets/presign/{action}/{{asset_type}}/{{name}}/{{version}} supports POST"
+                    ),
+                    &ctx.request_id,
+                )
+                .await?;
+                Ok(true)
+            }
+            ("download", _) => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "/v1/assets/presign/download/{asset_type}/{name}/{version} supports GET",
+                    &ctx.request_id,
+                )
+                .await?;
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -170,6 +194,25 @@ impl FerroGateway {
             .await;
         }
 
+        let id = stored_asset_id(&tenant_id, asset_type, name, version);
+        match state.get_asset(&id).await {
+            Ok(Some(_)) => {
+                return write_asset_version_immutable(session, ctx, asset_type, name, version)
+                    .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
+
         let Some(bucket) = state.asset_bucket_client() else {
             return write_json_error(
                 session,
@@ -198,7 +241,6 @@ impl FerroGateway {
             .await;
         }
 
-        let id = stored_asset_id(&tenant_id, asset_type, name, version);
         // Quota preflight so an obviously over-quota upload is rejected
         // before we hand out a presigned URL; the authoritative accounting
         // still happens at commit (below), when the real bytes exist.
@@ -309,6 +351,37 @@ impl FerroGateway {
             .await;
         }
         let expected_sha256 = commit.sha256.to_ascii_lowercase();
+        let id = stored_asset_id(&tenant_id, asset_type, name, version);
+        match state.get_asset(&id).await {
+            Ok(Some(existing)) => {
+                if existing_asset_matches_commit(
+                    &existing,
+                    commit.size_bytes,
+                    &expected_sha256,
+                    commit.content_type.as_deref(),
+                ) {
+                    let body = AssetMutationResponse {
+                        object: "asset",
+                        asset: asset_summary(&existing),
+                    };
+                    return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                        .await;
+                }
+                return write_asset_version_immutable(session, ctx, asset_type, name, version)
+                    .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
         let content_type = commit
             .content_type
             .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -323,8 +396,6 @@ impl FerroGateway {
             )
             .await;
         };
-
-        let id = stored_asset_id(&tenant_id, asset_type, name, version);
 
         // Verify the committed object end-to-end (size via HEAD, sha256 +
         // supply-chain checks against the fetched bytes) and fail closed by
@@ -781,6 +852,38 @@ enum CommitVerification {
     NotUploaded,
     /// The object existed but failed validation; it has been deleted.
     Rejected(CommitRejection),
+}
+
+fn existing_asset_matches_commit(
+    asset: &StoredAsset,
+    expected_size: u64,
+    expected_sha256: &str,
+    requested_content_type: Option<&str>,
+) -> bool {
+    asset.storage_uri.is_some()
+        && asset.size_bytes == expected_size
+        && asset.content_hash == expected_sha256
+        && requested_content_type.is_none_or(|content_type| asset.content_type == content_type)
+}
+
+async fn write_asset_version_immutable(
+    session: &mut Session,
+    ctx: &super::ProxyContext,
+    asset_type: &str,
+    name: &str,
+    version: &str,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::CONFLICT,
+        "asset_version_immutable",
+        format!(
+            "{asset_type}/{name}/{version} already exists and is immutable; \
+             delete it before republishing"
+        ),
+        &ctx.request_id,
+    )
+    .await
 }
 
 /// Verifies a presigned-uploaded object against its registered intent and

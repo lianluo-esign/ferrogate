@@ -13,9 +13,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrogate_storage::sha256_hex;
+use ferrogate_storage::{sha256_hex, StoredAsset};
 
-use super::{verify_and_fetch_committed_object, CommitVerification};
+use super::{existing_asset_matches_commit, verify_and_fetch_committed_object, CommitVerification};
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
 /// The EICAR antivirus test signature -- the same fixed byte string
@@ -334,4 +334,67 @@ fn is_hex_sha256_accepts_only_64_char_hex() {
     assert!(!super::is_hex_sha256(&"a".repeat(65)));
     assert!(!super::is_hex_sha256(&"g".repeat(64)));
     assert!(!super::is_hex_sha256(""));
+}
+
+fn committed_asset(storage_uri: Option<&str>) -> StoredAsset {
+    StoredAsset {
+        id: "tenant-a:cli_tool:hello:1.0.0".into(),
+        tenant_id: "tenant-a".into(),
+        project_id: None,
+        asset_type: "cli_tool".into(),
+        name: "hello".into(),
+        version: "1.0.0".into(),
+        content_type: "text/plain".into(),
+        content_hash: "a".repeat(64),
+        size_bytes: 42,
+        content: Vec::new(),
+        storage_uri: storage_uri.map(str::to_string),
+        variant: String::new(),
+        yanked: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }
+}
+
+#[test]
+fn repeated_commit_is_idempotent_only_for_matching_bucket_metadata() {
+    let bucket_asset = committed_asset(Some("tenant-a:cli_tool:hello:1.0.0"));
+    assert!(existing_asset_matches_commit(
+        &bucket_asset,
+        42,
+        &"a".repeat(64),
+        None,
+    ));
+    assert!(existing_asset_matches_commit(
+        &bucket_asset,
+        42,
+        &"a".repeat(64),
+        Some("text/plain"),
+    ));
+    assert!(!existing_asset_matches_commit(
+        &bucket_asset,
+        43,
+        &"a".repeat(64),
+        None,
+    ));
+    assert!(!existing_asset_matches_commit(
+        &bucket_asset,
+        42,
+        &"b".repeat(64),
+        None,
+    ));
+    assert!(!existing_asset_matches_commit(
+        &bucket_asset,
+        42,
+        &"a".repeat(64),
+        Some("application/octet-stream"),
+    ));
+
+    let inline_asset = committed_asset(None);
+    assert!(!existing_asset_matches_commit(
+        &inline_asset,
+        42,
+        &"a".repeat(64),
+        Some("text/plain"),
+    ));
 }

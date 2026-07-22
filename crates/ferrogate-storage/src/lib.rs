@@ -533,8 +533,8 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 49;
-const POSTGRES_SCHEMA_NAME: &str = "049_self_hosted_worker_evidence_correlation";
+const POSTGRES_SCHEMA_VERSION: u64 = 50;
+const POSTGRES_SCHEMA_NAME: &str = "050_bucket_backed_asset_size_constraint";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \
@@ -4014,6 +4014,38 @@ impl PostgresControlPlaneStore {
         };
         transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(asset_from_row).collect())
+    }
+
+    /// Keep tenant storage accounting on a metadata-only projection. Loading
+    /// `content` here would deserialize every inline BYTEA merely to add its
+    /// already-recorded size, turning quota checks and operator summaries into
+    /// bulk blob reads.
+    const TENANT_ASSET_STORAGE_SIZE_QUERY: &'static str =
+        "SELECT size_bytes FROM stored_assets WHERE tenant_id = $1";
+
+    async fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> Result<u64, StorageError> {
+        let operation = self.asset_operation("read tenant asset storage usage");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // The transaction exists only to pin the configured schema in
+        // `search_path`; the indexed SELECT is the sole data operation.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(Self::TENANT_ASSET_STORAGE_SIZE_QUERY, &[&tenant_id])
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().fold(0_u64, |total, row| {
+            total.saturating_add(nonnegative_u64(row.get::<_, i64>(0)))
+        }))
     }
 
     async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
@@ -10087,6 +10119,14 @@ impl RuntimeControlPlaneState {
             .collect()
     }
 
+    pub fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> u64 {
+        self.assets
+            .records
+            .values()
+            .filter(|asset| asset.tenant_id == tenant_id)
+            .fold(0_u64, |total, asset| total.saturating_add(asset.size_bytes))
+    }
+
     pub fn delete_asset(&mut self, id: &str) -> bool {
         self.assets.remove(id).is_some()
     }
@@ -13105,6 +13145,26 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Authoritative tenant storage usage without loading stored object bytes.
+    pub async fn tenant_asset_storage_bytes_used(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|control_plane| control_plane.tenant_asset_storage_bytes_used(tenant_id))
+                .map_err(|_| {
+                    StorageError::Runtime("in-memory asset repository lock is poisoned".to_string())
+                }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .tenant_asset_storage_bytes_used(tenant_id)
+                    .await
+            }
+        }
+    }
+
     pub async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
@@ -15398,6 +15458,10 @@ mod usage_metadata_schema_test;
 #[cfg(test)]
 #[path = "control_plane_schema_test.rs"]
 mod control_plane_schema_test;
+
+#[cfg(test)]
+#[path = "asset_storage_usage_test.rs"]
+mod asset_storage_usage_test;
 
 #[cfg(test)]
 mod tests {

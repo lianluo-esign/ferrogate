@@ -142,11 +142,8 @@ impl AppState {
     ) -> anyhow::Result<u64> {
         Ok(self
             .repositories
-            .list_assets(tenant_id, None)
-            .await?
-            .iter()
-            .map(|asset| asset.size_bytes)
-            .sum())
+            .tenant_asset_storage_bytes_used(tenant_id)
+            .await?)
     }
 
     /// Resolves the S3-compatible bucket client for `/v1/assets/*` content

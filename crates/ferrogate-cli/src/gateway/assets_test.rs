@@ -87,3 +87,46 @@ fn manifest_groups_variants_under_versions_newest_first() {
     assert_eq!(manifest.channels[0].channel, "latest");
     assert_eq!(manifest.channels[0].version, "1.0.0");
 }
+
+#[test]
+fn storage_summary_uses_effective_quota_and_saturates_remaining_bytes() {
+    let summary = build_asset_storage_summary(30, Some(50), None);
+    assert_eq!(summary.object, "asset_storage_summary");
+    assert_eq!(summary.used_bytes, 30);
+    assert_eq!(summary.quota_bytes, Some(50));
+    assert_eq!(summary.remaining_bytes, Some(20));
+    assert_eq!(summary.inline_upload_max_bytes, 50);
+    assert!(!summary.presigned_upload.enabled);
+    assert_eq!(summary.presigned_upload.max_object_bytes, None);
+    assert_eq!(summary.presigned_upload.url_ttl_seconds, None);
+
+    let over_quota = build_asset_storage_summary(75, Some(50), None);
+    assert_eq!(over_quota.remaining_bytes, Some(0));
+}
+
+#[test]
+fn storage_summary_exposes_presign_limits_only_when_bucket_is_available() {
+    let summary = build_asset_storage_summary(7, None, Some((5_000, 900)));
+    assert_eq!(summary.quota_bytes, None);
+    assert_eq!(summary.remaining_bytes, None);
+    assert_eq!(summary.inline_upload_max_bytes, INLINE_ASSET_MAX_BYTES);
+    assert!(summary.presigned_upload.enabled);
+    assert_eq!(summary.presigned_upload.max_object_bytes, Some(5_000));
+    assert_eq!(summary.presigned_upload.url_ttl_seconds, Some(900));
+}
+
+#[test]
+fn channel_target_requires_an_existing_non_yanked_logical_version() {
+    let healthy_variants = vec![
+        asset("1.0.0", "linux-x86_64", false, "a"),
+        asset("1.0.0", "darwin-arm64", false, "b"),
+    ];
+    assert!(channel_target_is_resolvable(&healthy_variants, "1.0.0"));
+    assert!(!channel_target_is_resolvable(&healthy_variants, "9.9.9"));
+
+    let partially_yanked = vec![
+        asset("1.0.0", "linux-x86_64", false, "a"),
+        asset("1.0.0", "darwin-arm64", true, "b"),
+    ];
+    assert!(!channel_target_is_resolvable(&partially_yanked, "1.0.0"));
+}

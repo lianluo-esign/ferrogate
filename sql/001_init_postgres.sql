@@ -2291,3 +2291,27 @@ ALTER TABLE self_hosted_worker_telemetry_events
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (49, '049_self_hosted_worker_evidence_correlation')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 50 (#338): the original stored-assets constraint predates the
+-- presigned bucket path and capped every row at the inline 10 MiB ceiling.
+-- Bucket-backed objects bypass the gateway body buffer and use their own
+-- configured per-object limit, so only inline BYTEA rows retain this database
+-- backstop. Keep the stable constraint name so schema validation and incident
+-- inspection can identify the exact invariant. The insert-first/IF FOUND gate
+-- is concurrency-safe and transactional: only the startup that records the
+-- migration performs the table scan, and a failed ALTER rolls the ledger row
+-- back so the next startup can retry.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (50, '050_bucket_backed_asset_size_constraint')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE stored_assets
+            DROP CONSTRAINT IF EXISTS stored_assets_size_bytes_check;
+        ALTER TABLE stored_assets
+            ADD CONSTRAINT stored_assets_size_bytes_check
+            CHECK (size_bytes >= 0 AND (storage_uri IS NOT NULL OR size_bytes <= 10485760));
+    END IF;
+END
+$$;

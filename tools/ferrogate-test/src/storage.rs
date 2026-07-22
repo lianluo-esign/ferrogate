@@ -1300,11 +1300,29 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 48",
-        quote_ident(schema)
+         FROM {schema}.storage_schema_migrations \
+         WHERE version = (SELECT MAX(version) FROM {schema}.storage_schema_migrations)",
+        schema = quote_ident(schema),
     ))?;
-    if migration_version.trim() != "48:048_handoff_parent_identity" {
+    if migration_version.trim() != "50:050_bucket_backed_asset_size_constraint" {
         bail!("unexpected latest Supabase migration: {migration_version}");
+    }
+
+    let asset_size_constraint = postgres_scalar(&format!(
+        "SELECT pg_get_constraintdef(constraint_row.oid) \
+         FROM pg_constraint AS constraint_row \
+         JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid \
+         JOIN pg_namespace AS namespace_row ON namespace_row.oid = table_row.relnamespace \
+         WHERE namespace_row.nspname = '{}' \
+           AND table_row.relname = 'stored_assets' \
+           AND constraint_row.conname = 'stored_assets_size_bytes_check'",
+        sql_literal(schema),
+    ))?;
+    if !asset_size_constraint.contains("size_bytes >= 0")
+        || !asset_size_constraint.contains("storage_uri IS NOT NULL")
+        || !asset_size_constraint.contains("size_bytes <= 10485760")
+    {
+        bail!("unexpected stored_assets_size_bytes_check definition: {asset_size_constraint}");
     }
 
     Ok(())
