@@ -8,8 +8,9 @@ use crate::schema_routing_test_support::{
     block_on, run_sql, serialize_db_test, unique_schema, SchemaGuard,
 };
 use crate::{
-    PostgresControlPlaneStore, PostgresStorageConfig, PostgresTlsMode, RuntimeControlPlaneBackend,
-    RuntimeStorageRepositories, StorageError, StorageProviderKind, StoredAsset, StoredAssetChannel,
+    asset_transaction_commit_outcome_unknown, PostgresControlPlaneStore, PostgresStorageConfig,
+    PostgresTlsMode, RuntimeControlPlaneBackend, RuntimeStorageRepositories, StorageError,
+    StorageOperation, StorageProviderKind, StoredAsset, StoredAssetChannel,
 };
 
 fn asset(id: &str, tenant_id: &str, size_bytes: u64) -> StoredAsset {
@@ -91,6 +92,79 @@ fn in_memory_usage_sums_only_the_requested_tenants_rows() {
 }
 
 #[test]
+fn create_asset_if_absent_is_atomic_and_never_replaces_the_winner() {
+    let repositories =
+        RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 16, 16);
+    let winner = asset("asset-a", "tenant-a", 17);
+    let mut loser = winner.clone();
+    loser.content_hash = "b".repeat(64);
+    loser.size_bytes = 99;
+
+    assert!(
+        block_on(repositories.create_asset_if_absent(winner.clone())).expect("first create"),
+        "the first immutable version publisher must win"
+    );
+    assert!(
+        !block_on(repositories.create_asset_if_absent(loser)).expect("conflicting create"),
+        "a conflicting publisher must get a definitive false result"
+    );
+    assert_eq!(
+        block_on(repositories.get_asset("asset-a"))
+            .expect("read winner")
+            .expect("winner exists"),
+        winner,
+        "the losing create must not mutate any winner metadata"
+    );
+}
+
+#[test]
+fn concurrent_create_asset_if_absent_has_exactly_one_metadata_winner() {
+    let repositories = std::sync::Arc::new(RuntimeStorageRepositories::in_memory(
+        vec![StorageProviderKind::Memory],
+        16,
+        16,
+    ));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let (results_tx, results_rx) = std::sync::mpsc::channel();
+    let mut threads = Vec::new();
+
+    for (hash_byte, size_bytes) in [('a', 17_u64), ('b', 23_u64)] {
+        let repositories = std::sync::Arc::clone(&repositories);
+        let barrier = std::sync::Arc::clone(&barrier);
+        let results_tx = results_tx.clone();
+        threads.push(std::thread::spawn(move || {
+            let mut candidate = asset("asset-race", "tenant-a", size_bytes);
+            candidate.content_hash = hash_byte.to_string().repeat(64);
+            barrier.wait();
+            let created = block_on(repositories.create_asset_if_absent(candidate.clone()))
+                .expect("concurrent create");
+            results_tx
+                .send((created, candidate))
+                .expect("report create result");
+        }));
+    }
+    drop(results_tx);
+    barrier.wait();
+
+    let results: Vec<(bool, StoredAsset)> = results_rx.into_iter().collect();
+    for thread in threads {
+        thread.join().expect("create worker");
+    }
+    assert_eq!(results.iter().filter(|(created, _)| *created).count(), 1);
+    let winner = results
+        .iter()
+        .find_map(|(created, candidate)| created.then_some(candidate))
+        .expect("one winner");
+    assert_eq!(
+        block_on(repositories.get_asset("asset-race"))
+            .expect("read winner")
+            .expect("winner exists"),
+        *winner,
+        "the stored row must exactly equal the candidate that won the atomic create"
+    );
+}
+
+#[test]
 fn poisoned_memory_lock_fails_closed_for_every_asset_repository_method() {
     let repositories =
         RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 16, 16);
@@ -98,6 +172,9 @@ fn poisoned_memory_lock_fails_closed_for_every_asset_repository_method() {
 
     assert_asset_repository_poisoned(block_on(
         repositories.upsert_asset(asset("asset-a", "tenant-a", 17)),
+    ));
+    assert_asset_repository_poisoned(block_on(
+        repositories.create_asset_if_absent(asset("asset-a", "tenant-a", 17)),
     ));
     assert_asset_repository_poisoned(block_on(repositories.get_asset("asset-a")));
     assert_asset_repository_poisoned(block_on(repositories.list_assets("tenant-a", None)));
@@ -122,6 +199,32 @@ fn postgres_usage_query_projects_only_size_bytes() {
         PostgresControlPlaneStore::TENANT_ASSET_STORAGE_SIZE_QUERY,
         "SELECT size_bytes FROM stored_assets WHERE tenant_id = $1",
     );
+}
+
+#[test]
+fn postgres_immutable_create_is_one_insert_without_an_update_branch() {
+    let query = PostgresControlPlaneStore::CREATE_ASSET_IF_ABSENT_QUERY;
+    assert!(query.starts_with("INSERT INTO stored_assets"));
+    assert!(query.ends_with("ON CONFLICT (id) DO NOTHING"));
+    assert!(!query.contains("DO UPDATE"));
+    assert!(!query.contains("SELECT"));
+}
+
+#[test]
+fn immutable_create_commit_error_is_typed_as_outcome_unknown_only_after_the_fence() {
+    let operation =
+        StorageOperation::new("create asset if absent", std::time::Duration::from_secs(1));
+    operation
+        .begin_commit("before transaction commit")
+        .expect("commit fence");
+    assert_eq!(
+        asset_transaction_commit_outcome_unknown(&operation),
+        StorageError::OperationCommitOutcomeUnknown {
+            operation: "create asset if absent",
+            stage: "transaction commit",
+        }
+    );
+    operation.finish_commit();
 }
 
 /// The intentionally minimal live table contains none of the columns needed

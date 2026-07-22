@@ -13,7 +13,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::Child,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -50,6 +53,41 @@ struct CapturedBucketRequest {
 struct BucketState {
     objects: HashMap<String, Vec<u8>>,
     requests: Vec<CapturedBucketRequest>,
+    race_gate: Option<Arc<CommitRaceGate>>,
+}
+
+#[derive(Debug)]
+struct CommitRaceGate {
+    block_next_head: AtomicBool,
+    signal_next_delete: AtomicBool,
+    first_head_arrived: Mutex<Option<mpsc::Sender<()>>>,
+    release_first_head: Mutex<mpsc::Receiver<()>>,
+    staging_deleted: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+impl CommitRaceGate {
+    fn new() -> (
+        Arc<Self>,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+        mpsc::Receiver<()>,
+    ) {
+        let (first_head_arrived_tx, first_head_arrived_rx) = mpsc::channel();
+        let (release_first_head_tx, release_first_head_rx) = mpsc::channel();
+        let (staging_deleted_tx, staging_deleted_rx) = mpsc::channel();
+        (
+            Arc::new(Self {
+                block_next_head: AtomicBool::new(true),
+                signal_next_delete: AtomicBool::new(true),
+                first_head_arrived: Mutex::new(Some(first_head_arrived_tx)),
+                release_first_head: Mutex::new(release_first_head_rx),
+                staging_deleted: Mutex::new(Some(staging_deleted_tx)),
+            }),
+            first_head_arrived_rx,
+            release_first_head_tx,
+            staging_deleted_rx,
+        )
+    }
 }
 
 struct GatewayGuard(Child);
@@ -69,64 +107,103 @@ fn spawn_sigv4_bucket_mock() -> (String, Arc<Mutex<BucketState>>) {
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let Some(request) = read_http_request(&mut stream) else {
-                continue;
-            };
-            let (path, query) = request
-                .target
-                .split_once('?')
-                .map_or((request.target.as_str(), None), |(path, query)| {
-                    (path, Some(query))
-                });
-            let signature_kind = if query.is_some() {
-                SignatureKind::Query
-            } else {
-                SignatureKind::Header
-            };
-            let signature_valid = verify_sigv4(&request, path, query).is_ok();
-
-            let mut state = server_state.lock().unwrap();
-            state.requests.push(CapturedBucketRequest {
-                method: request.method.clone(),
-                path: path.to_string(),
-                signature_kind,
-                signature_valid,
-            });
-
-            if !signature_valid {
-                write_http_response(&mut stream, "403 Forbidden", b"invalid SigV4", None);
-                continue;
-            }
-
-            match request.method.as_str() {
-                "PUT" => {
-                    state.objects.insert(path.to_string(), request.body);
-                    write_http_response(&mut stream, "200 OK", b"", None);
-                }
-                "HEAD" => match state.objects.get(path) {
-                    Some(bytes) => {
-                        write_http_response(&mut stream, "200 OK", b"", Some(bytes.len()))
-                    }
-                    None => write_http_response(&mut stream, "404 Not Found", b"", None),
-                },
-                "GET" => match state.objects.get(path) {
-                    Some(bytes) => write_http_response(&mut stream, "200 OK", bytes, None),
-                    None => write_http_response(&mut stream, "404 Not Found", b"", None),
-                },
-                "DELETE" => {
-                    state.objects.remove(path);
-                    write_http_response(&mut stream, "204 No Content", b"", None);
-                }
-                _ => write_http_response(&mut stream, "405 Method Not Allowed", b"", None),
-            }
+            let Ok(stream) = stream else { break };
+            let connection_state = Arc::clone(&server_state);
+            std::thread::spawn(move || handle_bucket_connection(stream, connection_state));
         }
     });
 
     (endpoint, state)
+}
+
+fn handle_bucket_connection(mut stream: TcpStream, server_state: Arc<Mutex<BucketState>>) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let Some(request) = read_http_request(&mut stream) else {
+        return;
+    };
+    let (path, query) = request
+        .target
+        .split_once('?')
+        .map_or((request.target.as_str(), None), |(path, query)| {
+            (path, Some(query))
+        });
+    let signature_kind = if query.is_some() {
+        SignatureKind::Query
+    } else {
+        SignatureKind::Header
+    };
+    let signature_valid = verify_sigv4(&request, path, query).is_ok();
+
+    let race_gate = server_state.lock().unwrap().race_gate.clone();
+    if signature_valid && request.method == "HEAD" {
+        if let Some(gate) = race_gate
+            .as_ref()
+            .filter(|gate| gate.block_next_head.swap(false, Ordering::AcqRel))
+        {
+            gate.first_head_arrived
+                .lock()
+                .unwrap()
+                .take()
+                .expect("first HEAD signal")
+                .send(())
+                .expect("report blocked first HEAD");
+            gate.release_first_head
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release blocked first HEAD");
+        }
+    }
+
+    let mut state = server_state.lock().unwrap();
+    state.requests.push(CapturedBucketRequest {
+        method: request.method.clone(),
+        path: path.to_string(),
+        signature_kind,
+        signature_valid,
+    });
+
+    if !signature_valid {
+        write_http_response(&mut stream, "403 Forbidden", b"invalid SigV4", None);
+        return;
+    }
+
+    match request.method.as_str() {
+        "PUT" => {
+            state.objects.insert(path.to_string(), request.body);
+            write_http_response(&mut stream, "200 OK", b"", None);
+        }
+        "HEAD" => match state.objects.get(path) {
+            Some(bytes) => write_http_response(&mut stream, "200 OK", b"", Some(bytes.len())),
+            None => write_http_response(&mut stream, "404 Not Found", b"", None),
+        },
+        "GET" => match state.objects.get(path) {
+            Some(bytes) => write_http_response(&mut stream, "200 OK", bytes, None),
+            None => write_http_response(&mut stream, "404 Not Found", b"", None),
+        },
+        "DELETE" => {
+            state.objects.remove(path);
+            let delete_gate = state.race_gate.as_ref().and_then(|gate| {
+                gate.signal_next_delete
+                    .swap(false, Ordering::AcqRel)
+                    .then(|| Arc::clone(gate))
+            });
+            write_http_response(&mut stream, "204 No Content", b"", None);
+            drop(state);
+            if let Some(gate) = delete_gate {
+                gate.staging_deleted
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("staging delete signal")
+                    .send(())
+                    .expect("report staging deletion");
+            }
+        }
+        _ => write_http_response(&mut stream, "405 Method Not Allowed", b"", None),
+    }
 }
 
 struct RawHttpRequest {
@@ -305,6 +382,17 @@ fn raw_response_body(response: &[u8]) -> &[u8] {
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map_or(&[], |position| &response[position + 4..])
+}
+
+fn object_path_from_url(url: &str) -> String {
+    let authority_and_target = url
+        .strip_prefix("http://")
+        .expect("the local bucket URL must use http");
+    let (_, target) = authority_and_target
+        .split_once('/')
+        .expect("presigned URL must have an object path");
+    let path = target.split_once('?').map_or(target, |(path, _)| path);
+    format!("/{path}")
 }
 
 fn write_config(path: &std::path::Path, gateway_addr: &str, bucket_endpoint: &str) {
@@ -492,36 +580,125 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     assert_eq!(intent["sha256"], sha256);
     let object_key = intent["key"]
         .as_str()
-        .expect("upload intent must identify its opaque asset key")
+        .expect("upload intent must identify its logical asset key")
         .to_string();
+    let upload_id = intent["upload_id"]
+        .as_str()
+        .expect("upload intent must include upload_id")
+        .to_string();
+    assert_eq!(upload_id.len(), 36);
+    assert!(upload_id.starts_with("upl_"));
+    assert!(upload_id[4..]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     let upload_url = intent["upload_url"]
         .as_str()
-        .expect("upload intent must include upload_url");
+        .expect("upload intent must include upload_url")
+        .to_string();
     assert!(upload_url.starts_with(&bucket_endpoint));
+    let staging_path = object_path_from_url(&upload_url);
 
-    let upload = direct_bucket_request("PUT", upload_url, content);
+    let second_intent_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/large-tool/1.2.3",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &intent_body,
+    );
+    assert_status(&second_intent_response, 200);
+    let second_intent = response_json(&second_intent_response);
+    let second_upload_id = second_intent["upload_id"]
+        .as_str()
+        .expect("second intent must include upload_id")
+        .to_string();
+    let second_upload_url = second_intent["upload_url"]
+        .as_str()
+        .expect("second intent must include upload_url")
+        .to_string();
+    assert_eq!(second_intent["key"], object_key);
+    assert_ne!(second_upload_id, upload_id);
+    assert_ne!(second_upload_url, upload_url);
+    let second_staging_path = object_path_from_url(&second_upload_url);
+    assert_ne!(second_staging_path, staging_path);
+
+    let upload = direct_bucket_request("PUT", &upload_url, content);
     assert!(
         String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
         "direct upload failed: {}",
         String::from_utf8_lossy(&upload)
     );
+    let second_upload = direct_bucket_request("PUT", &second_upload_url, content);
+    assert!(
+        String::from_utf8_lossy(&second_upload).contains("HTTP/1.1 200"),
+        "second direct upload failed: {}",
+        String::from_utf8_lossy(&second_upload)
+    );
 
     let commit_body = format!(
-        r#"{{"size_bytes":{},"sha256":"{sha256}","content_type":"application/x-shellscript"}}"#,
+        r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"application/x-shellscript"}}"#,
         content.len()
     );
-    let commit_response = http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/assets/presign/commit/cli_tool/large-tool/1.2.3",
-        &[
-            "Authorization: Bearer asset-secret",
-            "Content-Type: application/json",
-        ],
-        &commit_body,
+    let (race_gate, first_head_arrived, release_first_head, staging_deleted) =
+        CommitRaceGate::new();
+    bucket_state.lock().unwrap().race_gate = Some(Arc::clone(&race_gate));
+
+    // The first request reads no metadata and then blocks at bucket HEAD. The
+    // second identical request publishes and deletes staging; only then does
+    // the first resume and observe 404. Its post-failure metadata reconcile
+    // must return the durable winner instead of a stale 404/503.
+    let late_gateway_addr = gateway_addr.clone();
+    let late_commit_body = commit_body.clone();
+    let late_commit = std::thread::spawn(move || {
+        http_request(
+            &late_gateway_addr,
+            "POST",
+            "/v1/assets/presign/commit/cli_tool/large-tool/1.2.3",
+            &[
+                "Authorization: Bearer asset-secret",
+                "Content-Type: application/json",
+            ],
+            &late_commit_body,
+        )
+    });
+    first_head_arrived
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first commit did not block at HEAD");
+
+    let winner_gateway_addr = gateway_addr.clone();
+    let winner_commit_body = commit_body.clone();
+    let winner_commit = std::thread::spawn(move || {
+        http_request(
+            &winner_gateway_addr,
+            "POST",
+            "/v1/assets/presign/commit/cli_tool/large-tool/1.2.3",
+            &[
+                "Authorization: Bearer asset-secret",
+                "Content-Type: application/json",
+            ],
+            &winner_commit_body,
+        )
+    });
+    staging_deleted
+        .recv_timeout(Duration::from_secs(5))
+        .expect("winning commit did not delete staging");
+    release_first_head
+        .send(())
+        .expect("release late commit HEAD");
+
+    let winner_commit_response = winner_commit.join().expect("winning commit request");
+    let late_commit_response = late_commit.join().expect("late commit request");
+    bucket_state.lock().unwrap().race_gate = None;
+    assert_status(&winner_commit_response, 200);
+    assert_status(&late_commit_response, 200);
+    let committed = response_json(&winner_commit_response);
+    assert_eq!(
+        response_json(&late_commit_response),
+        committed,
+        "the late identical commit must reconcile to the exact durable winner"
     );
-    assert_status(&commit_response, 200);
-    let committed = response_json(&commit_response);
     assert_eq!(committed["object"], "asset");
     let asset = &committed["asset"];
     assert_eq!(asset["asset_type"], "cli_tool");
@@ -533,6 +710,48 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     assert_eq!(asset["storage_backed"], true);
     assert!(asset["created_at_unix"].is_i64());
     assert!(asset["updated_at_unix"].is_i64());
+
+    let final_path = {
+        let bucket = bucket_state.lock().unwrap();
+        let final_path = bucket
+            .requests
+            .iter()
+            .find(|request| {
+                request.method == "PUT" && request.signature_kind == SignatureKind::Header
+            })
+            .expect("commit must copy verified bytes with a header-signed PUT")
+            .path
+            .clone();
+        assert_ne!(final_path, staging_path);
+        assert!(!upload_url.contains(&final_path));
+        assert!(!second_upload_url.contains(&final_path));
+        assert_eq!(
+            bucket.objects.get(&final_path).map(Vec::as_slice),
+            Some(content.as_slice())
+        );
+        final_path
+    };
+
+    let tampered = b"tampered after commit through the still-valid old PUT URL";
+    let replay = direct_bucket_request("PUT", &upload_url, tampered);
+    assert!(
+        String::from_utf8_lossy(&replay).contains("HTTP/1.1 200"),
+        "presigned PUT replay failed: {}",
+        String::from_utf8_lossy(&replay)
+    );
+    {
+        let bucket = bucket_state.lock().unwrap();
+        assert_eq!(
+            bucket.objects.get(&staging_path).map(Vec::as_slice),
+            Some(tampered.as_slice()),
+            "the old client capability may only recreate its staging object"
+        );
+        assert_eq!(
+            bucket.objects.get(&final_path).map(Vec::as_slice),
+            Some(content.as_slice()),
+            "a replayed upload must not replace the immutable final object"
+        );
+    }
 
     let mutations_before_retry = bucket_mutation_count(&bucket_state);
     let repeated_commit_response = http_request(
@@ -555,6 +774,63 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
         bucket_mutation_count(&bucket_state),
         mutations_before_retry,
         "an idempotent commit retry must not mutate the bucket"
+    );
+
+    let other_intent_commit_body = format!(
+        r#"{{"upload_id":"{second_upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"application/x-shellscript"}}"#,
+        content.len()
+    );
+    let other_intent_commit = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/large-tool/1.2.3",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &other_intent_commit_body,
+    );
+    assert_json_error(&other_intent_commit, 409, "asset_version_immutable");
+    let mutations_after_loser_cleanup = bucket_mutation_count(&bucket_state);
+    assert_eq!(
+        mutations_after_loser_cleanup,
+        mutations_before_retry + 1,
+        "a definitive different-upload conflict must delete only its staging object"
+    );
+    {
+        let bucket = bucket_state.lock().unwrap();
+        assert!(!bucket.objects.contains_key(&second_staging_path));
+        assert!(bucket
+            .requests
+            .iter()
+            .any(|request| { request.method == "DELETE" && request.path == second_staging_path }));
+        assert_eq!(
+            bucket.objects.get(&final_path).map(Vec::as_slice),
+            Some(content.as_slice()),
+            "loser cleanup must not touch the winner's immutable final object"
+        );
+    }
+
+    let mismatched_sha256 = sha256_hex(tampered);
+    let mismatched_commit_body = format!(
+        r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{mismatched_sha256}","content_type":"application/x-shellscript"}}"#,
+        tampered.len()
+    );
+    let mismatched_commit = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/large-tool/1.2.3",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &mismatched_commit_body,
+    );
+    assert_json_error(&mismatched_commit, 409, "asset_version_immutable");
+    assert_eq!(
+        bucket_mutation_count(&bucket_state),
+        mutations_after_loser_cleanup,
+        "same-upload metadata mismatches must not mutate staging or final objects"
     );
 
     let list_response = http_request(
@@ -633,6 +909,8 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     let download_url = download["download_url"]
         .as_str()
         .expect("download response must include download_url");
+    assert_eq!(object_path_from_url(download_url), final_path);
+    assert_ne!(object_path_from_url(download_url), staging_path);
     let direct_download = direct_bucket_request("GET", download_url, b"");
     assert!(
         String::from_utf8_lossy(&direct_download).contains("HTTP/1.1 200"),
@@ -712,6 +990,15 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     );
     assert!(
         bucket.requests.iter().any(|request| {
+            request.method == "PUT"
+                && request.signature_kind == SignatureKind::Header
+                && request.path == final_path
+        }),
+        "commit must copy verified bytes to a private header-signed final PUT: {:?}",
+        bucket.requests
+    );
+    assert!(
+        bucket.requests.iter().any(|request| {
             request.method == "GET" && request.signature_kind == SignatureKind::Query
         }),
         "the object must be downloaded via a query-presigned GET: {:?}",
@@ -731,8 +1018,17 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
             .iter()
             .filter(|request| matches!(request.method.as_str(), "PUT" | "DELETE"))
             .count(),
-        1,
-        "the successful lifecycle performs one direct upload and no bucket deletes"
+        6,
+        "lifecycle mutations include two staging uploads, final PUT, winner cleanup, old-URL replay, and loser cleanup"
     );
+    assert_eq!(
+        bucket.objects.get(&final_path).map(Vec::as_slice),
+        Some(content.as_slice())
+    );
+    assert_eq!(
+        bucket.objects.get(&staging_path).map(Vec::as_slice),
+        Some(tampered.as_slice())
+    );
+    assert!(!bucket.objects.contains_key(&second_staging_path));
     drop(bucket);
 }

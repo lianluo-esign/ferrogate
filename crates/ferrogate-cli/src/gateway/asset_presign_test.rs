@@ -4,7 +4,7 @@
 // description: Tests for the large-file presigned asset path (issue #259):
 // commit-time size/sha256 verification against the committed object,
 // fail-closed delete-on-violation, per-object ceiling enforcement, and the
-// supply-chain check running against the committed bytes. Driven against a
+// built-in content checks running against the committed bytes. Driven against a
 // scripted local mock S3-compatible endpoint (the same testing philosophy
 // as asset_bucket.rs), so no live bucket is required.
 
@@ -13,14 +13,19 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrogate_storage::{sha256_hex, StoredAsset};
+use ferrogate_storage::{sha256_hex, StorageError, StoredAsset};
 
-use super::{existing_asset_matches_commit, verify_and_fetch_committed_object, CommitVerification};
+use super::{
+    asset_create_failure_disposition, existing_asset_matches_commit, final_object_prefix,
+    is_upload_id, new_upload_id, staging_object_key, verify_and_fetch_committed_object,
+    AssetCreateFailureDisposition, CommitVerification, PresignCommitRequest,
+    PresignUploadIntentRequest,
+};
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
 /// The EICAR antivirus test signature -- the same fixed byte string
-/// `asset_security` scans for, reproduced here to prove the supply-chain
-/// check runs against the *committed* object (not just the inline path).
+/// `asset_security` scans for, reproduced here to prove the built-in content
+/// check runs against the uploaded bytes (not just the inline path).
 const EICAR: &[u8] = br#"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"#;
 
 #[derive(Clone)]
@@ -179,8 +184,8 @@ async fn commit_verify_accepts_a_matching_object_without_deleting_it() {
     .unwrap();
 
     match verification {
-        CommitVerification::Verified { size_bytes, sha256 } => {
-            assert_eq!(size_bytes, content.len() as u64);
+        CommitVerification::Verified { bytes, sha256 } => {
+            assert_eq!(bytes, content);
             assert_eq!(sha256, sha);
         }
         _ => panic!("expected a verified commit"),
@@ -273,14 +278,14 @@ async fn commit_verify_enforces_the_per_object_ceiling() {
 }
 
 #[tokio::test]
-async fn commit_verify_runs_the_supply_chain_scan_on_the_committed_object() {
+async fn commit_verify_runs_built_in_content_checks_on_the_committed_object() {
     let sha = sha256_hex(EICAR);
     let (endpoint, methods) =
         spawn_scripted_mock(vec![head_ok(EICAR.len()), get_ok(EICAR), delete_ok()]);
     let bucket = test_bucket(endpoint);
 
     // Size + sha256 match, but the committed bytes carry the EICAR malware
-    // test signature: the supply-chain check must fail closed and delete it.
+    // test signature: the built-in content check must reject and delete it.
     let verification = verify_and_fetch_committed_object(
         &bucket,
         "tenant-a:cli_tool:hello:1.0.0",
@@ -297,7 +302,7 @@ async fn commit_verify_runs_the_supply_chain_scan_on_the_committed_object() {
         CommitVerification::Rejected(rejection) => {
             assert_eq!(rejection.code, "asset_rejected");
         }
-        _ => panic!("expected a supply-chain rejection"),
+        _ => panic!("expected a built-in content rejection"),
     }
     assert_eq!(*methods.lock().unwrap(), vec!["HEAD", "GET", "DELETE"]);
 }
@@ -336,6 +341,77 @@ fn is_hex_sha256_accepts_only_64_char_hex() {
     assert!(!super::is_hex_sha256(""));
 }
 
+#[test]
+fn upload_ids_are_random_lowercase_128_bit_capabilities() {
+    let first = new_upload_id().expect("first upload id");
+    let second = new_upload_id().expect("second upload id");
+    assert!(is_upload_id(&first));
+    assert!(is_upload_id(&second));
+    assert_ne!(first, second);
+    assert!(!is_upload_id("upl_ABCDEF0123456789abcdef0123456789"));
+    assert!(!is_upload_id("upl_0123456789abcdef"));
+    assert!(!is_upload_id("obj_0123456789abcdef0123456789abcdef"));
+}
+
+#[test]
+fn staging_keys_bind_upload_to_asset_size_and_hash_without_exposing_the_asset_id() {
+    let asset_id = "tenant-a:cli_tool:hello:1.0.0";
+    let upload_id = "upl_0123456789abcdef0123456789abcdef";
+    let sha = "a".repeat(64);
+    let key = staging_object_key(asset_id, upload_id, 42, &sha);
+    assert!(key.starts_with(".ferrogate/staging/"));
+    assert!(!key.contains(asset_id));
+    assert_ne!(key, staging_object_key(asset_id, upload_id, 43, &sha));
+    assert_ne!(
+        key,
+        staging_object_key("tenant-a:cli_tool:other:1.0.0", upload_id, 42, &sha,)
+    );
+    assert_ne!(
+        key,
+        staging_object_key(asset_id, "upl_fedcba9876543210fedcba9876543210", 42, &sha,)
+    );
+}
+
+#[test]
+fn presign_control_requests_reject_unknown_json_fields() {
+    assert!(serde_json::from_str::<PresignUploadIntentRequest>(&format!(
+        r#"{{"size_bytes":42,"sha256":"{}","extra":true}}"#,
+        "a".repeat(64)
+    ))
+    .is_err());
+    assert!(serde_json::from_str::<PresignCommitRequest>(
+        &format!(
+            r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42,"sha256":"{}","extra":true}}"#,
+            "a".repeat(64)
+        )
+    )
+    .is_err());
+}
+
+#[test]
+fn create_failure_cleanup_preserves_only_genuinely_unknown_outcomes() {
+    let unknown = StorageError::OperationCommitOutcomeUnknown {
+        operation: "create asset if absent",
+        stage: "transaction commit",
+    };
+    assert_eq!(
+        asset_create_failure_disposition(&unknown),
+        AssetCreateFailureDisposition::OutcomeUnknown
+    );
+    assert_eq!(
+        asset_create_failure_disposition(&StorageError::Postgres("statement failed".into())),
+        AssetCreateFailureDisposition::DefinitelyNotPublished
+    );
+    assert_eq!(
+        asset_create_failure_disposition(&StorageError::OperationDeadlineExceeded {
+            operation: "create asset if absent",
+            stage: "asset insert",
+            commit_started: false,
+        }),
+        AssetCreateFailureDisposition::DefinitelyNotPublished
+    );
+}
+
 fn committed_asset(storage_uri: Option<&str>) -> StoredAsset {
     StoredAsset {
         id: "tenant-a:cli_tool:hello:1.0.0".into(),
@@ -358,43 +434,62 @@ fn committed_asset(storage_uri: Option<&str>) -> StoredAsset {
 
 #[test]
 fn repeated_commit_is_idempotent_only_for_matching_bucket_metadata() {
-    let bucket_asset = committed_asset(Some("tenant-a:cli_tool:hello:1.0.0"));
+    let asset_id = "tenant-a:cli_tool:hello:1.0.0";
+    let upload_id = "upl_0123456789abcdef0123456789abcdef";
+    let storage_uri = format!(
+        "{}obj_{}",
+        final_object_prefix(asset_id, upload_id),
+        "c".repeat(32)
+    );
+    let bucket_asset = committed_asset(Some(&storage_uri));
     assert!(existing_asset_matches_commit(
         &bucket_asset,
+        asset_id,
+        upload_id,
         42,
         &"a".repeat(64),
-        None,
-    ));
-    assert!(existing_asset_matches_commit(
-        &bucket_asset,
-        42,
-        &"a".repeat(64),
-        Some("text/plain"),
+        "text/plain",
     ));
     assert!(!existing_asset_matches_commit(
         &bucket_asset,
+        asset_id,
+        upload_id,
         43,
         &"a".repeat(64),
-        None,
+        "text/plain",
     ));
     assert!(!existing_asset_matches_commit(
         &bucket_asset,
+        asset_id,
+        upload_id,
         42,
         &"b".repeat(64),
-        None,
+        "text/plain",
     ));
     assert!(!existing_asset_matches_commit(
         &bucket_asset,
+        asset_id,
+        upload_id,
         42,
         &"a".repeat(64),
-        Some("application/octet-stream"),
+        "application/octet-stream",
+    ));
+    assert!(!existing_asset_matches_commit(
+        &bucket_asset,
+        asset_id,
+        "upl_fedcba9876543210fedcba9876543210",
+        42,
+        &"a".repeat(64),
+        "text/plain",
     ));
 
     let inline_asset = committed_asset(None);
     assert!(!existing_asset_matches_commit(
         &inline_asset,
+        asset_id,
+        upload_id,
         42,
         &"a".repeat(64),
-        Some("text/plain"),
+        "text/plain",
     ));
 }

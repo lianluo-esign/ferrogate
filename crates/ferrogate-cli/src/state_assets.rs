@@ -30,6 +30,13 @@ impl AppState {
         Ok(self.repositories.upsert_asset(asset).await?)
     }
 
+    pub(crate) async fn create_asset_if_absent(
+        &self,
+        asset: StoredAsset,
+    ) -> Result<bool, StorageError> {
+        self.repositories.create_asset_if_absent(asset).await
+    }
+
     /// Load an asset and its verified bytes: resolves bucket-backed content
     /// (issue #176) from the configured bucket, then re-verifies the sha256 on
     /// every read (#176/#179). Shared by the REST pull path and the MCP asset

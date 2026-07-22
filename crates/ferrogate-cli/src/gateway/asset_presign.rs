@@ -12,11 +12,12 @@
 // entitlement + tenant scoping the inline `/v1/assets/*` handlers use.
 //
 // Push flow: register-intent (authorize + meter/audit + quota preflight,
-// return a short-TTL presigned PUT) -> client PUTs bytes straight to the
-// bucket -> commit (gateway verifies size via HEAD and sha256 by fetching
-// the committed object, runs the built-in content validation against that
-// object, and refuses to create the `stored_assets` row on any violation;
-// cleanup of the rejected bucket object is best effort).
+// return a short-TTL presigned PUT for a unique staging object) -> client PUTs
+// bytes straight to the bucket -> commit (gateway verifies size, sha256, and
+// the built-in content rules against the fetched staging bytes, copies those
+// verified bytes to a private immutable object key, then atomically publishes
+// the `stored_assets` row). A replayed client PUT can only replace staging;
+// it can never mutate the object referenced by an already-published version.
 //
 // Private-bucket operator runbook: docs/assets/private-bucket-migration.md.
 //
@@ -29,7 +30,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{sha256_hex, stored_asset_id, StoredAsset};
+use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -43,13 +44,16 @@ use crate::{
 /// only a size + sha256 + content-type, never object bytes (those go
 /// straight to the bucket via the presigned URL).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PresignUploadIntentRequest {
     size_bytes: u64,
     sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PresignCommitRequest {
+    upload_id: String,
     size_bytes: u64,
     sha256: String,
     #[serde(default)]
@@ -60,6 +64,7 @@ struct PresignCommitRequest {
 struct PresignUploadIntentResponse {
     object: &'static str,
     key: String,
+    upload_id: String,
     upload_url: String,
     method: &'static str,
     expires_in_seconds: u64,
@@ -279,8 +284,23 @@ impl FerroGateway {
             }
         }
 
+        let expected_sha256 = intent.sha256.to_ascii_lowercase();
+        let upload_id = match new_upload_id() {
+            Ok(upload_id) => upload_id,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let staging_key = staging_object_key(&id, &upload_id, intent.size_bytes, &expected_sha256);
         let ttl = state.asset_presign_ttl_secs();
-        let upload_url = match bucket.presign_put(&id, ttl, now_unix_seconds_u64()) {
+        let upload_url = match bucket.presign_put(&staging_key, ttl, now_unix_seconds_u64()) {
             Ok(url) => url,
             Err(error) => {
                 return write_json_error(
@@ -301,19 +321,20 @@ impl FerroGateway {
             &id,
             "issued",
             format!(
-                "issued a {ttl}s presigned upload URL for asset {id} ({} bytes)",
-                intent.size_bytes
+                "issued upload {upload_id} with a {ttl}s presigned staging URL for asset {id} ({} bytes)",
+                intent.size_bytes,
             ),
         ));
 
         let body = PresignUploadIntentResponse {
             object: "asset_upload_intent",
             key: id,
+            upload_id,
             upload_url,
             method: "PUT",
             expires_in_seconds: ttl,
             size_bytes: intent.size_bytes,
-            sha256: intent.sha256,
+            sha256: expected_sha256,
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
@@ -340,25 +361,36 @@ impl FerroGateway {
             Ok(None) => return Ok(()),
             Err(()) => return Ok(()),
         };
-        if commit.size_bytes == 0 || !is_hex_sha256(&commit.sha256) {
+        if commit.size_bytes == 0
+            || !is_hex_sha256(&commit.sha256)
+            || !is_upload_id(&commit.upload_id)
+        {
             return write_json_error(
                 session,
                 StatusCode::BAD_REQUEST,
                 "invalid_commit",
-                "commit requires the registered size_bytes and 64-char hex sha256",
+                "commit requires a valid upload_id, non-zero size_bytes, and 64-char hex sha256",
                 &ctx.request_id,
             )
             .await;
         }
         let expected_sha256 = commit.sha256.to_ascii_lowercase();
+        let content_type = commit
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
+        let staging_key =
+            staging_object_key(&id, &commit.upload_id, commit.size_bytes, &expected_sha256);
         match state.get_asset(&id).await {
             Ok(Some(existing)) => {
                 if existing_asset_matches_commit(
                     &existing,
+                    &id,
+                    &commit.upload_id,
                     commit.size_bytes,
                     &expected_sha256,
-                    commit.content_type.as_deref(),
+                    &content_type,
                 ) {
                     let body = AssetMutationResponse {
                         object: "asset",
@@ -366,6 +398,11 @@ impl FerroGateway {
                     };
                     return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                         .await;
+                }
+                if !existing_asset_uses_upload(&existing, &id, &commit.upload_id) {
+                    if let Some(bucket) = state.asset_bucket_client() {
+                        best_effort_delete(&bucket, &staging_key).await;
+                    }
                 }
                 return write_asset_version_immutable(session, ctx, asset_type, name, version)
                     .await;
@@ -382,10 +419,6 @@ impl FerroGateway {
                 .await;
             }
         }
-        let content_type = commit
-            .content_type
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
         let Some(bucket) = state.asset_bucket_client() else {
             return write_json_error(
                 session,
@@ -397,58 +430,105 @@ impl FerroGateway {
             .await;
         };
 
-        // Verify the committed object end-to-end for this path (size via HEAD,
-        // sha256 + built-in type/EICAR/manifest validation against fetched
-        // bytes) and fail closed by refusing visibility on any violation;
-        // bucket cleanup is best effort. Extracted for mock-bucket unit coverage.
-        let verification = match verify_and_fetch_committed_object(
+        // Verify the staging object and retain the exact verified bytes. The
+        // later private PUT uses this buffer, so a replay of the client-facing
+        // staging URL cannot race a different payload into the durable object.
+        let verification = verify_and_fetch_committed_object(
             &bucket,
-            &id,
+            &staging_key,
             commit.size_bytes,
             &expected_sha256,
             asset_type,
             &content_type,
             state.asset_presign_max_object_bytes(),
         )
-        .await
-        {
-            Ok(verification) => verification,
-            Err(error) => {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "asset_bucket_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
+        .await;
+        let (verified_bytes, actual_sha256) = match verification {
+            Ok(CommitVerification::Verified { bytes, sha256 }) => (bytes, sha256),
+            verification_failure => {
+                // A concurrent identical commit can publish metadata and
+                // remove staging after our early lookup. Reconcile every
+                // verification failure against that durable winner before
+                // returning a stale 404/422/503.
+                match reconcile_commit_winner(
+                    &state,
+                    &id,
+                    &commit.upload_id,
+                    commit.size_bytes,
+                    &expected_sha256,
+                    &content_type,
                 )
-                .await;
+                .await
+                {
+                    Ok(CommitWinner::Matching(existing)) => {
+                        let body = AssetMutationResponse {
+                            object: "asset",
+                            asset: asset_summary(&existing),
+                        };
+                        return write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &body,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Ok(CommitWinner::Conflict) => {
+                        best_effort_delete(&bucket, &staging_key).await;
+                        return write_asset_version_immutable(
+                            session, ctx, asset_type, name, version,
+                        )
+                        .await;
+                    }
+                    Ok(CommitWinner::Missing) => {}
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
+
+                match verification_failure {
+                    Ok(CommitVerification::NotUploaded) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "asset_not_uploaded",
+                            "no object was uploaded to the presigned URL for this asset",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Ok(CommitVerification::Rejected(rejection)) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            rejection.code,
+                            rejection.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "asset_bucket_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Ok(CommitVerification::Verified { .. }) => unreachable!(),
+                }
             }
         };
-        let (actual_size, actual_sha256) = match verification {
-            CommitVerification::Verified { size_bytes, sha256 } => (size_bytes, sha256),
-            CommitVerification::NotUploaded => {
-                return write_json_error(
-                    session,
-                    StatusCode::NOT_FOUND,
-                    "asset_not_uploaded",
-                    "no object was uploaded to the presigned URL for this asset",
-                    &ctx.request_id,
-                )
-                .await;
-            }
-            CommitVerification::Rejected(rejection) => {
-                // The orphaned object was already deleted inside the verify
-                // step (fail closed) -- just report the violation.
-                return write_json_error(
-                    session,
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    rejection.code,
-                    rejection.message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let actual_size = verified_bytes.len() as u64;
 
         // Quota is counted at commit, when the real object exists.
         match self
@@ -464,11 +544,11 @@ impl FerroGateway {
             QuotaStatus::Ok => {}
             QuotaStatus::Exceeded(quota) => {
                 return self
-                    .reject_committed_object(
+                    .reject_staging_object(
                         session,
                         ctx,
                         &bucket,
-                        &id,
+                        &staging_key,
                         "asset_storage_quota_exceeded",
                         format!(
                             "committing this asset would exceed the tenant's {quota}-byte asset storage quota"
@@ -489,16 +569,48 @@ impl FerroGateway {
         }
 
         let now = now_unix_seconds();
-        let created_at_unix = state
-            .get_asset(&id)
+        let final_key = match new_final_object_key(&id, &commit.upload_id) {
+            Ok(final_key) => final_key,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if let Err(error) = bucket
+            .put_object_owned(&final_key, verified_bytes, &content_type)
             .await
-            .ok()
-            .flatten()
-            .map_or(now, |existing| existing.created_at_unix);
+        {
+            // A transport failure does not prove the object PUT failed before
+            // commit. Preserve both candidates for a retry or the grace-based
+            // orphan reconciler instead of deleting possibly-written bytes.
+            tracing::warn!(
+                request_id = %ctx.request_id,
+                asset_id = %id,
+                upload_id = %commit.upload_id,
+                staging_key = %staging_key,
+                final_key = %final_key,
+                error = %error,
+                "private asset object PUT failed with an unknown object outcome; preserving candidates"
+            );
+            return write_json_error(
+                session,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "asset_bucket_unavailable",
+                error.to_string(),
+                &ctx.request_id,
+            )
+            .await;
+        }
 
-        // The bytes stay in the bucket; only a reference is persisted. The
-        // `stored_assets` row is what makes the asset visible, so it is
-        // written last, only after every check performed by this path passed.
+        // Publish with a create-only repository primitive. A normal upsert is
+        // correct for yank/channel mutations but would let concurrent commits
+        // replace the immutable version's final object reference.
         let asset = StoredAsset {
             id: id.clone(),
             tenant_id: tenant_id.clone(),
@@ -506,45 +618,154 @@ impl FerroGateway {
             asset_type: asset_type.to_string(),
             name: name.to_string(),
             version: version.to_string(),
-            content_type,
+            content_type: content_type.clone(),
             content_hash: actual_sha256,
             size_bytes: actual_size,
             content: Vec::new(),
-            storage_uri: Some(id.clone()),
+            storage_uri: Some(final_key.clone()),
             variant: String::new(),
             yanked: false,
-            created_at_unix,
+            created_at_unix: now,
             updated_at_unix: now,
         };
-        match state.upsert_asset(asset.clone()).await {
-            Ok(()) => {
+        match state.create_asset_if_absent(asset.clone()).await {
+            Ok(true) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
                     "asset.push",
                     &id,
                     "committed",
-                    format!("asset {id} committed via presigned upload ({actual_size} bytes)"),
+                    format!(
+                        "asset {id} committed via presigned upload {} ({actual_size} bytes)",
+                        commit.upload_id
+                    ),
                 ));
+                best_effort_delete(&bucket, &staging_key).await;
                 let body = AssetMutationResponse {
                     object: "asset",
                     asset: asset_summary(&asset),
                 };
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
+            Ok(false) => {
+                let winner = match state.get_asset(&id).await {
+                    Ok(Some(winner)) => winner,
+                    Ok(None) => {
+                        best_effort_delete(&bucket, &final_key).await;
+                        best_effort_delete(&bucket, &staging_key).await;
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            "the conflicting asset disappeared before it could be reconciled",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        // The staging object can never be a durable asset
+                        // reference. Preserve the final candidate because an
+                        // unreadable winner could theoretically reference it.
+                        best_effort_delete(&bucket, &staging_key).await;
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            asset_id = %id,
+                            upload_id = %commit.upload_id,
+                            final_key = %final_key,
+                            error = %error,
+                            "failed to read the winner after an immutable asset create conflict"
+                        );
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                best_effort_delete(&bucket, &staging_key).await;
+                if winner.storage_uri.as_deref() != Some(final_key.as_str()) {
+                    best_effort_delete(&bucket, &final_key).await;
+                }
+                if existing_asset_matches_commit(
+                    &winner,
+                    &id,
+                    &commit.upload_id,
+                    commit.size_bytes,
+                    &expected_sha256,
+                    &content_type,
+                ) {
+                    let body = AssetMutationResponse {
+                        object: "asset",
+                        asset: asset_summary(&winner),
+                    };
+                    write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                } else {
+                    write_asset_version_immutable(session, ctx, asset_type, name, version).await
+                }
+            }
             Err(error) => {
-                // The object is already verified/clean; a row-write failure
-                // leaves it orphaned in the bucket, which delete-on-push
-                // re-commit or an operator sweep reconciles -- the same
-                // failure mode the inline push has on its final DB write.
-                write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "storage_unavailable",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await
+                match asset_create_failure_disposition(&error) {
+                    AssetCreateFailureDisposition::OutcomeUnknown => {
+                        // The transaction may have committed even though its
+                        // result was lost. Preserve every candidate until a
+                        // same-upload retry or grace-based reconciliation.
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            asset_id = %id,
+                            upload_id = %commit.upload_id,
+                            staging_key = %staging_key,
+                            final_key = %final_key,
+                            error = %error,
+                            "immutable asset create returned an unknown commit outcome; preserving objects"
+                        );
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "asset.push",
+                            &id,
+                            "outcome_unknown",
+                            format!(
+                                "asset {id} upload {} has an unknown durable create outcome; staging and final candidates were preserved",
+                                commit.upload_id
+                            ),
+                        ));
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "asset_commit_outcome_unknown",
+                            "asset commit outcome is unknown; retry the same upload_id before cleanup",
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    AssetCreateFailureDisposition::DefinitelyNotPublished => {
+                        // Every error before the commit fence is a definitive
+                        // non-publication. Remove only the private final copy;
+                        // staging remains available for the same-upload retry.
+                        best_effort_delete(&bucket, &final_key).await;
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            asset_id = %id,
+                            upload_id = %commit.upload_id,
+                            staging_key = %staging_key,
+                            final_key = %final_key,
+                            error = %error,
+                            "immutable asset create failed before transaction commit"
+                        );
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
             }
         }
     }
@@ -667,22 +888,22 @@ impl FerroGateway {
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
-    /// Attempts to delete the orphaned bucket object and writes a 422 -- the
+    /// Attempts to delete the rejected staging object and writes a 422 -- the
     /// single exit used whenever a committed object fails size, sha256, built-in
     /// content, or quota validation. The rejected object never becomes a visible
     /// asset even if best-effort bucket cleanup fails.
-    async fn reject_committed_object(
+    async fn reject_staging_object(
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,
         bucket: &super::asset_bucket::AssetBucketClient,
-        id: &str,
+        staging_key: &str,
         code: &'static str,
         message: String,
     ) -> PingoraResult<()> {
-        if let Err(error) = bucket.delete_object(id).await {
+        if let Err(error) = bucket.delete_object(staging_key).await {
             tracing::warn!(
-                asset_id = %id,
+                staging_key = %staging_key,
                 error = %error,
                 "failed to delete a rejected presigned-upload object; it may be orphaned in the bucket"
             );
@@ -837,7 +1058,7 @@ enum QuotaStatus {
     StorageError(String),
 }
 
-/// A committed object that failed size, sha256, or built-in content validation;
+/// A staging object that failed size, sha256, or built-in content validation;
 /// best-effort bucket deletion has already been attempted.
 struct CommitRejection {
     code: &'static str,
@@ -846,25 +1067,80 @@ struct CommitRejection {
 
 enum CommitVerification {
     Verified {
-        size_bytes: u64,
+        bytes: Vec<u8>,
         sha256: String,
     },
     /// No object was uploaded to the presigned URL (bucket 404).
     NotUploaded,
-    /// The object existed but failed validation; it has been deleted.
+    /// The object existed but failed validation; cleanup has been attempted.
     Rejected(CommitRejection),
+}
+
+enum CommitWinner {
+    Missing,
+    Matching(Box<StoredAsset>),
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetCreateFailureDisposition {
+    DefinitelyNotPublished,
+    OutcomeUnknown,
+}
+
+fn asset_create_failure_disposition(error: &StorageError) -> AssetCreateFailureDisposition {
+    if matches!(error, StorageError::OperationCommitOutcomeUnknown { .. }) {
+        AssetCreateFailureDisposition::OutcomeUnknown
+    } else {
+        AssetCreateFailureDisposition::DefinitelyNotPublished
+    }
+}
+
+async fn reconcile_commit_winner(
+    state: &crate::state::AppState,
+    asset_id: &str,
+    upload_id: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+    requested_content_type: &str,
+) -> anyhow::Result<CommitWinner> {
+    let Some(existing) = state.get_asset(asset_id).await? else {
+        return Ok(CommitWinner::Missing);
+    };
+    if existing_asset_matches_commit(
+        &existing,
+        asset_id,
+        upload_id,
+        expected_size,
+        expected_sha256,
+        requested_content_type,
+    ) {
+        Ok(CommitWinner::Matching(Box::new(existing)))
+    } else {
+        Ok(CommitWinner::Conflict)
+    }
 }
 
 fn existing_asset_matches_commit(
     asset: &StoredAsset,
+    asset_id: &str,
+    upload_id: &str,
     expected_size: u64,
     expected_sha256: &str,
-    requested_content_type: Option<&str>,
+    requested_content_type: &str,
 ) -> bool {
-    asset.storage_uri.is_some()
+    asset.id == asset_id
+        && existing_asset_uses_upload(asset, asset_id, upload_id)
         && asset.size_bytes == expected_size
         && asset.content_hash == expected_sha256
-        && requested_content_type.is_none_or(|content_type| asset.content_type == content_type)
+        && asset.content_type == requested_content_type
+}
+
+fn existing_asset_uses_upload(asset: &StoredAsset, asset_id: &str, upload_id: &str) -> bool {
+    asset
+        .storage_uri
+        .as_deref()
+        .is_some_and(|key| key.starts_with(&final_object_prefix(asset_id, upload_id)))
 }
 
 async fn write_asset_version_immutable(
@@ -887,7 +1163,7 @@ async fn write_asset_version_immutable(
     .await
 }
 
-/// Verifies a presigned-uploaded object against its registered intent and
+/// Verifies a presigned-uploaded staging object against its registered intent and
 /// built-in type/EICAR/manifest content checks, fetching the bytes once (the
 /// intended commit-side cost for large objects; the upload/download data path
 /// itself never touches the gateway). Fails closed: on any size, sha256,
@@ -899,7 +1175,7 @@ async fn write_asset_version_immutable(
 /// the inner `Rejected` variant (mapped to 422).
 async fn verify_and_fetch_committed_object(
     bucket: &super::asset_bucket::AssetBucketClient,
-    id: &str,
+    staging_key: &str,
     expected_size: u64,
     expected_sha256: &str,
     asset_type: &str,
@@ -907,11 +1183,11 @@ async fn verify_and_fetch_committed_object(
     max_object_bytes: u64,
 ) -> anyhow::Result<CommitVerification> {
     // 1. HEAD gates the object's size before we download it.
-    let Some(actual_size) = bucket.head_object(id).await? else {
+    let Some(actual_size) = bucket.head_object(staging_key).await? else {
         return Ok(CommitVerification::NotUploaded);
     };
     if actual_size != expected_size || actual_size > max_object_bytes {
-        best_effort_delete(bucket, id).await;
+        best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_size_mismatch",
             message: format!(
@@ -921,10 +1197,12 @@ async fn verify_and_fetch_committed_object(
     }
 
     // 2. Fetch to verify sha256 and run built-in content checks on real bytes.
-    let content = bucket.get_object(id).await?;
+    let Some(content) = bucket.get_object_if_present(staging_key).await? else {
+        return Ok(CommitVerification::NotUploaded);
+    };
     let actual_sha256 = sha256_hex(&content);
     if actual_sha256 != expected_sha256 || content.len() as u64 != expected_size {
-        best_effort_delete(bucket, id).await;
+        best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_hash_mismatch",
             message: "committed object sha256/size does not match the registered intent"
@@ -934,7 +1212,7 @@ async fn verify_and_fetch_committed_object(
     if let Err(message) =
         super::asset_security::validate_asset_content(asset_type, content_type, &content)
     {
-        best_effort_delete(bucket, id).await;
+        best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_rejected",
             message,
@@ -942,19 +1220,64 @@ async fn verify_and_fetch_committed_object(
     }
 
     Ok(CommitVerification::Verified {
-        size_bytes: actual_size,
+        bytes: content,
         sha256: actual_sha256,
     })
 }
 
-async fn best_effort_delete(bucket: &super::asset_bucket::AssetBucketClient, id: &str) {
-    if let Err(error) = bucket.delete_object(id).await {
+async fn best_effort_delete(bucket: &super::asset_bucket::AssetBucketClient, object_key: &str) {
+    if let Err(error) = bucket.delete_object(object_key).await {
         tracing::warn!(
-            asset_id = %id,
+            object_key = %object_key,
             error = %error,
-            "failed to delete a rejected presigned-upload object; it may be orphaned in the bucket"
+            "failed to delete a presigned-upload object; it may be orphaned in the bucket"
         );
     }
+}
+
+fn new_upload_id() -> anyhow::Result<String> {
+    Ok(format!("upl_{}", random_hex_128()?))
+}
+
+fn new_final_object_key(asset_id: &str, upload_id: &str) -> anyhow::Result<String> {
+    Ok(format!(
+        "{}obj_{}",
+        final_object_prefix(asset_id, upload_id),
+        random_hex_128()?
+    ))
+}
+
+fn staging_object_key(asset_id: &str, upload_id: &str, size_bytes: u64, sha256: &str) -> String {
+    let material =
+        format!("ferrogate-asset-staging-v1\0{asset_id}\0{upload_id}\0{size_bytes}\0{sha256}");
+    format!(".ferrogate/staging/{}", sha256_hex(material.as_bytes()))
+}
+
+fn final_object_prefix(asset_id: &str, upload_id: &str) -> String {
+    let material = format!("ferrogate-asset-final-v1\0{asset_id}\0{upload_id}");
+    format!(".ferrogate/objects/{}/", sha256_hex(material.as_bytes()))
+}
+
+fn random_hex_128() -> anyhow::Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("operating-system random source unavailable: {error}"))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(32);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(encoded)
+}
+
+fn is_upload_id(value: &str) -> bool {
+    value.strip_prefix("upl_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// True for a canonical 64-character lowercase-or-uppercase hex SHA-256.

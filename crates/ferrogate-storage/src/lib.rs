@@ -3938,6 +3938,66 @@ impl PostgresControlPlaneStore {
         Ok(())
     }
 
+    const CREATE_ASSET_IF_ABSENT_QUERY: &'static str = "INSERT INTO stored_assets \
+         (id, tenant_id, project_id, asset_type, name, version, content_type, \
+          content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+          storage_uri, variant, yanked) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+         ON CONFLICT (id) DO NOTHING";
+
+    async fn create_asset_if_absent(&self, asset: &StoredAsset) -> Result<bool, StorageError> {
+        let size_bytes = saturating_i64(asset.size_bytes);
+        let operation = self.asset_operation("create asset if absent");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let inserted = transaction
+            .execute(
+                Self::CREATE_ASSET_IF_ABSENT_QUERY,
+                &[
+                    &asset.id,
+                    &asset.tenant_id,
+                    &asset.project_id,
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    &asset.content_type,
+                    &asset.content_hash,
+                    &size_bytes,
+                    &asset.content,
+                    &asset.created_at_unix,
+                    &asset.updated_at_unix,
+                    &asset.storage_uri,
+                    &asset.variant,
+                    &asset.yanked,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the immutable asset create commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(inserted == 1)
+    }
+
     async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
         let operation = self.asset_operation("get asset");
         let mut client = self
@@ -10107,6 +10167,14 @@ impl RuntimeControlPlaneState {
         self.assets.insert(asset.id.clone(), asset);
     }
 
+    pub fn create_asset_if_absent(&mut self, asset: StoredAsset) -> bool {
+        if self.assets.records.contains_key(&asset.id) {
+            return false;
+        }
+        self.assets.insert(asset.id.clone(), asset);
+        true
+    }
+
     pub fn get_asset(&self, id: &str) -> Option<StoredAsset> {
         self.assets.get(id)
     }
@@ -13119,6 +13187,21 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Publishes an immutable asset version exactly once. The Postgres backend
+    /// uses one `INSERT ... ON CONFLICT DO NOTHING` statement; the memory
+    /// backend performs the equivalent check and insert under one lock.
+    pub async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.create_asset_if_absent(asset))
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.create_asset_if_absent(&asset).await
+            }
+        }
+    }
+
     pub async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
@@ -15275,6 +15358,13 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
 
 fn postgres_error(error: tokio_postgres::Error) -> StorageError {
     StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
+}
+
+fn asset_transaction_commit_outcome_unknown(operation: &StorageOperation) -> StorageError {
+    StorageError::OperationCommitOutcomeUnknown {
+        operation: operation.name(),
+        stage: "transaction commit",
+    }
 }
 
 fn postgres_error_message(error: &tokio_postgres::Error) -> String {

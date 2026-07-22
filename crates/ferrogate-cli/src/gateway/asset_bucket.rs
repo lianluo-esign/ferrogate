@@ -58,9 +58,23 @@ impl AssetBucketClient {
         body: &[u8],
         content_type: &str,
     ) -> anyhow::Result<()> {
+        self.put_object_owned(key, body.to_vec(), content_type)
+            .await
+    }
+
+    /// PUTs an owned object buffer without cloning it for the HTTP request.
+    /// The presigned commit path already owns the verified bytes and may hold
+    /// up to the configured multi-gigabyte ceiling, so a second full copy is
+    /// not acceptable there.
+    pub(crate) async fn put_object_owned(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<()> {
         let (scheme, host) = self.scheme_and_host()?;
         let path = self.object_path(key);
-        let signed = self.sign("PUT", &path, &host, body);
+        let signed = self.sign("PUT", &path, &host, &body);
         let client = provider_http_client()?;
         let mut request = client
             .put(format!("{scheme}://{host}{path}"))
@@ -68,7 +82,7 @@ impl AssetBucketClient {
             .header("x-amz-date", signed.x_amz_date.clone())
             .header("authorization", signed.authorization.clone())
             .header("content-type", content_type)
-            .body(body.to_vec());
+            .body(body);
         if let Some(content_sha256) = &signed.x_amz_content_sha256 {
             request = request.header("x-amz-content-sha256", content_sha256.clone());
         }
@@ -82,6 +96,14 @@ impl AssetBucketClient {
     }
 
     pub(crate) async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        self.get_object_if_present(key).await?.ok_or_else(|| {
+            anyhow::anyhow!("asset bucket GET failed (HTTP 404 Not Found): object does not exist")
+        })
+    }
+
+    /// GETs an object while preserving a missing-key result for commit-race
+    /// reconciliation. Other bucket failures remain explicit errors.
+    pub(crate) async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let (scheme, host) = self.scheme_and_host()?;
         let path = self.object_path(key);
         let signed = self.sign("GET", &path, &host, b"");
@@ -96,11 +118,14 @@ impl AssetBucketClient {
         }
         let response = request.send().await?;
         let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             anyhow::bail!("asset bucket GET failed (HTTP {status}): {text}");
         }
-        Ok(response.bytes().await?.to_vec())
+        Ok(Some(response.bytes().await?.to_vec()))
     }
 
     pub(crate) async fn delete_object(&self, key: &str) -> anyhow::Result<()> {

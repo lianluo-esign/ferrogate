@@ -47,6 +47,7 @@ ferrogate-runtime = { path = "../ferrogate-runtime" }
 ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 futures-util.workspace = true
+getrandom.workspace = true
 http.workspace = true
 hmac.workspace = true
 instant-acme.workspace = true
