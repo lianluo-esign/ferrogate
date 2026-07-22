@@ -8,8 +8,8 @@ use crate::schema_routing_test_support::{
     block_on, run_sql, serialize_db_test, unique_schema, SchemaGuard,
 };
 use crate::{
-    PostgresControlPlaneStore, PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories,
-    StorageProviderKind, StoredAsset,
+    PostgresControlPlaneStore, PostgresStorageConfig, PostgresTlsMode, RuntimeControlPlaneBackend,
+    RuntimeStorageRepositories, StorageError, StorageProviderKind, StoredAsset, StoredAssetChannel,
 };
 
 fn asset(id: &str, tenant_id: &str, size_bytes: u64) -> StoredAsset {
@@ -29,6 +29,42 @@ fn asset(id: &str, tenant_id: &str, size_bytes: u64) -> StoredAsset {
         yanked: false,
         created_at_unix: 1,
         updated_at_unix: 1,
+    }
+}
+
+fn channel(id: &str) -> StoredAssetChannel {
+    StoredAssetChannel {
+        id: id.into(),
+        tenant_id: "tenant-a".into(),
+        asset_type: "config_file".into(),
+        name: "artifact".into(),
+        channel: "stable".into(),
+        version: "1.0.0".into(),
+        updated_at_unix: 1,
+    }
+}
+
+fn poison_asset_repository(repositories: &RuntimeStorageRepositories) {
+    let RuntimeControlPlaneBackend::Memory(control_plane) = &repositories.control_plane else {
+        panic!("test repository must use the in-memory control plane");
+    };
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = control_plane.lock().expect("lock before poisoning");
+        panic!("poison the in-memory asset repository lock");
+    }));
+    assert!(
+        panic.is_err(),
+        "poisoning must unwind while holding the lock"
+    );
+}
+
+fn assert_asset_repository_poisoned<T>(result: Result<T, StorageError>) {
+    match result {
+        Err(StorageError::Runtime(message)) => {
+            assert_eq!(message, "in-memory asset repository lock is poisoned")
+        }
+        Err(error) => panic!("expected poisoned-lock runtime error, got {error}"),
+        Ok(_) => panic!("poisoned asset repository must fail closed"),
     }
 }
 
@@ -52,6 +88,32 @@ fn in_memory_usage_sums_only_the_requested_tenants_rows() {
         block_on(repositories.tenant_asset_storage_bytes_used("missing")).expect("usage query"),
         0,
     );
+}
+
+#[test]
+fn poisoned_memory_lock_fails_closed_for_every_asset_repository_method() {
+    let repositories =
+        RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 16, 16);
+    poison_asset_repository(&repositories);
+
+    assert_asset_repository_poisoned(block_on(
+        repositories.upsert_asset(asset("asset-a", "tenant-a", 17)),
+    ));
+    assert_asset_repository_poisoned(block_on(repositories.get_asset("asset-a")));
+    assert_asset_repository_poisoned(block_on(repositories.list_assets("tenant-a", None)));
+    assert_asset_repository_poisoned(block_on(
+        repositories.tenant_asset_storage_bytes_used("tenant-a"),
+    ));
+    assert_asset_repository_poisoned(block_on(repositories.delete_asset("asset-a")));
+    assert_asset_repository_poisoned(block_on(
+        repositories.upsert_asset_channel(channel("channel-a")),
+    ));
+    assert_asset_repository_poisoned(block_on(repositories.list_asset_channels(
+        "tenant-a",
+        "config_file",
+        "artifact",
+    )));
+    assert_asset_repository_poisoned(block_on(repositories.delete_asset_channel("channel-a")));
 }
 
 #[test]

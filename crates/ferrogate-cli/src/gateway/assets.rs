@@ -1139,8 +1139,9 @@ impl FerroGateway {
             .collect())
     }
 
-    /// Upsert (create or move) a channel pointer, validating the target
-    /// version exists and is not yanked, then audit only the durable move.
+    /// Upsert (create or move) a channel pointer after a best-effort target
+    /// preflight, then audit only the durable move. The target read and channel
+    /// write are not atomic; repository-level CAS is needed to close that race.
     #[allow(clippy::too_many_arguments)]
     async fn move_channel(
         &self,
@@ -1152,8 +1153,8 @@ impl FerroGateway {
         channel: &str,
         version: &str,
     ) -> Result<StoredAssetChannel, ChannelMoveError> {
-        // The channel target must be an existing, non-yanked version so a tag
-        // never points at an unresolvable artifact.
+        // Reject targets that are already missing or yanked. This read cannot
+        // prevent a concurrent change before the channel upsert below.
         let tenant_id = auth_tenant(auth);
         let assets = self
             .asset_versions(state, &tenant_id, asset_type, name)

@@ -14,9 +14,9 @@
 // Push flow: register-intent (authorize + meter/audit + quota preflight,
 // return a short-TTL presigned PUT) -> client PUTs bytes straight to the
 // bucket -> commit (gateway verifies size via HEAD and sha256 by fetching
-// the committed object, re-runs the asset_security supply-chain checks
-// against that object, and fails closed by deleting it on any violation
-// before the `stored_assets` row -- and thus the asset -- becomes visible).
+// the committed object, runs the built-in content validation against that
+// object, and refuses to create the `stored_assets` row on any violation;
+// cleanup of the rejected bucket object is best effort).
 //
 // Private-bucket operator runbook: docs/assets/private-bucket-migration.md.
 //
@@ -397,10 +397,10 @@ impl FerroGateway {
             .await;
         };
 
-        // Verify the committed object end-to-end (size via HEAD, sha256 +
-        // supply-chain checks against the fetched bytes) and fail closed by
-        // deleting it on any violation, all before the asset becomes
-        // visible. Extracted so it is unit-testable against the mock bucket.
+        // Verify the committed object end-to-end for this path (size via HEAD,
+        // sha256 + built-in type/EICAR/manifest validation against fetched
+        // bytes) and fail closed by refusing visibility on any violation;
+        // bucket cleanup is best effort. Extracted for mock-bucket unit coverage.
         let verification = match verify_and_fetch_committed_object(
             &bucket,
             &id,
@@ -498,7 +498,7 @@ impl FerroGateway {
 
         // The bytes stay in the bucket; only a reference is persisted. The
         // `stored_assets` row is what makes the asset visible, so it is
-        // written last, only after every check above passed.
+        // written last, only after every check performed by this path passed.
         let asset = StoredAsset {
             id: id.clone(),
             tenant_id: tenant_id.clone(),
@@ -667,9 +667,10 @@ impl FerroGateway {
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
-    /// Deletes the orphaned bucket object (fail-closed) and writes a 422 --
-    /// the single exit used whenever a committed object fails size, sha256,
-    /// supply-chain, or quota validation, so a rejected object never lingers.
+    /// Attempts to delete the orphaned bucket object and writes a 422 -- the
+    /// single exit used whenever a committed object fails size, sha256, built-in
+    /// content, or quota validation. The rejected object never becomes a visible
+    /// asset even if best-effort bucket cleanup fails.
     async fn reject_committed_object(
         &self,
         session: &mut Session,
@@ -836,8 +837,8 @@ enum QuotaStatus {
     StorageError(String),
 }
 
-/// A committed object that failed size/sha256/supply-chain validation and
-/// has already been deleted from the bucket (fail closed).
+/// A committed object that failed size, sha256, or built-in content validation;
+/// best-effort bucket deletion has already been attempted.
 struct CommitRejection {
     code: &'static str,
     message: String,
@@ -887,11 +888,11 @@ async fn write_asset_version_immutable(
 }
 
 /// Verifies a presigned-uploaded object against its registered intent and
-/// the supply-chain checks, fetching the bytes once (the intended
-/// commit-side cost for large objects; the upload/download data path
+/// built-in type/EICAR/manifest content checks, fetching the bytes once (the
+/// intended commit-side cost for large objects; the upload/download data path
 /// itself never touches the gateway). Fails closed: on any size, sha256,
-/// per-object-ceiling, or `asset_security` violation it best-effort
-/// deletes the orphaned object before returning [`CommitVerification::Rejected`].
+/// per-object-ceiling, or `asset_security` violation it attempts to delete the
+/// orphaned object before returning [`CommitVerification::Rejected`].
 ///
 /// The outer `Err` is reserved for bucket-infrastructure failures (HEAD/GET
 /// transport errors) which the caller maps to 503; validation failures are
@@ -919,7 +920,7 @@ async fn verify_and_fetch_committed_object(
         }));
     }
 
-    // 2. Fetch to verify sha256 and run supply-chain checks on real bytes.
+    // 2. Fetch to verify sha256 and run built-in content checks on real bytes.
     let content = bucket.get_object(id).await?;
     let actual_sha256 = sha256_hex(&content);
     if actual_sha256 != expected_sha256 || content.len() as u64 != expected_size {

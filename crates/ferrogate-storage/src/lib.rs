@@ -9586,6 +9586,10 @@ enum RuntimeControlPlaneBackend {
     Postgres(Arc<PostgresControlPlaneStore>),
 }
 
+fn poisoned_asset_repository_lock() -> StorageError {
+    StorageError::Runtime("in-memory asset repository lock is poisoned".to_string())
+}
+
 impl RuntimeControlPlaneState {
     pub fn new() -> Self {
         let mut plans = InMemoryRepository::new();
@@ -13105,12 +13109,10 @@ impl RuntimeStorageRepositories {
     /// model as tenant account CRUD.
     pub async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_asset(asset);
-                }
-                Ok(())
-            }
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.upsert_asset(asset))
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_asset(&asset).await
             }
@@ -13119,10 +13121,10 @@ impl RuntimeStorageRepositories {
 
     pub async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|control_plane| control_plane.get_asset(id))
-                .unwrap_or(None)),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_asset(id).await
             }
@@ -13135,10 +13137,10 @@ impl RuntimeStorageRepositories {
         asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_assets(tenant_id, asset_type))
-                .unwrap_or_default()),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_assets(tenant_id, asset_type).await
             }
@@ -13154,9 +13156,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|control_plane| control_plane.tenant_asset_storage_bytes_used(tenant_id))
-                .map_err(|_| {
-                    StorageError::Runtime("in-memory asset repository lock is poisoned".to_string())
-                }),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .tenant_asset_storage_bytes_used(tenant_id)
@@ -13167,10 +13167,10 @@ impl RuntimeStorageRepositories {
 
     pub async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_asset(id))
-                .unwrap_or(false)),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_asset(id).await
             }
@@ -13184,12 +13184,10 @@ impl RuntimeStorageRepositories {
         channel: StoredAssetChannel,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_asset_channel(channel);
-                }
-                Ok(())
-            }
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.upsert_asset_channel(channel))
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_asset_channel(&channel).await
             }
@@ -13203,10 +13201,10 @@ impl RuntimeStorageRepositories {
         name: &str,
     ) -> Result<Vec<StoredAssetChannel>, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|control_plane| control_plane.list_asset_channels(tenant_id, asset_type, name))
-                .unwrap_or_default()),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .list_asset_channels(tenant_id, asset_type, name)
@@ -13217,10 +13215,10 @@ impl RuntimeStorageRepositories {
 
     pub async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
         match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
                 .lock()
                 .map(|mut control_plane| control_plane.delete_asset_channel(id))
-                .unwrap_or(false)),
+                .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_asset_channel(id).await
             }
