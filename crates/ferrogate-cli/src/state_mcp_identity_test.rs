@@ -1025,34 +1025,80 @@ fn provider_phase_waits_for_inflight_renewal_before_final_mutation() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let renewal_completed = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&renewal_completed);
-        let started = std::time::Instant::now();
-        let outcome = run_with_refresh_heartbeat_tagged(
-            async {
-                tokio::time::sleep(Duration::from_millis(2)).await;
+        // Deterministic ordering proof: every stage appends to an event log, and
+        // explicit notify handshakes force the schedule instead of timed sleeps.
+        //
+        //   renewal_started      -> the heartbeat renewal is provably in flight
+        //   provider_result_ready-> the provider work resolves while renewal is
+        //                           still held open (renewal_completed not logged)
+        //   renewal_completed    -> the held renewal is drained to completion
+        //   outcome_returned     -> only then does the provider phase return,
+        //                           unblocking the final mutation path
+        let events: Arc<std::sync::Mutex<Vec<&'static str>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let renewal_started = Arc::new(tokio::sync::Notify::new());
+        let work_finished = Arc::new(tokio::sync::Notify::new());
+        let release_renewal = Arc::new(tokio::sync::Notify::new());
+
+        let work_events = Arc::clone(&events);
+        let work_gate = Arc::clone(&renewal_started);
+        let work_done = Arc::clone(&work_finished);
+        let renew_events = Arc::clone(&events);
+        let renew_started = Arc::clone(&renewal_started);
+        let renew_release = Arc::clone(&release_renewal);
+
+        let heartbeat = run_with_refresh_heartbeat_tagged(
+            async move {
+                // The provider result only becomes ready once the renewal has
+                // signalled that it is in flight, so completion order is forced.
+                work_gate.notified().await;
+                work_events.lock().unwrap().push("provider_result_ready");
+                work_done.notify_one();
                 Ok::<_, McpIdentityError>("provider-result")
             },
             Duration::from_millis(1),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             move || {
-                let observed = Arc::clone(&observed);
+                let events = Arc::clone(&renew_events);
+                let started = Arc::clone(&renew_started);
+                let release = Arc::clone(&renew_release);
                 async move {
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    observed.store(true, Ordering::SeqCst);
+                    events.lock().unwrap().push("renewal_started");
+                    started.notify_one();
+                    // Hold the renewal in flight until the provider result has
+                    // been produced; completion is released, never timed.
+                    release.notified().await;
+                    events.lock().unwrap().push("renewal_completed");
                     Ok(())
                 }
             },
-        )
-        .await;
+        );
+
+        // Releases the held renewal only after the provider work has finished,
+        // proving the provider phase then drains the in-flight renewal before
+        // returning rather than abandoning it.
+        let releaser = async {
+            work_finished.notified().await;
+            release_renewal.notify_one();
+        };
+
+        let (outcome, ()) = tokio::join!(heartbeat, releaser);
+        events.lock().unwrap().push("outcome_returned");
 
         assert!(matches!(
             outcome,
             RefreshHeartbeatOutcome::Work(Ok("provider-result"))
         ));
-        assert!(started.elapsed() >= Duration::from_millis(30));
-        assert!(renewal_completed.load(Ordering::SeqCst));
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "renewal_started",
+                "provider_result_ready",
+                "renewal_completed",
+                "outcome_returned",
+            ]
+        );
     });
 }
 
