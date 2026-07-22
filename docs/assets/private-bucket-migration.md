@@ -13,7 +13,7 @@ Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
 
 - **Presigned upload** - `POST /v1/assets/presign/upload/{asset_type}/{name}/{version}`
   authorizes (virtual-key `assets.write` + StoredPlan/role asset-hosting
-  entitlement + tenant scoping), enforces the per-object ceiling and the
+  entitlement + tenant scoping), preflights the declared per-object size and
   cumulative tenant `asset_storage_quota_bytes`, audits, and returns a
   short-TTL SigV4 `PUT` URL plus a unique opaque `upload_id`. Each intent uses
   a separate staging object bound to the tenant, logical asset identity,
@@ -85,6 +85,12 @@ authorized download URL encapsulates final-object access.
 - `presign_max_object_bytes` — per-object size ceiling for the presigned
   path; defaults to 5 GiB. Independent of the tenant-wide
   `asset_storage_quota_bytes`.
+
+Current limitation (#368): the presigned `PUT` authorization does not yet bind
+the request's content length or checksum at the bucket boundary. Commit rejects
+and best-effort cleans a staging object that violates its declaration, but the
+bucket may temporarily store those bytes until commit or orphan GC. Treat the
+intent checks as commit admission controls, not as a bucket-enforced hard quota.
 
 ## Migration sequence (operator-run, not automated)
 
