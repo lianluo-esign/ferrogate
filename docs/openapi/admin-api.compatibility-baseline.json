@@ -9436,7 +9436,7 @@
               }
             },
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "type": "string",
                   "format": "binary"
@@ -9511,7 +9511,7 @@
               }
             },
             "content": {
-              "application/octet-stream": {
+              "*/*": {
                 "schema": {
                   "type": "string",
                   "format": "binary"
@@ -9799,7 +9799,7 @@
           "required": true,
           "description": "Raw asset bytes. The request Content-Type becomes the stored content type; it defaults to application/octet-stream when absent.",
           "content": {
-            "application/octet-stream": {
+            "*/*": {
               "schema": {
                 "type": "string",
                 "format": "binary"
@@ -11663,7 +11663,7 @@
           "gateway"
         ],
         "summary": "Issue a presigned large-asset upload intent.",
-        "description": "Preflights the declared size and tenant quota, then returns a short-lived direct PUT URL. The URL expires after expires_in_seconds. The opaque key is a transfer identity, not a public bucket location. Existing immutable versions return 409 before a URL is issued.",
+        "description": "Preflights the declared size and tenant quota, allocates a unique staging upload, and returns its opaque upload_id plus a short-lived direct PUT URL. Every intent gets a new staging object, so issuing or replaying an intent cannot overwrite a live immutable asset. key identifies the logical asset only; no storage key is returned as a standalone field, and the upload URL never targets the final key. Existing immutable versions return 409 before a URL is issued.",
         "x-ferrogate-contract": {
           "visibility": "public",
           "auth": {
@@ -11674,7 +11674,7 @@
         },
         "responses": {
           "200": {
-            "description": "Presigned direct-upload intent.",
+            "description": "Presigned direct-upload intent bound to one unique staging upload.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11757,7 +11757,7 @@
           "gateway"
         ],
         "summary": "Verify and commit a presigned asset upload.",
-        "description": "HEADs and fetches the uploaded object, verifies declared size and SHA-256, applies the built-in asset content/type validation, and only then makes the asset visible. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Retrying the same version with identical committed metadata is idempotent and returns the existing asset unchanged; mismatched metadata returns 409 before bucket mutation. Rejected objects are deleted best-effort before a typed 422. An object is not visible until commit succeeds; a final storage-row failure can leave an object for operator reconciliation.",
+        "description": "Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and applies the built-in asset content/type validation. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.",
         "x-ferrogate-contract": {
           "visibility": "public",
           "auth": {
@@ -11802,12 +11802,12 @@
             "$ref": "#/components/responses/AssetUnprocessableEntity"
           },
           "503": {
-            "$ref": "#/components/responses/ServiceUnavailable"
+            "$ref": "#/components/responses/AssetServiceUnavailable"
           }
         },
         "requestBody": {
           "required": true,
-          "description": "The registered size/checksum plus the content type to persist after verification.",
+          "description": "The upload_id returned by the intent plus its registered size/checksum and the content type to persist after verification.",
           "content": {
             "application/json": {
               "schema": {
@@ -12654,6 +12654,16 @@
       },
       "AssetUnprocessableEntity": {
         "description": "Uploaded bytes failed checksum, size, content, signature, or malware validation and are not published.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AssetErrorResponse"
+            }
+          }
+        }
+      },
+      "AssetServiceUnavailable": {
+        "description": "Asset storage is unavailable or a commit outcome cannot be proven. asset_bucket_unavailable covers final-key generation or object-write failure and preserves staging plus any final candidate. asset_commit_outcome_unknown means the atomic metadata create may already be durable; retry with the same upload_id and do not delete staging or final objects.",
         "content": {
           "application/json": {
             "schema": {
@@ -24193,7 +24203,8 @@
           "asset_egress_quota_exceeded",
           "asset_download_rate_limit_exceeded",
           "governance_counter_unavailable",
-          "asset_integrity_check_failed"
+          "asset_integrity_check_failed",
+          "asset_commit_outcome_unknown"
         ]
       },
       "AssetErrorResponse": {
@@ -24433,6 +24444,11 @@
       "AssetPresignCommitRequest": {
         "type": "object",
         "properties": {
+          "upload_id": {
+            "type": "string",
+            "description": "Opaque staging-upload identity returned by createAssetUploadIntent.",
+            "pattern": "^upl_[0-9a-f]{32}$"
+          },
           "size_bytes": {
             "type": "integer",
             "format": "int64",
@@ -24453,6 +24469,7 @@
         },
         "additionalProperties": false,
         "required": [
+          "upload_id",
           "size_bytes",
           "sha256"
         ]
@@ -24465,7 +24482,12 @@
           },
           "key": {
             "type": "string",
-            "description": "Opaque tenant-scoped transfer identity; not a public bucket URL."
+            "description": "Logical tenant-scoped asset identity. This is never a staging or final bucket key."
+          },
+          "upload_id": {
+            "type": "string",
+            "description": "Opaque identity of this unique staging upload; submit it unchanged when committing.",
+            "pattern": "^upl_[0-9a-f]{32}$"
           },
           "upload_url": {
             "type": "string",
@@ -24493,6 +24515,7 @@
         "required": [
           "object",
           "key",
+          "upload_id",
           "upload_url",
           "method",
           "expires_in_seconds",

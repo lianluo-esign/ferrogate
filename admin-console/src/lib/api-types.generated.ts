@@ -2749,7 +2749,7 @@ export interface paths {
         put?: never;
         /**
          * Issue a presigned large-asset upload intent.
-         * @description Preflights the declared size and tenant quota, then returns a short-lived direct PUT URL. The URL expires after expires_in_seconds. The opaque key is a transfer identity, not a public bucket location. Existing immutable versions return 409 before a URL is issued.
+         * @description Preflights the declared size and tenant quota, allocates a unique staging upload, and returns its opaque upload_id plus a short-lived direct PUT URL. Every intent gets a new staging object, so issuing or replaying an intent cannot overwrite a live immutable asset. key identifies the logical asset only; no storage key is returned as a standalone field, and the upload URL never targets the final key. Existing immutable versions return 409 before a URL is issued.
          */
         post: operations["createAssetUploadIntent"];
         delete?: never;
@@ -2769,7 +2769,7 @@ export interface paths {
         put?: never;
         /**
          * Verify and commit a presigned asset upload.
-         * @description HEADs and fetches the uploaded object, verifies declared size and SHA-256, applies the built-in asset content/type validation, and only then makes the asset visible. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Retrying the same version with identical committed metadata is idempotent and returns the existing asset unchanged; mismatched metadata returns 409 before bucket mutation. Rejected objects are deleted best-effort before a typed 422. An object is not visible until commit succeeds; a final storage-row failure can leave an object for operator reconciliation.
+         * @description Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and applies the built-in asset content/type validation. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.
          */
         post: operations["commitAssetUpload"];
         delete?: never;
@@ -5626,7 +5626,7 @@ export interface components {
          * @description Stable asset lifecycle error code.
          * @enum {string}
          */
-        AssetErrorCode: "asset_not_found" | "asset_variant_not_found" | "asset_variant_required" | "asset_version_immutable" | "asset_storage_quota_exceeded" | "asset_hosting_disabled" | "tenant_required" | "channel_target_required" | "channel_target_not_found" | "channel_not_found" | "asset_not_bucket_backed" | "asset_bucket_unavailable" | "storage_unavailable" | "payload_too_large" | "invalid_upload_intent" | "invalid_commit" | "invalid_request_body" | "asset_not_uploaded" | "asset_commit_size_mismatch" | "asset_commit_hash_mismatch" | "asset_rejected" | "asset_signature_required" | "cross_tenant_publish_denied" | "asset_scan_rejected" | "asset_egress_quota_exceeded" | "asset_download_rate_limit_exceeded" | "governance_counter_unavailable" | "asset_integrity_check_failed";
+        AssetErrorCode: "asset_not_found" | "asset_variant_not_found" | "asset_variant_required" | "asset_version_immutable" | "asset_storage_quota_exceeded" | "asset_hosting_disabled" | "tenant_required" | "channel_target_required" | "channel_target_not_found" | "channel_not_found" | "asset_not_bucket_backed" | "asset_bucket_unavailable" | "storage_unavailable" | "payload_too_large" | "invalid_upload_intent" | "invalid_commit" | "invalid_request_body" | "asset_not_uploaded" | "asset_commit_size_mismatch" | "asset_commit_hash_mismatch" | "asset_rejected" | "asset_signature_required" | "cross_tenant_publish_denied" | "asset_scan_rejected" | "asset_egress_quota_exceeded" | "asset_download_rate_limit_exceeded" | "governance_counter_unavailable" | "asset_integrity_check_failed" | "asset_commit_outcome_unknown";
         AssetErrorResponse: {
             error: {
                 message: string;
@@ -5693,6 +5693,8 @@ export interface components {
             sha256: string;
         };
         AssetPresignCommitRequest: {
+            /** @description Opaque staging-upload identity returned by createAssetUploadIntent. */
+            upload_id: string;
             /** Format: int64 */
             size_bytes: number;
             /** @description Registered hex SHA-256; comparison is case-insensitive. */
@@ -5703,8 +5705,10 @@ export interface components {
         AssetPresignUploadIntentResponse: {
             /** @constant */
             object: "asset_upload_intent";
-            /** @description Opaque tenant-scoped transfer identity; not a public bucket URL. */
+            /** @description Logical tenant-scoped asset identity. This is never a staging or final bucket key. */
             key: string;
+            /** @description Opaque identity of this unique staging upload; submit it unchanged when committing. */
+            upload_id: string;
             /** Format: uri */
             upload_url: string;
             /** @constant */
@@ -6027,6 +6031,15 @@ export interface components {
         };
         /** @description Uploaded bytes failed checksum, size, content, signature, or malware validation and are not published. */
         AssetUnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description Asset storage is unavailable or a commit outcome cannot be proven. asset_bucket_unavailable covers final-key generation or object-write failure and preserves staging plus any final candidate. asset_commit_outcome_unknown means the atomic metadata create may already be durable; retry with the same upload_id and do not delete staging or final objects. */
+        AssetServiceUnavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -11086,7 +11099,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "*/*": string;
                 };
             };
             /** @description Requested byte range of the resolved asset. */
@@ -11115,7 +11128,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "*/*": string;
                 };
             };
             /** @description The supplied validator matches; no response body is sent. */
@@ -11213,7 +11226,7 @@ export interface operations {
         /** @description Raw asset bytes. The request Content-Type becomes the stored content type; it defaults to application/octet-stream when absent. */
         requestBody: {
             content: {
-                "application/octet-stream": string;
+                "*/*": string;
             };
         };
         responses: {
@@ -12130,7 +12143,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Presigned direct-upload intent. */
+            /** @description Presigned direct-upload intent bound to one unique staging upload. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12162,7 +12175,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description The registered size/checksum plus the content type to persist after verification. */
+        /** @description The upload_id returned by the intent plus its registered size/checksum and the content type to persist after verification. */
         requestBody: {
             content: {
                 "application/json": components["schemas"]["AssetPresignCommitRequest"];
@@ -12186,7 +12199,7 @@ export interface operations {
             409: components["responses"]["AssetConflict"];
             413: components["responses"]["AssetPayloadTooLarge"];
             422: components["responses"]["AssetUnprocessableEntity"];
-            503: components["responses"]["ServiceUnavailable"];
+            503: components["responses"]["AssetServiceUnavailable"];
         };
     };
     getAssetDownloadUrl: {

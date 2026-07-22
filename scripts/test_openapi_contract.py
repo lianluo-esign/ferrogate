@@ -199,10 +199,74 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(set(documented_assets), set(expected))
 
         response_components = document["components"]["responses"]
+        asset_schemas = document["components"]["schemas"]
         self.assertIn(
             "channel_target_not_found",
-            document["components"]["schemas"]["AssetErrorCode"]["enum"],
+            asset_schemas["AssetErrorCode"]["enum"],
         )
+        self.assertIn(
+            "asset_commit_outcome_unknown",
+            asset_schemas["AssetErrorCode"]["enum"],
+        )
+
+        concrete_asset = documented_assets[
+            ("/v1/assets/{asset_type}/{name}/{version}", "get")
+        ]
+        self.assertEqual(set(concrete_asset["responses"]["200"]["content"]), {"*/*"})
+        self.assertEqual(set(concrete_asset["responses"]["206"]["content"]), {"*/*"})
+        inline_put = documented_assets[
+            ("/v1/assets/{asset_type}/{name}/{version}", "put")
+        ]
+        self.assertEqual(set(inline_put["requestBody"]["content"]), {"*/*"})
+
+        upload_id_pattern = r"^upl_[0-9a-f]{32}$"
+        commit_request = asset_schemas["AssetPresignCommitRequest"]
+        upload_response = asset_schemas["AssetPresignUploadIntentResponse"]
+        for schema in (
+            asset_schemas["AssetPresignUploadIntentRequest"],
+            commit_request,
+            upload_response,
+        ):
+            self.assertIs(schema["additionalProperties"], False)
+        self.assertIn("upload_id", commit_request["required"])
+        self.assertEqual(
+            commit_request["properties"]["upload_id"]["type"],
+            "string",
+        )
+        self.assertEqual(
+            commit_request["properties"]["upload_id"]["pattern"],
+            upload_id_pattern,
+        )
+        self.assertIn("upload_id", upload_response["required"])
+        self.assertEqual(
+            upload_response["properties"]["upload_id"]["type"],
+            "string",
+        )
+        self.assertEqual(
+            upload_response["properties"]["upload_id"]["pattern"],
+            upload_id_pattern,
+        )
+        self.assertIn(
+            "never a staging or final bucket key",
+            upload_response["properties"]["key"]["description"],
+        )
+
+        commit_operation = documented_assets[
+            ("/v1/assets/presign/commit/{asset_type}/{name}/{version}", "post")
+        ]
+        self.assertEqual(
+            commit_operation["responses"]["503"]["$ref"],
+            "#/components/responses/AssetServiceUnavailable",
+        )
+        asset_unavailable = response_components["AssetServiceUnavailable"]
+        self.assertEqual(
+            asset_unavailable["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AssetErrorResponse",
+        )
+        self.assertIn("asset_bucket_unavailable", asset_unavailable["description"])
+        self.assertIn("asset_commit_outcome_unknown", asset_unavailable["description"])
+        self.assertIn("same upload_id", asset_unavailable["description"])
+
         for key, scope in expected.items():
             runtime_operation = runtime_assets[key]
             documented_operation = documented_assets[key]
