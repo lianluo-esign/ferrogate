@@ -2649,6 +2649,17 @@
       "rbac_action": null
     },
     {
+      "path": "/v1/assets/storage/summary",
+      "method": "get",
+      "operation_id": "getAssetStorageSummary",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/assets/{asset_type}",
       "method": "get",
       "operation_id": "listAssetsByType",
@@ -2689,6 +2700,105 @@
       "auth": {
         "kind": "bearer",
         "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/manifest",
+      "method": "get",
+      "operation_id": "getAssetManifest",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/channels",
+      "method": "get",
+      "operation_id": "listAssetChannels",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/channels/{channel}",
+      "method": "put",
+      "operation_id": "putAssetChannel",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/channels/{channel}",
+      "method": "delete",
+      "operation_id": "deleteAssetChannel",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/{version}/yank",
+      "method": "post",
+      "operation_id": "yankAssetVersion",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/{asset_type}/{name}/{version}/yank",
+      "method": "delete",
+      "operation_id": "unyankAssetVersion",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/presign/upload/{asset_type}/{name}/{version}",
+      "method": "post",
+      "operation_id": "createAssetUploadIntent",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/presign/commit/{asset_type}/{name}/{version}",
+      "method": "post",
+      "operation_id": "commitAssetUpload",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/assets/presign/download/{asset_type}/{name}/{version}",
+      "method": "get",
+      "operation_id": "getAssetDownloadUrl",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
       },
       "rbac_action": null
     },

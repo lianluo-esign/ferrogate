@@ -14,6 +14,7 @@ from openapi_contract import (
     CONTRACT_PATH,
     OPENAPI_PATH,
     load_json,
+    operations,
     validate_bidirectional_drift,
     validate_compatibility,
     validate_openapi,
@@ -158,6 +159,81 @@ class ContractTests(unittest.TestCase):
         scope_map = operation["auth"]["scope_discriminator"]["map"]
         self.assertEqual(scope_map["notifications/initialized"], "tools.read")
         self.assertNotIn("notifications/cancelled", scope_map)
+
+    def test_repository_asset_lifecycle_contract_has_exact_scopes_and_typed_4xx(self) -> None:
+        runtime, runtime_failures = load_json(CONTRACT_PATH)
+        document, document_failures = load_json(OPENAPI_PATH)
+        self.assertEqual(runtime_failures, [])
+        self.assertEqual(document_failures, [])
+        assert runtime is not None
+        assert document is not None
+
+        expected = {
+            ("/v1/assets", "get"): "assets.read",
+            ("/v1/assets/storage/summary", "get"): "assets.read",
+            ("/v1/assets/{asset_type}", "get"): "assets.read",
+            ("/v1/assets/{asset_type}/{name}/{version}", "get"): "assets.read",
+            ("/v1/assets/{asset_type}/{name}/{version}", "put"): "assets.write",
+            ("/v1/assets/{asset_type}/{name}/{version}", "delete"): "assets.write",
+            ("/v1/assets/{asset_type}/{name}/manifest", "get"): "assets.read",
+            ("/v1/assets/{asset_type}/{name}/channels", "get"): "assets.read",
+            ("/v1/assets/{asset_type}/{name}/channels/{channel}", "put"): "assets.write",
+            ("/v1/assets/{asset_type}/{name}/channels/{channel}", "delete"): "assets.write",
+            ("/v1/assets/{asset_type}/{name}/{version}/yank", "post"): "assets.write",
+            ("/v1/assets/{asset_type}/{name}/{version}/yank", "delete"): "assets.write",
+            ("/v1/assets/presign/upload/{asset_type}/{name}/{version}", "post"): "assets.write",
+            ("/v1/assets/presign/commit/{asset_type}/{name}/{version}", "post"): "assets.write",
+            ("/v1/assets/presign/download/{asset_type}/{name}/{version}", "get"): "assets.read",
+        }
+        runtime_assets = {
+            (operation["path"], operation["method"]): operation
+            for operation in runtime["operations"]
+            if operation["path"].startswith("/v1/assets")
+        }
+        documented_assets = {
+            key: operation
+            for key, operation in operations(document).items()
+            if key[0].startswith("/v1/assets")
+        }
+        self.assertEqual(set(runtime_assets), set(expected))
+        self.assertEqual(set(documented_assets), set(expected))
+
+        response_components = document["components"]["responses"]
+        self.assertIn(
+            "channel_target_not_found",
+            document["components"]["schemas"]["AssetErrorCode"]["enum"],
+        )
+        for key, scope in expected.items():
+            runtime_operation = runtime_assets[key]
+            documented_operation = documented_assets[key]
+            self.assertEqual(runtime_operation["auth"], {"kind": "bearer", "scope": scope})
+            self.assertEqual(
+                documented_operation["x-ferrogate-contract"]["auth"],
+                {"kind": "bearer", "scope": scope},
+            )
+            self.assertIn("401", documented_operation["responses"])
+            self.assertIn("403", documented_operation["responses"])
+            self.assertIn("405", documented_operation["responses"])
+
+            for status, response in documented_operation["responses"].items():
+                if not status.startswith("4"):
+                    continue
+                if status == "416":
+                    self.assertNotIn("content", response)
+                    continue
+                response_ref = response.get("$ref")
+                self.assertIsInstance(response_ref, str, f"{key} {status} must use a typed response")
+                component_name = response_ref.rsplit("/", 1)[-1]
+                schema_ref = response_components[component_name]["content"]["application/json"][
+                    "schema"
+                ]["$ref"]
+                self.assertIn(
+                    schema_ref,
+                    {
+                        "#/components/schemas/ErrorResponse",
+                        "#/components/schemas/AssetErrorResponse",
+                    },
+                )
 
     def test_operation_must_belong_to_a_route_pattern(self) -> None:
         invalid = contract()

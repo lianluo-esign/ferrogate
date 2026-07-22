@@ -28,25 +28,14 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import {
-  gatewayDelete,
-  gatewayGet,
+  adminDelete,
+  adminGet,
+  type AdminSchema,
   gatewayGetBinary,
   gatewayPutBinary,
-  type AdminPage,
 } from "@/lib/gateway-client";
 
-interface AssetSummary {
-  id: string;
-  asset_type: string;
-  name: string;
-  version: string;
-  content_type: string;
-  content_hash: string;
-  size_bytes: number;
-  storage_backed: boolean;
-  created_at_unix: number;
-  updated_at_unix: number;
-}
+type AssetSummary = AdminSchema<"AssetSummary">;
 
 const ASSET_TYPES = [
   { label: "CLI tool", value: "cli_tool" },
@@ -55,6 +44,8 @@ const ASSET_TYPES = [
   { label: "Static site", value: "static_site" },
   { label: "Config file", value: "config_file" },
 ];
+const ASSETS_QUERY_KEY = ["assets"] as const;
+const ASSET_STORAGE_SUMMARY_QUERY_KEY = ["asset-storage-summary"] as const;
 
 function assetPath(assetType: string, name: string, version: string): string {
   return `/v1/assets/${encodeURIComponent(assetType)}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
@@ -70,7 +61,6 @@ export default function AssetsPage() {
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
-  const queryKey = ["assets"];
 
   const [assetType, setAssetType] = useState("cli_tool");
   const [name, setName] = useState("");
@@ -79,25 +69,17 @@ export default function AssetsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const { data, isLoading, error: listError } = useQuery({
-    queryKey,
-    queryFn: () => gatewayGet<AdminPage<AssetSummary>>(apiKey, "/v1/assets"),
+    queryKey: ASSETS_QUERY_KEY,
+    queryFn: () => adminGet(apiKey, "/v1/assets"),
   });
 
-  // Quota usage (issue #178's acceptance criteria): current bytes are
-  // summed client-side from the already-fetched asset list rather than a
-  // dedicated endpoint (none exists -- tenant_asset_storage_bytes_used is
-  // only used internally by the push quota check today); the limit comes
-  // from the resolved-defaults endpoint (issue #168) since a plan's
-  // default_asset_storage_quota_bytes isn't exposed anywhere else either.
-  const tenantId = session?.tenant.id;
-  const { data: resolvedDefaults } = useQuery({
-    queryKey: ["tenant-resolved-defaults-for-quota", tenantId],
-    queryFn: () =>
-      gatewayGet<{ default_asset_storage_quota_bytes: number | null }>(
-        apiKey,
-        `/admin/v1/tenant-accounts/${encodeURIComponent(tenantId ?? "")}/resolved-defaults`,
-      ),
-    enabled: Boolean(tenantId),
+  const {
+    data: storageSummary,
+    isLoading: isStorageSummaryLoading,
+    error: storageSummaryError,
+  } = useQuery({
+    queryKey: ASSET_STORAGE_SUMMARY_QUERY_KEY,
+    queryFn: () => adminGet(apiKey, "/v1/assets/storage/summary"),
   });
 
   const uploadMutation = useMutation({
@@ -112,7 +94,8 @@ export default function AssetsPage() {
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey });
+      queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ASSET_STORAGE_SUMMARY_QUERY_KEY });
       toast.success("Asset pushed");
       setName("");
       setVersion("");
@@ -124,9 +107,16 @@ export default function AssetsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (asset: AssetSummary) =>
-      gatewayDelete(apiKey, assetPath(asset.asset_type, asset.name, asset.version)),
+      adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
+        params: {
+          asset_type: asset.asset_type,
+          name: asset.name,
+          version: asset.version,
+        },
+      }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey });
+      queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ASSET_STORAGE_SUMMARY_QUERY_KEY });
       toast.success("Asset deleted");
     },
     onError: (deleteError: Error) => toast.error(deleteError.message),
@@ -152,8 +142,6 @@ export default function AssetsPage() {
   }
 
   const rows = data?.data ?? [];
-  const bytesUsed = rows.reduce((total, asset) => total + asset.size_bytes, 0);
-  const quotaBytes = resolvedDefaults?.default_asset_storage_quota_bytes ?? null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -171,10 +159,20 @@ export default function AssetsPage() {
           <CardTitle className="text-base">Storage quota</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm">
-            {formatBytes(bytesUsed)} used
-            {quotaBytes !== null ? ` of ${formatBytes(quotaBytes)}` : " (no quota configured)"}
-          </p>
+          {storageSummaryError ? (
+            <p role="alert" className="text-sm text-destructive">
+              Failed to load storage usage: {storageSummaryError.message}
+            </p>
+          ) : isStorageSummaryLoading || !storageSummary ? (
+            <p className="text-sm text-muted-foreground">Loading...</p>
+          ) : (
+            <p className="text-sm">
+              {formatBytes(storageSummary.used_bytes)} used
+              {storageSummary.quota_bytes !== null
+                ? ` of ${formatBytes(storageSummary.quota_bytes)}`
+                : " (no quota configured)"}
+            </p>
+          )}
         </CardContent>
       </Card>
 

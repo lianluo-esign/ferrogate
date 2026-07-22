@@ -2290,7 +2290,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List tenant assets. */
+        /**
+         * List tenant assets.
+         * @description Returns metadata only; bytes, the internal storage_uri field, bucket endpoint, and credentials are not serialized. Use each asset manifest for variant and yank state.
+         */
         get: operations["listAssets"];
         put?: never;
         post?: never;
@@ -2307,7 +2310,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List tenant assets by type. */
+        /**
+         * List tenant assets by type.
+         * @description Returns metadata only; use GET /v1/assets/{asset_type}/{name}/manifest for channel, variant, and yank state.
+         */
         get: operations["listAssetsByType"];
         put?: never;
         post?: never;
@@ -2324,12 +2330,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Fetch tenant asset bytes. */
+        /**
+         * Resolve and fetch tenant asset bytes.
+         * @description Resolves an exact version, channel, or semver range, selects a platform variant, enforces download quotas, and returns raw bytes using the stored content type. A yanked version remains downloadable but carries warning metadata. Use the manifest response to inspect all versions and SHA-256 checksums before downloading.
+         */
         get: operations["getAsset"];
-        /** Create or replace a tenant asset. */
+        /**
+         * Publish a small tenant asset inline.
+         * @description Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission.
+         */
         put: operations["putAsset"];
         post?: never;
-        /** Delete a tenant asset. */
+        /**
+         * Delete a concrete tenant asset variant.
+         * @description Deletes the selected variant row and best-effort removes its bucket object. Omit platform for the default variant.
+         */
         delete: operations["deleteAsset"];
         options?: never;
         head?: never;
@@ -2610,6 +2625,174 @@ export interface paths {
         post?: never;
         /** Unbind a custom hostname from its hosted static site (audited). */
         delete: operations["unbindSiteDomain"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/storage/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get authoritative tenant asset storage usage and upload limits.
+         * @description Reads durable tenant usage and the authenticated key's effective tenant-owned storage quota. The response also tells clients whether to use inline upload or the presigned transfer flow.
+         */
+        get: operations["getAssetStorageSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{asset_type}/{name}/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an asset registry manifest.
+         * @description Returns every logical version, yank state, platform variant, checksum, size, storage mode, and channel pointer without serializing raw bytes, the internal storage_uri field, bucket endpoint, or credentials.
+         */
+        get: operations["getAssetManifest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{asset_type}/{name}/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List channel pointers for an asset.
+         * @description Lists tenant-scoped latest/stable/canary or free-form channel pointers.
+         */
+        get: operations["listAssetChannels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{asset_type}/{name}/channels/{channel}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Create or move an asset channel.
+         * @description Validates that the target is an existing, non-yanked concrete version, then durably writes the channel pointer. The validation and upsert are separate repository operations and do not claim race-free target integrity. Asset hosting requires the tenant plan flag or assets.host permission.
+         */
+        put: operations["putAssetChannel"];
+        post?: never;
+        /**
+         * Delete an asset channel.
+         * @description Deletes only the channel pointer; concrete asset versions remain unchanged.
+         */
+        delete: operations["deleteAssetChannel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{asset_type}/{name}/{version}/yank": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Yank every variant of an asset version.
+         * @description Marks every variant of the concrete version as yanked. Pinned downloads remain possible with warning headers, while channel moves cannot target a yanked version.
+         */
+        post: operations["yankAssetVersion"];
+        /**
+         * Unyank every variant of an asset version.
+         * @description Clears yank state on every variant of the concrete version.
+         */
+        delete: operations["unyankAssetVersion"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/presign/upload/{asset_type}/{name}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a presigned large-asset upload intent.
+         * @description Preflights the declared size and tenant quota, then returns a short-lived direct PUT URL. The URL expires after expires_in_seconds. The opaque key is a transfer identity, not a public bucket location. Existing immutable versions return 409 before a URL is issued.
+         */
+        post: operations["createAssetUploadIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/presign/commit/{asset_type}/{name}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify and commit a presigned asset upload.
+         * @description HEADs and fetches the uploaded object, verifies declared size and SHA-256, applies the built-in asset content/type validation, and only then makes the asset visible. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Retrying the same version with identical committed metadata is idempotent and returns the existing asset unchanged; mismatched metadata returns 409 before bucket mutation. Rejected objects are deleted best-effort before a typed 422. An object is not visible until commit succeeds; a final storage-row failure can leave an object for operator reconciliation.
+         */
+        post: operations["commitAssetUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/presign/download/{asset_type}/{name}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Issue a presigned private-bucket download URL.
+         * @description Returns a short-lived direct GET URL plus the stored size, content type, and SHA-256 for client verification. Inline assets return 409 and must be fetched through the ordinary asset GET route. URL issuance is audited and metered as egress.
+         */
+        get: operations["getAssetDownloadUrl"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -5309,9 +5492,14 @@ export interface components {
             name: string;
             version: string;
             content_type: string;
+            /** @description Lowercase SHA-256 digest of the exact stored bytes. */
             content_hash: string;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Authoritative stored byte count.
+             */
             size_bytes: number;
+            /** @description True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized. */
             storage_backed: boolean;
             /** Format: int64 */
             created_at_unix: number;
@@ -5433,6 +5621,138 @@ export interface components {
             /** @constant */
             object: "list";
             data: components["schemas"]["AdminSiteDomain"][];
+        };
+        /**
+         * @description Stable asset lifecycle error code.
+         * @enum {string}
+         */
+        AssetErrorCode: "asset_not_found" | "asset_variant_not_found" | "asset_variant_required" | "asset_version_immutable" | "asset_storage_quota_exceeded" | "asset_hosting_disabled" | "tenant_required" | "channel_target_required" | "channel_target_not_found" | "channel_not_found" | "asset_not_bucket_backed" | "asset_bucket_unavailable" | "storage_unavailable" | "payload_too_large" | "invalid_upload_intent" | "invalid_commit" | "invalid_request_body" | "asset_not_uploaded" | "asset_commit_size_mismatch" | "asset_commit_hash_mismatch" | "asset_rejected" | "asset_signature_required" | "cross_tenant_publish_denied" | "asset_scan_rejected" | "asset_egress_quota_exceeded" | "asset_download_rate_limit_exceeded" | "governance_counter_unavailable" | "asset_integrity_check_failed";
+        AssetErrorResponse: {
+            error: {
+                message: string;
+                /** @constant */
+                type: "ferrogate_error";
+                code: components["schemas"]["AssetErrorCode"];
+                request_id: string | null;
+            };
+        };
+        /** @description One channel pointer and its concrete version target. */
+        AssetChannelSummary: {
+            channel: string;
+            version: string;
+            /** Format: int64 */
+            updated_at_unix: number;
+        };
+        AssetChannelListResponse: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AssetChannelSummary"][];
+        };
+        AssetChannelMutationResponse: {
+            /** @constant */
+            object: "asset_channel";
+            asset_type: string;
+            name: string;
+            channel: components["schemas"]["AssetChannelSummary"];
+        };
+        /** @description One platform/architecture artifact of a logical version. */
+        AssetManifestVariant: {
+            /** @description Platform variant; an empty string is the default variant. */
+            variant: string;
+            content_type: string;
+            /** @description Lowercase SHA-256 digest of the exact variant bytes. */
+            content_hash: string;
+            /** Format: int64 */
+            size_bytes: number;
+            /** @description True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized. */
+            storage_backed: boolean;
+        };
+        AssetManifestVersion: {
+            version: string;
+            yanked: boolean;
+            variants: components["schemas"]["AssetManifestVariant"][];
+        };
+        AssetManifest: {
+            /** @constant */
+            object: "asset_manifest";
+            asset_type: string;
+            name: string;
+            channels: components["schemas"]["AssetChannelSummary"][];
+            versions: components["schemas"]["AssetManifestVersion"][];
+        };
+        /** @description Asset summaries for every variant updated by yank or unyank. */
+        AssetYankMutationResponse: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AssetSummary"][];
+        };
+        AssetPresignUploadIntentRequest: {
+            /** Format: int64 */
+            size_bytes: number;
+            /** @description Hex SHA-256 of the bytes that will be uploaded. */
+            sha256: string;
+        };
+        AssetPresignCommitRequest: {
+            /** Format: int64 */
+            size_bytes: number;
+            /** @description Registered hex SHA-256; comparison is case-insensitive. */
+            sha256: string;
+            /** @description Stored content type; null or omission defaults to application/octet-stream. */
+            content_type?: string | null;
+        };
+        AssetPresignUploadIntentResponse: {
+            /** @constant */
+            object: "asset_upload_intent";
+            /** @description Opaque tenant-scoped transfer identity; not a public bucket URL. */
+            key: string;
+            /** Format: uri */
+            upload_url: string;
+            /** @constant */
+            method: "PUT";
+            /** Format: int64 */
+            expires_in_seconds: number;
+            /** Format: int64 */
+            size_bytes: number;
+            sha256: string;
+        };
+        AssetPresignDownloadResponse: {
+            /** @constant */
+            object: "asset_download_url";
+            /** Format: uri */
+            download_url: string;
+            /** @constant */
+            method: "GET";
+            /** Format: int64 */
+            expires_in_seconds: number;
+            sha256: string;
+            /** Format: int64 */
+            size_bytes: number;
+            content_type: string;
+        };
+        /** @description Current direct-to-bucket upload capability and limits. */
+        AssetPresignedUploadConstraints: {
+            enabled: boolean;
+            /** Format: int64 */
+            max_object_bytes: number | null;
+            /** Format: int64 */
+            url_ttl_seconds: number | null;
+        };
+        /** @description Authoritative tenant usage, effective quota, and upload-path constraints. */
+        AssetStorageSummary: {
+            /** @constant */
+            object: "asset_storage_summary";
+            /** Format: int64 */
+            used_bytes: number;
+            /** Format: int64 */
+            quota_bytes: number | null;
+            /**
+             * Format: int64
+             * @description Saturating quota minus usage, or null when storage is unlimited.
+             */
+            remaining_bytes: number | null;
+            /** Format: int64 */
+            inline_upload_max_bytes: number;
+            presigned_upload: components["schemas"]["AssetPresignedUploadConstraints"];
         };
         DeleteProjectResponse: components["schemas"]["DeleteResponse"] & {
             /** @constant */
@@ -5658,6 +5978,78 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["DeleteResponse"];
+            };
+        };
+        /** @description The fixed route exists but does not support this HTTP method. */
+        MethodNotAllowed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Asset reference, variant, channel target, checksum, or JSON control body is invalid. */
+        AssetBadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description The requested asset, version, variant, channel, or uploaded object does not exist. */
+        AssetNotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description The operation conflicts with immutable version state or the selected transfer mode. */
+        AssetConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description The inline body, control body, or declared object exceeds its configured limit. */
+        AssetPayloadTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description Uploaded bytes failed checksum, size, content, signature, or malware validation and are not published. */
+        AssetUnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description The resolved asset download exceeds the effective egress byte budget or download request rate. */
+        AssetTooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
+            };
+        };
+        /** @description Stored asset bytes failed their recorded SHA-256 integrity check. */
+        AssetInternalServerError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["AssetErrorResponse"];
             };
         };
         /** @description Project delete response. */
@@ -10610,6 +11002,8 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     listAssetsByType: {
@@ -10617,6 +11011,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
                 asset_type: string;
             };
             cookie?: never;
@@ -10638,54 +11033,191 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getAsset: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                /** @description Platform/architecture variant. Required when resolution is otherwise ambiguous. */
+                platform?: string;
+            };
+            header?: {
+                /** @description Platform fallback when the platform query parameter is omitted. */
+                "x-ferrogate-platform"?: string;
+                Range?: string;
+                "If-None-Match"?: string;
+                "If-Modified-Since"?: string;
+            };
             path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
                 asset_type: string;
+                /** @description Tenant-scoped asset name. */
                 name: string;
+                /** @description Exact version, channel name, or semver range to resolve to a concrete version. */
                 version: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Fetch tenant asset bytes. */
+            /** @description Complete resolved asset bytes. Content-Type is the stored asset content type. */
             200: {
                 headers: {
+                    /** @description Strong SHA-256 entity validator for the resolved object. */
+                    ETag?: string;
+                    /** @description Last asset update time in HTTP-date form. */
+                    "Last-Modified"?: string;
+                    /** @description Tenant-private revalidation policy. */
+                    "Cache-Control"?: string;
+                    /** @description Advertises single byte-range support. */
+                    "Accept-Ranges"?: "bytes";
+                    /** @description How the requested reference resolved to a concrete version. */
+                    "x-ferrogate-asset-resolved"?: string;
+                    /** @description Concrete version selected by exact, channel, or semver resolution. */
+                    "x-ferrogate-asset-version"?: string;
+                    /** @description Selected platform variant when the asset is variant-specific. */
+                    "x-ferrogate-asset-variant"?: string;
+                    /** @description Present with value true when the resolved version is yanked. */
+                    "x-ferrogate-asset-yanked"?: "true";
+                    /** @description RFC 7234 warning emitted when serving a yanked version. */
+                    Warning?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/octet-stream": string;
                 };
             };
+            /** @description Requested byte range of the resolved asset. */
+            206: {
+                headers: {
+                    /** @description Strong SHA-256 entity validator for the resolved object. */
+                    ETag?: string;
+                    /** @description Last asset update time in HTTP-date form. */
+                    "Last-Modified"?: string;
+                    /** @description Tenant-private revalidation policy. */
+                    "Cache-Control"?: string;
+                    /** @description Advertises single byte-range support. */
+                    "Accept-Ranges"?: "bytes";
+                    /** @description How the requested reference resolved to a concrete version. */
+                    "x-ferrogate-asset-resolved"?: string;
+                    /** @description Concrete version selected by exact, channel, or semver resolution. */
+                    "x-ferrogate-asset-version"?: string;
+                    /** @description Selected platform variant when the asset is variant-specific. */
+                    "x-ferrogate-asset-variant"?: string;
+                    /** @description Present with value true when the resolved version is yanked. */
+                    "x-ferrogate-asset-yanked"?: "true";
+                    /** @description RFC 7234 warning emitted when serving a yanked version. */
+                    Warning?: string;
+                    /** @description Inclusive range and complete representation size. */
+                    "Content-Range"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description The supplied validator matches; no response body is sent. */
+            304: {
+                headers: {
+                    /** @description Strong SHA-256 entity validator for the resolved object. */
+                    ETag?: string;
+                    /** @description Last asset update time in HTTP-date form. */
+                    "Last-Modified"?: string;
+                    /** @description Tenant-private revalidation policy. */
+                    "Cache-Control"?: string;
+                    /** @description Advertises single byte-range support. */
+                    "Accept-Ranges"?: "bytes";
+                    /** @description How the requested reference resolved to a concrete version. */
+                    "x-ferrogate-asset-resolved"?: string;
+                    /** @description Concrete version selected by exact, channel, or semver resolution. */
+                    "x-ferrogate-asset-version"?: string;
+                    /** @description Selected platform variant when the asset is variant-specific. */
+                    "x-ferrogate-asset-variant"?: string;
+                    /** @description Present with value true when the resolved version is yanked. */
+                    "x-ferrogate-asset-yanked"?: "true";
+                    /** @description RFC 7234 warning emitted when serving a yanked version. */
+                    Warning?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["AssetBadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            /** @description The requested byte range is outside the asset body; the runtime sends no JSON body. */
+            416: {
+                headers: {
+                    /** @description Unsatisfied range in bytes *\/{complete-length} form. */
+                    "Content-Range"?: string;
+                    /** @description Strong SHA-256 entity validator for the resolved object. */
+                    ETag?: string;
+                    /** @description Last asset update time in HTTP-date form. */
+                    "Last-Modified"?: string;
+                    /** @description Tenant-private revalidation policy. */
+                    "Cache-Control"?: string;
+                    /** @description Advertises single byte-range support. */
+                    "Accept-Ranges"?: "bytes";
+                    /** @description How the requested reference resolved to a concrete version. */
+                    "x-ferrogate-asset-resolved"?: string;
+                    /** @description Concrete version selected by exact, channel, or semver resolution. */
+                    "x-ferrogate-asset-version"?: string;
+                    /** @description Selected platform variant when the asset is variant-specific. */
+                    "x-ferrogate-asset-variant"?: string;
+                    /** @description Present with value true when the resolved version is yanked. */
+                    "x-ferrogate-asset-yanked"?: "true";
+                    /** @description RFC 7234 warning emitted when serving a yanked version. */
+                    Warning?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            429: components["responses"]["AssetTooManyRequests"];
+            500: components["responses"]["AssetInternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     putAsset: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                /** @description Platform/architecture variant stored for this logical version. */
+                platform?: string;
+                /** @description Move this channel to the new version after the durable publish succeeds. */
+                channel?: string;
+            };
+            header?: {
+                /** @description Detached minisign file or base64 Ed25519 signature material. */
+                "x-asset-signature"?: string;
+                /** @description Detached signature encoding; defaults to minisign. */
+                "x-asset-signature-format"?: "minisign" | "ed25519" | "cosign";
+                /** @description Publisher key hint for bare Ed25519 signatures. */
+                "x-asset-signature-key-id"?: string;
+                /** @description Publish visibility. Cross-tenant values require a durable approval record. */
+                "x-asset-visibility"?: "private" | "tenant" | "tenant_private" | "shared" | "cross_tenant" | "cross_tenant_shared" | "public";
+                /** @description Durable tool-approval record used for cross-tenant publication. */
+                "x-asset-approval-id"?: string;
+            };
             path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
                 asset_type: string;
+                /** @description Tenant-scoped asset name. */
                 name: string;
+                /** @description Concrete immutable asset version. */
                 version: string;
             };
             cookie?: never;
         };
+        /** @description Raw asset bytes. The request Content-Type becomes the stored content type; it defaults to application/octet-stream when absent. */
         requestBody: {
             content: {
                 "application/octet-stream": string;
             };
         };
         responses: {
-            /** @description Create or replace a tenant asset. */
+            /** @description Published asset metadata including authoritative size and SHA-256. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10694,35 +11226,49 @@ export interface operations {
                     "application/json": components["schemas"]["AssetMutationResponse"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["AssetBadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["AssetConflict"];
+            413: components["responses"]["AssetPayloadTooLarge"];
+            422: components["responses"]["AssetUnprocessableEntity"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     deleteAsset: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Platform/architecture variant to delete. */
+                platform?: string;
+            };
             header?: never;
             path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
                 asset_type: string;
+                /** @description Tenant-scoped asset name. */
                 name: string;
+                /** @description Concrete immutable asset version. */
                 version: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Delete a tenant asset. */
+            /** @description Deleted asset identity. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AssetMutationResponse"];
+                    "application/json": components["schemas"]["DeleteResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     listPermissions: {
@@ -11346,6 +11892,334 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getAssetStorageSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authoritative storage usage, quota, and transfer constraints. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetStorageSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getAssetManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Typed asset registry manifest. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetManifest"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listAssetChannels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Asset channel list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetChannelListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    putAssetChannel: {
+        parameters: {
+            query: {
+                /** @description Existing, non-yanked concrete version that the channel will target. */
+                version: string;
+            };
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Channel pointer to create or move. */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Durably stored channel pointer. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetChannelMutationResponse"];
+                };
+            };
+            400: components["responses"]["AssetBadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    deleteAssetChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Channel pointer to delete. */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted channel identity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    yankAssetVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Updated variant summaries. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetYankMutationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    unyankAssetVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Updated variant summaries. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetYankMutationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createAssetUploadIntent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description Declared byte length and SHA-256 of the bytes that will be PUT directly to the returned URL. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetPresignUploadIntentRequest"];
+            };
+        };
+        responses: {
+            /** @description Presigned direct-upload intent. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetPresignUploadIntentResponse"];
+                };
+            };
+            400: components["responses"]["AssetBadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["AssetConflict"];
+            413: components["responses"]["AssetPayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    commitAssetUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description The registered size/checksum plus the content type to persist after verification. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetPresignCommitRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified committed asset metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetMutationResponse"];
+                };
+            };
+            400: components["responses"]["AssetBadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["AssetConflict"];
+            413: components["responses"]["AssetPayloadTooLarge"];
+            422: components["responses"]["AssetUnprocessableEntity"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getAssetDownloadUrl: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Presigned direct-download metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetPresignDownloadResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["AssetConflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
 }
