@@ -25,6 +25,12 @@ import BillingWalletsPage from "@/pages/billing-wallets";
 import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
 import BillingMeteringPage from "@/pages/billing-metering";
 import BillingDeadLettersPage from "@/pages/billing-dead-letters";
+import ToolsCatalogPage from "@/pages/tools-catalog";
+import ToolSessionsPage from "@/pages/tool-sessions";
+import ToolApprovalsPage from "@/pages/tool-approvals";
+import TenantRolesPage from "@/pages/tenant-roles";
+import McpIdentitiesPage from "@/pages/mcp-identities";
+import InvestigationsPage from "@/pages/investigations";
 import { policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import {
@@ -586,5 +592,167 @@ describe("billing-dead-letters page copy is localized", () => {
       within(dialog).getByText(zhCN["page.billingDeadLetters.detail.cost"]),
     ).toBeInTheDocument();
     expect(within(dialog).getByText(localeUsd("zh-CN", 0.42))).toBeInTheDocument();
+  });
+});
+
+// --- Tool / tenant-roles bespoke-page group (#348 slice) ---------------------
+// Proves the six pages render their page-local copy from the typed catalog in
+// BOTH `en` and `zh-CN`, the runtime companion to the de-allowlisted lint gate.
+
+describe("tools-catalog page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/tools", []);
+  });
+
+  it("renders English title and description", async () => {
+    renderWithProviders(<ToolsCatalogPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.toolsCatalog.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.toolsCatalog.description"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title and description", async () => {
+    renderWithProviders(<ToolsCatalogPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.toolsCatalog.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.toolsCatalog.description"])).toBeInTheDocument();
+  });
+});
+
+describe("tool-sessions page copy is localized", () => {
+  it("renders English title, lookup form, and prompt", async () => {
+    renderWithProviders(<ToolSessionsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.toolSessions.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.toolSessions.inspect"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.toolSessions.prompt"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, lookup form, and prompt", async () => {
+    renderWithProviders(<ToolSessionsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.toolSessions.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.toolSessions.inspect"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.toolSessions.prompt"])).toBeInTheDocument();
+  });
+});
+
+describe("tool-approvals page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/tool-approvals", []);
+  });
+
+  it("renders English title, tabs, and empty state", async () => {
+    renderWithProviders(<ToolApprovalsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.toolApprovals.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: en["page.toolApprovals.tab.history"] }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.toolApprovals.pending.empty"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, tabs, and empty state", async () => {
+    renderWithProviders(<ToolApprovalsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.toolApprovals.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: zhCN["page.toolApprovals.tab.history"] }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.toolApprovals.pending.empty"]),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("tenant-roles page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/tenant-roles/tenant-1", []);
+  });
+
+  it("renders English title, assign action, and empty state", async () => {
+    renderWithProviders(<TenantRolesPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.tenantRoles.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.tenantRoles.assign"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.tenantRoles.empty"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, assign action, and empty state", async () => {
+    renderWithProviders(<TenantRolesPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.tenantRoles.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.tenantRoles.assign"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.tenantRoles.empty"])).toBeInTheDocument();
+  });
+});
+
+describe("mcp-identities page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/mcp-servers", []);
+  });
+
+  it("renders English title, server selector, and prompt", async () => {
+    renderWithProviders(<McpIdentitiesPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.mcpIdentities.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.mcpIdentities.loadStatus"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.mcpIdentities.prompt"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, server selector, and prompt", async () => {
+    renderWithProviders(<McpIdentitiesPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.mcpIdentities.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.mcpIdentities.loadStatus"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.mcpIdentities.prompt"])).toBeInTheDocument();
+  });
+});
+
+describe("investigations page copy is localized", () => {
+  it("renders English title, lookup action, and prompt", async () => {
+    renderWithProviders(<InvestigationsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.investigations.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.investigations.investigate"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.investigations.prompt"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, lookup action, and prompt", async () => {
+    renderWithProviders(<InvestigationsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.investigations.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.investigations.investigate"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.investigations.prompt"])).toBeInTheDocument();
   });
 });

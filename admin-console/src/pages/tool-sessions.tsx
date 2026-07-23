@@ -18,6 +18,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 
 function formatUnix(unix: number | null | undefined): string {
@@ -38,6 +39,7 @@ function outcomeVariant(outcome: string): "default" | "secondary" | "destructive
 
 export default function ToolSessionsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [sessionInput, setSessionInput] = useState("");
@@ -62,67 +64,69 @@ export default function ToolSessionsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Tool sessions</h1>
+        <h1 className="text-lg font-semibold">{t("page.toolSessions.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Audit timeline for a caller-supplied tool session. Enter the session id
-          your caller stamped on its tool invocations to inspect the grouped events.
+          {t("page.toolSessions.description")}
         </p>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">Look up a session</CardTitle>
+          <CardTitle className="text-sm font-medium">
+            {t("page.toolSessions.lookup.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3">
           <div className="grid gap-1.5">
-            <Label htmlFor="session-input">Session id</Label>
+            <Label htmlFor="session-input">{t("page.toolSessions.field.sessionId")}</Label>
             <Input
               id="session-input"
               value={sessionInput}
               onChange={(e) => setSessionInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && lookup()}
+              // eslint-disable-next-line ferrogate/no-untranslated-literal -- example session id, not translatable copy
               placeholder="sess-abc123"
               className="w-72"
             />
           </div>
           <Button type="button" onClick={lookup} disabled={sessionInput.trim() === ""}>
-            {isFetching ? "Loading…" : "Inspect"}
+            {isFetching ? t("resource.table.loading") : t("page.toolSessions.inspect")}
           </Button>
         </CardContent>
       </Card>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load session {sessionId}: {error.message}
+          {t("page.toolSessions.loadError", { session: sessionId, message: error.message })}
         </p>
       ) : null}
 
       {sessionId === "" ? (
-        <p className="text-sm text-muted-foreground">Enter a session id to inspect.</p>
+        <p className="text-sm text-muted-foreground">{t("page.toolSessions.prompt")}</p>
       ) : (
         <div className="rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Occurred</TableHead>
-                <TableHead>Action</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Outcome</TableHead>
-                <TableHead>Message</TableHead>
-                <TableHead>Request</TableHead>
+                <TableHead>{t("page.toolSessions.col.occurred")}</TableHead>
+                <TableHead>{t("page.toolSessions.col.action")}</TableHead>
+                <TableHead>{t("page.toolSessions.col.target")}</TableHead>
+                <TableHead>{t("page.toolSessions.col.outcome")}</TableHead>
+                <TableHead>{t("page.toolSessions.col.message")}</TableHead>
+                <TableHead>{t("page.toolSessions.col.request")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
                 <TableRow>
                   <TableCell colSpan={6} className="h-24 text-center">
-                    Loading…
+                    {t("resource.table.loading")}
                   </TableCell>
                 </TableRow>
               ) : events.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="h-24 text-center">
-                    No audit events for this session.
+                    {t("page.toolSessions.empty")}
                   </TableCell>
                 </TableRow>
               ) : (

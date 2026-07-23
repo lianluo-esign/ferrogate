@@ -27,6 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 import {
   formatUnix,
@@ -37,11 +38,7 @@ import {
 
 type SelectorKind = "request_id" | "trace_id" | "agent_run_id";
 
-const SELECTOR_LABELS: Record<SelectorKind, string> = {
-  request_id: "Request ID",
-  trace_id: "Trace ID",
-  agent_run_id: "Agent run ID",
-};
+const SELECTOR_KINDS: SelectorKind[] = ["request_id", "trace_id", "agent_run_id"];
 
 function Section({
   title,
@@ -71,11 +68,12 @@ function Section({
 }
 
 function IdList({ label, ids }: { label: string; ids: string[] }) {
+  const { t } = useI18n();
   return (
     <li>
       <span className="text-muted-foreground">{label}:</span>{" "}
       {ids.length === 0 ? (
-        "none"
+        t("page.investigations.none")
       ) : (
         <span className="font-mono text-xs">{ids.join(", ")}</span>
       )}
@@ -85,28 +83,40 @@ function IdList({ label, ids }: { label: string; ids: string[] }) {
 
 /** One shared-action-identity group: fingerprint -> joined evidence ids + child tree (#306/#307). */
 function CorrelationGroup({ group }: { group: InvestigationActionCorrelation }) {
+  const { t } = useI18n();
   const childRequests = group.child_request_ids ?? [];
   const childDispatches = group.child_dispatch_ids ?? [];
   return (
     <div className="rounded-md border p-3" data-testid="correlation-group">
       <p className="break-all font-mono text-xs">{group.action_fingerprint}</p>
       <ul className="mt-2 space-y-1 border-l pl-4 text-sm">
-        <IdList label="Guardrail evaluations" ids={group.guardrail_evaluation_ids} />
-        <IdList label="Approvals" ids={group.approval_ids} />
-        <IdList label="Timeline events" ids={group.agent_event_ids} />
-        <IdList label="Audit events" ids={group.audit_event_ids} />
+        <IdList
+          label={t("page.investigations.label.guardrailEvaluations")}
+          ids={group.guardrail_evaluation_ids}
+        />
+        <IdList label={t("page.investigations.label.approvals")} ids={group.approval_ids} />
+        <IdList
+          label={t("page.investigations.label.timelineEvents")}
+          ids={group.agent_event_ids}
+        />
+        <IdList
+          label={t("page.investigations.label.auditEvents")}
+          ids={group.audit_event_ids}
+        />
         {(childRequests.length > 0 || childDispatches.length > 0) && (
           <li>
-            <span className="text-muted-foreground">Downstream child actions (#307):</span>
+            <span className="text-muted-foreground">
+              {t("page.investigations.childActions")}
+            </span>
             <ul className="mt-1 space-y-1 border-l pl-4">
               {childRequests.map((id) => (
                 <li key={id} className="font-mono text-xs">
-                  child request {id}
+                  {t("page.investigations.childRequest", { id })}
                 </li>
               ))}
               {childDispatches.map((id) => (
                 <li key={id} className="font-mono text-xs">
-                  child dispatch {id}
+                  {t("page.investigations.childDispatch", { id })}
                 </li>
               ))}
             </ul>
@@ -119,7 +129,14 @@ function CorrelationGroup({ group }: { group: InvestigationActionCorrelation }) 
 
 export default function InvestigationsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
+
+  const selectorLabels: Record<SelectorKind, string> = {
+    request_id: t("page.investigations.selector.requestId"),
+    trace_id: t("page.investigations.selector.traceId"),
+    agent_run_id: t("page.investigations.selector.agentRunId"),
+  };
 
   const [kind, setKind] = useState<SelectorKind>("request_id");
   const [value, setValue] = useState("");
@@ -148,59 +165,58 @@ export default function InvestigationsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Investigations</h1>
+        <h1 className="text-lg font-semibold">{t("page.investigations.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Joined evidence for one request, trace or agent run: identity, requests,
-          guardrail evaluations, approvals, timeline, billing, audit events and the
-          fingerprint-based action correlation groups (#306, #307).
+          {t("page.investigations.description")}
         </p>
       </div>
 
       <form className="flex flex-wrap items-end gap-4 rounded-md border p-4" onSubmit={handleSubmit}>
         <div className="grid gap-2">
-          <Label htmlFor="investigation-kind">Look up by</Label>
+          <Label htmlFor="investigation-kind">{t("page.investigations.lookupBy")}</Label>
           <Select value={kind} onValueChange={(next) => setKind(next as SelectorKind)}>
             <SelectTrigger id="investigation-kind" className="w-44">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {(Object.keys(SELECTOR_LABELS) as SelectorKind[]).map((option) => (
+              {SELECTOR_KINDS.map((option) => (
                 <SelectItem key={option} value={option}>
-                  {SELECTOR_LABELS[option]}
+                  {selectorLabels[option]}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="grid min-w-64 flex-1 gap-2">
-          <Label htmlFor="investigation-value">{SELECTOR_LABELS[kind]}</Label>
+          <Label htmlFor="investigation-value">{selectorLabels[kind]}</Label>
           <Input
             id="investigation-value"
             value={value}
             onChange={(event) => setValue(event.target.value)}
+            // eslint-disable-next-line ferrogate/no-untranslated-literal -- example identifier tokens, not translatable copy
             placeholder="req_... / trace-... / run-..."
           />
         </div>
-        <Button type="submit">Investigate</Button>
+        <Button type="submit">{t("page.investigations.investigate")}</Button>
       </form>
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Investigation failed: {error.message}
+          {t("page.investigations.loadError", { message: error.message })}
         </p>
       )}
-      {isLoading && <p className="text-sm text-muted-foreground">Loading investigation…</p>}
+      {isLoading && (
+        <p className="text-sm text-muted-foreground">{t("page.investigations.loading")}</p>
+      )}
       {!applied && !data && (
-        <p className="text-sm text-muted-foreground">
-          Enter a request, trace or agent run id to load its investigation timeline.
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.investigations.prompt")}</p>
       )}
 
       {data && (
         <div className="flex flex-col gap-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Outcome</CardTitle>
+              <CardTitle className="text-base">{t("page.investigations.outcome")}</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap items-center gap-4 text-sm">
               <Badge variant={verdictVariant(data.final_outcome)}>
@@ -208,34 +224,39 @@ export default function InvestigationsPage() {
               </Badge>
               <span className="font-mono text-xs">{data.selector}</span>
               <span>
-                <span className="text-muted-foreground">Total cost:</span>{" "}
+                <span className="text-muted-foreground">
+                  {t("page.investigations.totalCost")}
+                </span>{" "}
                 ${data.total_cost_usd.toFixed(4)}
               </span>
               {data.identity && (
                 <span className="font-mono text-xs">
-                  org {data.identity.organization_id ?? "—"} / project{" "}
-                  {data.identity.project_id ?? "—"} / key {data.identity.api_key_id ?? "—"}
+                  {t("page.investigations.identity", {
+                    org: data.identity.organization_id ?? "—",
+                    project: data.identity.project_id ?? "—",
+                    key: data.identity.api_key_id ?? "—",
+                  })}
                 </span>
               )}
             </CardContent>
           </Card>
 
           <Section
-            title="Request evidence"
+            title={t("page.investigations.section.requests")}
             count={data.requests.length}
-            description="Gateway request-log rows, including the upstream parent action fingerprint (#307) when the request declared one."
+            description={t("page.investigations.section.requestsDescription")}
           >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Request</TableHead>
-                    <TableHead>Route</TableHead>
-                    <TableHead>Provider / model</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Error</TableHead>
-                    <TableHead>Parent action fingerprint</TableHead>
-                    <TableHead>Started</TableHead>
+                    <TableHead>{t("page.investigations.col.request")}</TableHead>
+                    <TableHead>{t("page.investigations.col.route")}</TableHead>
+                    <TableHead>{t("page.investigations.col.providerModel")}</TableHead>
+                    <TableHead>{t("common.status")}</TableHead>
+                    <TableHead>{t("page.investigations.col.error")}</TableHead>
+                    <TableHead>{t("page.investigations.col.parentActionFingerprint")}</TableHead>
+                    <TableHead>{t("page.investigations.col.started")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -264,18 +285,21 @@ export default function InvestigationsPage() {
             </div>
           </Section>
 
-          <Section title="Guardrail evaluations" count={data.guardrail_evaluations.length}>
+          <Section
+            title={t("page.investigations.label.guardrailEvaluations")}
+            count={data.guardrail_evaluations.length}
+          >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>Policy</TableHead>
-                    <TableHead>Stage</TableHead>
-                    <TableHead>Verdict</TableHead>
-                    <TableHead>Decision</TableHead>
-                    <TableHead>Decision reason</TableHead>
-                    <TableHead>Action fingerprint</TableHead>
+                    <TableHead>{t("page.investigations.col.id")}</TableHead>
+                    <TableHead>{t("page.investigations.col.policy")}</TableHead>
+                    <TableHead>{t("page.investigations.col.stage")}</TableHead>
+                    <TableHead>{t("page.investigations.col.verdict")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decision")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decisionReason")}</TableHead>
+                    <TableHead>{t("page.investigations.col.actionFingerprint")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -309,18 +333,21 @@ export default function InvestigationsPage() {
             </div>
           </Section>
 
-          <Section title="Approvals" count={data.approvals.length}>
+          <Section
+            title={t("page.investigations.label.approvals")}
+            count={data.approvals.length}
+          >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>Tool</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Decision</TableHead>
-                    <TableHead>Decision reason</TableHead>
-                    <TableHead>Action fingerprint</TableHead>
-                    <TableHead>Requested</TableHead>
+                    <TableHead>{t("page.investigations.col.id")}</TableHead>
+                    <TableHead>{t("page.investigations.col.tool")}</TableHead>
+                    <TableHead>{t("common.status")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decision")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decisionReason")}</TableHead>
+                    <TableHead>{t("page.investigations.col.actionFingerprint")}</TableHead>
+                    <TableHead>{t("page.investigations.col.requested")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -348,21 +375,23 @@ export default function InvestigationsPage() {
           </Section>
 
           <Section
-            title="Timeline"
+            title={t("page.investigations.section.timeline")}
             count={data.agent_events.length}
-            description={`Agent-run events across ${data.agent_runs.length} run(s).`}
+            description={t("page.investigations.section.timelineDescription", {
+              count: data.agent_runs.length,
+            })}
           >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Turn</TableHead>
-                    <TableHead>Kind</TableHead>
-                    <TableHead>Target</TableHead>
-                    <TableHead>Outcome</TableHead>
-                    <TableHead>Decision</TableHead>
-                    <TableHead>Action fingerprint</TableHead>
-                    <TableHead>Occurred</TableHead>
+                    <TableHead>{t("page.investigations.col.turn")}</TableHead>
+                    <TableHead>{t("page.investigations.col.kind")}</TableHead>
+                    <TableHead>{t("page.investigations.col.target")}</TableHead>
+                    <TableHead>{t("page.investigations.col.outcome")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decision")}</TableHead>
+                    <TableHead>{t("page.investigations.col.actionFingerprint")}</TableHead>
+                    <TableHead>{t("page.investigations.col.occurred")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -387,18 +416,21 @@ export default function InvestigationsPage() {
             </div>
           </Section>
 
-          <Section title="Billing entries" count={data.billing_events.length}>
+          <Section
+            title={t("page.investigations.section.billing")}
+            count={data.billing_events.length}
+          >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Model</TableHead>
-                    <TableHead>Provider</TableHead>
-                    <TableHead>Tokens</TableHead>
-                    <TableHead>Cost (USD)</TableHead>
-                    <TableHead>Wallet delta</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Occurred</TableHead>
+                    <TableHead>{t("page.investigations.col.model")}</TableHead>
+                    <TableHead>{t("page.investigations.col.provider")}</TableHead>
+                    <TableHead>{t("page.investigations.col.tokens")}</TableHead>
+                    <TableHead>{t("page.investigations.col.cost")}</TableHead>
+                    <TableHead>{t("page.investigations.col.walletDelta")}</TableHead>
+                    <TableHead>{t("common.status")}</TableHead>
+                    <TableHead>{t("page.investigations.col.occurred")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -422,17 +454,20 @@ export default function InvestigationsPage() {
             </div>
           </Section>
 
-          <Section title="Audit events" count={data.audit_events.length}>
+          <Section
+            title={t("page.investigations.label.auditEvents")}
+            count={data.audit_events.length}
+          >
             <div className="rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Action</TableHead>
-                    <TableHead>Target</TableHead>
-                    <TableHead>Outcome</TableHead>
-                    <TableHead>Decision</TableHead>
-                    <TableHead>Action fingerprint</TableHead>
-                    <TableHead>Occurred</TableHead>
+                    <TableHead>{t("page.investigations.col.action")}</TableHead>
+                    <TableHead>{t("page.investigations.col.target")}</TableHead>
+                    <TableHead>{t("page.investigations.col.outcome")}</TableHead>
+                    <TableHead>{t("page.investigations.col.decision")}</TableHead>
+                    <TableHead>{t("page.investigations.col.actionFingerprint")}</TableHead>
+                    <TableHead>{t("page.investigations.col.occurred")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -457,13 +492,13 @@ export default function InvestigationsPage() {
           </Section>
 
           <Section
-            title="Action correlations"
+            title={t("page.investigations.section.correlations")}
             count={data.action_correlations?.length ?? 0}
-            description="Evidence rows sharing one canonical_target_sha256 action fingerprint describe the same external action; child requests/dispatches declared this fingerprint as their parent."
+            description={t("page.investigations.section.correlationsDescription")}
           >
             {!data.action_correlations || data.action_correlations.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No evidence row in this investigation carries an action fingerprint.
+                {t("page.investigations.correlations.empty")}
               </p>
             ) : (
               <div className="flex flex-col gap-3">

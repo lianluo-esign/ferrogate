@@ -1,14 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
-import { AuthProvider } from "@/hooks/use-auth";
 import ToolSessionsPage from "@/pages/tool-sessions";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, server } from "@/test/msw";
-import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 type StoredAuditEvent = AdminSchema<"StoredAuditEvent">;
 
@@ -32,15 +29,7 @@ function event(overrides: Partial<StoredAuditEvent> = {}): StoredAuditEvent {
 }
 
 function renderPage() {
-  return render(
-    <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <ToolSessionsPage />
-        </QueryClientProvider>
-      </AuthProvider>
-    </MemoryRouter>,
-  );
+  return renderWithProviders(<ToolSessionsPage />);
 }
 
 beforeEach(() => {

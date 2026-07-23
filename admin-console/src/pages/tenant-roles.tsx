@@ -30,6 +30,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminTenantRoleBinding = AdminSchema<"AdminTenantRoleBinding">;
@@ -41,6 +42,7 @@ function formatUnix(unix: number | null | undefined): string {
 
 export default function TenantRolesPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -70,7 +72,7 @@ export default function TenantRolesPage() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success("Role assigned to tenant");
+      toast.success(t("page.tenantRoles.toast.assigned"));
       setRoleId("");
     },
     onError: (error: Error) => toast.error(error.message),
@@ -83,7 +85,7 @@ export default function TenantRolesPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success("Role binding removed");
+      toast.success(t("page.tenantRoles.toast.removed"));
       setRemoving(null);
     },
     onError: (error: Error) => toast.error(error.message),
@@ -92,23 +94,21 @@ export default function TenantRolesPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Tenant role bindings</h1>
+        <h1 className="text-lg font-semibold">{t("page.tenantRoles.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Assign RBAC roles to a tenant. Role IDs come from the Roles page.
-          Tenant-scoped callers can only manage their own tenant; targeting
-          another tenant surfaces a 403 below.
+          {t("page.tenantRoles.description")}
         </p>
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid gap-2">
-          <Label htmlFor="tenant-id">Tenant ID</Label>
+          <Label htmlFor="tenant-id">{t("page.tenantRoles.field.tenantId")}</Label>
           <Input
             id="tenant-id"
             className="w-72"
             value={tenantId}
             onChange={(event) => setTenantId(event.target.value)}
-            placeholder="tenant id"
+            placeholder={t("page.tenantRoles.placeholder.tenantId")}
           />
         </div>
       </div>
@@ -121,13 +121,13 @@ export default function TenantRolesPage() {
         }}
       >
         <div className="grid gap-2">
-          <Label htmlFor="role-id">Role ID to assign</Label>
+          <Label htmlFor="role-id">{t("page.tenantRoles.field.roleId")}</Label>
           <Input
             id="role-id"
             className="w-72"
             value={roleId}
             onChange={(event) => setRoleId(event.target.value)}
-            placeholder="role id"
+            placeholder={t("page.tenantRoles.placeholder.roleId")}
           />
         </div>
         <Button
@@ -135,13 +135,13 @@ export default function TenantRolesPage() {
           disabled={roleId.trim() === "" || tenantId.trim() === "" || assignMutation.isPending}
         >
           <Plus className="mr-1 h-4 w-4" />
-          Assign role
+          {t("page.tenantRoles.assign")}
         </Button>
       </form>
 
       {listError ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load tenant roles: {(listError as Error).message}
+          {t("page.tenantRoles.loadError", { message: (listError as Error).message })}
         </p>
       ) : null}
 
@@ -149,22 +149,24 @@ export default function TenantRolesPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Role ID</TableHead>
-              <TableHead>Bound at</TableHead>
-              <TableHead className="w-24 text-right">Actions</TableHead>
+              <TableHead>{t("page.tenantRoles.col.roleId")}</TableHead>
+              <TableHead>{t("page.tenantRoles.col.boundAt")}</TableHead>
+              <TableHead className="w-24 text-right">
+                {t("resource.table.actionsColumn")}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={3} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : bindings.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={3} className="h-24 text-center">
-                  No roles bound to this tenant.
+                  {t("page.tenantRoles.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -182,7 +184,7 @@ export default function TenantRolesPage() {
                         className="text-destructive"
                         onClick={() => setRemoving(binding)}
                       >
-                        Remove
+                        {t("resource.action.remove")}
                       </Button>
                     </div>
                   </TableCell>
@@ -199,14 +201,16 @@ export default function TenantRolesPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove role binding?</AlertDialogTitle>
+            <AlertDialogTitle>{t("page.tenantRoles.remove.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              Role <span className="font-mono">{removing?.role_id}</span> will be
-              unbound from tenant <span className="font-mono">{tenantId}</span>.
+              {t("page.tenantRoles.remove.description", {
+                role: removing?.role_id ?? "",
+                tenant: tenantId,
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               disabled={removeMutation.isPending}
@@ -215,7 +219,9 @@ export default function TenantRolesPage() {
                 if (removing) removeMutation.mutate(removing);
               }}
             >
-              {removeMutation.isPending ? "Removing…" : "Remove"}
+              {removeMutation.isPending
+                ? t("page.tenantRoles.removing")
+                : t("resource.action.remove")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

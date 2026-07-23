@@ -33,6 +33,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AuthorizeResponse = AdminSchema<"McpOauthAuthorizeResponse">;
@@ -57,6 +58,7 @@ function StatusField({ label, children }: { label: string; children: React.React
 
 export default function McpIdentitiesPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -94,7 +96,7 @@ export default function McpIdentitiesPage() {
       }),
     onSuccess: (response) => {
       setAuthorization(response);
-      toast.success("Authorization flow initiated");
+      toast.success(t("page.mcpIdentities.toast.authInitiated"));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -103,7 +105,7 @@ export default function McpIdentitiesPage() {
     mutationFn: () =>
       adminDelete(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
     onSuccess: () => {
-      toast.success(`Disconnected ${server}`);
+      toast.success(t("page.mcpIdentities.toast.disconnected", { server }));
       setAuthorization(null);
       queryClient.invalidateQueries({ queryKey: identityQueryKey });
     },
@@ -122,25 +124,28 @@ export default function McpIdentitiesPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">MCP OAuth identities</h1>
+        <h1 className="text-lg font-semibold">{t("page.mcpIdentities.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Subject-bound identity status for MCP servers. Connect initiates an OAuth
-          authorization-code flow; the consent redirect completes out-of-band against
-          the gateway callback, then refresh status here.
+          {t("page.mcpIdentities.description")}
         </p>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">Select a server</CardTitle>
+          <CardTitle className="text-sm font-medium">
+            {t("page.mcpIdentities.select.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3">
           {serverNames.length > 0 ? (
             <div className="grid gap-1.5">
-              <Label>Configured servers</Label>
+              <Label>{t("page.mcpIdentities.field.configuredServers")}</Label>
               <Select value={server || undefined} onValueChange={loadServer}>
-                <SelectTrigger className="w-56" aria-label="Configured servers">
-                  <SelectValue placeholder="Pick a server" />
+                <SelectTrigger
+                  className="w-56"
+                  aria-label={t("page.mcpIdentities.field.configuredServers")}
+                >
+                  <SelectValue placeholder={t("page.mcpIdentities.field.pickServer")} />
                 </SelectTrigger>
                 <SelectContent>
                   {serverNames.map((name) => (
@@ -153,33 +158,34 @@ export default function McpIdentitiesPage() {
             </div>
           ) : null}
           <div className="grid gap-1.5">
-            <Label htmlFor="server-input">Server name</Label>
+            <Label htmlFor="server-input">{t("page.mcpIdentities.field.serverName")}</Label>
             <Input
               id="server-input"
               value={serverInput}
               onChange={(e) => setServerInput(e.target.value)}
+              // eslint-disable-next-line ferrogate/no-untranslated-literal -- example server name, not translatable copy
               placeholder="github-mcp"
               className="w-56"
             />
           </div>
           <Button type="button" variant="outline" onClick={() => loadServer(serverInput)}>
-            Load status
+            {t("page.mcpIdentities.loadStatus")}
           </Button>
         </CardContent>
       </Card>
 
       {statusError ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load identity for {server}: {statusError.message}
+          {t("page.mcpIdentities.loadError", { server, message: statusError.message })}
         </p>
       ) : null}
 
       {server === "" ? (
         <p className="text-sm text-muted-foreground">
-          Pick or enter a server name to view its identity status.
+          {t("page.mcpIdentities.prompt")}
         </p>
       ) : isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading identity…</p>
+        <p className="text-sm text-muted-foreground">{t("page.mcpIdentities.loading")}</p>
       ) : status ? (
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2 pb-3">
@@ -189,21 +195,31 @@ export default function McpIdentitiesPage() {
                 variant={status.connected ? "default" : "secondary"}
                 data-testid="identity-connection"
               >
-                {status.connected ? "connected" : "disconnected"}
+                {status.connected
+                  ? t("page.mcpIdentities.connected")
+                  : t("page.mcpIdentities.disconnected")}
               </Badge>
               <Badge variant="outline">{status.auth_type}</Badge>
             </div>
           </CardHeader>
           <CardContent className="grid gap-4">
             <div className="grid gap-3 sm:grid-cols-2">
-              <StatusField label="Credential source">{status.credential_source}</StatusField>
-              <StatusField label="Subject">{status.subject ?? "-"}</StatusField>
-              <StatusField label="Expires at">{formatUnix(status.expires_at_unix)}</StatusField>
-              <StatusField label="Revoked at">{formatUnix(status.revoked_at_unix)}</StatusField>
-              <StatusField label="Last refresh outcome">
+              <StatusField label={t("page.mcpIdentities.field.credentialSource")}>
+                {status.credential_source}
+              </StatusField>
+              <StatusField label={t("page.mcpIdentities.field.subject")}>
+                {status.subject ?? "-"}
+              </StatusField>
+              <StatusField label={t("page.mcpIdentities.field.expiresAt")}>
+                {formatUnix(status.expires_at_unix)}
+              </StatusField>
+              <StatusField label={t("page.mcpIdentities.field.revokedAt")}>
+                {formatUnix(status.revoked_at_unix)}
+              </StatusField>
+              <StatusField label={t("page.mcpIdentities.field.lastRefreshOutcome")}>
                 {status.last_refresh_outcome ?? "-"}
               </StatusField>
-              <StatusField label="Last revocation outcome">
+              <StatusField label={t("page.mcpIdentities.field.lastRevocationOutcome")}>
                 {status.last_revocation_outcome ?? "-"}
               </StatusField>
             </div>
@@ -215,7 +231,9 @@ export default function McpIdentitiesPage() {
                 onClick={() => queryClient.invalidateQueries({ queryKey: identityQueryKey })}
                 disabled={isFetching}
               >
-                {isFetching ? "Refreshing…" : "Refresh status"}
+                {isFetching
+                  ? t("page.mcpIdentities.refreshing")
+                  : t("page.mcpIdentities.refreshStatus")}
               </Button>
               {canOauth ? (
                 <Button
@@ -224,15 +242,14 @@ export default function McpIdentitiesPage() {
                   disabled={authorizeMutation.isPending}
                 >
                   {authorizeMutation.isPending
-                    ? "Initiating…"
+                    ? t("page.mcpIdentities.initiating")
                     : status.connected
-                      ? "Reconnect (OAuth)"
-                      : "Connect (OAuth)"}
+                      ? t("page.mcpIdentities.reconnect")
+                      : t("page.mcpIdentities.connect")}
                 </Button>
               ) : (
                 <span className="self-center text-xs text-muted-foreground">
-                  {status.auth_type} identities are not connected via an interactive
-                  OAuth flow.
+                  {t("page.mcpIdentities.notInteractive", { authType: status.auth_type })}
                 </span>
               )}
               {status.connected ? (
@@ -242,7 +259,9 @@ export default function McpIdentitiesPage() {
                   onClick={() => revokeMutation.mutate()}
                   disabled={revokeMutation.isPending}
                 >
-                  {revokeMutation.isPending ? "Disconnecting…" : "Disconnect"}
+                  {revokeMutation.isPending
+                    ? t("page.mcpIdentities.disconnecting")
+                    : t("page.mcpIdentities.disconnect")}
                 </Button>
               ) : null}
             </div>
@@ -252,12 +271,13 @@ export default function McpIdentitiesPage() {
                 className="grid gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-3"
                 data-testid="authorization-panel"
               >
-                <p className="text-sm font-medium">Complete authorization out-of-band</p>
+                <p className="text-sm font-medium">
+                  {t("page.mcpIdentities.authPanel.title")}
+                </p>
                 <p className="text-xs text-muted-foreground">
-                  Open the authorization URL and grant consent with the upstream
-                  provider. It redirects to the gateway callback, which consumes the
-                  one-time state (expires {formatUnix(authorization.expires_at_unix)})
-                  and persists the encrypted credential. Then refresh status here.
+                  {t("page.mcpIdentities.authPanel.description", {
+                    expires: formatUnix(authorization.expires_at_unix),
+                  })}
                 </p>
                 <a
                   href={authorization.authorize_url}

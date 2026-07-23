@@ -44,17 +44,11 @@ const I18N_UNMIGRATED_ALLOWLIST = [
   "src/components/ui/sidebar.tsx",
   "src/components/worker-ops/worker-ops-primitives.tsx",
   "src/pages/assets.tsx",
-  "src/pages/investigations.tsx",
   "src/pages/managed-worker-sessions.tsx",
-  "src/pages/mcp-identities.tsx",
   "src/pages/plugin-tools.tsx",
   "src/pages/self-hosted-runs.tsx",
   "src/pages/self-hosted-worker-detail.tsx",
   "src/pages/self-hosted-workers-ops.tsx",
-  "src/pages/tenant-roles.tsx",
-  "src/pages/tool-approvals.tsx",
-  "src/pages/tool-sessions.tsx",
-  "src/pages/tools-catalog.tsx",
 ];
 
 export default [

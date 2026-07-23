@@ -1,14 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
-import { AuthProvider } from "@/hooks/use-auth";
 import McpIdentitiesPage from "@/pages/mcp-identities";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, server } from "@/test/msw";
-import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 type IdentityStatus = AdminSchema<"McpIdentityStatus">;
 
@@ -43,15 +40,7 @@ function mockIdentity(record: IdentityStatus): void {
 }
 
 function renderPage() {
-  return render(
-    <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <McpIdentitiesPage />
-        </QueryClientProvider>
-      </AuthProvider>
-    </MemoryRouter>,
-  );
+  return renderWithProviders(<McpIdentitiesPage />);
 }
 
 beforeEach(() => {
