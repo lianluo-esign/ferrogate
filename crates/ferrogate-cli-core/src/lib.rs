@@ -60,6 +60,7 @@ pub mod args;
 pub mod asset;
 pub mod auth;
 pub mod billing;
+pub mod catalog;
 pub mod command;
 pub mod context;
 pub mod error;
@@ -85,8 +86,11 @@ pub use error::{ApiError, CliError, CliResult, ExitClass};
 /// [`Registry`]. The composing `ferrogate` binary (epic #358) calls this to get
 /// the full client command surface; #361 contributes the organization and IAM
 /// families, #362 the agent / worker / MCP / tool-approval / guardrail lifecycle
-/// families, #363 the asset families, and #364 the billing/usage, evidence, and
-/// operator-action families (including gateway config profiles).
+/// families, #363 the asset families plus the catalog families (prompt
+/// templates, skill packages, plugins, read-only model/provider/extension
+/// catalogs, and the admin dashboard aggregate reads), and #364 the
+/// billing/usage, evidence, and operator-action families (including gateway
+/// config profiles).
 pub fn register_resource_families(registry: &mut Registry) -> CliResult<()> {
     organization::register(registry)?;
     iam::register(registry)?;
@@ -96,6 +100,7 @@ pub fn register_resource_families(registry: &mut Registry) -> CliResult<()> {
     tool_approval::register(registry)?;
     guardrail::register(registry)?;
     asset::register(registry)?;
+    catalog::register(registry)?;
     billing::register(registry)?;
     evidence::register(registry)?;
     ops::register(registry)?;
