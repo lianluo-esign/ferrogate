@@ -142,6 +142,18 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
   "prompt-templates": {
     listPath: "/admin/v1/prompt-templates",
   },
+  // #341: the guardrail-evaluations observability log filters by the policy that
+  // produced a row. GET /admin/v1/guardrail-policies returns the flat revision
+  // list (one row per revision), so many rows share a `policy_id`; the picker
+  // dedupes by value and keeps whichever revision's `name` it saw as the label.
+  // Like the routing catalogs above this endpoint exposes no per-item GET and no
+  // server-side search/offset, so the adapter carries no detailPath —
+  // `hydrateEntityReference` resolves an existing filter value from the (full)
+  // list, and a policy that has been fully deleted stays visible as an
+  // unresolved badge instead of a silently-dropped raw id.
+  "guardrail-policies": {
+    listPath: "/admin/v1/guardrail-policies",
+  },
   // agent-workflows envelopes each list row as `{ workflow, counters }`, so the
   // canonical `id`/`name` live under `workflow` (see unwrapListItem).
   "agent-workflows": {

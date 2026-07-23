@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -22,7 +22,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -48,7 +47,60 @@ import {
   formatUnix,
   verdictVariant,
   type GuardrailPolicyDryRunResponse,
+  type GuardrailPolicyRevisionView,
 } from "@/lib/guardrails";
+
+// Sentinel Select value for "no explicit revision" — Radix Select forbids an
+// empty-string item value, so the auto/default option carries this constant and
+// maps back to "" (null revision) in state.
+const AUTO_REVISION = "__auto__";
+
+/**
+ * #341 canonical revision picker. Both the dry-run panel and the rollback dialog
+ * choose one of the policy's *own* revisions (not an entity-registry reference),
+ * so they share this Select over the loaded revision history instead of a raw
+ * numeric input. Each option carries enough context (revision number, name,
+ * status, creation time) to pick the right one; the leading option represents
+ * the default null revision. `value` is the state string ("" = default).
+ */
+function RevisionSelect({
+  id,
+  revisions,
+  value,
+  autoLabel,
+  onChange,
+}: {
+  id: string;
+  revisions: GuardrailPolicyRevisionView[];
+  value: string;
+  autoLabel: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <Select
+      value={value === "" ? AUTO_REVISION : value}
+      onValueChange={(next) => onChange(next === AUTO_REVISION ? "" : next)}
+    >
+      <SelectTrigger id={id}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={AUTO_REVISION}>{autoLabel}</SelectItem>
+        {revisions.map((revision) => (
+          <SelectItem key={revision.revision} value={String(revision.revision)}>
+            {t("page.guardrailPolicyDetail.revisionOption", {
+              revision: revision.revision,
+              name: revision.name,
+              status: revision.status,
+              created: formatUnix(revision.created_at_unix),
+            })}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
 
 export default function GuardrailPolicyDetailPage() {
   const { policyId = "" } = useParams<{ policyId: string }>();
@@ -132,6 +184,15 @@ export default function GuardrailPolicyDetailPage() {
   const [dryRunResult, setDryRunResult] = useState<GuardrailPolicyDryRunResponse | null>(
     null,
   );
+  // #341: a revision belongs to exactly one policy, so a chosen dry-run/rollback
+  // target must not survive a switch to a different policy (which reloads a fresh
+  // revision history). Clearing both back to the default null revision keeps the
+  // canonical selectors from ever pointing at a stale, cross-policy revision.
+  useEffect(() => {
+    setDryRunRevision("");
+    setRollbackRevision("");
+  }, [policyId]);
+
   const dryRunMutation = useMutation({
     mutationFn: () =>
       adminPost(
@@ -389,12 +450,16 @@ export default function GuardrailPolicyDetailPage() {
               <Label htmlFor="dry-run-revision">
                 {t("page.guardrailPolicyDetail.dryRun.revision")}
               </Label>
-              <Input
+              {/* #341: pick the dry-run target revision from the policy's actual
+                  loaded revisions (number + name + status + timestamp) rather
+                  than typing a raw number; the leading option plans against the
+                  active revision. */}
+              <RevisionSelect
                 id="dry-run-revision"
-                type="number"
+                revisions={revisions}
                 value={dryRunRevision}
-                onChange={(event) => setDryRunRevision(event.target.value)}
-                placeholder={t("page.guardrailPolicyDetail.dryRun.revisionPlaceholder")}
+                autoLabel={t("page.guardrailPolicyDetail.dryRun.revisionAuto")}
+                onChange={setDryRunRevision}
               />
             </div>
             <div className="grid gap-2">
@@ -583,12 +648,14 @@ export default function GuardrailPolicyDetailPage() {
             <Label htmlFor="rollback-revision">
               {t("page.guardrailPolicyDetail.rollbackDialog.targetLabel")}
             </Label>
-            <Input
+            {/* #341: same canonical revision selector as the dry-run panel; the
+                leading option rolls back to the highest archived revision. */}
+            <RevisionSelect
               id="rollback-revision"
-              type="number"
+              revisions={revisions}
               value={rollbackRevision}
-              onChange={(event) => setRollbackRevision(event.target.value)}
-              placeholder={t("page.guardrailPolicyDetail.rollbackDialog.targetPlaceholder")}
+              autoLabel={t("page.guardrailPolicyDetail.rollbackDialog.targetAuto")}
+              onChange={setRollbackRevision}
             />
           </div>
           <AlertDialogFooter>

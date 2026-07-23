@@ -1,9 +1,9 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
-import { evaluation, FP_ACTION } from "@/test/fixtures/guardrails";
+import { evaluation, FP_ACTION, policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
 
@@ -75,6 +75,43 @@ describe("GuardrailEvaluationsPage", () => {
     // Untouched filters are omitted rather than sent empty.
     expect(filtered.searchParams.has("trace_id")).toBe(false);
     expect(filtered.searchParams.has("verdict")).toBe(false);
+  });
+
+  it("filters by a policy chosen from the reference picker, applying its id to the query", async () => {
+    const user = userEvent.setup();
+    const seenUrls: URL[] = [];
+    mockEvaluations([evaluation()], (url) => seenUrls.push(url));
+    // The policy-id filter is now a searchable reference over the real policy
+    // catalog rather than a raw-id text box.
+    server.use(
+      http.get(gatewayUrl("/admin/v1/guardrail-policies"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            policyRevision({ policy_id: "pol-pii", name: "PII guard" }),
+            policyRevision({ policy_id: "pol-tox", name: "Toxicity guard", revision: 4 }),
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<GuardrailEvaluationsPage />);
+    await screen.findByText("req-1");
+
+    // Open the picker and choose a policy by its human name.
+    await user.click(screen.getByLabelText("Policy ID"));
+    await user.click(await screen.findByRole("option", { name: /PII guard/ }));
+
+    // The picker hydrates the chosen policy to its label, not a raw id.
+    expect(screen.getByLabelText("Policy ID")).toHaveTextContent("PII guard");
+
+    mockEvaluations([evaluation()], (url) => seenUrls.push(url));
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      const last = seenUrls[seenUrls.length - 1];
+      expect(last.searchParams.get("policy_id")).toBe("pol-pii");
+    });
   });
 
   it("shows an empty state when no evaluations match", async () => {

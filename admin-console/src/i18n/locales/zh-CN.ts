@@ -1242,8 +1242,9 @@ export const zhCN = {
   "page.guardrailPolicyDetail.dryRun.stage": "阶段",
   "page.guardrailPolicyDetail.dryRun.stageRequest": "请求",
   "page.guardrailPolicyDetail.dryRun.stageResponse": "响应",
-  "page.guardrailPolicyDetail.dryRun.revision": "修订（留空 = 激活）",
-  "page.guardrailPolicyDetail.dryRun.revisionPlaceholder": "激活",
+  "page.guardrailPolicyDetail.dryRun.revision": "修订",
+  "page.guardrailPolicyDetail.dryRun.revisionAuto": "激活修订（默认）",
+  "page.guardrailPolicyDetail.revisionOption": "r{revision} · {name} · {status} · {created}",
   "page.guardrailPolicyDetail.dryRun.model": "模型（可选）",
   "page.guardrailPolicyDetail.dryRun.provider": "提供方（可选）",
   "page.guardrailPolicyDetail.dryRun.text": "示例负载文本",
@@ -1265,7 +1266,7 @@ export const zhCN = {
   "page.guardrailPolicyDetail.rollbackDialog.description":
     "重新激活一个已归档的修订。留空修订则回滚到编号最高的已归档修订。",
   "page.guardrailPolicyDetail.rollbackDialog.targetLabel": "目标修订（可选）",
-  "page.guardrailPolicyDetail.rollbackDialog.targetPlaceholder": "编号最高的已归档修订",
+  "page.guardrailPolicyDetail.rollbackDialog.targetAuto": "编号最高的已归档修订（默认）",
 
   // Billing — wallets (issue #319; #348 slice).
   "page.billingWallets.title": "钱包",

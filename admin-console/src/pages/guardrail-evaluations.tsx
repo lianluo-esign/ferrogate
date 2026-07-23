@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -127,14 +128,36 @@ export default function GuardrailEvaluationsPage() {
         </div>
         <div className="grid gap-2">
           <Label htmlFor="filter-policy-id">{t("page.guardrailEvaluations.filter.policyId")}</Label>
-          <Input
+          {/* #341: the policy filter is a real, queryable entity
+              (GET /admin/v1/guardrail-policies), so it uses the shared reference
+              picker — operators search by policy name instead of pasting a raw
+              id, the applied id still drives the log query, and a deleted policy
+              stays visible as an unresolved badge. */}
+          <EntityReferencePicker
             id="filter-policy-id"
+            label={t("page.guardrailEvaluations.filter.policyId")}
+            reference={{
+              target: "guardrail-policies",
+              valueKey: "policy_id",
+              primaryLabelKey: "name",
+            }}
             value={form.policy_id}
-            onChange={(event) => setField("policy_id", event.target.value)}
+            dependencyValues={{}}
+            onChange={(value) =>
+              setField("policy_id", typeof value === "string" ? value : (value[0] ?? ""))
+            }
           />
         </div>
         <div className="grid gap-2">
           <Label htmlFor="filter-scope-id">{t("page.guardrailEvaluations.filter.scopeId")}</Label>
+          {/* #341 (justified, no silent exclusion): scope_id here is a
+              polymorphic observability correlation input, not an entity-backed
+              config field. Evaluation rows carry every scope kind (tenant /
+              project / workspace / key / service-account …) and this filter has
+              no scope_type discriminator, so there is no single entity kind to
+              build a picker over. Adding a scope_type dimension would change the
+              log query contract (a #341 non-goal: "redesigning runtime
+              semantics"), so this stays a free-text correlation box. */}
           <Input
             id="filter-scope-id"
             value={form.scope_id}

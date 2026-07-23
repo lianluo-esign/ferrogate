@@ -1193,8 +1193,9 @@ export const enRest = {
   "page.guardrailPolicyDetail.dryRun.stage": "Stage",
   "page.guardrailPolicyDetail.dryRun.stageRequest": "request",
   "page.guardrailPolicyDetail.dryRun.stageResponse": "response",
-  "page.guardrailPolicyDetail.dryRun.revision": "Revision (blank = active)",
-  "page.guardrailPolicyDetail.dryRun.revisionPlaceholder": "active",
+  "page.guardrailPolicyDetail.dryRun.revision": "Revision",
+  "page.guardrailPolicyDetail.dryRun.revisionAuto": "Active revision (default)",
+  "page.guardrailPolicyDetail.revisionOption": "r{revision} · {name} · {status} · {created}",
   "page.guardrailPolicyDetail.dryRun.model": "Model (optional)",
   "page.guardrailPolicyDetail.dryRun.provider": "Provider (optional)",
   "page.guardrailPolicyDetail.dryRun.text": "Sample payload text",
@@ -1216,7 +1217,7 @@ export const enRest = {
   "page.guardrailPolicyDetail.rollbackDialog.description":
     "Re-activates an archived revision. Leave the revision blank to roll back to the highest archived revision.",
   "page.guardrailPolicyDetail.rollbackDialog.targetLabel": "Target revision (optional)",
-  "page.guardrailPolicyDetail.rollbackDialog.targetPlaceholder": "highest archived",
+  "page.guardrailPolicyDetail.rollbackDialog.targetAuto": "Highest archived revision (default)",
 
   // Billing — wallets (issue #319; #348 slice).
   "page.billingWallets.title": "Wallets",

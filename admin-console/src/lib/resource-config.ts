@@ -61,7 +61,8 @@ export type EntityReferenceTarget =
   | "tools"
   | "mcp-servers"
   | "prompt-templates"
-  | "agent-workflows";
+  | "agent-workflows"
+  | "guardrail-policies";
 
 export interface FieldOption {
   /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
