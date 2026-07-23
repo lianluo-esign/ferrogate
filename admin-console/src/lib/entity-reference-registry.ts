@@ -65,6 +65,19 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
     detailPath: (value) => `/admin/v1/permissions/${encodeURIComponent(value)}`,
     unwrapDetail: unwrapNamedRecord("permission"),
   },
+  // #341: routing/policy/quota reference the model and provider catalogs by
+  // their canonical `name`. The list endpoints expose no per-item GET, so these
+  // adapters have no detailPath — `hydrateEntityReference` resolves an existing
+  // value by locating it in the list response instead. These collections do not
+  // yet honour server-side search/offset params (that is #337-style Rust work
+  // on the routing endpoints, out of scope here); the picker still loads the
+  // full catalog, renders human labels and submits the canonical name.
+  models: {
+    listPath: "/admin/v1/models",
+  },
+  providers: {
+    listPath: "/admin/v1/providers",
+  },
 };
 
 function adapterFor(

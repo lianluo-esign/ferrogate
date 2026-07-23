@@ -44,8 +44,24 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
         { label: "Key", value: "key" },
       ],
     },
+    // scope_id targets a different entity kind per scope_type (tenant / project
+    // / workspace / key). The shared reference config binds a single static
+    // `target`, so a scope-kind-driven picker needs a config extension (target
+    // selected by a sibling field) rather than a fork — tracked as remaining
+    // #341 work; left as free-text for now (#341).
     { name: "scope_id", label: "Scope ID", type: "text", required: true, createOnly: true },
-    { name: "model_allowlist", label: "Model allowlist (comma-separated)", type: "csv" },
+    {
+      name: "model_allowlist",
+      label: "Model allowlist",
+      type: "entities",
+      description: "Models this scope may call; leave empty to allow all models.",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
     { name: "rpm_limit", label: "Requests per minute", type: "number" },
     { name: "tpm_limit", label: "Tokens per minute", type: "number" },
     { name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number" },

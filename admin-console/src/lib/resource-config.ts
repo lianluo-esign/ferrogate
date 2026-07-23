@@ -13,7 +13,9 @@ export type EntityReferenceTarget =
   | "tenant-accounts"
   | "projects"
   | "workspaces"
-  | "permissions";
+  | "permissions"
+  | "models"
+  | "providers";
 
 export interface FieldOption {
   label: string;

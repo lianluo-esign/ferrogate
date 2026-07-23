@@ -34,7 +34,18 @@ export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
       label: "Capabilities (comma-separated: invoke,read,stream,discover)",
       type: "csv",
     },
-    { name: "tenant_ids", label: "Tenant IDs (comma-separated)", type: "csv" },
+    {
+      name: "tenant_ids",
+      label: "Tenants",
+      type: "entities",
+      description: "Tenants allowed to dispatch to this upstream; leave empty for all tenants.",
+      reference: {
+        target: "tenant-accounts",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug"],
+      },
+    },
     {
       name: "auth",
       label: "Auth (JSON, e.g. \"none\" or {\"bearer\":{\"token\":\"...\"}})",

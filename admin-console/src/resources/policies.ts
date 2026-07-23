@@ -44,11 +44,45 @@ export const policiesConfig: ResourceConfig<PolicyRule> = {
         { label: "Allow", value: "allow" },
       ],
     },
+    // organization_ids and api_key_ids match on the raw identifier the caller
+    // presents at request time (see ferrogate-cli policy evaluation), which is
+    // not guaranteed to be an admin-console tenant/key row, so they stay
+    // free-text rather than being force-mapped to an entity source (#341).
     { name: "organization_ids", label: "Organization IDs (comma-separated)", type: "csv" },
-    { name: "project_ids", label: "Project IDs (comma-separated)", type: "csv" },
+    {
+      name: "project_ids",
+      label: "Projects",
+      type: "entities",
+      reference: {
+        target: "projects",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "tenant_id"],
+      },
+    },
     { name: "api_key_ids", label: "API key IDs (comma-separated)", type: "csv" },
-    { name: "models", label: "Models (comma-separated)", type: "csv" },
-    { name: "providers", label: "Providers (comma-separated)", type: "csv" },
+    {
+      name: "models",
+      label: "Models",
+      type: "entities",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
+    {
+      name: "providers",
+      label: "Providers",
+      type: "entities",
+      reference: {
+        target: "providers",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["kind", "base_url"],
+      },
+    },
     { name: "code", label: "Deny code", type: "text", placeholder: "policy_denied" },
     {
       name: "message",

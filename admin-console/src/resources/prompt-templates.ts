@@ -44,7 +44,17 @@ export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
         { label: "Responses", value: "responses" },
       ],
     },
-    { name: "model", label: "Model", type: "text" },
+    {
+      name: "model",
+      label: "Model",
+      type: "entity",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
     {
       name: "variables",
       label: "Variables (JSON array)",
