@@ -41,6 +41,19 @@ describe("useI18n", () => {
     expect(result.current.t("language.label")).toBe("Language");
   });
 
+  it("renders a route/page namespace key once the code-split EN rest has loaded", async () => {
+    // #394: `page.*`/`dashboard.*`/`resource.*` copy is split OUT of the entry
+    // and pulled in by `loadCatalog("en")` (the test setup warms it, mirroring
+    // how production loads a route's copy with its chunk). After that load the
+    // provider resolves route keys — not just the eager chrome subset.
+    await loadCatalog("en");
+    const { result } = renderHook(() => useI18n(), { wrapper: wrapper("en") });
+    // Chrome key (eager bootstrap subset) AND a route key (lazy rest) both resolve.
+    expect(result.current.t("language.label")).toBe("Language");
+    expect(result.current.t("page.assets.title")).toBe("Assets");
+    expect(result.current.t("dashboard.title")).toBe("Operations overview");
+  });
+
   it("lazy-loads the non-default (zh-CN) catalog via dynamic import()", async () => {
     // `loadCatalog` is the dynamic-import() entry point Vite emits as its own
     // chunk in production; awaiting it yields the fully translated catalog.

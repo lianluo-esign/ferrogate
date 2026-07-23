@@ -14,7 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import {
-  DEFAULT_CATALOG,
+  BOOTSTRAP_CATALOG,
   getLoadedCatalog,
   loadCatalog,
   LOCALE_META,
@@ -40,22 +40,23 @@ import {
 /**
  * Translate a typed key for `locale`, interpolating `{name}` placeholders.
  *
- * Resolves against the locale's catalog IF it has already been lazily loaded
- * (`getLoadedCatalog`), else against the eager default catalog. The default
- * locale is always available synchronously; a non-default locale whose chunk
- * has not resolved yet gracefully yields the English string. For a live,
- * re-rendering surface prefer the context `t` (below), which tracks the active
- * catalog as it loads; this free function is for one-shot/synchronous callers.
+ * Resolves against the locale's FULL catalog IF it has already been lazily
+ * loaded (`getLoadedCatalog`), else against the eager bootstrap subset. Chrome
+ * keys are always available synchronously (they live in the bootstrap subset); a
+ * key whose code-split chunk has not resolved yet gracefully yields the English
+ * bootstrap string or, failing that, the key itself. For a live, re-rendering
+ * surface prefer the context `t` (below), which tracks the active catalog as it
+ * loads; this free function is for one-shot/synchronous callers.
  */
 export function translate(
   locale: Locale,
   key: TranslationKey,
   values?: InterpolationValues,
 ): string {
-  const catalog = getLoadedCatalog(locale) ?? DEFAULT_CATALOG;
-  // Typed catalogs guarantee the key exists; the `?? DEFAULT` chain only guards
-  // against a locale catalog being hand-edited out of sync at runtime.
-  const template = catalog[key] ?? DEFAULT_CATALOG[key] ?? key;
+  const catalog = getLoadedCatalog(locale) ?? BOOTSTRAP_CATALOG;
+  // Typed catalogs guarantee the key exists once loaded; the `?? BOOTSTRAP ?? key`
+  // chain covers a not-yet-loaded code-split chunk and any runtime drift.
+  const template = catalog[key] ?? BOOTSTRAP_CATALOG[key] ?? key;
   return interpolate(template, values);
 }
 
@@ -95,14 +96,14 @@ export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
     () => initialLocale ?? resolveInitialLocale(),
   );
 
-  // The active message catalog. The default locale — and any non-default locale
-  // whose chunk is already cached — resolves SYNCHRONOUSLY here, so the common
-  // case (and every default-locale render, including the test suite's) paints
-  // with no async hop. A not-yet-loaded non-default locale seeds with the eager
-  // default catalog (graceful English pending state) and swaps in once its
-  // dynamically imported chunk resolves via the effect below.
-  const [catalog, setCatalog] = useState<Messages>(
-    () => getLoadedCatalog(locale) ?? DEFAULT_CATALOG,
+  // The active message catalog. A locale whose FULL chunk is already cached
+  // resolves SYNCHRONOUSLY here (including under the test suite, which warms the
+  // cache in setup). Otherwise it seeds with the eager bootstrap subset — the
+  // always-visible chrome renders with NO async hop — and swaps in the full,
+  // dynamically imported catalog once it resolves via the effect below. Typed
+  // `Partial<Messages>` because the bootstrap seed is intentionally partial.
+  const [catalog, setCatalog] = useState<Partial<Messages>>(
+    () => getLoadedCatalog(locale) ?? BOOTSTRAP_CATALOG,
   );
 
   // Reflect the active locale on the document element for a11y + `:lang()` CSS.
@@ -110,18 +111,22 @@ export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
     document.documentElement.lang = LOCALE_META[locale].htmlLang;
   }, [locale]);
 
-  // Keep `catalog` in sync with `locale`, lazily importing non-default locales.
+  // Keep `catalog` in sync with `locale`, lazily importing the active locale's
+  // code-split chunk. This now fires for EVERY locale on first use — including
+  // the default (English), whose bulk copy (`en/rest`) is split out of the entry
+  // (#394) — not only for non-default locales.
   useEffect(() => {
     const alreadyLoaded = getLoadedCatalog(locale);
     if (alreadyLoaded) {
       setCatalog(alreadyLoaded);
       return;
     }
-    // Non-default locale not yet resolved: show the default copy while its chunk
-    // downloads, then re-render with the real catalog. `cancelled` guards a
+    // Full catalog not yet resolved: show the eager bootstrap subset (chrome is
+    // translated immediately; other keys fall back to English/key) while the
+    // chunk downloads, then re-render with the full catalog. `cancelled` guards a
     // locale change (or unmount) that lands before the import settles.
     let cancelled = false;
-    setCatalog(DEFAULT_CATALOG);
+    setCatalog(BOOTSTRAP_CATALOG);
     void loadCatalog(locale).then((messages) => {
       if (!cancelled) setCatalog(messages);
     });
@@ -154,8 +159,9 @@ export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
       locale,
       setLocale,
       // Resolve from the active (possibly lazily loaded) catalog, falling back
-      // to the eager default so a pending non-default locale renders English.
-      t: (key, values) => interpolate(catalog[key] ?? DEFAULT_CATALOG[key] ?? key, values),
+      // to the eager bootstrap subset (always-available chrome) and finally the
+      // key itself for a not-yet-loaded code-split entry.
+      t: (key, values) => interpolate(catalog[key] ?? BOOTSTRAP_CATALOG[key] ?? key, values),
       format,
     };
   }, [locale, catalog, setLocale]);

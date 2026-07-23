@@ -20,12 +20,31 @@ import { fileURLToPath } from "node:url";
 //                      -> 221_805 B (216.61 KiB min / 56.76 KiB gzip)
 //     i.e. -97_911 B min (-30.6%) / -23.3 KiB gzip left the entry chunk.
 //   * new    zh-CN-*.js : 98_220 B — the Simplified Chinese copy, now lazy.
-// The ceiling drops to 225_000 B: ~3.2 KiB (~1.4%) headroom over the measured
-// 221_805 B entry — tight, so it stays a guard against an unintended heavy
-// dependency (or a locale catalog accidentally re-entering the entry) rather than
-// a blank cheque. Future EN-only key growth still nudges this; a large jump would
-// signal regression (e.g. zh-CN back in the entry, or i18next reaching it).
-const MAX_ENTRY_BYTES = 225_000;
+//
+// LOWERED 225_000 -> 131_000 (#394): the DEFAULT (English) catalog is now
+// code-split TOO. Only a small chrome "bootstrap" subset (src/i18n/locales/en/
+// bootstrap.ts — 133 keys: the language selector, `common.*`, app-shell `nav.*`/
+// `shell.*`, the `auth.*` login copy, worker reveal warnings, and the theme
+// switcher + route-load-boundary "Loading page…" + sidebar a11y) stays eager in
+// the entry; the bulk (src/i18n/locales/en/rest.ts — the other 1_551 keys:
+// dashboard/resource/every `page.<route>.*`) is pulled in by a dynamic import()
+// (src/i18n/catalog.ts `catalogLoaders.en`) and merged over the bootstrap subset,
+// so it lands in its OWN chunk outside the entry. Measured effect on the SAME tree:
+//   * entry  index-*.js : 221_805 B (216.61 KiB min / 56.76 KiB gzip)
+//                      -> 128_571 B (125.56 KiB min / 36.72 KiB gzip)
+//     i.e. -93_234 B min (-42.0%) / -20.0 KiB gzip left the entry chunk.
+//   * new    rest-*.js  : 95_740 B — the non-chrome English copy, now lazy.
+// The type union `TranslationKey` is STILL the keys of the whole catalog: en.ts
+// re-aggregates bootstrap+rest and is imported TYPE-ONLY (erased), so a mistyped
+// `t()` still fails tsc and zh-CN completeness is still compile-enforced.
+//
+// The ceiling drops to 131_000 B: ~2.4 KiB (~1.9%) headroom over the measured
+// 128_571 B entry — tight, so it stays a guard against an unintended heavy
+// dependency (or a catalog chunk accidentally re-entering the entry: re-merging
+// `en/rest` would jump the entry ~+95 KiB and trip this) rather than a blank
+// cheque. Only EN CHROME (bootstrap) growth now nudges the entry — route/page
+// copy lands in the lazy rest chunk — so this ratchet should hold far longer.
+const MAX_ENTRY_BYTES = 131_000;
 const MAX_CHUNK_BYTES = 500_000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");

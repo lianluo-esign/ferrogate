@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { en } from "./locales/en";
 import {
+  BOOTSTRAP_CATALOG,
   LOCALES,
   LOCALE_META,
   isLocale,
@@ -60,6 +61,42 @@ describe("catalog consistency", () => {
       expect(LOCALE_META[locale].nativeName.length).toBeGreaterThan(0);
       expect(LOCALE_META[locale].htmlLang.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// #394: the DEFAULT (EN) catalog is code-split. Only a small chrome "bootstrap"
+// subset is eager (in the entry chunk); the bulk (dashboard/resource/page.*) is
+// pulled in by a dynamic import() and merged in by `loadCatalog("en")`. These
+// tests pin the split boundary so an accidental re-merge of the whole EN catalog
+// back into the eager subset (which would defeat the entry-budget win) is caught.
+describe("EN bootstrap code-split (#394)", () => {
+  it("bootstrap subset holds always-visible chrome keys synchronously", () => {
+    // No await: these resolve from the eagerly bundled subset on the render path.
+    expect(BOOTSTRAP_CATALOG["language.label"]).toBe("Language");
+    expect(BOOTSTRAP_CATALOG["common.status"]).toBe("Status");
+    // The route-load-boundary copy MUST be eager — it shows WHILE a route chunk
+    // (and its namespace copy) is still downloading.
+    expect(BOOTSTRAP_CATALOG["component.routeBoundary.loading"]).toBe("Loading page…");
+  });
+
+  it("bootstrap subset excludes route/page copy (it is split OUT of the entry)", () => {
+    // These live in the lazy `./locales/en/rest` chunk, not the eager subset.
+    expect(BOOTSTRAP_CATALOG["page.assets.title"]).toBeUndefined();
+    expect(BOOTSTRAP_CATALOG["dashboard.title"]).toBeUndefined();
+    expect(BOOTSTRAP_CATALOG["resource.action.new"]).toBeUndefined();
+    // The bootstrap subset is a strict, small fraction of the whole catalog.
+    expect(Object.keys(BOOTSTRAP_CATALOG).length).toBeLessThan(Object.keys(en).length / 4);
+  });
+
+  it("loadCatalog('en') merges the code-split rest over the bootstrap subset", async () => {
+    const full = await loadCatalog("en");
+    // Route/page copy is present only after the dynamic import() resolves...
+    expect(full["page.assets.title"]).toBe("Assets");
+    expect(full["dashboard.title"]).toBe("Operations overview");
+    // ...and the eager chrome keys are still there in the merged full catalog.
+    expect(full["language.label"]).toBe("Language");
+    // The merged catalog is the WHOLE key set — same size as the source union.
+    expect(Object.keys(full).length).toBe(Object.keys(en).length);
   });
 });
 

@@ -13,19 +13,30 @@
 //     flat dot-namespaced keys map 1:1 onto i18next namespaces/keys, and the
 //     `t` / formatter surface is the same shape react-i18next exposes.
 //
-// Code-split (#393): only the DEFAULT locale (English) is eagerly bundled into
-// the entry chunk. Every non-default locale (currently zh-CN) is fetched with a
-// dynamic `import()` (see `catalogLoaders`), so Vite emits its copy as its OWN
-// chunk OUTSIDE the entry — an operator only downloads Chinese strings if they
-// actually switch to Chinese. The compile-time completeness guarantee is
-// preserved WITHOUT bundling zh-CN's runtime value: `zh-CN.ts` is imported here
-// TYPE-ONLY (fully erased by the bundler; contributes nothing to the entry
-// chunk) purely to assert, at `tsc` time, that it still covers every
-// `TranslationKey` (see `_ZhCatalogIsComplete`).
-import { en } from "./locales/en";
+// Code-split — locales (#393) AND the default catalog (#394):
+//   * Non-default locales (zh-CN) were already lazy: fetched with a dynamic
+//     `import()` so Vite emits each as its OWN chunk outside the entry.
+//   * #394 splits the DEFAULT locale (English) too. Only a SMALL bootstrap
+//     subset (`./locales/en/bootstrap` — the always-visible chrome: language
+//     selector, `common.*`, app-shell `nav.*`/`shell.*`, the `auth.*` login copy,
+//     worker reveal warnings, the theme switcher + route-load-boundary "Loading
+//     page…" + sidebar a11y) is eagerly bundled into the entry, so chrome still
+//     paints SYNCHRONOUSLY with no async hop. The bulk of the EN copy
+//     (`./locales/en/rest` — dashboard/resource/every `page.<route>.*`) is pulled
+//     in by a dynamic `import()` (see `catalogLoaders.en`) and merged over the
+//     bootstrap subset, so it lands in its own chunk OUTSIDE the entry.
+//
+// The compile-time completeness guarantee is preserved WITHOUT bundling the full
+// EN or the zh-CN runtime value into the entry: both `./locales/en` (the whole-
+// catalog aggregator) and `./locales/zh-CN` are imported here TYPE-ONLY (fully
+// erased by the bundler; contribute nothing to the entry chunk). `TranslationKey`
+// is still `keyof typeof en` — the union of EVERY key across bootstrap + rest —
+// and `_ZhCatalogIsComplete` still fails `tsc` if zh-CN drops or misspells a key.
+import { enBootstrap } from "./locales/en/bootstrap";
+import type { en } from "./locales/en";
 import type { zhCN } from "./locales/zh-CN";
 
-/** Every valid translation key, derived from the English source catalog. */
+/** Every valid translation key, derived from the (whole) English source catalog. */
 export type TranslationKey = keyof typeof en;
 
 /** The shape every locale catalog must satisfy: all keys, string values. */
@@ -47,7 +58,7 @@ export type _ZhCatalogIsComplete = AssertCovers<Messages, typeof zhCN>;
 export const LOCALES = ["en", "zh-CN"] as const;
 export type Locale = (typeof LOCALES)[number];
 
-/** Source/fallback locale — the ONLY catalog eagerly in the entry chunk. */
+/** Source/fallback locale — the ONLY locale with any copy eager in the entry. */
 export const DEFAULT_LOCALE = "en" satisfies Locale;
 
 /**
@@ -61,43 +72,53 @@ export const LOCALE_META: Record<Locale, { nativeName: string; htmlLang: string 
 };
 
 /**
- * The default catalog: eagerly bundled with the entry chunk so the default
- * locale (and the EN fallback for any pending non-default locale) resolves
- * SYNCHRONOUSLY — no async on first paint, no flash of untranslated content.
+ * The bootstrap catalog: the SMALL chrome subset of EN eagerly bundled with the
+ * entry chunk so the default-locale chrome (and the synchronous EN fallback for
+ * any pending/not-yet-loaded key) resolves WITHOUT async — no flash of
+ * untranslated content on the always-visible shell. It is a PARTIAL catalog by
+ * design: the rest of EN (dashboard/resource/page.*) is code-split into its own
+ * chunk (`./locales/en/rest`) and merged in by `loadCatalog("en")`. A key that
+ * is not in the bootstrap subset resolves once its route's copy has loaded; until
+ * then `t()` falls back to the key (rare — the EN rest loads at provider mount).
  */
-export const DEFAULT_CATALOG: Messages = en;
+export const BOOTSTRAP_CATALOG: Partial<Messages> = enBootstrap;
 
 /**
- * Catalogs resolved so far. Seeded with the eager default; each non-default
- * locale populates on its first `loadCatalog(...)`. Read synchronously via
- * `getLoadedCatalog` on the render path.
+ * Catalogs FULLY resolved so far. Empty until first load: even the default
+ * locale's complete catalog is assembled lazily (bootstrap subset + the
+ * dynamically imported rest). Each locale populates on its first `loadCatalog`.
+ * Read synchronously via `getLoadedCatalog` on the render path.
  */
-const loadedCatalogs: Partial<Record<Locale, Messages>> = { en };
+const loadedCatalogs: Partial<Record<Locale, Messages>> = {};
 
 /**
- * Dynamic importers for the non-default locales. Each `import()` makes Vite emit
- * that locale's copy as a SEPARATE chunk outside the entry. Typed
- * `Record<Exclude<Locale, typeof DEFAULT_LOCALE>, ...>`, so adding a new
- * `Locale` is a COMPILE error until its lazy loader is registered here.
+ * Dynamic importers for EVERY locale's FULL catalog. Each `import()` makes Vite
+ * emit that locale's copy as a SEPARATE chunk outside the entry — including the
+ * default locale, whose bulk (`./locales/en/rest`) is merged over the eager
+ * bootstrap subset. Typed `Record<Locale, ...>`, so adding a new `Locale` is a
+ * COMPILE error until its lazy loader is registered here.
  */
-const catalogLoaders: Record<Exclude<Locale, typeof DEFAULT_LOCALE>, () => Promise<Messages>> = {
+const catalogLoaders: Record<Locale, () => Promise<Messages>> = {
+  en: () =>
+    import("./locales/en/rest").then((module) => ({ ...enBootstrap, ...module.enRest })),
   "zh-CN": () => import("./locales/zh-CN").then((module) => module.zhCN),
 };
 
-/** The catalog for `locale` if already resolved, else `undefined`. */
+/** The FULLY resolved catalog for `locale` if already loaded, else `undefined`. */
 export function getLoadedCatalog(locale: Locale): Messages | undefined {
   return loadedCatalogs[locale];
 }
 
 /**
- * Resolve `locale`'s catalog, dynamically importing (and caching) it on first
- * use. The default locale resolves synchronously from the eager bundle; every
- * other locale awaits its own chunk. Idempotent: repeat calls return the cache.
+ * Resolve `locale`'s FULL catalog, dynamically importing (and caching) its
+ * code-split chunk on first use. Every locale — the default included — awaits its
+ * own chunk the first time; the always-visible chrome renders synchronously in
+ * the meantime from `BOOTSTRAP_CATALOG`. Idempotent: repeat calls return the cache.
  */
 export async function loadCatalog(locale: Locale): Promise<Messages> {
   const cached = loadedCatalogs[locale];
   if (cached) return cached;
-  const messages = await catalogLoaders[locale as Exclude<Locale, typeof DEFAULT_LOCALE>]();
+  const messages = await catalogLoaders[locale]();
   loadedCatalogs[locale] = messages;
   return messages;
 }

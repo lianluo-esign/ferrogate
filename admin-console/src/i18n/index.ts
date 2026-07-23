@@ -3,7 +3,7 @@
 // Import from `@/i18n` rather than reaching into submodules so #348 can move
 // internals (e.g. swap in lazy namespace loading) without churning call sites.
 export {
-  DEFAULT_CATALOG,
+  BOOTSTRAP_CATALOG,
   DEFAULT_LOCALE,
   LOCALE_META,
   LOCALES,
