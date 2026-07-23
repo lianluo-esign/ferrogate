@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { LanguageSwitcher } from "@/i18n";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -94,7 +95,8 @@ export function AppShell() {
               </BreadcrumbList>
             </Breadcrumb>
           </div>
-          <div className="ml-auto flex items-center px-4">
+          <div className="ml-auto flex items-center gap-1 px-4">
+            <LanguageSwitcher />
             <ThemeSwitcher />
           </div>
         </header>

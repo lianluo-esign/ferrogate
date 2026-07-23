@@ -6,6 +6,7 @@ import { ProtectedRoute } from "@/components/protected-route";
 import { RouteLoadBoundary } from "@/components/route-load-boundary";
 import { AppThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
+import { I18nProvider } from "@/i18n";
 import { AuthProvider } from "@/hooks/use-auth";
 import { APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
@@ -66,6 +67,7 @@ function routeElement(Component: LazyExoticComponent<ComponentType>) {
 function App() {
   return (
     <AppThemeProvider>
+      <I18nProvider>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <AuthProvider>
@@ -151,6 +153,7 @@ function App() {
         </BrowserRouter>
         <Toaster />
       </QueryClientProvider>
+      </I18nProvider>
     </AppThemeProvider>
   );
 }

@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, type RenderResult } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import { saveStoredSession, type StoredSession } from "@/lib/session-storage";
 
 export const TEST_GATEWAY_API_KEY = "fg-test-gateway-key";
@@ -51,11 +52,13 @@ export function createTestQueryClient(): QueryClient {
 export function AllProviders({ children }: { children: ReactNode }) {
   return (
     <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          {children}
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            {children}
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>
   );
 }

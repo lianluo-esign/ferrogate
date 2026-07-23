@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { LanguageSwitcher } from "@/i18n";
 import {
   Card,
   CardContent,
@@ -47,7 +48,8 @@ export default function LoginPage() {
 
   return (
     <div className="relative min-h-svh bg-background">
-      <div className="absolute right-4 top-4 z-10">
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-1">
+        <LanguageSwitcher />
         <ThemeSwitcher />
       </div>
       <main className="flex min-h-svh flex-col items-center justify-center gap-6 p-6">
