@@ -13,13 +13,13 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferrogate_storage::{sha256_hex, StorageError, StoredAsset};
+use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
 
 use super::{
-    asset_create_failure_disposition, existing_asset_matches_commit, final_object_prefix,
-    is_upload_id, new_upload_id, staging_object_key, verify_and_fetch_committed_object,
-    AssetCreateFailureDisposition, CommitVerification, PresignCommitRequest,
-    PresignUploadIntentRequest,
+    asset_create_failure_disposition, effective_max_object_bytes, existing_asset_matches_commit,
+    final_object_prefix, is_upload_id, new_upload_id, staging_object_key,
+    verify_and_fetch_committed_object, AssetCreateFailureDisposition, CommitVerification,
+    PresignCommitRequest, PresignUploadIntentRequest,
 };
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
@@ -327,6 +327,90 @@ async fn commit_verify_reports_not_uploaded_when_the_object_is_absent() {
     assert!(matches!(verification, CommitVerification::NotUploaded));
     // A never-uploaded object has nothing to delete.
     assert_eq!(*methods.lock().unwrap(), vec!["HEAD"]);
+}
+
+#[test]
+fn effective_per_object_ceiling_is_plan_quota_driven_with_a_global_default() {
+    // #259: the per-object ceiling replaces a fixed constant with a
+    // plan/quota-driven limit. A tenant with no quota (unlimited storage) keeps
+    // the operator's global ceiling as the sane default.
+    assert_eq!(
+        effective_max_object_bytes(5 * 1024 * 1024 * 1024, None),
+        5 * 1024 * 1024 * 1024
+    );
+    // A tenant whose plan quota is SMALLER than the global ceiling is capped to
+    // its quota: a single object can never exceed the whole tenant quota.
+    assert_eq!(
+        effective_max_object_bytes(5 * 1024 * 1024 * 1024, Some(50 * 1024 * 1024)),
+        50 * 1024 * 1024
+    );
+    // A tenant whose plan quota is LARGER than the global ceiling stays bounded
+    // by the operator ceiling (the tighter of the two always wins).
+    assert_eq!(
+        effective_max_object_bytes(1024 * 1024, Some(10 * 1024 * 1024 * 1024)),
+        1024 * 1024
+    );
+    // Equal bounds resolve to that shared value.
+    assert_eq!(effective_max_object_bytes(4096, Some(4096)), 4096);
+    // A zero quota admits nothing -- degenerate but well-defined.
+    assert_eq!(effective_max_object_bytes(4096, Some(0)), 0);
+}
+
+#[test]
+fn presigned_read_path_issues_a_short_ttl_signed_url_never_a_public_object_url() {
+    // #259 private-bucket read path: an authorized tenant's download resolves to
+    // a gateway-issued presigned GET, so reads never require the bucket to be
+    // public. Prove the URL is a short-TTL SigV4-signed URL, not a bare public
+    // object URL, and that it never embeds the secret access key.
+    let bucket = test_bucket("http://127.0.0.1:9".to_string());
+    let ttl = 900_u64;
+    let url = bucket
+        .presign_get(".ferrogate/objects/abc/obj_deadbeef", ttl, 1_700_000_000)
+        .expect("presign_get builds a signed URL");
+    // Signed: carries the SigV4 query parameters and a bounded expiry.
+    assert!(
+        url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+        "url must be SigV4-signed: {url}"
+    );
+    assert!(
+        url.contains("X-Amz-Signature="),
+        "url must carry a signature: {url}"
+    );
+    assert!(
+        url.contains(&format!("X-Amz-Expires={ttl}")),
+        "url must carry the short TTL: {url}"
+    );
+    // Not a bare public object URL: a public URL would be the object path with
+    // no signing query string at all.
+    assert!(
+        url.contains('?'),
+        "a presigned URL must carry a query string: {url}"
+    );
+    // The signing secret must never appear in a URL handed to a client.
+    assert!(
+        !url.contains("wJalrXUtnFEMI"),
+        "the secret access key must never be embedded in a presigned URL: {url}"
+    );
+}
+
+#[test]
+fn download_authorization_is_tenant_scoped_so_cross_tenant_reads_cannot_resolve() {
+    // #259: the presigned download handler derives the asset id from the
+    // AUTHENTICATED tenant (`stored_asset_id(tenant, ...)`), so a caller
+    // authenticated as another tenant resolves a different id and misses -- the
+    // storage-layer tenant-isolation bypass the public bucket allowed is closed
+    // because the read path never trusts a caller-supplied object path.
+    let owner = stored_asset_id("tenant-a", "cli_tool", "hello", "1.0.0");
+    let cross_tenant = stored_asset_id("tenant-b", "cli_tool", "hello", "1.0.0");
+    assert_ne!(
+        owner, cross_tenant,
+        "a cross-tenant caller must resolve a different asset id than the owner"
+    );
+    // The owning tenant's own request is stable and self-consistent.
+    assert_eq!(
+        owner,
+        stored_asset_id("tenant-a", "cli_tool", "hello", "1.0.0")
+    );
 }
 
 #[test]

@@ -163,6 +163,22 @@ fn storage_summary_exposes_presign_limits_only_when_bucket_is_available() {
 }
 
 #[test]
+fn storage_summary_reports_the_plan_quota_tightened_per_object_ceiling() {
+    // #259: the advertised presigned per-object ceiling is plan/quota-driven.
+    // A tenant whose cumulative asset-storage quota is SMALLER than the global
+    // operator ceiling sees the tighter quota-derived limit, since a single
+    // object can never exceed the whole tenant quota.
+    let tightened = build_asset_storage_summary(0, Some(4_096), Some((5_000, 900)));
+    assert!(tightened.presigned_upload.enabled);
+    assert_eq!(tightened.presigned_upload.max_object_bytes, Some(4_096));
+
+    // A tenant whose quota is LARGER than the global ceiling stays bounded by
+    // the operator ceiling (the tighter of the two wins).
+    let bounded = build_asset_storage_summary(0, Some(10_000), Some((5_000, 900)));
+    assert_eq!(bounded.presigned_upload.max_object_bytes, Some(5_000));
+}
+
+#[test]
 fn channel_target_requires_an_existing_non_yanked_logical_version() {
     let healthy_variants = vec![
         asset("1.0.0", "linux-x86_64", false, "a"),

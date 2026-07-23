@@ -1900,8 +1900,20 @@ fn build_asset_storage_summary(
     presigned_limits: Option<(u64, u64)>,
 ) -> AssetStorageSummary {
     let (enabled, max_object_bytes, url_ttl_seconds) = match presigned_limits {
-        Some((max_object_bytes, url_ttl_seconds)) => {
-            (true, Some(max_object_bytes), Some(url_ttl_seconds))
+        Some((global_max_object_bytes, url_ttl_seconds)) => {
+            // Report the plan/quota-driven effective per-object ceiling (issue
+            // #259), not the raw global operator constant: a single object can
+            // never exceed the tenant's whole cumulative asset-storage quota, so
+            // the advertised limit is tightened to that quota when it is smaller
+            // (matching what the presigned upload-intent path enforces).
+            let effective_max_object_bytes = quota_bytes.map_or(global_max_object_bytes, |quota| {
+                global_max_object_bytes.min(quota)
+            });
+            (
+                true,
+                Some(effective_max_object_bytes),
+                Some(url_ttl_seconds),
+            )
         }
         None => (false, None, None),
     };

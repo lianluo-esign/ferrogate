@@ -309,8 +309,17 @@ impl FerroGateway {
         };
 
         // Per-object ceiling (issue #259) -- layered on top of, and checked
-        // before, the cumulative tenant quota.
-        let max_object_bytes = state.asset_presign_max_object_bytes();
+        // before, the cumulative tenant quota. The operator's global
+        // `[asset_bucket].presign_max_object_bytes` is further tightened to the
+        // tenant's plan-derived cumulative `asset_storage_quota_bytes` when that
+        // is smaller, so the per-object limit is plan/quota-driven (mirroring
+        // the inline path's `inline_push_byte_limit`) rather than a single fixed
+        // operator constant. A single object can never exceed the whole tenant
+        // quota, and the value is echoed to the client so it can fail fast.
+        let max_object_bytes = effective_max_object_bytes(
+            state.asset_presign_max_object_bytes(),
+            auth.effective_quota.asset_storage_quota_bytes,
+        );
         if intent.size_bytes > max_object_bytes {
             // #368: outcome `rejected_intent` distinguishes this preflight
             // rejection from bucket-boundary (`rejected_bucket`) and
@@ -556,7 +565,15 @@ impl FerroGateway {
             &expected_sha256,
             asset_type,
             &content_type,
-            state.asset_presign_max_object_bytes(),
+            // Same plan/quota-driven per-object ceiling the intent was checked
+            // against (issue #259): the commit-time size verification tightens
+            // the global ceiling to the tenant's cumulative asset-storage quota,
+            // so a committed object can never exceed the whole tenant quota even
+            // if a stale intent was issued under a larger prior ceiling.
+            effective_max_object_bytes(
+                state.asset_presign_max_object_bytes(),
+                auth.effective_quota.asset_storage_quota_bytes,
+            ),
         )
         .await;
         let (verified_bytes, actual_sha256) = match verification {
@@ -1518,6 +1535,23 @@ fn is_upload_id(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
+}
+
+/// The effective per-object upload ceiling for a tenant (issue #259): the
+/// operator's global `[asset_bucket].presign_max_object_bytes` ceiling,
+/// further tightened to the tenant's plan-derived cumulative
+/// `asset_storage_quota_bytes` when that quota is smaller. A single object can
+/// never exceed the whole tenant quota, so folding the quota in makes the
+/// per-object size limit plan/quota-driven (the quota resolves from the
+/// tenant's `StoredPlan` / quota-policy) rather than a single fixed operator
+/// constant -- the presigned-path analogue of the inline path's
+/// `inline_push_byte_limit`. A `None` quota (unlimited storage) leaves the
+/// global ceiling as the sane default.
+fn effective_max_object_bytes(global_ceiling: u64, tenant_quota: Option<u64>) -> u64 {
+    match tenant_quota {
+        Some(quota) => global_ceiling.min(quota),
+        None => global_ceiling,
+    }
 }
 
 /// True for a canonical 64-character lowercase-or-uppercase hex SHA-256.
