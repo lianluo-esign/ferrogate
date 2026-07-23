@@ -2785,6 +2785,17 @@
       "rbac_action": null
     },
     {
+      "path": "/v1/assets/{asset_type}/{name}/{version}/visibility",
+      "method": "post",
+      "operation_id": "promoteAssetVisibility",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/assets/presign/upload/{asset_type}/{name}/{version}",
       "method": "post",
       "operation_id": "createAssetUploadIntent",

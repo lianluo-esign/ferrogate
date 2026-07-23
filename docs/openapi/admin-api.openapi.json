@@ -11754,6 +11754,108 @@
         ]
       }
     },
+    "/v1/assets/{asset_type}/{name}/{version}/visibility": {
+      "post": {
+        "operationId": "promoteAssetVisibility",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Promote a pending_scan asset after an out-of-band scan.",
+        "description": "Flips a withheld pending_scan asset version to visible (clean verdict) or quarantined (flagged verdict) after a completed out-of-band/async scan. The transition is a fail-closed compare-and-swap that fires only from the pending_scan state: an already-visible or already-quarantined asset returns 409 and a missing asset returns 404, so a completed scan can never silently re-promote a terminal asset. An unknown scan_outcome or missing evidence returns 400 and never promotes. Every attempt (committed or rejected) emits a durable audit event linking the promotion to the scan outcome, evidence, asset id, tenant, and request/trace id. Select a platform variant with the platform query parameter. Asset hosting requires the tenant plan flag or assets.host permission.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetVisibilityPromotionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The asset was promoted to its terminal visibility.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetVisibilityPromotionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/AssetNotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "asset_type",
+            "in": "path",
+            "required": true,
+            "description": "Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Tenant-scoped asset name.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "description": "Concrete immutable asset version.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "platform",
+            "in": "query",
+            "required": false,
+            "description": "Platform/arch variant key (issue #260), e.g. linux-x86_64. Omit for the default no-variant artifact.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/v1/assets/presign/upload/{asset_type}/{name}/{version}": {
       "post": {
         "operationId": "createAssetUploadIntent",
@@ -24585,6 +24687,77 @@
         "required": [
           "object",
           "data"
+        ]
+      },
+      "AssetVisibilityPromotionRequest": {
+        "type": "object",
+        "description": "Completed out-of-band scan result driving a pending_scan promotion (issue #378).",
+        "properties": {
+          "scan_outcome": {
+            "type": "string",
+            "description": "Terminal scan verdict. clean (or visible) promotes to visible; quarantined (or quarantine/infected) withholds permanently. Any other value is rejected fail-closed and never promotes.",
+            "enum": [
+              "clean",
+              "visible",
+              "quarantined",
+              "quarantine",
+              "infected"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Durable, human-readable justification (scanner id, verdict detail, ticket) recorded verbatim in the promotion audit event. Required and non-empty.",
+            "minLength": 1
+          },
+          "scanner": {
+            "type": "string",
+            "description": "Optional identifier of the out-of-band scanner/backend that produced the verdict, echoed into the audit evidence."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "scan_outcome",
+          "evidence"
+        ]
+      },
+      "AssetVisibilityPromotionResponse": {
+        "type": "object",
+        "description": "Result of a completed-scan visibility promotion (issue #378).",
+        "properties": {
+          "object": {
+            "const": "asset.visibility_promotion"
+          },
+          "id": {
+            "type": "string",
+            "description": "Variant-aware stored asset id that was promoted."
+          },
+          "visibility": {
+            "type": "string",
+            "description": "The durable terminal visibility the gateway persisted.",
+            "enum": [
+              "visible",
+              "quarantined"
+            ]
+          },
+          "scan_outcome": {
+            "type": "string",
+            "description": "The terminal target the supplied scan_outcome resolved to.",
+            "enum": [
+              "visible",
+              "quarantined"
+            ]
+          },
+          "asset": {
+            "$ref": "#/components/schemas/AssetSummary"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "id",
+          "visibility",
+          "scan_outcome",
+          "asset"
         ]
       },
       "AssetPresignUploadIntentRequest": {

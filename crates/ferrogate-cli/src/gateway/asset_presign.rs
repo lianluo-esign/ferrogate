@@ -1248,7 +1248,7 @@ impl FerroGateway {
         }
     }
 
-    async fn read_control_body<T: for<'de> Deserialize<'de>>(
+    pub(super) async fn read_control_body<T: for<'de> Deserialize<'de>>(
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,

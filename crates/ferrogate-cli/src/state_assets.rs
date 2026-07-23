@@ -147,6 +147,23 @@ impl AppState {
             .await
     }
 
+    /// Atomically promote a `pending_scan` asset row to a terminal visibility
+    /// after an out-of-band scan completes (issue #378). The flip fires only
+    /// from the `pending_scan` state (one short conditional CAS); a missing or
+    /// already-terminal row is rejected fail-closed. This is the only path that
+    /// moves an asset out of `pending_scan` -- the push screening (#366) only
+    /// ever admits INTO it.
+    pub(crate) async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: ferrogate_storage::AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<ferrogate_storage::AssetVisibilityPromotionOutcome, StorageError> {
+        self.repositories
+            .promote_pending_asset_visibility(id, target, now_unix)
+            .await
+    }
+
     /// Atomically delete one variant row unless it would strand a channel on an
     /// absent version (issue #367).
     pub(crate) async fn delete_asset_variant_if_unreferenced(

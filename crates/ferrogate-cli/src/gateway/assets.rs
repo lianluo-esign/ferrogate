@@ -16,8 +16,9 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use ferrogate_storage::{
-    asset_channel_id, sha256_hex, stored_asset_id, stored_asset_variant_id, ChannelMoveOutcome,
-    StoredAsset, StoredAssetChannel, VariantDeleteOutcome, VersionYankOutcome,
+    asset_channel_id, sha256_hex, stored_asset_id, stored_asset_variant_id, AssetPromotionTarget,
+    AssetVisibilityPromotionOutcome, ChannelMoveOutcome, StoredAsset, StoredAssetChannel,
+    VariantDeleteOutcome, VersionYankOutcome,
 };
 
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
@@ -32,7 +33,8 @@ use crate::{
         write_json_response, AdminDeleteResponse, AdminList, AssetCacheHeaders,
         AssetChannelMutationResponse, AssetChannelSummary, AssetManifest, AssetManifestVariant,
         AssetManifestVersion, AssetMutationResponse, AssetPresignedUploadConstraints,
-        AssetStorageSummary, AssetSummary,
+        AssetStorageSummary, AssetSummary, AssetVisibilityPromotionRequest,
+        AssetVisibilityPromotionResponse,
     },
 };
 
@@ -196,6 +198,24 @@ impl FerroGateway {
                         session,
                         ctx,
                         "/v1/assets/{asset_type}/{name}/{version}/yank supports POST, DELETE",
+                    )
+                    .await
+                }
+            },
+            // Out-of-band scan promotion (#378): flip a `pending_scan` version
+            // to `visible`/`quarantined` after a completed async scan.
+            [asset_type, name, version, "visibility"] => match *method {
+                Method::POST => {
+                    self.handle_asset_visibility_promotion(
+                        session, ctx, headers, asset_type, name, version, query,
+                    )
+                    .await
+                }
+                _ => {
+                    method_not_allowed(
+                        session,
+                        ctx,
+                        "/v1/assets/{asset_type}/{name}/{version}/visibility supports POST",
                     )
                     .await
                 }
@@ -989,6 +1009,200 @@ impl FerroGateway {
             &ctx.request_id,
         )
         .await
+    }
+
+    /// Promote a `pending_scan` asset version to `visible`/`quarantined` after
+    /// an out-of-band scan completes (issue #378, follow-up to #366). The
+    /// operator supplies the completed-scan verdict and durable evidence; the
+    /// gateway maps the verdict to a terminal target, runs the fail-closed CAS
+    /// (which flips ONLY from `pending_scan`), and emits a durable audit event
+    /// linking the promotion to the scan outcome, asset id, tenant, and
+    /// request/trace id. An unknown verdict, missing evidence, or a
+    /// non-`pending_scan` asset is rejected -- nothing is ever silently
+    /// promoted.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_asset_visibility_promotion(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let Some(tenant_id) = auth.organization_id.clone() else {
+            return tenant_required(session, ctx).await;
+        };
+        if !self.tenant_can_host(&state, &tenant_id).await {
+            return asset_hosting_disabled(session, ctx).await;
+        }
+
+        let request: AssetVisibilityPromotionRequest =
+            match self.read_control_body(session, ctx).await? {
+                Ok(Some(request)) => request,
+                Ok(None) => return Ok(()),
+                Err(()) => return Ok(()),
+            };
+
+        // Map the completed-scan verdict to a terminal target. An unknown token
+        // is rejected fail-closed: a promotion NEVER defaults to `visible`, so a
+        // malformed or unexpected verdict can never publish unscanned bytes.
+        let target = match request.scan_outcome.as_str() {
+            "clean" | "visible" => AssetPromotionTarget::Visible,
+            "quarantined" | "quarantine" | "infected" => AssetPromotionTarget::Quarantined,
+            other => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_scan_outcome",
+                    format!(
+                        "scan_outcome must be one of clean|quarantined (got {other:?}); \
+                         an unknown verdict is rejected fail-closed and never promotes"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        // Evidence is mandatory: a durable promotion must carry the
+        // justification that links it to the scan result. No evidence, no flip.
+        let evidence = request.evidence.trim();
+        if evidence.is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "missing_scan_evidence",
+                "evidence is required: supply the completed-scan justification \
+                 (scanner id, verdict detail, or ticket) to promote an asset",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let variant = query_param(query, "platform").unwrap_or_default();
+        let id = stored_asset_variant_id(&tenant_id, asset_type, name, version, &variant);
+        let scanner = request.scanner.as_deref().unwrap_or("out-of-band");
+        // The audit message is the durable evidence the issue requires: it ties
+        // the promotion to the scan outcome, the resulting visibility, the
+        // scanner, and the operator-supplied justification. request/trace id,
+        // tenant, and actor ride the AdminAuditEventDraft itself.
+        let evidence_detail = format!(
+            "scan_outcome={} target_visibility={} scanner={scanner} evidence={evidence}",
+            target.as_str(),
+            target.visibility().as_str(),
+        );
+
+        let now = now_unix_seconds();
+        match state
+            .promote_pending_asset_visibility(&id, target, now)
+            .await
+        {
+            Ok(AssetVisibilityPromotionOutcome::Promoted { to }) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.visibility.promote",
+                    &id,
+                    "committed",
+                    format!(
+                        "asset {id} promoted pending_scan -> {} ({evidence_detail})",
+                        to.as_str()
+                    ),
+                ));
+                // Re-read for the response body only (the CAS already committed
+                // the mutation durably above; this read does not prove it).
+                let asset = match state.get_asset(&id).await {
+                    Ok(Some(asset)) => asset,
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "asset_not_found",
+                            format!("no asset at {asset_type}/{name}/{version}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return storage_unavailable(session, ctx, error.to_string()).await;
+                    }
+                };
+                let body = AssetVisibilityPromotionResponse {
+                    object: "asset.visibility_promotion",
+                    id: id.clone(),
+                    visibility: to.as_str(),
+                    scan_outcome: target.as_str(),
+                    asset: asset_summary(&asset),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(AssetVisibilityPromotionOutcome::NotFound) => {
+                // A scan verdict arriving for an absent asset is security-
+                // relevant: record the rejected attempt as durable evidence.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.visibility.promote",
+                    &id,
+                    "rejected",
+                    format!("asset {id} promotion rejected: no such asset ({evidence_detail})"),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "asset_not_found",
+                    format!(
+                        "no asset at {asset_type}/{name}/{version}{}",
+                        variant_suffix(&variant)
+                    ),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(AssetVisibilityPromotionOutcome::NotPending { current }) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.visibility.promote",
+                    &id,
+                    "rejected",
+                    format!(
+                        "asset {id} promotion rejected: not pending_scan (current={}); \
+                         {evidence_detail}",
+                        current.as_str()
+                    ),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "asset_not_pending_scan",
+                    format!(
+                        "{asset_type}/{name}/{version}{} is {}, not pending_scan; \
+                         only a pending_scan asset can be promoted",
+                        variant_suffix(&variant),
+                        current.as_str()
+                    ),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => storage_unavailable(session, ctx, error.to_string()).await,
+        }
     }
 
     async fn handle_channel_list(

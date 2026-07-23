@@ -1454,6 +1454,37 @@ pub(crate) struct AssetMutationResponse {
     pub(crate) asset: AssetSummary,
 }
 
+/// Operator-supplied completed out-of-band scan result that drives a
+/// `pending_scan -> visible|quarantined` promotion (issue #378, follow-up to
+/// #366). `scan_outcome` is the terminal verdict (`clean` publishes the asset,
+/// `quarantined` withholds it permanently); an unknown value is rejected
+/// fail-closed and never promotes. `evidence` is the durable, human-readable
+/// justification (scanner id, verdict detail, ticket) recorded verbatim in the
+/// audit event so the promotion is explainable after the fact.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AssetVisibilityPromotionRequest {
+    pub(crate) scan_outcome: String,
+    #[serde(default)]
+    pub(crate) evidence: String,
+    /// Optional identifier of the out-of-band scanner/backend that produced the
+    /// verdict, echoed into the audit evidence when present.
+    #[serde(default)]
+    pub(crate) scanner: Option<String>,
+}
+
+/// Result of a completed-scan visibility promotion (issue #378). Echoes the
+/// resulting durable `visibility` and the `scan_outcome` that drove it
+/// alongside the promoted asset summary, so a caller can confirm the exact
+/// terminal state the gateway persisted.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetVisibilityPromotionResponse {
+    pub(crate) object: &'static str,
+    pub(crate) id: String,
+    pub(crate) visibility: &'static str,
+    pub(crate) scan_outcome: &'static str,
+    pub(crate) asset: AssetSummary,
+}
+
 // --- Artifact registry semantics (issue #260) ---
 
 /// One channel pointer (`latest`/`stable`/`canary` or a free-form tag) and the

@@ -210,6 +210,11 @@ fn poisoned_memory_lock_fails_closed_for_every_asset_repository_method() {
         "artifact",
         "1.0.0",
     )));
+    assert_asset_repository_poisoned(block_on(repositories.promote_pending_asset_visibility(
+        "asset-a",
+        crate::AssetPromotionTarget::Visible,
+        1,
+    )));
 }
 
 #[test]

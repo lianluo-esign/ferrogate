@@ -4516,6 +4516,82 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
+        let operation = self.asset_operation("promote asset visibility");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // One short conditional CAS (#378): the UPDATE fires only from the
+        // `pending_scan` state, and the two scalar sub-selects classify the
+        // zero-row case (absent row vs. already-terminal row) inside the SAME
+        // statement snapshot -- no read-then-write gap, no coordination lock,
+        // no long transaction. The transaction wrapper exists only to pin
+        // `search_path` to the configured schema (#238/#239) so the CTE
+        // resolves `stored_assets` in the same schema the push path wrote to.
+        // Note: a data-modifying CTE's write is invisible to the sibling
+        // sub-select, so when the UPDATE fires `current_visibility` still reads
+        // the pre-update `pending_scan`; that is fine because the caller only
+        // consults `current_visibility` when `promoted_visibility` is NULL.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let target_token = target.visibility().as_str();
+        let row = transaction
+            .query_one(
+                "WITH promoted AS ( \
+                     UPDATE stored_assets \
+                        SET visibility = $2, updated_at_unix = $3 \
+                      WHERE id = $1 AND visibility = 'pending_scan' \
+                     RETURNING visibility \
+                 ) \
+                 SELECT (SELECT visibility FROM promoted) AS promoted_visibility, \
+                        (SELECT visibility FROM stored_assets WHERE id = $1) \
+                            AS current_visibility",
+                &[&id, &target_token, &now_unix],
+            )
+            .await
+            .map_err(postgres_error)?;
+        // Extract the classification BEFORE the commit fence so the row's
+        // borrow does not outlive the transaction.
+        let promoted_visibility: Option<String> = row.get("promoted_visibility");
+        let current_visibility: Option<String> = row.get("current_visibility");
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the visibility promotion commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(match (promoted_visibility, current_visibility) {
+            // The CAS fired: RETURNING carries the exact new terminal state.
+            (Some(promoted), _) => AssetVisibilityPromotionOutcome::Promoted {
+                to: AssetVisibility::from_stored(&promoted),
+            },
+            // The CAS did not fire but the row exists -> already terminal.
+            (None, Some(current)) => AssetVisibilityPromotionOutcome::NotPending {
+                current: AssetVisibility::from_stored(&current),
+            },
+            // Neither: no such row.
+            (None, None) => AssetVisibilityPromotionOutcome::NotFound,
+        })
+    }
+
     // #263: asset lifecycle -- retention policies + whole-table reconcile scans
     // for the lifecycle sweeper.
 
@@ -10710,6 +10786,34 @@ impl RuntimeControlPlaneState {
         VariantDeleteOutcome::Deleted
     }
 
+    /// Promote a single `pending_scan` asset row to a terminal visibility
+    /// (issue #378) under one lock. The flip is applied only when the row is
+    /// currently `pending_scan`; a missing or already-terminal row is rejected
+    /// fail-closed so a completed out-of-band scan can never silently
+    /// re-promote (or re-quarantine) a terminal asset. The single control-plane
+    /// lock the caller holds around this method is the serialization point, so
+    /// two concurrent promotions of the same row cannot both observe
+    /// `pending_scan` -- the second sees the terminal state the first wrote.
+    pub fn promote_pending_asset_visibility(
+        &mut self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> AssetVisibilityPromotionOutcome {
+        let Some(asset) = self.assets.records.get_mut(id) else {
+            return AssetVisibilityPromotionOutcome::NotFound;
+        };
+        if asset.visibility != AssetVisibility::PendingScan {
+            return AssetVisibilityPromotionOutcome::NotPending {
+                current: asset.visibility,
+            };
+        }
+        let to = target.visibility();
+        asset.visibility = to;
+        asset.updated_at_unix = now_unix;
+        AssetVisibilityPromotionOutcome::Promoted { to }
+    }
+
     // #263: asset lifecycle -- retention policies + reconcile scans.
 
     pub fn upsert_retention_policy(&mut self, policy: StoredRetentionPolicy) {
@@ -11610,6 +11714,66 @@ pub enum VariantDeleteOutcome {
     /// The delete would have removed the last resolvable variant of a
     /// channel-referenced version, so nothing was deleted (409).
     BlockedByChannel,
+}
+
+/// The legal terminal targets of an out-of-band scan promotion (issue #378). A
+/// completed async scan can only ever move a `pending_scan` asset to one of
+/// these two states -- clean bytes to `visible`, flagged bytes to
+/// `quarantined` -- and never back to `pending_scan`. Modeling the target as
+/// this two-variant enum makes an invalid/unknown promotion target
+/// unrepresentable at the type level, so the CAS is fail-closed by
+/// construction: the storage layer can never be handed a target that would
+/// silently keep an asset withheld while reporting success, or promote to an
+/// undefined state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetPromotionTarget {
+    /// The out-of-band scan proved the bytes clean: publish the asset so every
+    /// download/resolution surface will serve it.
+    Visible,
+    /// The out-of-band scan flagged the bytes: withhold them permanently for
+    /// operator inspection (never served), the terminal fail-closed state.
+    Quarantined,
+}
+
+impl AssetPromotionTarget {
+    /// The durable [`AssetVisibility`] this target resolves to.
+    pub fn visibility(self) -> AssetVisibility {
+        match self {
+            AssetPromotionTarget::Visible => AssetVisibility::Visible,
+            AssetPromotionTarget::Quarantined => AssetVisibility::Quarantined,
+        }
+    }
+
+    /// Stable wire token, kept in lockstep with [`AssetVisibility::as_str`] so
+    /// the request contract, the persisted column, and the audit evidence all
+    /// agree on one spelling.
+    pub fn as_str(self) -> &'static str {
+        self.visibility().as_str()
+    }
+}
+
+/// Outcome of the atomic `pending_scan -> visible|quarantined` promotion CAS
+/// (issue #378, follow-up to #366). The state flip is durable only when the row
+/// is in `pending_scan` at the instant the conditional UPDATE fires; the
+/// zero-row case is classified within the same statement snapshot (Postgres) /
+/// under the same lock (memory) so a terminal (already-promoted) row is never
+/// silently re-promoted and a missing row is never conflated with a rejected
+/// one. Every non-`Promoted` variant means nothing was written -- fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetVisibilityPromotionOutcome {
+    /// The row transitioned out of `pending_scan` to `to` (the requested
+    /// terminal state). `to` is recorded so the caller's audit evidence links
+    /// the scan outcome to the exact resulting visibility.
+    Promoted { to: AssetVisibility },
+    /// No `stored_assets` row with the given id exists (404). A scan result
+    /// arriving for an absent asset is rejected, never treated as a success.
+    NotFound,
+    /// The row exists but is not `pending_scan`: it is already in a terminal
+    /// state, so the promotion is a no-op and is rejected rather than silently
+    /// succeeding (409 conflict). `current` is the state the row is actually
+    /// in, so the caller can tell an already-`visible` from a `quarantined`
+    /// asset in its evidence.
+    NotPending { current: AssetVisibility },
 }
 
 /// SHA-256 content hash, hex-encoded. Computed by the caller when an asset
@@ -13990,6 +14154,34 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Atomically promote a `pending_scan` asset row to `visible`/`quarantined`
+    /// after an out-of-band scan completes (issue #378, follow-up to #366). The
+    /// flip fires only from the `pending_scan` state -- Postgres via one short
+    /// conditional data-modifying CTE, memory under one lock -- so a missing or
+    /// already-terminal row is rejected fail-closed and two concurrent
+    /// promotions can never both succeed. This is the only path that moves an
+    /// asset out of `pending_scan`; the push path only ever admits INTO it.
+    pub async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.promote_pending_asset_visibility(id, target, now_unix)
+                })
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .promote_pending_asset_visibility(id, target, now_unix)
+                    .await
+            }
+        }
+    }
+
     // #263: asset lifecycle -- retention policies + whole-registry reconcile
     // scans the lifecycle sweeper drives.
 
@@ -16275,6 +16467,10 @@ mod asset_channel_lifecycle_test;
 #[cfg(test)]
 #[path = "asset_visibility_test.rs"]
 mod asset_visibility_test;
+
+#[cfg(test)]
+#[path = "asset_visibility_promotion_test.rs"]
+mod asset_visibility_promotion_test;
 
 #[cfg(test)]
 #[path = "payment_attempt_test.rs"]
