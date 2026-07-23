@@ -68,6 +68,7 @@ use ferrogate_providers::{ProviderHeader, SecretValue};
 
 use ferrogate_guardrails::{ActionKind as GuardrailActionKind, ManagedActionClass};
 
+use super::admin_list_query::{list_response, matches_search, query_value};
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
 use super::managed_action_guardrail::{
@@ -4609,25 +4610,29 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList::new(
-                    state
-                        .config
-                        .providers
-                        .iter()
-                        .map(|provider| AdminProvider {
-                            name: provider.name.clone(),
-                            kind: provider.kind.clone(),
-                            compatibility: provider_compatibility_kind(&provider.kind),
-                            base_url: provider.base_url.clone(),
-                            has_api_key: provider.api_key_env.is_some(),
-                            enabled: provider.enabled,
-                        })
-                        .collect(),
-                );
+                let search = query_value(query, "search");
+                let providers = state
+                    .config
+                    .providers
+                    .iter()
+                    .filter(|provider| {
+                        matches_search(search.as_deref(), &[&provider.name, &provider.kind])
+                    })
+                    .map(|provider| AdminProvider {
+                        name: provider.name.clone(),
+                        kind: provider.kind.clone(),
+                        compatibility: provider_compatibility_kind(&provider.kind),
+                        base_url: provider.base_url.clone(),
+                        has_api_key: provider.api_key_env.is_some(),
+                        enabled: provider.enabled,
+                    })
+                    .collect();
+                let body = list_response(providers, query, state.admin_pagination(query));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -7811,11 +7816,25 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList::new(state.config.models.clone());
+                let search = query_value(query, "search");
+                let models = state
+                    .config
+                    .models
+                    .iter()
+                    .filter(|model| {
+                        matches_search(
+                            search.as_deref(),
+                            &[&model.name, &model.provider, &model.provider_model],
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let body = list_response(models, query, state.admin_pagination(query));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

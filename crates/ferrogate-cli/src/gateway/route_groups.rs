@@ -514,7 +514,7 @@ impl FerroGateway {
         req: &RequestParts,
     ) -> PingoraResult<bool> {
         if req.path == "/admin/v1/providers" {
-            self.handle_admin_providers(session, ctx, &req.headers)
+            self.handle_admin_providers(session, ctx, &req.headers, req.query.as_deref())
                 .await?;
             return Ok(true);
         }
@@ -651,7 +651,8 @@ impl FerroGateway {
         req: &RequestParts,
     ) -> PingoraResult<bool> {
         if req.path == "/admin/v1/models" {
-            self.handle_admin_models(session, ctx, &req.headers).await?;
+            self.handle_admin_models(session, ctx, &req.headers, req.query.as_deref())
+                .await?;
             return Ok(true);
         }
         Ok(false)
