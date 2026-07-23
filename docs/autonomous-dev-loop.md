@@ -125,3 +125,25 @@ Every integrated commit follows AGENTS.md "Commit Requirements": reference the
 issue in the subject (e.g. `(#367) ...`), include a closing/related trailer, and
 use Lore trailers (`Constraint:`, `Rejected:`, `Tested:`, `Not-tested:`,
 `Confidence:`, `Scope-risk:`, `Refs #<n>`) for non-trivial changes.
+
+## Lane-entry contract (test-gate rule, added 2026-07-23)
+
+An issue may move into **In review & Test** only when its acceptance list is
+**deliverable as written** — every checkbox either implemented-and-tested or
+explicitly re-scoped by editing the issue BEFORE the lane move. The gate
+rejects on the first unmet box; a commit's `Not-tested:`/"deferred" note is
+treated as an admission, not an excuse.
+
+Hard rules learned from 14 consecutive gate rejections (#340-#360 era):
+
+- **The E2E/operator-facing boxes are part of the issue.** A library-complete
+  slice with the harness scenario, Admin API surface, Playwright flow, or
+  write-read compliance proof "deferred to later work" fails the gate.
+- **Landing incremental slices on main is encouraged; moving the issue to the
+  lane is not** until the last acceptance box is closed. Keep the issue in
+  "In progress" between slices.
+- **If part of the scope must move out, edit the issue** (split a follow-up,
+  shrink acceptance) before the lane move, and say so in a comment.
+- Rejected issues return to **Ready** carrying the `gate-rejected` label and a
+  comment listing exactly which boxes failed; remove nothing from that list
+  when re-entering.
