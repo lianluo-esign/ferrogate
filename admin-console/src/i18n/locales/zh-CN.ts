@@ -714,6 +714,12 @@ export const zhCN = {
   // 单站点详情抽屉：来自清单的已发布包文件树。
   "page.staticSites.detail.description": "包 {version} — {files} 个文件，{bytes}。",
   "page.staticSites.detail.files": "包文件",
+  // 单文件下载（按路径键对每个文件对象发起资产 GET）+ 服务链接。
+  "page.staticSites.detail.download": "下载",
+  "page.staticSites.detail.downloading": "下载中…",
+  "page.staticSites.download.failed": "下载 {file} 失败：{message}",
+  "page.staticSites.serveUrl.open": "打开服务 URL",
+  "page.staticSites.serveUrl.newTabHint": "（在新标签页中打开）",
   // 取消发布——按名称输入确认的破坏性删除，区别于重新发布。
   "page.staticSites.unpublish.action": "取消发布",
   "page.staticSites.unpublish.title": "取消发布 {site}？",

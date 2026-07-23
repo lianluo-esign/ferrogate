@@ -27,6 +27,22 @@
 // read back from the reserved `__site_manifest__` version the gateway writes at
 // publish time; it is the authoritative source for a site's serving policy and
 // its file tree.
+//
+// This slice (#345) adds the remaining deferred affordances that the runtime
+// actually backs: (a) per-file DOWNLOAD of any published file (a plain asset GET
+// of that file's path-keyed object), and (b) an outbound OPEN-SERVE-URL link.
+//
+// NOTE — per-bundle version HISTORY + channel-move ROLLBACK were also requested
+// but are intentionally NOT built here, because the static-site runtime does not
+// back them (verified against gateway `sites.rs`, not assumed from the generic
+// asset model): publishing a bundle overwrites each file object in place under a
+// PATH-keyed `version` and rewrites the single `__site_manifest__` row, so NO
+// prior bundle is retained to roll back to; and serve-mode resolves purely
+// through that manifest — it never consults an asset CHANNEL. A channel-move on
+// a static_site would therefore return 200 yet change nothing that is served
+// (the #188 "write succeeds, runtime ignores it" failure mode). Real history/
+// rollback needs gateway support (retain prior bundles + make serve resolve
+// through a pointer); tracked as a follow-up rather than faked in the UI.
 import { useMemo, useRef, useState } from "react";
 import {
   useMutation,
@@ -82,6 +98,7 @@ import {
   adminGet,
   type AdminSchema,
   gatewayGet,
+  gatewayGetBinary,
 } from "@/lib/gateway-client";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
 
@@ -166,6 +183,27 @@ function shortHash(hash: string): string {
   return `${hash.slice(0, 12)}…`;
 }
 
+/** Asset-object path for ONE published file. Each file's `version` key IS its
+ * bundle path (the same convention publish writes and unpublish deletes), so a
+ * plain asset GET streams that individual file back. Kept as a manual encoded
+ * string (not the typed `params` client) so it lines up byte-for-byte with the
+ * publish/unpublish addressing in this module. */
+function siteFilePath(site: string, filePath: string): string {
+  return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/${encodeURIComponent(filePath)}`;
+}
+
+/** Absolute, browser-openable serve URL for a site's stored relative serve path
+ * (`/sites/{tenant}/{site}/…`). The gateway serves the browse surface on the
+ * same origin the admin client already talks to, so we resolve the relative
+ * path against that base; a malformed base degrades to the raw path. */
+function serveHref(servePath: string): string {
+  try {
+    return new URL(servePath, GATEWAY_ADMIN_BASE_URL).toString();
+  } catch {
+    return servePath;
+  }
+}
+
 /** `.zip` by extension or a zip-ish MIME type. The gateway re-checks the ZIP
  * magic bytes on the raw upload, so this is fast feedback, not the gate. */
 function looksLikeZip(file: File): boolean {
@@ -238,10 +276,12 @@ function putBundleWithProgress<T>(
  */
 function SiteDetailSheet({
   row,
+  apiKey,
   onClose,
   onUnpublish,
 }: {
   row: SiteRow | null;
+  apiKey: string;
   onClose: () => void;
   onUnpublish: () => void;
 }) {
@@ -254,6 +294,37 @@ function SiteDetailSheet({
         : [],
     [manifest],
   );
+
+  // Which file's asset GET is in flight, so exactly that row's button shows a
+  // busy state (concurrent downloads of different files stay independent).
+  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+
+  async function handleFileDownload(entry: SiteFileEntry) {
+    if (!row) return;
+    setDownloadingPath(entry.path);
+    try {
+      const blob = await gatewayGetBinary(apiKey, siteFilePath(row.name, entry.path));
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      // Save under the file's leaf name, not the full bundle path.
+      link.download = entry.path.split("/").pop() || entry.path;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      // Surface the gateway/network verdict verbatim, keyed to the exact file.
+      toast.error(
+        t("page.staticSites.download.failed", {
+          file: entry.path,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      setDownloadingPath(null);
+    }
+  }
 
   return (
     <Sheet open={row !== null} onOpenChange={(next) => !next && onClose()}>
@@ -272,6 +343,25 @@ function SiteDetailSheet({
                 </SheetDescription>
               ) : null}
             </SheetHeader>
+
+            {/* Outbound affordance: open the live serve surface in a new tab.
+              rel=noopener keeps the opened site from reaching back via
+              window.opener; the sr-only hint announces the new-tab behavior. */}
+            <div>
+              <Button asChild variant="outline" size="sm">
+                <a
+                  href={serveHref(row.serveUrl)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {t("page.staticSites.serveUrl.open")}
+                  <span className="sr-only">
+                    {" "}
+                    {t("page.staticSites.serveUrl.newTabHint")}
+                  </span>
+                </a>
+              </Button>
+            </div>
 
             {row.manifestError ? (
               <p
@@ -297,13 +387,16 @@ function SiteDetailSheet({
                         <TableHead>{t("page.assets.col.contentType")}</TableHead>
                         <TableHead>{t("page.assets.col.contentHash")}</TableHead>
                         <TableHead>{t("page.assets.col.size")}</TableHead>
+                        <TableHead className="w-28">
+                          {t("resource.table.actionsColumn")}
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {files.length === 0 ? (
                         <TableRow>
                           <TableCell
-                            colSpan={4}
+                            colSpan={5}
                             className="h-16 text-center text-sm text-muted-foreground"
                           >
                             {t("resource.table.empty")}
@@ -322,6 +415,19 @@ function SiteDetailSheet({
                               {shortHash(entry.content_hash)}
                             </TableCell>
                             <TableCell>{format.bytes(entry.size_bytes)}</TableCell>
+                            <TableCell>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={downloadingPath === entry.path}
+                                onClick={() => handleFileDownload(entry)}
+                              >
+                                {downloadingPath === entry.path
+                                  ? t("page.staticSites.detail.downloading")
+                                  : t("page.staticSites.detail.download")}
+                              </Button>
+                            </TableCell>
                           </TableRow>
                         ))
                       )}
@@ -874,7 +980,20 @@ export default function StaticSitesPage() {
                         })
                       : "—"}
                   </TableCell>
-                  <TableCell className="font-mono text-xs break-all">{row.serveUrl}</TableCell>
+                  <TableCell className="font-mono text-xs break-all">
+                    <a
+                      href={serveHref(row.serveUrl)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary underline-offset-2 hover:underline"
+                    >
+                      {row.serveUrl}
+                      <span className="sr-only">
+                        {" "}
+                        {t("page.staticSites.serveUrl.newTabHint")}
+                      </span>
+                    </a>
+                  </TableCell>
                   <TableCell>
                     {row.domains.length === 0 ? (
                       <Button asChild variant="link" size="sm" className="h-auto p-0">
@@ -911,6 +1030,7 @@ export default function StaticSitesPage() {
 
       <SiteDetailSheet
         row={detailRow}
+        apiKey={apiKey}
         onClose={() => setDetailSite(null)}
         onUnpublish={() => {
           if (!detailRow) return;

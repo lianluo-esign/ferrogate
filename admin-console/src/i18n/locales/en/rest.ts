@@ -652,6 +652,12 @@ export const enRest = {
   "page.staticSites.detail.description":
     "Bundle {version} — {files} files, {bytes}.",
   "page.staticSites.detail.files": "Bundle files",
+  // Per-file download (asset GET of each file's path-keyed object) + serve link.
+  "page.staticSites.detail.download": "Download",
+  "page.staticSites.detail.downloading": "Downloading…",
+  "page.staticSites.download.failed": "Failed to download {file}: {message}",
+  "page.staticSites.serveUrl.open": "Open serve URL",
+  "page.staticSites.serveUrl.newTabHint": "(opens in a new tab)",
   // Unpublish — name-typed destructive removal, distinct from a republish.
   "page.staticSites.unpublish.action": "Unpublish",
   "page.staticSites.unpublish.title": "Unpublish {site}?",

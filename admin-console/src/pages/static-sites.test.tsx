@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
+import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
@@ -293,6 +294,180 @@ describe("StaticSitesPage detail drawer", () => {
     expect(within(drawer).getByText(zhCN["page.staticSites.detail.files"])).toBeInTheDocument();
     expect(within(drawer).getByText("index.html")).toBeInTheDocument();
     expect(within(drawer).getByText("app.js")).toBeInTheDocument();
+  });
+});
+
+describe("StaticSitesPage serve-URL affordance", () => {
+  it("links each site's serve URL out to a new tab with a safe rel", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+    const link = within(row).getByRole("link", {
+      name: /\/sites\/tenant-1\/marketing\//,
+    });
+    expect(link).toHaveAttribute("target", "_blank");
+    // rel=noopener severs window.opener; noreferrer drops the Referer header.
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    // href is an absolute, openable URL that ends in the tenant/site serve path.
+    expect(link.getAttribute("href")).toMatch(/\/sites\/tenant-1\/marketing\/$/);
+  });
+
+  it("offers the same open-serve-URL affordance inside the detail drawer", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+    await user.click(
+      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
+    );
+    const drawer = await screen.findByRole("dialog");
+    const openLink = within(drawer).getByRole("link", {
+      name: new RegExp(en["page.staticSites.serveUrl.open"]),
+    });
+    expect(openLink).toHaveAttribute("target", "_blank");
+    expect(openLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(openLink.getAttribute("href")).toMatch(/\/sites\/tenant-1\/marketing\/$/);
+  });
+});
+
+/** Installs jsdom-safe object-URL + anchor-click doubles for the duration of a
+ * download test (jsdom implements neither), returning the spies + a restore. */
+function stubDownloadPlumbing() {
+  const createObjectURL = vi.fn(() => "blob:mock-url");
+  const revokeObjectURL = vi.fn();
+  const urlWithBlob = URL as unknown as {
+    createObjectURL?: (obj: Blob) => string;
+    revokeObjectURL?: (url: string) => void;
+  };
+  const originalCreate = urlWithBlob.createObjectURL;
+  const originalRevoke = urlWithBlob.revokeObjectURL;
+  urlWithBlob.createObjectURL = createObjectURL;
+  urlWithBlob.revokeObjectURL = revokeObjectURL;
+  const clickSpy = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => {});
+  return {
+    createObjectURL,
+    clickSpy,
+    restore() {
+      clickSpy.mockRestore();
+      urlWithBlob.createObjectURL = originalCreate;
+      urlWithBlob.revokeObjectURL = originalRevoke;
+    },
+  };
+}
+
+async function openMarketingDrawer(user: ReturnType<typeof userEvent.setup>) {
+  const row = await screen.findByTestId("static-site-marketing");
+  await within(row).findByText("2.1.0");
+  await user.click(
+    within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
+  );
+  return screen.findByRole("dialog");
+}
+
+describe("StaticSitesPage per-file download", () => {
+  it("downloads an individual bundle file via that file's asset-object path", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    let requestedPath: string | null = null;
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/app.js"), ({ request }) => {
+        requestedPath = new URL(request.url).pathname;
+        return new HttpResponse("console.log(1)", {
+          headers: { "Content-Type": "text/javascript" },
+        });
+      }),
+    );
+    const plumbing = stubDownloadPlumbing();
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const drawer = await openMarketingDrawer(user);
+
+      // Download the app.js row specifically (index.html is a separate row).
+      const appRow = within(drawer).getByText("app.js").closest("tr") as HTMLElement;
+      await user.click(
+        within(appRow).getByRole("button", {
+          name: en["page.staticSites.detail.download"],
+        }),
+      );
+
+      await waitFor(() =>
+        expect(requestedPath).toBe("/v1/assets/static_site/marketing/app.js"),
+      );
+      // A blob URL was minted and a synthetic anchor click fired the save.
+      expect(plumbing.createObjectURL).toHaveBeenCalledTimes(1);
+      expect(plumbing.clickSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      plumbing.restore();
+    }
+  });
+
+  it("surfaces a download failure verbatim, keyed to the exact file", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/app.js"), () =>
+        HttpResponse.json(
+          { error: { code: "asset_not_found", message: "no asset resolves" } },
+          { status: 404 },
+        ),
+      ),
+    );
+    // No Toaster is mounted in the test provider stack, so assert on the sonner
+    // call itself: the message must name the file AND carry the gateway verdict.
+    const errorToast = vi.spyOn(toast, "error");
+    const plumbing = stubDownloadPlumbing();
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const drawer = await openMarketingDrawer(user);
+      const appRow = within(drawer).getByText("app.js").closest("tr") as HTMLElement;
+      await user.click(
+        within(appRow).getByRole("button", {
+          name: en["page.staticSites.detail.download"],
+        }),
+      );
+
+      await waitFor(() => expect(errorToast).toHaveBeenCalled());
+      const message = errorToast.mock.calls[0][0] as string;
+      expect(message).toContain("app.js");
+      expect(message).toContain("no asset resolves");
+    } finally {
+      errorToast.mockRestore();
+      plumbing.restore();
+    }
+  });
+
+  it("labels the download + serve-URL affordances in Simplified Chinese", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+    await user.click(
+      within(row).getByRole("button", { name: zhCN["resource.table.moreDetails"] }),
+    );
+    const drawer = await screen.findByRole("dialog");
+    expect(
+      within(drawer).getByRole("link", {
+        name: new RegExp(zhCN["page.staticSites.serveUrl.open"]),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getAllByRole("button", {
+        name: zhCN["page.staticSites.detail.download"],
+      }).length,
+    ).toBeGreaterThan(0);
   });
 });
 
