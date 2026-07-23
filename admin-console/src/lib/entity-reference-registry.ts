@@ -65,6 +65,16 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
     detailPath: (value) => `/admin/v1/permissions/${encodeURIComponent(value)}`,
     unwrapDetail: unwrapNamedRecord("permission"),
   },
+  // #340: tenant accounts reference a sellable plan by its canonical `id`
+  // (tenant-accounts.plan_id). The plans list endpoint exposes no server-side
+  // search/offset params (same shape as models/providers below), so the picker
+  // loads the full plan catalog; an existing value is hydrated to its label via
+  // the per-plan GET at /admin/v1/plans/{plan_id} (wrapped under `plan`).
+  plans: {
+    listPath: "/admin/v1/plans",
+    detailPath: (value) => `/admin/v1/plans/${encodeURIComponent(value)}`,
+    unwrapDetail: unwrapNamedRecord("plan"),
+  },
   // #341: routing/policy/quota reference the model and provider catalogs by
   // their canonical `name`. The list endpoints expose no per-item GET, so these
   // adapters have no detailPath — `hydrateEntityReference` resolves an existing

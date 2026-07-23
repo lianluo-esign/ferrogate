@@ -27,15 +27,56 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   ],
   fields: [
     { name: "name", label: "Name", type: "text", required: true, createOnly: true },
-    { name: "workspace_id", label: "Workspace ID", type: "text", required: true, createOnly: true },
     {
+      // #340: workspace_id was a raw text field. A virtual key is issued against
+      // a workspace row, so it now uses the shared single-entity picker.
+      // Immutable after create (the key's workspace scope is fixed at issue
+      // time), so it stays `createOnly`. Submitted value is the workspace `id`.
+      name: "workspace_id",
+      label: "Workspace",
+      type: "entity",
+      required: true,
+      createOnly: true,
+      reference: {
+        target: "workspaces",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "project_id"],
+      },
+    },
+    {
+      // Scopes are an enumerated set of Admin API permission strings
+      // (admin.read, admin.write, …), not entity rows backed by a list/get API,
+      // so they stay free text per the #337 escape-hatch guidance (#340).
       name: "scopes",
       label: "Scopes (comma-separated)",
       type: "csv",
       placeholder: "admin.read,admin.write",
     },
-    { name: "allowed_models", label: "Allowed models (comma-separated)", type: "csv" },
-    { name: "allowed_providers", label: "Allowed providers (comma-separated)", type: "csv" },
+    {
+      // #340: allowed_models targets the model catalog by canonical `name`.
+      name: "allowed_models",
+      label: "Allowed models",
+      type: "entities",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
+    {
+      // #340: allowed_providers targets the provider catalog by canonical `name`.
+      name: "allowed_providers",
+      label: "Allowed providers",
+      type: "entities",
+      reference: {
+        target: "providers",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["kind", "base_url"],
+      },
+    },
     { name: "monthly_token_budget", label: "Monthly token budget", type: "number" },
     { name: "request_limit_per_minute", label: "Requests per minute", type: "number" },
   ],

@@ -54,14 +54,91 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
       description: "Inline secret; stored hashed. Set once at creation.",
     },
     { name: "enabled", label: "Enabled", type: "boolean" },
-    { name: "scopes", label: "Scopes (comma-separated)", type: "csv" },
-    { name: "allowed_models", label: "Allowed models (comma-separated)", type: "csv" },
-    { name: "denied_models", label: "Denied models (comma-separated)", type: "csv" },
-    { name: "allowed_providers", label: "Allowed providers (comma-separated)", type: "csv" },
-    { name: "denied_providers", label: "Denied providers (comma-separated)", type: "csv" },
+    {
+      // Scopes are an enumerated set of Admin API permission strings, not entity
+      // rows with a list/get API, so they stay free text (#337 escape hatch, #340).
+      name: "scopes",
+      label: "Scopes (comma-separated)",
+      type: "csv",
+    },
+    {
+      // #340: allow/deny model + provider lists target the model/provider
+      // catalogs by canonical `name` (same shape as policies.ts from #341).
+      name: "allowed_models",
+      label: "Allowed models",
+      type: "entities",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
+    {
+      name: "denied_models",
+      label: "Denied models",
+      type: "entities",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
+    },
+    {
+      name: "allowed_providers",
+      label: "Allowed providers",
+      type: "entities",
+      reference: {
+        target: "providers",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["kind", "base_url"],
+      },
+    },
+    {
+      name: "denied_providers",
+      label: "Denied providers",
+      type: "entities",
+      reference: {
+        target: "providers",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["kind", "base_url"],
+      },
+    },
+    // organization_id and user_id match the raw identifier the caller presents
+    // at request time (see the native api-key auth path in ferrogate-cli); they
+    // are not guaranteed to be admin-console tenant/user rows and the console
+    // exposes no organizations/users list endpoint, so they stay free text
+    // rather than being force-mapped to an entity source (mirrors the
+    // policies.ts organization_ids decision from #341; #340).
     { name: "organization_id", label: "Organization ID", type: "text" },
-    { name: "project_id", label: "Project ID", type: "text" },
-    { name: "workspace_id", label: "Workspace ID", type: "text" },
+    {
+      // #340: project_id / workspace_id are first-class rows the key is scoped
+      // to, so they now use the shared single-entity pickers. Submitted values
+      // are unchanged (the canonical `id`).
+      name: "project_id",
+      label: "Project",
+      type: "entity",
+      reference: {
+        target: "projects",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "tenant_id"],
+      },
+    },
+    {
+      name: "workspace_id",
+      label: "Workspace",
+      type: "entity",
+      reference: {
+        target: "workspaces",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "project_id"],
+      },
+    },
     { name: "user_id", label: "User ID", type: "text" },
     { name: "monthly_token_budget", label: "Monthly token budget", type: "number" },
     { name: "request_limit_per_minute", label: "Requests per minute", type: "number" },

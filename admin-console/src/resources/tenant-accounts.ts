@@ -37,10 +37,20 @@ export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
     { name: "slug", label: "Slug", type: "text", required: true },
     { name: "status", label: "Status", type: "text", placeholder: "active" },
     {
+      // #340: plan_id was a raw text field asking operators to paste a plan
+      // id/slug. It is a first-class entity (the Plans catalog), so it now uses
+      // the shared single-entity picker. The submitted value is unchanged: the
+      // plan's canonical `id`.
       name: "plan_id",
-      label: "Plan ID",
-      type: "text",
-      description: "Must match an existing plan's id/slug -- see the Plans page.",
+      label: "Plan",
+      type: "entity",
+      description: "The subscription plan this tenant inherits quota/features from.",
+      reference: {
+        target: "plans",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug"],
+      },
     },
   ],
 };

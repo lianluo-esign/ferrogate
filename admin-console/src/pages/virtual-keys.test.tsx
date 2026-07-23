@@ -124,13 +124,20 @@ describe("VirtualKeysPage", () => {
   it("creates a key and reveals its secret once", async () => {
     const user = userEvent.setup();
     mockAdminList("/admin/v1/virtual-keys", [vkey()]);
+    // #340: the create form's workspace_id is now an entity picker, so the
+    // workspaces catalog must be mockable for the option to appear.
+    mockAdminList("/admin/v1/workspaces", [
+      { id: "ws-1", project_id: "proj-1", tenant_id: "tenant-1", name: "Staging", slug: "staging" },
+    ]);
+    let postedWorkspaceId: unknown;
     server.use(
-      http.post(gatewayUrl("/admin/v1/virtual-keys"), () =>
-        HttpResponse.json(
+      http.post(gatewayUrl("/admin/v1/virtual-keys"), async ({ request }) => {
+        postedWorkspaceId = ((await request.json()) as { workspace_id?: unknown }).workspace_id;
+        return HttpResponse.json(
           { object: "virtual_api_key", key: vkey({ id: "vk-2" }), secret: "fg-live-new-secret" },
           { status: 201 },
-        ),
-      ),
+        );
+      }),
     );
 
     renderWithProviders(<VirtualKeysPage />);
@@ -138,11 +145,14 @@ describe("VirtualKeysPage", () => {
 
     await user.click(screen.getByRole("button", { name: "New" }));
     await user.type(await screen.findByLabelText("Name *"), "second");
-    await user.type(screen.getByLabelText("Workspace ID *"), "ws-1");
+    await user.click(screen.getByRole("combobox", { name: "Workspace *" }));
+    await user.click(await screen.findByRole("option", { name: /Staging/ }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     expect(await screen.findByText("Save this secret now")).toBeInTheDocument();
     expect(screen.getByText("fg-live-new-secret")).toBeInTheDocument();
+    // The canonical workspace id is submitted unchanged.
+    expect(postedWorkspaceId).toBe("ws-1");
   });
 
   it("surfaces a 403 from the list", async () => {

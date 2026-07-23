@@ -15,7 +15,8 @@ export type EntityReferenceTarget =
   | "workspaces"
   | "permissions"
   | "models"
-  | "providers";
+  | "providers"
+  | "plans";
 
 export interface FieldOption {
   label: string;
