@@ -1824,6 +1824,7 @@ storage:
     - "postgres"
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
   postgres_pool_size: 2
+  postgres_pool_acquire_timeout_millis: 30000
   postgres_tls_mode: "{tls_mode}"
 {ca_path}  postgres_connect_timeout_secs: 10
   postgres_statement_timeout_millis: 30000

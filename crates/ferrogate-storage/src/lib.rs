@@ -542,8 +542,10 @@ const AGENT_RUN_EVENT_GLOBAL_RETENTION_MULTIPLIER: usize = 8;
 /// overshoot its retention bound by at most this many rows, which keeps the
 /// hot ingest path from paying an indexed OFFSET scan on every single write.
 const DURABLE_PRUNE_WRITE_INTERVAL: u64 = 32;
-const POSTGRES_SCHEMA_VERSION: u64 = 50;
-const POSTGRES_SCHEMA_NAME: &str = "050_bucket_backed_asset_size_constraint";
+/// Current schema migration version; exported so the E2E harness asserts
+/// against the runtime authority instead of a hardcoded copy.
+pub const POSTGRES_SCHEMA_VERSION: u64 = 50;
+pub const POSTGRES_SCHEMA_NAME: &str = "050_bucket_backed_asset_size_constraint";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const GUARDRAIL_POLICY_BINDING_INSERT_CAS_SQL: &str =
     "INSERT INTO guardrail_policy_bindings \

@@ -783,7 +783,7 @@ fn run_live_repository_replay(args: &SupabaseLiveRestartArgs, schema: &str) -> R
         PostgresStorageConfig {
             dsn: args.supabase_dsn.clone(),
             pool_size: 1,
-            pool_acquire_timeout_millis: 1_000,
+            pool_acquire_timeout_millis: 30_000,
             tls_mode,
             tls_ca_cert_path: args
                 .tls_ca_cert_path
@@ -912,6 +912,7 @@ storage:
   provider_order: ["supabase", "postgres"]
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
   postgres_pool_size: 2
+  postgres_pool_acquire_timeout_millis: 30000
   postgres_tls_mode: "{tls_mode}"
 {ca}  postgres_connect_timeout_secs: 10
   postgres_statement_timeout_millis: 30000
@@ -1608,7 +1609,7 @@ fn expect_validate_only_failure(
         PostgresStorageConfig {
             dsn: args.supabase_dsn.clone(),
             pool_size: 1,
-            pool_acquire_timeout_millis: 1_000,
+            pool_acquire_timeout_millis: 30_000,
             tls_mode,
             tls_ca_cert_path: args
                 .tls_ca_cert_path

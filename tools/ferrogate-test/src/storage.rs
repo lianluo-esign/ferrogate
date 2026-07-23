@@ -1507,6 +1507,7 @@ impl ControlPlaneRestartStorage<'_> {
     - postgres
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
   postgres_pool_size: 2
+  postgres_pool_acquire_timeout_millis: 30000
   postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
@@ -1538,6 +1539,7 @@ impl ControlPlaneRestartStorage<'_> {
     - postgres
   supabase_dsn_env: FERROGATE_SUPABASE_DSN
   postgres_pool_size: 2
+  postgres_pool_acquire_timeout_millis: 30000
   postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
@@ -1952,8 +1954,14 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 41);
-                assert_eq!(body["storage"]["schema"]["name"], "040_wallet_reservations");
+                assert_eq!(
+                    body["storage"]["schema"]["version"],
+                    ferrogate_storage::POSTGRES_SCHEMA_VERSION
+                );
+                assert_eq!(
+                    body["storage"]["schema"]["name"],
+                    ferrogate_storage::POSTGRES_SCHEMA_NAME
+                );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
                     .as_str()
