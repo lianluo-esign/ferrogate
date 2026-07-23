@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_providers::RoutingStrategy;
 
-use super::{CacheMode, Config};
+use super::{CacheMode, Config, McpAuthType, McpTransport};
 
 struct WorkflowToolNames {
     names: HashSet<String>,
@@ -131,6 +131,53 @@ impl Config {
         self.validate_cloudflare()?;
         self.validate_asset_bucket_r2()?;
         self.validate_cloudflare_ai_gateway_providers()?;
+        self.validate_cloudflare_mcp_servers()?;
+        Ok(())
+    }
+
+    /// Cloudflare-hosted managed MCP upstream guardrails (issue #408).
+    ///
+    /// Registering a Cloudflare managed MCP server (`*.mcp.cloudflare.com` or a
+    /// tenant `*.workers.dev/mcp`) needs no new transport — it is an ordinary
+    /// Streamable-HTTP/SSE [`super::McpServerConfig`] upstream. This adds the two
+    /// load-time invariants a Cloudflare endpoint gets wrong most often and that
+    /// would otherwise surface only as a runtime `401`/handshake failure:
+    ///   1. the URL is `https` (Cloudflare managed servers are TLS-only), and
+    ///   2. `auth_type` is not `none` — Cloudflare always requires an OAuth grant
+    ///      or a Cloudflare API bearer token, so an unauthenticated upstream can
+    ///      never connect.
+    ///
+    /// Deny-by-default execution (`tools_to_execute`) and the generic
+    /// transport/URL checks are already enforced by
+    /// [`ferrogate_mcp::validate_mcp_server_config`] via `validate_mcp_servers`,
+    /// so they are not re-checked here. Non-Cloudflare MCP servers are untouched.
+    fn validate_cloudflare_mcp_servers(&self) -> AnyResult<()> {
+        for (index, server) in self.mcp_servers.iter().enumerate() {
+            if !matches!(
+                server.transport,
+                McpTransport::StreamableHttp | McpTransport::Sse
+            ) {
+                continue;
+            }
+            let Some(url) = server.url.as_deref() else {
+                continue;
+            };
+            if !ferrogate_mcp::is_cloudflare_managed_mcp_url(url) {
+                continue;
+            }
+            if !url.to_ascii_lowercase().starts_with("https://") {
+                bail!(
+                    "field mcp_servers[{index}].url: Cloudflare managed MCP server {} must use an https url",
+                    server.name
+                );
+            }
+            if server.auth_type == McpAuthType::None {
+                bail!(
+                    "field mcp_servers[{index}].auth_type: Cloudflare managed MCP server {} requires authentication (shared_headers with a Cloudflare API bearer token, per_user_oauth, or original_bearer); Cloudflare rejects unauthenticated requests",
+                    server.name
+                );
+            }
+        }
         Ok(())
     }
 

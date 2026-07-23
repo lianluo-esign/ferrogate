@@ -3548,6 +3548,64 @@ fn validates_mcp_server_config_shape() {
     assert!(error.contains("requires command"), "{error}");
 }
 
+/// #408: Cloudflare-hosted managed MCP upstreams (`*.mcp.cloudflare.com` /
+/// tenant `*.workers.dev/mcp`) must be https and authenticated; a bearer
+/// (`shared_headers`) or OAuth config validates cleanly.
+#[test]
+fn validates_cloudflare_managed_mcp_server_guardrails() {
+    // Cloudflare host with auth_type none is rejected (CF always requires auth).
+    let mut unauth = mcp_server();
+    unauth.name = "cfmanaged".into();
+    unauth.url = Some("https://mcp.cloudflare.com/mcp".into());
+    let config = Config {
+        mcp_servers: vec![unauth],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("requires authentication"), "{error}");
+
+    // Cloudflare host over plain http is rejected (managed servers are TLS-only).
+    let mut insecure = mcp_server();
+    insecure.name = "cfmanaged".into();
+    insecure.url = Some("http://docs.mcp.cloudflare.com/mcp".into());
+    insecure.auth_type = McpAuthType::SharedHeaders;
+    insecure.headers = vec![McpHeaderConfig {
+        name: "Authorization".into(),
+        value: Some("Bearer cf-token".into()),
+        value_env: None,
+    }];
+    let config = Config {
+        mcp_servers: vec![insecure],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("must use an https url"), "{error}");
+
+    // A Cloudflare bearer upstream (https + shared_headers) validates cleanly.
+    let mut bearer = mcp_server();
+    bearer.name = "cfmanaged".into();
+    bearer.url = Some("https://mcp.cloudflare.com/mcp".into());
+    bearer.auth_type = McpAuthType::SharedHeaders;
+    bearer.headers = vec![McpHeaderConfig {
+        name: "Authorization".into(),
+        value: None,
+        value_env: Some("CLOUDFLARE_MCP_BEARER".into()),
+    }];
+    bearer.tools_to_execute = vec!["search".into(), "execute".into()];
+    let config = Config {
+        mcp_servers: vec![bearer],
+        ..Config::default()
+    };
+    config.validate().expect("CF bearer upstream is valid");
+
+    // A non-Cloudflare http upstream with auth_type none is unaffected.
+    let config = Config {
+        mcp_servers: vec![mcp_server()],
+        ..Config::default()
+    };
+    config.validate().expect("non-CF upstream still validates");
+}
+
 #[test]
 fn accepts_mcp_policy_targets() {
     let mut key = api_key("blocked", "Blocked");

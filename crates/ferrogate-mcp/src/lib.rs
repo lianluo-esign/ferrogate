@@ -9,6 +9,62 @@
 //! The crate depends on the official `rmcp` SDK and keeps FerroGate's runtime
 //! boundary explicit: long-lived server sessions are owned by `McpManager`,
 //! while the gateway applies auth, policy, billing, and audit before calling it.
+//!
+//! # Recipe: register a Cloudflare-hosted managed MCP server (issue #408)
+//!
+//! Cloudflare hosts remote MCP servers over the same Streamable HTTP transport
+//! FerroGate already speaks, so a Cloudflare managed server is registered as an
+//! ordinary [`McpServerConfig`] upstream — no new transport. Cloudflare's
+//! general-purpose "Code Mode" catalog lives at
+//! [`CLOUDFLARE_MANAGED_MCP_URL`] (`https://mcp.cloudflare.com/mcp`, exposing a
+//! `search`/`execute` tool pair), and product servers live at
+//! `https://<product>.mcp.cloudflare.com/mcp` (see
+//! [`cloudflare_product_mcp_url`]). Both require auth — either a Cloudflare API
+//! bearer token or the Cloudflare OAuth flow (Cloudflare is the OAuth provider).
+//!
+//! Execution is deny-by-default: only tools named in `tools_to_execute` are
+//! listed or callable, so Code Mode's `search`/`execute` are allowlisted like
+//! any other tool and flow through the normal `tools/list` -> `tools/call` path.
+//!
+//! Bearer auth (a scoped Cloudflare API token) via `shared_headers`:
+//!
+//! ```json
+//! {
+//!   "name": "cfmanaged",
+//!   "transport": "streamable_http",
+//!   "url": "https://mcp.cloudflare.com/mcp",
+//!   "auth_type": "shared_headers",
+//!   "headers": [{"name": "Authorization", "value_env": "CLOUDFLARE_MCP_BEARER"}],
+//!   "tools_to_execute": ["search", "execute"]
+//! }
+//! ```
+//!
+//! The `CLOUDFLARE_MCP_BEARER` environment variable holds the full
+//! `Bearer <cf-api-token>` value; keep the token out of the config file and
+//! source it through the secrets seam. [`cloudflare_bearer_header`] and
+//! [`cloudflare_managed_bearer_config`] build the same shape programmatically
+//! from an already-resolved token.
+//!
+//! Per-user OAuth (Cloudflare as the OAuth provider, isolating each end-user's
+//! grant) reuses the existing `per_user_oauth` machinery — point `oauth.issuer`
+//! at Cloudflare's authorization server and supply `client_id`,
+//! `client_secret_ref` (resolved via the secrets seam), and `redirect_uri`:
+//!
+//! ```json
+//! {
+//!   "name": "cfoauth",
+//!   "transport": "streamable_http",
+//!   "url": "https://docs.mcp.cloudflare.com/mcp",
+//!   "auth_type": "per_user_oauth",
+//!   "oauth": {
+//!     "issuer": "https://mcp.cloudflare.com",
+//!     "client_id": "<registered-client-id>",
+//!     "client_secret_ref": "env://CLOUDFLARE_MCP_OAUTH_SECRET",
+//!     "redirect_uri": "https://gateway.example/v1/mcp/identity/callback"
+//!   },
+//!   "tools_to_execute": ["search", "execute"]
+//! }
+//! ```
 
 use std::{
     collections::HashMap,
@@ -1682,6 +1738,94 @@ fn validate_static_header(header: &McpHeaderConfig) -> AnyResult<()> {
         _ => bail!("MCP static header must set exactly one of value or value_env"),
     }
     Ok(())
+}
+
+// ---- Cloudflare-hosted managed MCP servers (issue #408) -------------------
+
+/// Cloudflare's general-purpose managed MCP server. Exposes "Code Mode"
+/// (`search()` + `execute()` over Cloudflare's managed catalog) over the
+/// Streamable HTTP transport FerroGate already speaks.
+pub const CLOUDFLARE_MANAGED_MCP_URL: &str = "https://mcp.cloudflare.com/mcp";
+
+/// Streamable HTTP URL of a Cloudflare product-scoped managed MCP server, e.g.
+/// `cloudflare_product_mcp_url("docs")` ->
+/// `https://docs.mcp.cloudflare.com/mcp`. Cloudflare publishes product servers
+/// for `docs`, `bindings`, `observability`, `ai-gateway`, `containers`,
+/// `browser`, `radar`, `graphql`, and more.
+pub fn cloudflare_product_mcp_url(product: &str) -> String {
+    format!("https://{product}.mcp.cloudflare.com/mcp")
+}
+
+/// True when `url` targets a Cloudflare-hosted managed MCP server: the managed
+/// catalog and product servers on `*.mcp.cloudflare.com`, or a tenant Worker
+/// MCP endpoint on `*.workers.dev` (`/mcp` Streamable HTTP or `/sse`). Used to
+/// apply the Cloudflare-specific config guardrails at load time (issue #408) —
+/// a `*.workers.dev` host is only treated as an MCP upstream when its path is
+/// the conventional `/mcp` or `/sse`, so ordinary Workers are not flagged.
+pub fn is_cloudflare_managed_mcp_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<Uri>() else {
+        return false;
+    };
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host = authority.host().to_ascii_lowercase();
+    if host == "mcp.cloudflare.com" || host.ends_with(".mcp.cloudflare.com") {
+        return true;
+    }
+    if host != "workers.dev" && !host.ends_with(".workers.dev") {
+        return false;
+    }
+    let path = uri.path().trim_end_matches('/');
+    path == "/mcp" || path == "/sse" || path.ends_with("/mcp") || path.ends_with("/sse")
+}
+
+/// Build the `Authorization: Bearer <token>` static header a Cloudflare managed
+/// MCP server accepts as a Cloudflare API bearer token. `api_token` is an
+/// already-resolved secret — source it through FerroGate's secrets seam rather
+/// than inlining it in a persisted config.
+pub fn cloudflare_bearer_header(api_token: &str) -> McpHeaderConfig {
+    McpHeaderConfig {
+        name: "Authorization".to_string(),
+        value: Some(format!("Bearer {api_token}")),
+        value_env: None,
+    }
+}
+
+/// Construct a deny-by-default [`McpServerConfig`] for a Cloudflare managed MCP
+/// server authenticated with a Cloudflare API bearer token (`shared_headers`).
+/// `url` should be [`CLOUDFLARE_MANAGED_MCP_URL`] or a
+/// [`cloudflare_product_mcp_url`]; `tools_to_execute` is the execution
+/// allowlist (e.g. `["search", "execute"]` for Code Mode). The returned config
+/// still passes through [`validate_mcp_server_config`] like any other upstream.
+pub fn cloudflare_managed_bearer_config(
+    name: impl Into<String>,
+    url: impl Into<String>,
+    api_token: &str,
+    tools_to_execute: Vec<String>,
+) -> McpServerConfig {
+    McpServerConfig {
+        name: name.into(),
+        transport: McpTransport::StreamableHttp,
+        url: Some(url.into()),
+        command: None,
+        args: Vec::new(),
+        auth_type: McpAuthType::SharedHeaders,
+        headers: vec![cloudflare_bearer_header(api_token)],
+        oauth: None,
+        signed_jwt_audience: None,
+        tools_to_execute,
+        tools_to_auto_execute: Vec::new(),
+        approval_policy: ApprovalPolicy::default(),
+        tool_include: Vec::new(),
+        tool_regex: Vec::new(),
+        tls: McpTlsConfig::default(),
+        timeout_ms: default_timeout_ms(),
+        health_ping_interval_secs: default_health_ping_interval_secs(),
+        max_reconnect_attempts: default_max_reconnect_attempts(),
+        min_reconnect_backoff_secs: default_min_reconnect_backoff_secs(),
+        max_reconnect_backoff_secs: default_max_reconnect_backoff_secs(),
+    }
 }
 
 #[cfg(test)]
