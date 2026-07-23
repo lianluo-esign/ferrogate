@@ -338,3 +338,229 @@ describe("AssetsPage detail + lifecycle", () => {
     expect(channelUrl).toContain("version=2.0.0");
   });
 });
+
+describe("AssetsPage presigned large-object upload", () => {
+  const UPLOAD_ID = `upl_${"0".repeat(32)}`;
+  const UPLOAD_URL = "https://bucket.example.test/staging/object-1";
+
+  async function fillPresignDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", {
+        name: en["page.assets.presign.submit"],
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(
+      within(dialog).getByLabelText(en["page.assets.field.name"]),
+      "big-tool",
+    );
+    await user.type(
+      within(dialog).getByLabelText(en["page.assets.field.version"]),
+      "9.0.0",
+    );
+    const file = new File(["a very large bundle payload"], "big.tar.gz", {
+      type: "application/gzip",
+    });
+    await user.upload(
+      within(dialog).getByLabelText(en["page.assets.field.file"]),
+      file,
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: en["page.assets.presign.submit"],
+      }),
+    );
+    return { dialog, file };
+  }
+
+  it("runs register-intent -> direct PUT -> commit in order with verified metadata", async () => {
+    seedList();
+    const calls: string[] = [];
+    let commitBody: AdminSchema<"AssetPresignCommitRequest"> | null = null;
+    server.use(
+      http.post(
+        gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          calls.push("intent");
+          const body = (await request.json()) as {
+            size_bytes: number;
+            sha256: string;
+          };
+          return HttpResponse.json({
+            object: "asset_upload_intent",
+            key: "tenant-1/cli_tool/big-tool/9.0.0",
+            upload_id: UPLOAD_ID,
+            upload_url: UPLOAD_URL,
+            method: "PUT",
+            expires_in_seconds: 900,
+            size_bytes: body.size_bytes,
+            sha256: body.sha256,
+          });
+        },
+      ),
+      http.put(UPLOAD_URL, () => {
+        // The bytes must go DIRECTLY to storage, only after the intent.
+        calls.push("put");
+        return new HttpResponse(null, { status: 200 });
+      }),
+      http.post(
+        gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          calls.push("commit");
+          commitBody = (await request.json()) as AdminSchema<"AssetPresignCommitRequest">;
+          return HttpResponse.json({
+            object: "asset",
+            asset: asset({ name: "big-tool", version: "9.0.0", storage_backed: true }),
+          });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const { file } = await fillPresignDialog(user);
+
+    await waitFor(() =>
+      expect(calls).toEqual(["intent", "put", "commit"]),
+    );
+    expect(commitBody).not.toBeNull();
+    // The commit re-declares the same identity the intent registered so the
+    // gateway can verify size + SHA-256 over the staged bytes.
+    expect(commitBody!.upload_id).toMatch(/^upl_[0-9a-f]{32}$/);
+    expect(commitBody!.size_bytes).toBe(file.size);
+    expect(commitBody!.sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("surfaces a gateway commit error verbatim in an alert", async () => {
+    seedList();
+    const verbatim =
+      "sha256 mismatch: declared aaa… but staged bytes hash to bbb…";
+    server.use(
+      http.post(
+        gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            size_bytes: number;
+            sha256: string;
+          };
+          return HttpResponse.json({
+            object: "asset_upload_intent",
+            key: "k",
+            upload_id: UPLOAD_ID,
+            upload_url: UPLOAD_URL,
+            method: "PUT",
+            expires_in_seconds: 900,
+            size_bytes: body.size_bytes,
+            sha256: body.sha256,
+          });
+        },
+      ),
+      http.put(UPLOAD_URL, () => new HttpResponse(null, { status: 200 })),
+      http.post(
+        gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"),
+        () =>
+          HttpResponse.json(
+            { error: { code: "asset_size_mismatch", message: verbatim } },
+            { status: 422 },
+          ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    await fillPresignDialog(user);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(verbatim);
+  });
+});
+
+describe("AssetsPage permanent version deletion", () => {
+  async function openDetail(
+    user: ReturnType<typeof userEvent.setup>,
+    moreDetailsLabel: string = en["resource.table.moreDetails"],
+  ) {
+    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    await user.click(
+      within(ferrogateRow).getByRole("button", { name: moreDetailsLabel }),
+    );
+    return screen.findByRole("dialog");
+  }
+
+  it("requires the exact typed name@version before enabling delete, then calls DELETE", async () => {
+    seedList();
+    let deleteUrl: string | null = null;
+    server.use(
+      http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
+        HttpResponse.json(ferrogateManifest),
+      ),
+      http.delete(
+        gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0"),
+        ({ request }) => {
+          deleteUrl = request.url;
+          return HttpResponse.json({
+            object: "asset",
+            id: "org-acme:cli_tool:ferrogate:1.0.0",
+            deleted: true,
+          });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openDetail(user);
+    // Two versions render a permanent-delete button; the last is 1.0.0.
+    const deleteButtons = within(dialog).getAllByRole("button", {
+      name: en["page.assets.delete.action"],
+    });
+    await user.click(deleteButtons[deleteButtons.length - 1]);
+
+    const confirmDialog = (
+      await screen.findByText(
+        en["page.assets.delete.title"].replace("{asset}", "ferrogate@1.0.0"),
+      )
+    ).closest("[role='dialog']") as HTMLElement;
+    const confirmButton = within(confirmDialog).getByRole("button", {
+      name: en["page.assets.delete.action"],
+    });
+    // Disarmed until the exact identifier is retyped.
+    expect(confirmButton).toBeDisabled();
+
+    const input = within(confirmDialog).getByLabelText(
+      en["page.assets.delete.confirmLabel"].replace("{asset}", "ferrogate@1.0.0"),
+    );
+    await user.type(input, "ferrogate@9.9.9");
+    expect(confirmButton).toBeDisabled();
+
+    await user.clear(input);
+    await user.type(input, "ferrogate@1.0.0");
+    expect(confirmButton).toBeEnabled();
+
+    await user.click(confirmButton);
+    await waitFor(() => expect(deleteUrl).not.toBeNull());
+    expect(deleteUrl).toContain("/v1/assets/cli_tool/ferrogate/1.0.0");
+  });
+
+  it("renders the large-object upload and permanent-delete affordances in zh-CN", async () => {
+    seedList();
+    server.use(
+      http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
+        HttpResponse.json(ferrogateManifest),
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("zh-CN");
+
+    expect(
+      await screen.findByText(zhCN["page.assets.presign.title"]),
+    ).toBeInTheDocument();
+
+    const dialog = await openDetail(user, zhCN["resource.table.moreDetails"]);
+    expect(
+      within(dialog).getAllByRole("button", {
+        name: zhCN["page.assets.delete.action"],
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+});

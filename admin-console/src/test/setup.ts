@@ -59,6 +59,21 @@ if (!("ResizeObserver" in globalThis)) {
   });
 }
 
+// jsdom (v26) ships Blob/File without the standard async `arrayBuffer()`, which
+// the presigned large-object upload (#344) relies on to hash bytes client-side
+// before requesting an intent. Browsers implement it natively; polyfill it here
+// via jsdom's working FileReader so the flow is testable under jsdom.
+if (typeof Blob !== "undefined" && !Blob.prototype.arrayBuffer) {
+  Blob.prototype.arrayBuffer = function arrayBuffer(this: Blob) {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(this);
+    });
+  };
+}
+
 if (!window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,

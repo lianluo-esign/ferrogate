@@ -1741,6 +1741,29 @@ export const en = {
   "page.assets.channel.deleteBody":
     "Deletes only the {channel} pointer for {name}; concrete versions remain. Consumers resolving {channel} will fail until it is recreated.",
   "page.assets.channel.deleteSuccess": "Channel deleted",
+  // Presigned large-object upload — register-intent -> direct PUT -> commit (#344/#338).
+  "page.assets.presign.title": "Large-object upload",
+  "page.assets.presign.description":
+    "For bundles above the inline push limit. The console requests a presigned URL, PUTs the bytes directly to storage (bypassing the gateway body), then commits — the gateway verifies size and SHA-256 before the version is registered.",
+  "page.assets.presign.disabled":
+    "Presigned uploads are not enabled for this tenant. Use the inline push above, or enable direct-to-bucket storage.",
+  "page.assets.presign.maxHint": "Direct-to-bucket limit: {max}.",
+  "page.assets.presign.submit": "Upload large object",
+  "page.assets.presign.phaseHashing": "Hashing bytes…",
+  "page.assets.presign.phaseRegistering": "Requesting upload URL…",
+  "page.assets.presign.phaseUploading": "Uploading to storage…",
+  "page.assets.presign.phaseCommitting": "Committing…",
+  "page.assets.presign.success": "Large object committed",
+  "page.assets.presign.errorHeading": "Upload failed",
+  "page.assets.presign.tooLarge":
+    "File is {size}, over the {max} presigned limit.",
+  // Permanent version deletion — destructive, name-typed, distinct from yank (#344).
+  "page.assets.delete.action": "Delete permanently",
+  "page.assets.delete.title": "Permanently delete {asset}?",
+  "page.assets.delete.body":
+    "PERMANENTLY deletes every variant of {asset} and its stored bytes. This is NOT a yank: it cannot be undone, pinned downloads break immediately, and the content hash is freed. The deletion is recorded in the audit log. Type the exact identifier below to confirm.",
+  "page.assets.delete.confirmLabel": "Type {asset} to confirm",
+  "page.assets.delete.success": "Version permanently deleted",
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "Withheld assets",

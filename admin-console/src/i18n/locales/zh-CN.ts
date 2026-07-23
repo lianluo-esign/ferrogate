@@ -1642,6 +1642,28 @@ export const zhCN = {
   "page.assets.channel.deleteBody":
     "仅删除 {name} 的 {channel} 指针；具体版本保持不变。解析 {channel} 的消费方在重新创建前将失败。",
   "page.assets.channel.deleteSuccess": "渠道已删除",
+  // Presigned large-object upload — register-intent -> direct PUT -> commit (#344/#338).
+  "page.assets.presign.title": "大对象上传",
+  "page.assets.presign.description":
+    "用于超过内联推送上限的包。控制台先请求一个预签名 URL，将字节直接 PUT 到存储（绕过网关请求体），然后提交——网关在注册该版本前会校验大小和 SHA-256。",
+  "page.assets.presign.disabled":
+    "该租户未启用预签名上传。请使用上方的内联推送，或启用直传存储桶。",
+  "page.assets.presign.maxHint": "直传存储桶上限：{max}。",
+  "page.assets.presign.submit": "上传大对象",
+  "page.assets.presign.phaseHashing": "正在哈希字节…",
+  "page.assets.presign.phaseRegistering": "正在请求上传 URL…",
+  "page.assets.presign.phaseUploading": "正在上传到存储…",
+  "page.assets.presign.phaseCommitting": "正在提交…",
+  "page.assets.presign.success": "大对象已提交",
+  "page.assets.presign.errorHeading": "上传失败",
+  "page.assets.presign.tooLarge": "文件为 {size}，超过预签名上限 {max}。",
+  // Permanent version deletion — destructive, name-typed, distinct from yank (#344).
+  "page.assets.delete.action": "永久删除",
+  "page.assets.delete.title": "永久删除 {asset}？",
+  "page.assets.delete.body":
+    "永久删除 {asset} 的所有变体及其存储的字节。这不是撤回：无法撤销，已固定版本的下载会立即失效，内容哈希也会被释放。删除操作会记录到审计日志。请在下方输入完整标识符以确认。",
+  "page.assets.delete.confirmLabel": "输入 {asset} 以确认",
+  "page.assets.delete.success": "版本已永久删除",
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "扣留的资产",

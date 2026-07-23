@@ -315,6 +315,35 @@ export async function gatewayPutBinary<T>(
   return responseBody as T;
 }
 
+/**
+ * PUTs raw bytes DIRECTLY to a presigned bucket URL (the large-object path,
+ * #338/#259). Unlike every other helper here this does NOT target the gateway
+ * and sends NO gateway `Authorization` header: the presigned URL already
+ * carries its own signed authorization in its query string, and the whole
+ * point of the flow is to keep a large bundle's bytes off the gateway body.
+ * The gateway later verifies size + SHA-256 at the commit step. Bucket errors
+ * (often XML, not our JSON envelope) surface verbatim as the thrown message.
+ */
+export async function putPresignedObject(
+  uploadUrl: string,
+  body: Blob,
+  contentType: string,
+): Promise<void> {
+  const response = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType || "application/octet-stream" },
+    body,
+  });
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).trim();
+    throw new Error(
+      detail !== ""
+        ? `${response.status} ${response.statusText}: ${detail}`
+        : `${response.status} ${response.statusText}`,
+    );
+  }
+}
+
 /** Downloads raw bytes from a `/v1/assets/*`-shaped endpoint (issue #178). */
 export async function gatewayGetBinary(apiKey: string, path: string): Promise<Blob> {
   const response = await fetch(buildUrl(path), {
