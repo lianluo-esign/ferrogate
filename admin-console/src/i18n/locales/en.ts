@@ -488,4 +488,168 @@ export const en = {
   "resource.usageReports.col.cost": "Cost (USD)",
   "resource.usageReports.col.requests": "Requests",
   "resource.usageReports.col.errors": "Errors",
+
+  // Per-resource copy — gateway-setup / agent / MCP / worker group + read-only
+  // logs (#348). Titles, descriptions, column headers, field labels/descriptions,
+  // and select-option labels across the providers, models, agent-upstreams,
+  // agent-workflows, skill-packages, prompt-templates, mcp-servers,
+  // self-hosted-workers, managed-workers, request-logs, and audit-events configs.
+  // Resource IDs, field names, option values, boolean Yes/No + Enabled/Disabled
+  // cell renders (deferred to #385), and JSON/example code placeholders stay
+  // data-driven. Labels keep inline code/config example values (comma-separated
+  // capability names, JSON shapes, the `/v1/prompts/{id}/render` API path).
+  "resource.providers.title": "Providers",
+  "resource.providers.description":
+    "Upstream model providers configured for this gateway (read-only).",
+  "resource.providers.col.name": "Name",
+  "resource.providers.col.kind": "Kind",
+  "resource.providers.col.compatibility": "Compatibility",
+  "resource.providers.col.baseUrl": "Base URL",
+  "resource.providers.col.hasApiKey": "Has API key",
+  "resource.providers.col.enabled": "Enabled",
+
+  "resource.models.title": "Models",
+  "resource.models.description": "Logical model routes exposed by the gateway (read-only).",
+  "resource.models.col.name": "Name",
+  "resource.models.col.provider": "Provider",
+  "resource.models.col.providerModel": "Provider model",
+  "resource.models.col.routingStrategy": "Routing strategy",
+  "resource.models.col.contextWindow": "Context window",
+  "resource.models.col.enabled": "Enabled",
+
+  "resource.agentUpstreams.title": "Agent upstreams",
+  "resource.agentUpstreams.description":
+    "A2A-protocol agent upstreams the gateway can dispatch to.",
+  "resource.agentUpstreams.col.name": "Name",
+  "resource.agentUpstreams.col.endpoint": "Endpoint",
+  "resource.agentUpstreams.col.protocol": "Protocol",
+  "resource.agentUpstreams.col.enabled": "Enabled",
+  "resource.agentUpstreams.col.capabilities": "Capabilities",
+  "resource.agentUpstreams.field.name": "Name",
+  "resource.agentUpstreams.field.description": "Description",
+  "resource.agentUpstreams.field.endpoint": "Endpoint URL",
+  "resource.agentUpstreams.field.enabled": "Enabled",
+  "resource.agentUpstreams.field.capabilities":
+    "Capabilities (comma-separated: invoke,read,stream,discover)",
+  "resource.agentUpstreams.field.tenants": "Tenants",
+  "resource.agentUpstreams.field.tenants.desc":
+    "Tenants allowed to dispatch to this upstream; leave empty for all tenants.",
+  "resource.agentUpstreams.field.auth":
+    "Auth (JSON, e.g. \"none\" or {\"bearer\":{\"token\":\"...\"}})",
+
+  "resource.agentWorkflows.title": "Agent workflows",
+  "resource.agentWorkflows.description":
+    "Multi-step orchestration graphs (model/tool/router/human/checkpoint nodes).",
+  "resource.agentWorkflows.col.name": "Name",
+  "resource.agentWorkflows.col.id": "ID",
+  "resource.agentWorkflows.col.version": "Version",
+  "resource.agentWorkflows.col.enabled": "Enabled",
+  "resource.agentWorkflows.col.requests": "Requests",
+  "resource.agentWorkflows.field.id": "ID",
+  "resource.agentWorkflows.field.name": "Name",
+  "resource.agentWorkflows.field.version": "Version",
+  "resource.agentWorkflows.field.enabled": "Enabled",
+  "resource.agentWorkflows.field.organizationIds": "Organization IDs (comma-separated)",
+  "resource.agentWorkflows.field.projects": "Projects",
+  "resource.agentWorkflows.field.apiKeyIds": "API key IDs (comma-separated)",
+  "resource.agentWorkflows.field.nodes": "Nodes (JSON array)",
+  "resource.agentWorkflows.field.edges": "Edges (JSON array)",
+  "resource.agentWorkflows.field.maxModelCalls": "Max model calls",
+  "resource.agentWorkflows.field.maxToolCalls": "Max tool calls",
+  "resource.agentWorkflows.field.maxParallelism": "Max parallelism",
+  "resource.agentWorkflows.field.maxIterations": "Max iterations",
+  "resource.agentWorkflows.field.timeout": "Timeout (ms)",
+  "resource.agentWorkflows.field.tokenBudget": "Token budget",
+
+  "resource.skillPackages.title": "Skill packages",
+  "resource.skillPackages.description":
+    "Bundles of plugins, tools, prompts, and workflows shipped as one unit.",
+  "resource.skillPackages.col.name": "Name",
+  "resource.skillPackages.col.version": "Version",
+  "resource.skillPackages.col.enabled": "Enabled",
+  "resource.skillPackages.col.capabilities": "Capabilities",
+  "resource.skillPackages.field.id": "ID",
+  "resource.skillPackages.field.name": "Name",
+  "resource.skillPackages.field.version": "Version",
+  "resource.skillPackages.field.description": "Description",
+  "resource.skillPackages.field.enabled": "Enabled",
+  "resource.skillPackages.field.apiKeyIds": "API key IDs (comma-separated)",
+  "resource.skillPackages.field.compatibility": "Compatibility (JSON)",
+  "resource.skillPackages.field.permissions": "Permissions (JSON)",
+  "resource.skillPackages.field.capabilities": "Capabilities (JSON array)",
+  "resource.skillPackages.field.resources":
+    "Resources (JSON: plugins/mcp_servers/prompt_templates/agent_workflows)",
+  "resource.skillPackages.field.metadata": "Metadata (JSON)",
+
+  "resource.promptTemplates.title": "Prompt templates",
+  "resource.promptTemplates.description":
+    "Versioned, reusable prompts served through /v1/prompts/{id}/render.",
+  "resource.promptTemplates.col.name": "Name",
+  "resource.promptTemplates.col.model": "Model",
+  "resource.promptTemplates.col.status": "Status",
+  "resource.promptTemplates.col.activeRevision": "Active revision",
+  "resource.promptTemplates.field.id": "ID",
+  "resource.promptTemplates.field.name": "Name",
+  "resource.promptTemplates.field.status": "Status",
+  "resource.promptTemplates.option.status.draft": "Draft",
+  "resource.promptTemplates.option.status.active": "Active",
+  "resource.promptTemplates.option.status.archived": "Archived",
+  "resource.promptTemplates.field.target": "Target",
+  "resource.promptTemplates.option.target.chatCompletions": "Chat completions",
+  "resource.promptTemplates.option.target.responses": "Responses",
+  "resource.promptTemplates.field.model": "Model",
+  "resource.promptTemplates.field.variables": "Variables (JSON array)",
+  "resource.promptTemplates.field.version": "New version (JSON)",
+  "resource.promptTemplates.field.version.desc":
+    "Appends a new revision; omit to leave versions unchanged.",
+
+  "resource.mcpServers.title": "MCP servers",
+  "resource.mcpServers.description":
+    "Model Context Protocol servers the gateway can dispatch tool calls to.",
+  "resource.mcpServers.col.name": "Name",
+  "resource.mcpServers.col.transport": "Transport",
+  "resource.mcpServers.col.enabled": "Enabled",
+  "resource.mcpServers.field.name": "Name",
+  "resource.mcpServers.field.enabled": "Enabled",
+  "resource.mcpServers.field.config": "Full server config (JSON)",
+  "resource.mcpServers.field.config.desc":
+    "Transport, auth, TLS, and endpoint fields per ferrogate-mcp::McpServerConfig.",
+
+  "resource.selfHostedWorkers.title": "Self-hosted workers",
+  "resource.selfHostedWorkers.description":
+    "Agent workers registered from customer infrastructure (read-only; registration happens via the worker's own bootstrap flow).",
+  "resource.selfHostedWorkers.col.name": "Name",
+  "resource.selfHostedWorkers.col.status": "Status",
+  "resource.selfHostedWorkers.col.trustLevel": "Trust level",
+  "resource.selfHostedWorkers.col.stale": "Stale",
+  "resource.selfHostedWorkers.col.orchestration": "Orchestration",
+  "resource.selfHostedWorkers.col.telemetryEvents": "Telemetry events",
+
+  "resource.managedWorkers.title": "Managed workers",
+  "resource.managedWorkers.description":
+    "The gateway-managed agent worker capability contract (read-only descriptor).",
+  "resource.managedWorkers.col.id": "ID",
+  "resource.managedWorkers.col.status": "Status",
+  "resource.managedWorkers.col.process": "Process",
+  "resource.managedWorkers.col.gatewayRole": "Gateway role",
+  "resource.managedWorkers.col.workerRole": "Worker role",
+  "resource.managedWorkers.col.lifecycleActions": "Lifecycle actions",
+
+  "resource.requestLogs.title": "Request logs",
+  "resource.requestLogs.description": "Recent proxied requests handled by the gateway.",
+  "resource.requestLogs.col.requestId": "Request ID",
+  "resource.requestLogs.col.route": "Route",
+  "resource.requestLogs.col.provider": "Provider",
+  "resource.requestLogs.col.model": "Model",
+  "resource.requestLogs.col.status": "Status",
+  "resource.requestLogs.col.error": "Error",
+
+  "resource.auditEvents.title": "Audit events",
+  "resource.auditEvents.description":
+    "Administrative and security-relevant actions recorded by the gateway.",
+  "resource.auditEvents.col.action": "Action",
+  "resource.auditEvents.col.target": "Target",
+  "resource.auditEvents.col.outcome": "Outcome",
+  "resource.auditEvents.col.message": "Message",
+  "resource.auditEvents.col.actorKey": "Actor key",
 } as const;

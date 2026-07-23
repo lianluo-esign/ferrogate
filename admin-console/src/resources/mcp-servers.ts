@@ -11,26 +11,31 @@ export interface AdminMcpServer extends Record<string, unknown> {
   transport?: string;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey`/
+// `descriptionKey` resolve under the active locale. Resource IDs, field
+// `name`s, and the data-driven defensive column renders (boolean Yes/No —
+// deferred to #385, and the name/transport fallbacks) stay untouched.
 export const mcpServersConfig: ResourceConfig<AdminMcpServer> = {
   key: "mcp-servers",
-  title: "MCP servers",
-  description: "Model Context Protocol servers the gateway can dispatch tool calls to.",
+  titleKey: "resource.mcpServers.title",
+  descriptionKey: "resource.mcpServers.description",
   basePath: "/admin/v1/mcp-servers",
   idField: "name",
   resolveDetailPath: (row) => String(row.name ?? row.id ?? ""),
   columns: [
-    { key: "name", header: "Name", render: (row) => String(row.name ?? row.id ?? "") },
-    { key: "transport", header: "Transport", render: (row) => String(row.transport ?? "") },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "name", headerKey: "resource.mcpServers.col.name", render: (row) => String(row.name ?? row.id ?? "") },
+    { key: "transport", headerKey: "resource.mcpServers.col.transport", render: (row) => String(row.transport ?? "") },
+    { key: "enabled", headerKey: "resource.mcpServers.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
   ],
   fields: [
-    { name: "name", label: "Name", type: "text", required: true, createOnly: true },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "name", labelKey: "resource.mcpServers.field.name", type: "text", required: true, createOnly: true },
+    { name: "enabled", labelKey: "resource.mcpServers.field.enabled", type: "boolean" },
     {
       name: "config",
-      label: "Full server config (JSON)",
+      labelKey: "resource.mcpServers.field.config",
       type: "json",
-      description: "Transport, auth, TLS, and endpoint fields per ferrogate-mcp::McpServerConfig.",
+      descriptionKey: "resource.mcpServers.field.config.desc",
     },
   ],
 };

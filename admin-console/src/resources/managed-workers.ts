@@ -10,22 +10,27 @@ export interface AdminManagedWorkerRuntime extends Record<string, unknown> {
   capability_boundary: string;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
+// locale. Column `key`s and the comma-joined lifecycle-actions cell (a
+// data-driven `render` callback) stay untouched; this is a read-only resource
+// with no fields.
 export const managedWorkersConfig: ResourceConfig<AdminManagedWorkerRuntime> = {
   key: "managed-workers",
-  title: "Managed workers",
-  description: "The gateway-managed agent worker capability contract (read-only descriptor).",
+  titleKey: "resource.managedWorkers.title",
+  descriptionKey: "resource.managedWorkers.description",
   basePath: "/admin/v1/managed-workers",
   idField: "id",
   readOnly: true,
   columns: [
-    { key: "id", header: "ID" },
-    { key: "status", header: "Status" },
-    { key: "process_name", header: "Process" },
-    { key: "gateway_role", header: "Gateway role" },
-    { key: "agent_worker_role", header: "Worker role" },
+    { key: "id", headerKey: "resource.managedWorkers.col.id" },
+    { key: "status", headerKey: "resource.managedWorkers.col.status" },
+    { key: "process_name", headerKey: "resource.managedWorkers.col.process" },
+    { key: "gateway_role", headerKey: "resource.managedWorkers.col.gatewayRole" },
+    { key: "agent_worker_role", headerKey: "resource.managedWorkers.col.workerRole" },
     {
       key: "lifecycle_actions",
-      header: "Lifecycle actions",
+      headerKey: "resource.managedWorkers.col.lifecycleActions",
       render: (row) => row.lifecycle_actions.join(", "),
     },
   ],

@@ -10,43 +10,50 @@ export interface AdminPromptTemplate extends Record<string, unknown> {
   versions: unknown[];
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
+// `descriptionKey`, and select-option `labelKey` resolve under the active
+// locale. Resource IDs, field `name`s, option `value`s, and the JSON example
+// placeholders (protected code/config values) stay data-driven. The
+// description keeps the literal `/v1/prompts/{id}/render` API path; `{id}` is
+// never interpolated (title/description are resolved with no values).
 export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
   key: "prompt-templates",
-  title: "Prompt templates",
-  description: "Versioned, reusable prompts served through /v1/prompts/{id}/render.",
+  titleKey: "resource.promptTemplates.title",
+  descriptionKey: "resource.promptTemplates.description",
   basePath: "/admin/v1/prompt-templates",
   idField: "id",
   columns: [
-    { key: "name", header: "Name" },
-    { key: "model", header: "Model" },
-    { key: "status", header: "Status" },
-    { key: "active_revision", header: "Active revision" },
+    { key: "name", headerKey: "resource.promptTemplates.col.name" },
+    { key: "model", headerKey: "resource.promptTemplates.col.model" },
+    { key: "status", headerKey: "resource.promptTemplates.col.status" },
+    { key: "active_revision", headerKey: "resource.promptTemplates.col.activeRevision" },
   ],
   fields: [
-    { name: "id", label: "ID", type: "text", required: true, createOnly: true },
-    { name: "name", label: "Name", type: "text", required: true },
+    { name: "id", labelKey: "resource.promptTemplates.field.id", type: "text", required: true, createOnly: true },
+    { name: "name", labelKey: "resource.promptTemplates.field.name", type: "text", required: true },
     {
       name: "status",
-      label: "Status",
+      labelKey: "resource.promptTemplates.field.status",
       type: "select",
       options: [
-        { label: "Draft", value: "draft" },
-        { label: "Active", value: "active" },
-        { label: "Archived", value: "archived" },
+        { labelKey: "resource.promptTemplates.option.status.draft", value: "draft" },
+        { labelKey: "resource.promptTemplates.option.status.active", value: "active" },
+        { labelKey: "resource.promptTemplates.option.status.archived", value: "archived" },
       ],
     },
     {
       name: "target",
-      label: "Target",
+      labelKey: "resource.promptTemplates.field.target",
       type: "select",
       options: [
-        { label: "Chat completions", value: "chat_completions" },
-        { label: "Responses", value: "responses" },
+        { labelKey: "resource.promptTemplates.option.target.chatCompletions", value: "chat_completions" },
+        { labelKey: "resource.promptTemplates.option.target.responses", value: "responses" },
       ],
     },
     {
       name: "model",
-      label: "Model",
+      labelKey: "resource.promptTemplates.field.model",
       type: "entity",
       reference: {
         target: "models",
@@ -57,17 +64,17 @@ export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
     },
     {
       name: "variables",
-      label: "Variables (JSON array)",
+      labelKey: "resource.promptTemplates.field.variables",
       type: "json",
       placeholder: '[{"name":"topic","required":true}]',
     },
     {
       name: "version",
-      label: "New version (JSON)",
+      labelKey: "resource.promptTemplates.field.version",
       type: "json",
       placeholder:
         '{"messages":[{"role":"system","content":"You are..."}],"temperature":0.7}',
-      description: "Appends a new revision; omit to leave versions unchanged.",
+      descriptionKey: "resource.promptTemplates.field.version.desc",
     },
   ],
 };

@@ -26,43 +26,49 @@ function workflowOf(row: AdminAgentWorkflowRow): AgentWorkflowPolicy | undefined
   return row.workflow ?? (row as unknown as AgentWorkflowPolicy);
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey` resolve
+// under the active locale. Resource IDs, field `name`s, the data-driven column
+// `render` callbacks (workflow field unwrapping, boolean Yes/No — deferred to
+// #385), and the JSON/example placeholders (`1`, node/edge shapes — protected
+// code/config values) stay data-driven.
 export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
   key: "agent-workflows",
-  title: "Agent workflows",
-  description: "Multi-step orchestration graphs (model/tool/router/human/checkpoint nodes).",
+  titleKey: "resource.agentWorkflows.title",
+  descriptionKey: "resource.agentWorkflows.description",
   basePath: "/admin/v1/agent-workflows",
   idField: "workflow",
   resolveDetailPath: (row) => workflowOf(row)?.id ?? "",
   unwrapRow: (row) => (workflowOf(row) as unknown as Record<string, unknown>) ?? {},
   columns: [
-    { key: "name", header: "Name", render: (row) => workflowOf(row)?.name ?? "" },
-    { key: "id", header: "ID", render: (row) => workflowOf(row)?.id ?? "" },
-    { key: "version", header: "Version", render: (row) => String(workflowOf(row)?.version ?? "") },
+    { key: "name", headerKey: "resource.agentWorkflows.col.name", render: (row) => workflowOf(row)?.name ?? "" },
+    { key: "id", headerKey: "resource.agentWorkflows.col.id", render: (row) => workflowOf(row)?.id ?? "" },
+    { key: "version", headerKey: "resource.agentWorkflows.col.version", render: (row) => String(workflowOf(row)?.version ?? "") },
     {
       key: "enabled",
-      header: "Enabled",
+      headerKey: "resource.agentWorkflows.col.enabled",
       render: (row) => (workflowOf(row)?.enabled ? "Yes" : "No"),
     },
     {
       key: "requests",
-      header: "Requests",
+      headerKey: "resource.agentWorkflows.col.requests",
       render: (row) => String(row.counters?.request_count ?? 0),
     },
   ],
   fields: [
-    { name: "id", label: "ID", type: "text", required: true, createOnly: true },
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "version", label: "Version", type: "number", placeholder: "1" },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "id", labelKey: "resource.agentWorkflows.field.id", type: "text", required: true, createOnly: true },
+    { name: "name", labelKey: "resource.agentWorkflows.field.name", type: "text", required: true },
+    { name: "version", labelKey: "resource.agentWorkflows.field.version", type: "number", placeholder: "1" },
+    { name: "enabled", labelKey: "resource.agentWorkflows.field.enabled", type: "boolean" },
     // organization_ids and api_key_ids scope a workflow to the raw identifiers a
     // caller presents at request time (ferrogate-cli agent-workflow evaluation),
     // which are not guaranteed to be admin-console tenant/key rows, so they stay
     // free-text rather than being force-mapped to an entity source (mirrors the
     // policies.ts decision from #341).
-    { name: "organization_ids", label: "Organization IDs (comma-separated)", type: "csv" },
+    { name: "organization_ids", labelKey: "resource.agentWorkflows.field.organizationIds", type: "csv" },
     {
       name: "project_ids",
-      label: "Projects",
+      labelKey: "resource.agentWorkflows.field.projects",
       type: "entities",
       reference: {
         target: "projects",
@@ -71,7 +77,7 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
         secondaryLabelKeys: ["slug", "tenant_id"],
       },
     },
-    { name: "api_key_ids", label: "API key IDs (comma-separated)", type: "csv" },
+    { name: "api_key_ids", labelKey: "resource.agentWorkflows.field.apiKeyIds", type: "csv" },
     // nodes/edges are a structured workflow document whose model/provider/MCP/
     // tool/prompt references live inside per-node JSON. Converting those to inline
     // pickers needs a structured reference panel (issue #342 acceptance) and is
@@ -79,21 +85,21 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
     // stay raw JSON so non-reference document fields round-trip unchanged.
     {
       name: "nodes",
-      label: "Nodes (JSON array)",
+      labelKey: "resource.agentWorkflows.field.nodes",
       type: "json",
       placeholder: '[{"id":"n1","kind":"model","model":"gpt-4o","providers":["openai"]}]',
     },
     {
       name: "edges",
-      label: "Edges (JSON array)",
+      labelKey: "resource.agentWorkflows.field.edges",
       type: "json",
       placeholder: '[{"from":"n1","to":"n2"}]',
     },
-    { name: "max_model_calls", label: "Max model calls", type: "number" },
-    { name: "max_tool_calls", label: "Max tool calls", type: "number" },
-    { name: "max_parallelism", label: "Max parallelism", type: "number" },
-    { name: "max_iterations", label: "Max iterations", type: "number" },
-    { name: "timeout_millis", label: "Timeout (ms)", type: "number" },
-    { name: "token_budget", label: "Token budget", type: "number" },
+    { name: "max_model_calls", labelKey: "resource.agentWorkflows.field.maxModelCalls", type: "number" },
+    { name: "max_tool_calls", labelKey: "resource.agentWorkflows.field.maxToolCalls", type: "number" },
+    { name: "max_parallelism", labelKey: "resource.agentWorkflows.field.maxParallelism", type: "number" },
+    { name: "max_iterations", labelKey: "resource.agentWorkflows.field.maxIterations", type: "number" },
+    { name: "timeout_millis", labelKey: "resource.agentWorkflows.field.timeout", type: "number" },
+    { name: "token_budget", labelKey: "resource.agentWorkflows.field.tokenBudget", type: "number" },
   ],
 };

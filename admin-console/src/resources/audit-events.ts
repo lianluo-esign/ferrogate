@@ -10,19 +10,23 @@ export interface AdminAuditEvent extends Record<string, unknown> {
   occurred_at_unix: number | null;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
+// locale. Column `key`s stay untouched; this is a read-only resource with no
+// fields.
 export const auditEventsConfig: ResourceConfig<AdminAuditEvent> = {
   key: "audit-events",
-  title: "Audit events",
-  description: "Administrative and security-relevant actions recorded by the gateway.",
+  titleKey: "resource.auditEvents.title",
+  descriptionKey: "resource.auditEvents.description",
   basePath: "/admin/v1/audit-events",
   idField: "id",
   readOnly: true,
   columns: [
-    { key: "action", header: "Action" },
-    { key: "target", header: "Target" },
-    { key: "outcome", header: "Outcome" },
-    { key: "message", header: "Message" },
-    { key: "actor_api_key_id", header: "Actor key" },
+    { key: "action", headerKey: "resource.auditEvents.col.action" },
+    { key: "target", headerKey: "resource.auditEvents.col.target" },
+    { key: "outcome", headerKey: "resource.auditEvents.col.outcome" },
+    { key: "message", headerKey: "resource.auditEvents.col.message" },
+    { key: "actor_api_key_id", headerKey: "resource.auditEvents.col.actorKey" },
   ],
   fields: [],
 };

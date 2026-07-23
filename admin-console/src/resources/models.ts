@@ -12,20 +12,24 @@ export interface AdminModel extends Record<string, unknown> {
   enabled: boolean;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
+// locale. Column `key`s and the boolean Yes/No cell render (deferred to #385)
+// stay data-driven; this is a read-only resource with no fields.
 export const modelsConfig: ResourceConfig<AdminModel> = {
   key: "models",
-  title: "Models",
-  description: "Logical model routes exposed by the gateway (read-only).",
+  titleKey: "resource.models.title",
+  descriptionKey: "resource.models.description",
   basePath: "/admin/v1/models",
   idField: "name",
   readOnly: true,
   columns: [
-    { key: "name", header: "Name" },
-    { key: "provider", header: "Provider" },
-    { key: "provider_model", header: "Provider model" },
-    { key: "routing_strategy", header: "Routing strategy" },
-    { key: "context_window", header: "Context window" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "name", headerKey: "resource.models.col.name" },
+    { key: "provider", headerKey: "resource.models.col.provider" },
+    { key: "provider_model", headerKey: "resource.models.col.providerModel" },
+    { key: "routing_strategy", headerKey: "resource.models.col.routingStrategy" },
+    { key: "context_window", headerKey: "resource.models.col.contextWindow" },
+    { key: "enabled", headerKey: "resource.models.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
   ],
   fields: [],
 };

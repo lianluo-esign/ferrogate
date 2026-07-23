@@ -11,34 +11,41 @@ export interface AdminAgentUpstream extends Record<string, unknown> {
   capabilities: string[];
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey`/
+// `descriptionKey` resolve under the active locale. Resource IDs, field
+// `name`s, the boolean Yes/No cell render and the comma-joined capabilities
+// cell (data-driven `render` callbacks, deferred to #385) stay untouched. The
+// capabilities/auth labels keep their inline code/config example values
+// (`invoke,read,stream,discover`, JSON shapes) inside the translated copy.
 export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
   key: "agent-upstreams",
-  title: "Agent upstreams",
-  description: "A2A-protocol agent upstreams the gateway can dispatch to.",
+  titleKey: "resource.agentUpstreams.title",
+  descriptionKey: "resource.agentUpstreams.description",
   basePath: "/admin/v1/agent-upstreams",
   idField: "id",
   columns: [
-    { key: "name", header: "Name" },
-    { key: "endpoint", header: "Endpoint" },
-    { key: "protocol", header: "Protocol" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "capabilities", header: "Capabilities", render: (row) => row.capabilities.join(", ") },
+    { key: "name", headerKey: "resource.agentUpstreams.col.name" },
+    { key: "endpoint", headerKey: "resource.agentUpstreams.col.endpoint" },
+    { key: "protocol", headerKey: "resource.agentUpstreams.col.protocol" },
+    { key: "enabled", headerKey: "resource.agentUpstreams.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "capabilities", headerKey: "resource.agentUpstreams.col.capabilities", render: (row) => row.capabilities.join(", ") },
   ],
   fields: [
-    { name: "name", label: "Name", type: "text", required: true, createOnly: true },
-    { name: "description", label: "Description", type: "textarea" },
-    { name: "endpoint", label: "Endpoint URL", type: "text", required: true },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "name", labelKey: "resource.agentUpstreams.field.name", type: "text", required: true, createOnly: true },
+    { name: "description", labelKey: "resource.agentUpstreams.field.description", type: "textarea" },
+    { name: "endpoint", labelKey: "resource.agentUpstreams.field.endpoint", type: "text", required: true },
+    { name: "enabled", labelKey: "resource.agentUpstreams.field.enabled", type: "boolean" },
     {
       name: "capabilities",
-      label: "Capabilities (comma-separated: invoke,read,stream,discover)",
+      labelKey: "resource.agentUpstreams.field.capabilities",
       type: "csv",
     },
     {
       name: "tenant_ids",
-      label: "Tenants",
+      labelKey: "resource.agentUpstreams.field.tenants",
       type: "entities",
-      description: "Tenants allowed to dispatch to this upstream; leave empty for all tenants.",
+      descriptionKey: "resource.agentUpstreams.field.tenants.desc",
       reference: {
         target: "tenant-accounts",
         valueKey: "id",
@@ -48,7 +55,7 @@ export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
     },
     {
       name: "auth",
-      label: "Auth (JSON, e.g. \"none\" or {\"bearer\":{\"token\":\"...\"}})",
+      labelKey: "resource.agentUpstreams.field.auth",
       type: "json",
     },
   ],
