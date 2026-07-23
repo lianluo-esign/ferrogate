@@ -651,25 +651,15 @@ impl FerroGateway {
         // workspace -> key quota chain and failed closed on repository errors.
         // Asset quotas are tenant-only because asset ownership and usage are
         // tenant-owned.
+        //
+        // #371: the tenant asset-storage quota is admitted ATOMICALLY, folded
+        // into the publication mutation below (`create_asset_within_quota`), NOT
+        // as a separate read-then-write here. The former `tenant_asset_storage_bytes_used`
+        // read + create let two concurrent pushes of two DIFFERENT ids both
+        // observe the same remaining capacity, both pass, and jointly overshoot
+        // the quota. The reservation now happens in the same conditional
+        // statement that inserts the row, so exactly the fitting set is admitted.
         let effective_quota = auth.effective_quota.asset_storage_quota_bytes;
-        if let Some(default_quota) = effective_quota {
-            let used = match state.tenant_asset_storage_bytes_used(&tenant_id).await {
-                Ok(used) => used,
-                Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
-            };
-            if used.saturating_add(content.len() as u64) > default_quota {
-                return write_json_error(
-                    session,
-                    StatusCode::FORBIDDEN,
-                    "asset_storage_quota_exceeded",
-                    format!(
-                        "pushing this asset would exceed the tenant's {default_quota}-byte asset storage quota"
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        }
 
         let now = now_unix_seconds();
 
@@ -740,10 +730,42 @@ impl FerroGateway {
             sink.as_ref(),
             asset.clone(),
             storage_uri.as_deref(),
+            effective_quota,
         )
         .await
         {
             asset_inline_publish::InlinePublishOutcome::Published => {}
+            asset_inline_publish::InlinePublishOutcome::OverQuota {
+                used_bytes,
+                attempted_bytes,
+                quota_bytes,
+            } => {
+                // #371/#368: the atomic admission definitively rejected this push
+                // (nothing reserved or published). Audit the rejection with the
+                // tenant/request/asset identity and the observed usage, mirroring
+                // the presigned commit's `rejected_commit` event.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.push",
+                    &id,
+                    "rejected_commit",
+                    format!(
+                        "asset {id} inline push rejected: reserving {attempted_bytes} bytes on top of \
+                         {used_bytes} used would exceed the tenant's {quota_bytes}-byte asset storage quota"
+                    ),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    "asset_storage_quota_exceeded",
+                    format!(
+                        "pushing this asset would exceed the tenant's {quota_bytes}-byte asset storage quota"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
             asset_inline_publish::InlinePublishOutcome::Conflict => {
                 return write_json_error(
                     session,

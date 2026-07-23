@@ -30,11 +30,21 @@ impl AppState {
         Ok(self.repositories.upsert_asset(asset).await?)
     }
 
-    pub(crate) async fn create_asset_if_absent(
+    /// Atomic tenant asset-storage quota admission + immutable publication
+    /// (issue #371). One conditional storage mutation reserves quota for this
+    /// push ONLY when the tenant's remaining capacity suffices and the id does
+    /// not already exist, returning a typed [`AssetQuotaAdmission`]. Replaces the
+    /// read (`tenant_asset_storage_bytes_used`) then separate `create_asset_if_absent`
+    /// admission, whose read-then-write gap let two commits for two different
+    /// asset ids jointly overshoot the quota.
+    pub(crate) async fn create_asset_within_quota(
         &self,
         asset: StoredAsset,
-    ) -> Result<bool, StorageError> {
-        self.repositories.create_asset_if_absent(asset).await
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        self.repositories
+            .create_asset_within_quota(asset, quota_bytes)
+            .await
     }
 
     /// Load an asset and its verified bytes: resolves bucket-backed content

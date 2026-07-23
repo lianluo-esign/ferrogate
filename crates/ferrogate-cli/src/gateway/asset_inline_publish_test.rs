@@ -90,6 +90,7 @@ impl AssetCandidateSink for RecordingBucket {
 /// (outcome-unknown, a vanished or unreadable winner).
 enum CreateScript {
     Conflict,
+    OverQuota,
     Unknown,
     Definitive,
 }
@@ -102,11 +103,20 @@ struct FakeRegistry {
 
 #[async_trait]
 impl ImmutableAssetRegistry for FakeRegistry {
-    async fn create_asset_if_absent(&self, _asset: StoredAsset) -> Result<bool, StorageError> {
+    async fn create_asset_within_quota(
+        &self,
+        _asset: StoredAsset,
+        _quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
         match self.create {
-            CreateScript::Conflict => Ok(false),
+            CreateScript::Conflict => Ok(AssetQuotaAdmission::AlreadyExists),
+            CreateScript::OverQuota => Ok(AssetQuotaAdmission::OverQuota {
+                used_bytes: 90,
+                attempted_bytes: 20,
+                quota_bytes: 100,
+            }),
             CreateScript::Unknown => Err(StorageError::OperationCommitOutcomeUnknown {
-                operation: "create asset if absent",
+                operation: "create asset within quota",
                 stage: "transaction commit",
             }),
             CreateScript::Definitive => Err(StorageError::Postgres("statement failed".into())),
@@ -161,6 +171,7 @@ fn concurrent_different_content_first_pushes_have_exactly_one_winner() {
                 &*bucket,
                 asset,
                 Some(key.as_str()),
+                None,
             ));
             tx.send((key, outcome)).expect("report outcome");
         }));
@@ -249,6 +260,7 @@ fn concurrent_same_content_first_pushes_have_exactly_one_winner() {
                 &*bucket,
                 asset,
                 Some(key.as_str()),
+                None,
             ));
             tx.send((key, outcome)).expect("report outcome");
         }));
@@ -296,7 +308,8 @@ fn loser_reclaims_only_its_own_candidate_against_a_seeded_winner() {
     let winner = bucket_asset(&winner_bytes, winner_key);
     bucket.put(winner_key, winner_bytes.clone());
     assert!(
-        block_on(state.create_asset_if_absent(winner.clone())).expect("seed winner"),
+        block_on(state.create_asset_within_quota(winner.clone(), None)).expect("seed winner")
+            == AssetQuotaAdmission::Admitted,
         "the seeded winner publishes"
     );
 
@@ -310,6 +323,7 @@ fn loser_reclaims_only_its_own_candidate_against_a_seeded_winner() {
         &bucket,
         loser,
         Some(loser_key),
+        None,
     ));
     assert!(is_conflict(&outcome), "the second push is a typed conflict");
     assert!(
@@ -349,6 +363,7 @@ fn outcome_unknown_create_preserves_the_candidate() {
         &bucket,
         bucket_asset(&[9_u8; 8], key),
         Some(key),
+        None,
     ));
     assert!(matches!(outcome, InlinePublishOutcome::OutcomeUnknown));
     assert!(
@@ -374,11 +389,46 @@ fn definitive_create_failure_reclaims_its_own_candidate() {
         &bucket,
         bucket_asset(&[3_u8; 8], key),
         Some(key),
+        None,
     ));
     assert!(matches!(outcome, InlinePublishOutcome::StorageFailed(_)));
     assert!(
         bucket.get(key).is_none() && bucket.was_discarded(key),
         "a definitive failure reclaims its own unreferenced candidate"
+    );
+}
+
+/// An over-quota admission (#371) is a definitive pre-commit rejection: nothing
+/// was reserved or published, so the attempt reclaims its OWN unreferenced
+/// candidate and surfaces the typed over-quota outcome with the observed usage.
+#[test]
+fn over_quota_admission_reclaims_its_own_candidate() {
+    let bucket = RecordingBucket::default();
+    let key = ".ferrogate/objects/pfx/inline_overquota";
+    bucket.put(key, vec![6_u8; 8]);
+    let registry = FakeRegistry {
+        create: CreateScript::OverQuota,
+        winner: None,
+        get_fails: false,
+    };
+    let outcome = block_on(publish_inline_asset(
+        &registry,
+        &bucket,
+        bucket_asset(&[6_u8; 8], key),
+        Some(key),
+        Some(100),
+    ));
+    assert!(matches!(
+        outcome,
+        InlinePublishOutcome::OverQuota {
+            used_bytes: 90,
+            attempted_bytes: 20,
+            quota_bytes: 100,
+        }
+    ));
+    assert!(
+        bucket.get(key).is_none() && bucket.was_discarded(key),
+        "an over-quota rejection reclaims its own unreferenced candidate"
     );
 }
 
@@ -401,6 +451,7 @@ fn loser_never_deletes_a_candidate_the_winner_references() {
         &bucket,
         bucket_asset(&[7_u8; 8], key),
         Some(key),
+        None,
     ));
     assert!(is_conflict(&outcome));
     assert!(
@@ -426,6 +477,7 @@ fn conflict_with_a_vanished_winner_reclaims_the_candidate() {
         &bucket,
         bucket_asset(&[4_u8; 8], key),
         Some(key),
+        None,
     ));
     assert!(matches!(outcome, InlinePublishOutcome::ReconcileFailed(_)));
     assert!(bucket.get(key).is_none() && bucket.was_discarded(key));
@@ -447,6 +499,7 @@ fn conflict_with_an_unreadable_winner_preserves_the_candidate() {
         &bucket,
         bucket_asset(&[5_u8; 8], key),
         Some(key),
+        None,
     ));
     assert!(matches!(outcome, InlinePublishOutcome::ReconcileFailed(_)));
     assert!(
@@ -465,13 +518,19 @@ fn pure_inline_publish_has_no_candidate_to_clean() {
     let mut winner = bucket_asset(&[1_u8; 4], "");
     winner.storage_uri = None;
     winner.content = vec![1_u8; 4];
-    let winner_outcome = block_on(publish_inline_asset(&state, &sink, winner.clone(), None));
+    let winner_outcome = block_on(publish_inline_asset(
+        &state,
+        &sink,
+        winner.clone(),
+        None,
+        None,
+    ));
     assert!(is_published(&winner_outcome));
 
     let mut loser = bucket_asset(&[2_u8; 4], "");
     loser.storage_uri = None;
     loser.content = vec![2_u8; 4];
-    let loser_outcome = block_on(publish_inline_asset(&state, &sink, loser, None));
+    let loser_outcome = block_on(publish_inline_asset(&state, &sink, loser, None, None));
     assert!(is_conflict(&loser_outcome));
 
     let stored = block_on(state.get_asset(VERSION_ID))

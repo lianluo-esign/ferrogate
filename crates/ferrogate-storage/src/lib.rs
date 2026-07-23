@@ -4016,6 +4016,119 @@ impl PostgresControlPlaneStore {
         Ok(inserted == 1)
     }
 
+    /// One conditional statement that atomically admits a push against the tenant
+    /// asset-storage quota AND publishes it (issue #371). The former two-step
+    /// admission (read `tenant_asset_storage_bytes_used`, then a separate
+    /// `create_asset_if_absent`) let two commits for two DIFFERENT asset ids both
+    /// read the same remaining capacity, both pass, and jointly overshoot the
+    /// quota. Here the usage sum, the quota guard, the immutability guard, and the
+    /// insert share ONE statement's snapshot, so there is no read-then-write gap:
+    /// the `INSERT ... SELECT ... WHERE` materializes the row only when the tenant
+    /// still has room, and the wrapping `WITH`/`SELECT` reports the definitive
+    /// classification even when nothing is inserted.
+    ///
+    /// `$17` is the quota bound (NULL = unlimited: the quota guard is a no-op and
+    /// only the create-if-absent immutability guard remains). The returned row
+    /// yields (`id_exists`, `used_bytes`, `quota_ok`, `inserted`) so the caller
+    /// distinguishes Admitted / AlreadyExists / OverQuota without a second read.
+    const CREATE_ASSET_WITHIN_QUOTA_QUERY: &'static str = "\
+        WITH guard AS ( \
+            SELECT \
+                EXISTS (SELECT 1 FROM stored_assets WHERE id = $1) AS id_exists, \
+                COALESCE((SELECT SUM(size_bytes) FROM stored_assets WHERE tenant_id = $2), 0) \
+                    AS used_bytes \
+        ), \
+        inserted AS ( \
+            INSERT INTO stored_assets \
+                (id, tenant_id, project_id, asset_type, name, version, content_type, \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                 storage_uri, variant, yanked, visibility) \
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16 \
+            FROM guard \
+            WHERE NOT guard.id_exists \
+              AND ($17::bigint IS NULL OR guard.used_bytes + $9::bigint <= $17::bigint) \
+            ON CONFLICT (id) DO NOTHING \
+            RETURNING 1 \
+        ) \
+        SELECT \
+            guard.id_exists, \
+            guard.used_bytes::bigint AS used_bytes, \
+            ($17::bigint IS NULL OR guard.used_bytes + $9::bigint <= $17::bigint) AS quota_ok, \
+            (SELECT COUNT(*) FROM inserted)::bigint AS inserted_count \
+        FROM guard";
+
+    async fn create_asset_within_quota(
+        &self,
+        asset: &StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        let size_bytes = saturating_i64(asset.size_bytes);
+        let quota = quota_bytes.map(saturating_i64);
+        let visibility = asset.visibility.as_str();
+        let operation = self.asset_operation("create asset within quota");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_one(
+                Self::CREATE_ASSET_WITHIN_QUOTA_QUERY,
+                &[
+                    &asset.id,
+                    &asset.tenant_id,
+                    &asset.project_id,
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    &asset.content_type,
+                    &asset.content_hash,
+                    &size_bytes,
+                    &asset.content,
+                    &asset.created_at_unix,
+                    &asset.updated_at_unix,
+                    &asset.storage_uri,
+                    &asset.variant,
+                    &asset.yanked,
+                    &visibility,
+                    &quota,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let id_exists: bool = row.get("id_exists");
+        let used_bytes = nonnegative_u64(row.get::<_, i64>("used_bytes"));
+        let quota_ok: bool = row.get("quota_ok");
+        let inserted_count: i64 = row.get("inserted_count");
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the asset quota-admission commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(classify_asset_quota_admission(
+            inserted_count == 1,
+            id_exists,
+            quota_ok,
+            used_bytes,
+            asset.size_bytes,
+            quota_bytes,
+        ))
+    }
+
     async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
         let operation = self.asset_operation("get asset");
         let mut client = self
@@ -10764,6 +10877,38 @@ impl RuntimeControlPlaneState {
         true
     }
 
+    /// Memory equivalent of the atomic quota admission (issue #371). The whole
+    /// read-guard-insert happens while the caller holds the single control-plane
+    /// lock, so it is the exact analogue of the one Postgres conditional
+    /// statement: the tenant usage read, the quota guard, the immutability guard,
+    /// and the insert cannot interleave with another admission. Both backends run
+    /// the same [`classify_asset_quota_admission`] so their truth tables match.
+    pub fn create_asset_within_quota(
+        &mut self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> AssetQuotaAdmission {
+        let id_exists = self.assets.records.contains_key(&asset.id);
+        // Usage is read BEFORE the insert and excludes this attempt's row, exactly
+        // as the Postgres `SUM(size_bytes)` guard subquery does.
+        let used_bytes = self.tenant_asset_storage_bytes_used(&asset.tenant_id);
+        let attempted_bytes = asset.size_bytes;
+        let quota_ok =
+            quota_bytes.is_none_or(|quota| used_bytes.saturating_add(attempted_bytes) <= quota);
+        let inserted = !id_exists && quota_ok;
+        if inserted {
+            self.assets.insert(asset.id.clone(), asset);
+        }
+        classify_asset_quota_admission(
+            inserted,
+            id_exists,
+            quota_ok,
+            used_bytes,
+            attempted_bytes,
+            quota_bytes,
+        )
+    }
+
     pub fn get_asset(&self, id: &str) -> Option<StoredAsset> {
         self.assets.get(id)
     }
@@ -11863,6 +12008,73 @@ impl StoredAsset {
     /// `PendingScan`/`Quarantined` row is never served.
     pub fn is_downloadable(&self) -> bool {
         self.visibility.is_downloadable()
+    }
+}
+
+/// The durable, definitive outcome of an atomic asset-storage quota admission
+/// (issue #371). The former admission was a read (`tenant_asset_storage_bytes_used`)
+/// then a separate create, so two commits for two DIFFERENT asset ids could both
+/// read the same remaining capacity, both pass, and jointly overshoot the tenant
+/// quota. [`RuntimeControlPlane::create_asset_within_quota`] folds the usage read,
+/// the quota guard, the immutability (create-if-absent) guard, and the row insert
+/// into ONE conditional statement so exactly the fitting set is admitted.
+///
+/// This enum carries only the DEFINITIVE, pre-commit-fence classifications; a lost
+/// commit outcome (the statement crossed the async-timeout fence after the commit
+/// began) is reported as `Err(StorageError::OperationCommitOutcomeUnknown)` by the
+/// method, never squashed into one of these arms, so a caller never treats an
+/// unresolved reservation as a definitive rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetQuotaAdmission {
+    /// The row was created; its `size_bytes` are now reserved against the tenant
+    /// quota. This attempt is the immutable version.
+    Admitted,
+    /// This asset id already exists, so nothing was inserted and NO bytes were
+    /// reserved (idempotent / immutable). A same-upload retry lands here and is
+    /// therefore never charged twice. The caller reconciles the durable winner
+    /// exactly as it would a create-if-absent conflict.
+    AlreadyExists,
+    /// Admission was definitively refused before any write: reserving
+    /// `attempted_bytes` on top of the `used_bytes` observed in the same
+    /// statement would exceed `quota_bytes`. Nothing was inserted, so no bytes
+    /// were reserved and no candidate can be referenced by this attempt.
+    OverQuota {
+        used_bytes: u64,
+        attempted_bytes: u64,
+        quota_bytes: u64,
+    },
+}
+
+/// The single classification the Postgres and memory backends share so their
+/// admission truth tables can never drift (issue #371). Inputs mirror the four
+/// values the one Postgres statement returns; the memory backend computes the
+/// identical four under its lock.
+///
+/// Precedence is deliberate: an `Admitted` insert wins first; then an existing id
+/// is an idempotent `AlreadyExists` (never charged, even if it would notionally
+/// exceed quota); only a non-existing id whose quota guard FAILED is a definitive
+/// `OverQuota`. A non-existing id that did not insert yet whose quota guard PASSED
+/// can only be the rare same-id concurrent-commit race (Postgres `ON CONFLICT DO
+/// NOTHING` after the snapshot); it is an `AlreadyExists` conflict, not a false
+/// over-quota rejection.
+fn classify_asset_quota_admission(
+    inserted: bool,
+    id_exists: bool,
+    quota_ok: bool,
+    used_bytes: u64,
+    attempted_bytes: u64,
+    quota_bytes: Option<u64>,
+) -> AssetQuotaAdmission {
+    if inserted {
+        AssetQuotaAdmission::Admitted
+    } else if id_exists || quota_ok {
+        AssetQuotaAdmission::AlreadyExists
+    } else {
+        AssetQuotaAdmission::OverQuota {
+            used_bytes,
+            attempted_bytes,
+            quota_bytes: quota_bytes.unwrap_or(u64::MAX),
+        }
     }
 }
 
@@ -14206,6 +14418,41 @@ impl RuntimeStorageRepositories {
                 .map_err(|_| poisoned_asset_repository_lock()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.create_asset_if_absent(&asset).await
+            }
+        }
+    }
+
+    /// Atomically admit a push against the tenant asset-storage quota and publish
+    /// it (issue #371). Replaces the read-then-write admission (a
+    /// `tenant_asset_storage_bytes_used` read followed by a separate
+    /// `create_asset_if_absent`) that let two commits for two DIFFERENT asset ids
+    /// both observe the same remaining capacity and jointly overshoot the quota.
+    ///
+    /// The Postgres backend folds the usage read, the quota guard, the
+    /// create-if-absent immutability guard, and the row insert into ONE
+    /// conditional statement; the memory backend performs the identical
+    /// read-guard-insert under one lock. Both return the same typed outcome:
+    /// `Admitted` (bytes reserved), `AlreadyExists` (idempotent, never charged
+    /// twice), or `OverQuota` (definitively rejected pre-commit, nothing written).
+    /// A lost commit outcome surfaces as `Err(OperationCommitOutcomeUnknown)` and
+    /// is never collapsed into a definitive arm, so a caller never double-reserves
+    /// nor falsely rejects on an unresolved reservation.
+    pub async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.create_asset_within_quota(asset, quota_bytes)
+                })
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .create_asset_within_quota(&asset, quota_bytes)
+                    .await
             }
         }
     }
@@ -16777,6 +17024,10 @@ mod control_plane_schema_test;
 #[cfg(test)]
 #[path = "asset_storage_usage_test.rs"]
 mod asset_storage_usage_test;
+
+#[cfg(test)]
+#[path = "asset_quota_admission_test.rs"]
+mod asset_quota_admission_test;
 
 #[cfg(test)]
 #[path = "asset_channel_lifecycle_test.rs"]

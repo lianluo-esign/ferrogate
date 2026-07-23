@@ -43,7 +43,9 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
+use ferrogate_storage::{
+    sha256_hex, stored_asset_id, AssetQuotaAdmission, StorageError, StoredAsset,
+};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -734,56 +736,14 @@ impl FerroGateway {
             }
         };
 
-        // Quota is counted at commit, when the real object exists.
-        match self
-            .asset_quota_status(
-                &state,
-                &tenant_id,
-                &id,
-                auth.effective_quota.asset_storage_quota_bytes,
-                actual_size,
-            )
-            .await
-        {
-            QuotaStatus::Ok => {}
-            QuotaStatus::Exceeded(quota) => {
-                // #368: quota is a commit-time verification failure too.
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                    ctx,
-                    &auth,
-                    "asset.push",
-                    &id,
-                    "rejected_commit",
-                    format!(
-                        "asset {id} upload {} rejected at commit: {actual_size} bytes would exceed the tenant's {quota}-byte asset storage quota",
-                        commit.upload_id
-                    ),
-                ));
-                return self
-                    .reject_staging_object(
-                        session,
-                        ctx,
-                        &bucket,
-                        &staging_key,
-                        "asset_storage_quota_exceeded",
-                        format!(
-                            "committing this asset would exceed the tenant's {quota}-byte asset storage quota"
-                        ),
-                    )
-                    .await;
-            }
-            QuotaStatus::StorageError(message) => {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "storage_unavailable",
-                    message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        }
-
+        // #371: the tenant asset-storage quota is NO LONGER admitted here with a
+        // separate read (`asset_quota_status`) before the publish. That
+        // read-then-write gap let two commits for two DIFFERENT asset ids both
+        // observe the same remaining capacity, both pass, and jointly overshoot
+        // the quota. Admission is now folded into the publication mutation below
+        // (`create_asset_within_quota`), so the quota reservation and the row
+        // insert share one conditional statement. The commit-time quota rejection
+        // (#368) is unchanged in shape -- it is just now atomic with publication.
         let now = now_unix_seconds();
         let final_key = match new_final_object_key(&id, &commit.upload_id) {
             Ok(final_key) => final_key,
@@ -847,8 +807,48 @@ impl FerroGateway {
             created_at_unix: now,
             updated_at_unix: now,
         };
-        match state.create_asset_if_absent(asset.clone()).await {
-            Ok(true) => {
+        match state
+            .create_asset_within_quota(
+                asset.clone(),
+                auth.effective_quota.asset_storage_quota_bytes,
+            )
+            .await
+        {
+            Ok(AssetQuotaAdmission::OverQuota {
+                used_bytes: _,
+                attempted_bytes: _,
+                quota_bytes,
+            }) => {
+                // #371/#368: quota is a commit-time verification failure, now
+                // decided ATOMICALLY with publication -- nothing was reserved or
+                // published, so the final candidate is provably unreferenced and
+                // is reclaimed here; the staging object is reclaimed by
+                // reject_staging_object. Same typed rejection shape as before.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.push",
+                    &id,
+                    "rejected_commit",
+                    format!(
+                        "asset {id} upload {} rejected at commit: {actual_size} bytes would exceed the tenant's {quota_bytes}-byte asset storage quota",
+                        commit.upload_id
+                    ),
+                ));
+                best_effort_delete(&bucket, &final_key).await;
+                self.reject_staging_object(
+                    session,
+                    ctx,
+                    &bucket,
+                    &staging_key,
+                    "asset_storage_quota_exceeded",
+                    format!(
+                        "committing this asset would exceed the tenant's {quota_bytes}-byte asset storage quota"
+                    ),
+                )
+                .await
+            }
+            Ok(AssetQuotaAdmission::Admitted) => {
                 // #366: the committed audit event carries the full trust
                 // evidence -- scan/signature/approval outcome + verification
                 // manifest -- linked to the asset id, tenant, and request id,
@@ -873,7 +873,7 @@ impl FerroGateway {
                 };
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
-            Ok(false) => {
+            Ok(AssetQuotaAdmission::AlreadyExists) => {
                 let winner = match state.get_asset(&id).await {
                     Ok(Some(winner)) => winner,
                     Ok(None) => {

@@ -17,7 +17,7 @@
 
 use async_trait::async_trait;
 
-use ferrogate_storage::{StorageError, StoredAsset};
+use ferrogate_storage::{AssetQuotaAdmission, StorageError, StoredAsset};
 
 use crate::state::AppState;
 
@@ -67,23 +67,32 @@ impl AssetCandidateSink for NoCandidateSink {
     async fn discard_candidate(&self, _key: &str) {}
 }
 
-/// The two repository operations the atomic publication needs: the immutable
-/// CREATE-IF-ABSENT (#338) and a winner re-read for loser reconciliation.
-/// Abstracted behind a trait so the winner/loser/outcome-unknown truth table
-/// can be driven with an injected registry (a definitive vs unknown create
+/// The two repository operations the atomic publication needs: the atomic
+/// quota-admission + immutable CREATE-IF-ABSENT (#371, built on #338) and a
+/// winner re-read for loser reconciliation. Abstracted behind a trait so the
+/// admit/reject/conflict/outcome-unknown truth table can be driven with an
+/// injected registry (an over-quota rejection, a definitive vs unknown create
 /// error, a vanished/unreadable winner) without a live database.
 #[async_trait]
 pub(super) trait ImmutableAssetRegistry: Send + Sync {
-    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError>;
+    async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError>;
     async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError>;
 }
 
 #[async_trait]
 impl ImmutableAssetRegistry for AppState {
-    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
+    async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
         // Method-call syntax resolves to AppState's inherent method (inherent
         // wins over the trait method of the same name), not a recursive call.
-        self.create_asset_if_absent(asset).await
+        self.create_asset_within_quota(asset, quota_bytes).await
     }
 
     async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
@@ -97,9 +106,20 @@ impl ImmutableAssetRegistry for AppState {
 /// arm to a status/code; the mapping mirrors the presigned commit path so the
 /// two publication surfaces agree on the truth table.
 pub(super) enum InlinePublishOutcome {
-    /// This attempt won the atomic create: its metadata + bytes are now the
-    /// immutable version. -> 200.
+    /// This attempt won the atomic admission: its bytes were reserved against
+    /// the tenant quota and its metadata + bytes are now the immutable version.
+    /// -> 200.
     Published,
+    /// Admission was definitively refused: reserving this push's bytes would push
+    /// the tenant over its asset-storage quota. Nothing was published, so this
+    /// attempt's own candidate has been discarded. -> typed 403
+    /// `asset_storage_quota_exceeded`. Carries the pre-admission usage and the
+    /// enforced quota for the operator-facing message.
+    OverQuota {
+        used_bytes: u64,
+        attempted_bytes: u64,
+        quota_bytes: u64,
+    },
     /// A concurrent first push already published this version. This attempt's
     /// own candidate has been discarded (it was never the winner's). The
     /// version is immutable. -> typed 409 `asset_version_immutable`.
@@ -149,23 +169,60 @@ pub(super) fn loser_may_discard_candidate(
     winner_storage_uri != Some(own_candidate_key)
 }
 
-/// Publish inline asset metadata atomically. The caller has already written the
-/// bytes: to `candidate_key` in the bucket (bucket-backed inline storage) or
-/// inline in `asset.content` (memory/Postgres bytes, `candidate_key == None`).
-/// This performs the CREATE-IF-ABSENT publication and the winner/loser/unknown
-/// cleanup truth table; it never issues an immutable-version upsert.
+/// Publish inline asset metadata atomically, admitting it against the tenant
+/// asset-storage quota in the SAME conditional mutation (issue #371). The caller
+/// has already written the bytes: to `candidate_key` in the bucket (bucket-backed
+/// inline storage) or inline in `asset.content` (memory/Postgres bytes,
+/// `candidate_key == None`). This performs the atomic quota-admission +
+/// CREATE-IF-ABSENT publication and the admit/reject/conflict/unknown cleanup
+/// truth table; it never issues an immutable-version upsert and never reads
+/// usage before reserving.
+///
+/// Truth table (`quota_bytes == None` means unlimited: the OverQuota arm is
+/// unreachable and this degenerates to the #369 create-if-absent invariant):
+/// - `Admitted` -> Published: bytes reserved, this is the visible version.
+/// - `OverQuota` -> definitive pre-commit rejection; discard OUR OWN candidate
+///   (it is provably unreferenced) and report 403.
+/// - `AlreadyExists` -> reconcile the durable winner (same as a #369 lost
+///   create): conflict 409, discarding only our own candidate when the winner
+///   does not reference it.
+/// - `Err(OutcomeUnknown)` -> preserve EVERY candidate (the reservation may have
+///   committed); report 503 and retry the identical push.
+/// - `Err(definitive)` -> discard our own candidate; report 503.
 pub(super) async fn publish_inline_asset<R: ImmutableAssetRegistry + ?Sized>(
     registry: &R,
     sink: &dyn AssetCandidateSink,
     asset: StoredAsset,
     candidate_key: Option<&str>,
+    quota_bytes: Option<u64>,
 ) -> InlinePublishOutcome {
-    match registry.create_asset_if_absent(asset.clone()).await {
-        Ok(true) => InlinePublishOutcome::Published,
-        Ok(false) => {
-            // Lost the atomic create: reconcile against the durable winner. We
-            // may delete ONLY our own unreferenced candidate, never one the
-            // winner references.
+    match registry
+        .create_asset_within_quota(asset.clone(), quota_bytes)
+        .await
+    {
+        Ok(AssetQuotaAdmission::Admitted) => InlinePublishOutcome::Published,
+        Ok(AssetQuotaAdmission::OverQuota {
+            used_bytes,
+            attempted_bytes,
+            quota_bytes,
+        }) => {
+            // Definitive pre-commit rejection: nothing durable was written, so
+            // this attempt's candidate is provably unreferenced -- reclaim only
+            // our own. Never touches a winner's bytes.
+            if let Some(key) = candidate_key {
+                sink.discard_candidate(key).await;
+            }
+            InlinePublishOutcome::OverQuota {
+                used_bytes,
+                attempted_bytes,
+                quota_bytes,
+            }
+        }
+        Ok(AssetQuotaAdmission::AlreadyExists) => {
+            // Lost the atomic admission to an existing row: reconcile against the
+            // durable winner. We may delete ONLY our own unreferenced candidate,
+            // never one the winner references. A same-content idempotent retry
+            // landing here is NOT charged again (no reservation happened).
             match registry.get_asset(&asset.id).await {
                 Ok(Some(winner)) => {
                     if let Some(key) = candidate_key {
