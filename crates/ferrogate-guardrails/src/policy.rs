@@ -351,6 +351,27 @@ pub enum DetectorDefinition {
         /// Required: the flagged-content fingerprint is keyed with this.
         fingerprint_secret_ref: String,
     },
+    /// Cloudflare Workers AI Llama Guard content-moderation detector (#422),
+    /// wired into config selection by #430. OPT-IN: it is constructible only
+    /// when a top-level `[cloudflare]` block (#405) is configured, whose shared
+    /// client carries the account id + Workers-AI token — absent Cloudflare, the
+    /// detector is unavailable with a clear error. Content is projected to
+    /// Cloudflare (a SaaS vendor); detect-only (Llama Guard returns no spans).
+    WorkersAiLlamaGuard {
+        /// Workers AI model slug; must be an `@cf/meta/llama-guard-*` model.
+        #[serde(default = "default_workers_ai_llama_guard_model")]
+        model: String,
+        /// Optional MLCommons hazard-category allow-list (`S1`..`S14`). When
+        /// set, only these categories cause a `Fail`; other unsafe verdicts pass.
+        #[serde(default)]
+        categories: Option<Vec<String>>,
+        #[serde(default = "default_detector_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_detector_max_payload_bytes")]
+        max_payload_bytes: usize,
+        /// Required: the flagged-content fingerprint is keyed with this.
+        fingerprint_secret_ref: String,
+    },
 }
 
 impl DetectorDefinition {
@@ -524,6 +545,46 @@ impl DetectorDefinition {
                     secret_ref.as_deref(),
                     fingerprint_secret_ref,
                 )?;
+            }
+            Self::WorkersAiLlamaGuard {
+                model,
+                categories,
+                timeout_ms,
+                max_payload_bytes,
+                fingerprint_secret_ref,
+            } => {
+                if !model.trim().starts_with("@cf/meta/llama-guard") {
+                    return Err(invalid_policy(
+                        "workers_ai_llama_guard detector model must be an @cf/meta/llama-guard-* slug",
+                    ));
+                }
+                if *timeout_ms == 0
+                    || *timeout_ms > MAX_DETECTOR_TIMEOUT.as_millis() as u64
+                    || *max_payload_bytes == 0
+                {
+                    return Err(invalid_policy(
+                        "workers_ai_llama_guard detector limits are invalid or exceed the runtime ceiling",
+                    ));
+                }
+                if fingerprint_secret_ref.trim().is_empty() {
+                    return Err(invalid_policy(
+                        "workers_ai_llama_guard detector requires fingerprint_secret_ref for keyed evidence",
+                    ));
+                }
+                if let Some(categories) = categories {
+                    let normalized = categories
+                        .iter()
+                        .map(|code| normalize_hazard_code(code))
+                        .collect::<Vec<_>>();
+                    if categories.is_empty()
+                        || normalized.iter().any(Option::is_none)
+                        || normalized.iter().collect::<HashSet<_>>().len() != normalized.len()
+                    {
+                        return Err(invalid_policy(
+                            "workers_ai_llama_guard categories must be unique valid S-codes (S1..S14) when set",
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -921,6 +982,21 @@ fn validate_semantic_adapter_limits(
 
 fn default_presidio_language() -> String {
     "en".to_string()
+}
+
+fn default_workers_ai_llama_guard_model() -> String {
+    crate::adapters::workers_ai_llama_guard::DEFAULT_MODEL.to_string()
+}
+
+/// Normalize a Llama Guard hazard-category token to its canonical S-code number
+/// (`1..=14`), or `None` if it is not a recognized MLCommons/Llama-Guard-3
+/// S-code. Used to validate + de-duplicate the operator's category allow-list.
+fn normalize_hazard_code(token: &str) -> Option<u8> {
+    token
+        .trim()
+        .strip_prefix(['s', 'S'])
+        .and_then(|digits| digits.parse::<u8>().ok())
+        .filter(|number| (1..=14).contains(number))
 }
 
 const fn default_semantic_score_threshold_percent() -> u8 {

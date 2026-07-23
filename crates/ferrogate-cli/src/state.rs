@@ -46,6 +46,7 @@ use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
     ProviderAttempt, TokenUsage as BillingTokenUsage,
 };
+use ferrogate_cloudflare::CloudflareClient;
 use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_guardrails::{
     apply_content_patches_to_document, validate_content_patch_permissions,
@@ -504,7 +505,12 @@ impl SharedAppState {
             );
         }
         let secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
-        build_guardrail_policy_runtime(revision.clone(), &secret_registry)?;
+        let cloudflare_client = build_cloudflare_client(active.config.cloudflare.as_ref());
+        build_guardrail_policy_runtime(
+            revision.clone(),
+            &secret_registry,
+            cloudflare_client.as_ref(),
+        )?;
         active
             .repositories
             .insert_guardrail_policy_revision(stored_guardrail_policy_revision(&revision)?)?;
@@ -531,7 +537,8 @@ impl SharedAppState {
             })?;
         let policy = deserialize_guardrail_policy_revision(&stored)?;
         let secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
-        build_guardrail_policy_runtime(policy, &secret_registry)?;
+        let cloudflare_client = build_cloudflare_client(active.config.cloudflare.as_ref());
+        build_guardrail_policy_runtime(policy, &secret_registry, cloudflare_client.as_ref())?;
         let transition = active.repositories.activate_guardrail_policy_revision(
             policy_id,
             revision,
@@ -4368,6 +4375,11 @@ impl AppState {
 
         let policy_engine = build_policy_engine(&config.policies);
         let guardrail_secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
+        // Shared Cloudflare client (#405), built once from the optional
+        // `[cloudflare]` block and threaded into every guardrail detector
+        // construction so the opt-in workers_ai_llama_guard detector (#430) can
+        // be selected. `None` when Cloudflare is not configured.
+        let cloudflare_client = build_cloudflare_client(config.cloudflare.as_ref());
         let mut guardrail_policies = config
             .guardrails
             .iter()
@@ -4375,7 +4387,11 @@ impl AppState {
             .map(compile_static_guardrail_policy)
             .map(|revision| {
                 revision.and_then(|revision| {
-                    build_guardrail_policy_runtime(revision, &guardrail_secret_registry)
+                    build_guardrail_policy_runtime(
+                        revision,
+                        &guardrail_secret_registry,
+                        cloudflare_client.as_ref(),
+                    )
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -4406,6 +4422,7 @@ impl AppState {
             guardrail_policies.push(build_guardrail_policy_runtime(
                 revision,
                 &guardrail_secret_registry,
+                cloudflare_client.as_ref(),
             )?);
         }
         guardrail_policies.sort_by(|left, right| {
@@ -6062,9 +6079,33 @@ fn stored_guardrail_policy_revision(
     })
 }
 
+/// Build the process-shared Cloudflare API client from the optional
+/// `[cloudflare]` block (#405). `None` means Cloudflare is not configured, which
+/// the guardrail detector construction treats as "workers_ai_llama_guard
+/// unavailable". A malformed transport build degrades to `None` (logged) rather
+/// than failing gateway startup, mirroring the other optional integrations.
+fn build_cloudflare_client(
+    config: Option<&ferrogate_cloudflare::CloudflareConfig>,
+) -> Option<Arc<CloudflareClient>> {
+    let config = config?;
+    let resolver = Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env());
+    match CloudflareClient::new(config.clone(), resolver) {
+        Ok(client) => Some(Arc::new(client)),
+        Err(error) => {
+            warn!(
+                error = %error,
+                "failed to build shared Cloudflare client from [cloudflare]; \
+                 workers_ai_llama_guard detector will be unavailable"
+            );
+            None
+        }
+    }
+}
+
 fn build_guardrail_policy_runtime(
     revision: PolicyRevision,
     secret_registry: &ferrogate_secrets::SecretResolverRegistry,
+    cloudflare_client: Option<&Arc<CloudflareClient>>,
 ) -> anyhow::Result<GuardrailPolicyRuntime> {
     revision.validate().map_err(|error| {
         anyhow::anyhow!(
@@ -6092,6 +6133,7 @@ fn build_guardrail_policy_runtime(
                     &check.sources,
                     &check.detector,
                     secret_registry,
+                    cloudflare_client,
                 )?,
                 fallback_detector: check
                     .fallback_detector
@@ -6103,6 +6145,7 @@ fn build_guardrail_policy_runtime(
                             &check.sources,
                             detector,
                             secret_registry,
+                            cloudflare_client,
                         )
                     })
                     .transpose()?,
@@ -6122,6 +6165,7 @@ fn guardrail_detector_evidence_metadata(
         DetectorDefinition::LlmGuardPromptInjection { .. } => {
             "llm_guard_prompt_injection".to_string()
         }
+        DetectorDefinition::WorkersAiLlamaGuard { .. } => "workers_ai_llama_guard".to_string(),
     };
     let serialized = serde_json::to_vec(definition)?;
     let digest = Sha256::digest(serialized);
@@ -6133,6 +6177,7 @@ fn build_guardrail_detector(
     sources: &[ferrogate_guardrails::ContentSource],
     definition: &DetectorDefinition,
     secret_registry: &ferrogate_secrets::SecretResolverRegistry,
+    cloudflare_client: Option<&Arc<CloudflareClient>>,
 ) -> anyhow::Result<Arc<dyn GuardrailDetector>> {
     if let DetectorDefinition::Local {
         keywords,
@@ -6291,6 +6336,39 @@ fn build_guardrail_detector(
                     bearer_token,
                     fingerprint_key,
                 },
+            )
+            .map_err(init_error)?;
+            Ok(Arc::new(detector))
+        }
+        DetectorDefinition::WorkersAiLlamaGuard {
+            model,
+            categories,
+            timeout_ms,
+            max_payload_bytes,
+            fingerprint_secret_ref,
+        } => {
+            // OPT-IN (#405/#430): the detector needs the shared Cloudflare
+            // client (account id + Workers-AI token). Absent a `[cloudflare]`
+            // block the client is `None`, so the detector is unavailable with a
+            // clear error rather than a panic.
+            let client = cloudflare_client.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to initialize guardrail {policy_id}/{check_id}: \
+                     workers_ai_llama_guard detector requires a configured [cloudflare] block"
+                )
+            })?;
+            let fingerprint_key = resolve_secret(fingerprint_secret_ref)?;
+            let detector = ferrogate_guardrails::WorkersAiLlamaGuardDetector::new(
+                ferrogate_guardrails::WorkersAiLlamaGuardConfig {
+                    id: format!("{policy_id}/{check_id}"),
+                    model: model.clone(),
+                    categories: categories.clone(),
+                    timeout: Duration::from_millis(*timeout_ms),
+                    max_payload_bytes: *max_payload_bytes,
+                    supported_sources: sources.to_vec(),
+                    fingerprint_key,
+                },
+                Arc::clone(client),
             )
             .map_err(init_error)?;
             Ok(Arc::new(detector))
@@ -7204,3 +7282,7 @@ mod state_billing_outbox_test;
 #[cfg(test)]
 #[path = "state_reload_test.rs"]
 mod state_reload_test;
+
+#[cfg(test)]
+#[path = "state_workers_ai_llama_guard_test.rs"]
+mod state_workers_ai_llama_guard_test;

@@ -406,3 +406,85 @@ fn model_content_ctx() -> PolicySelectionContext<'static> {
         managed_action: None,
     }
 }
+
+#[test]
+fn workers_ai_llama_guard_definition_round_trips_and_defaults() {
+    // #430: operators select the detector by `kind = "workers_ai_llama_guard"`.
+    // The model has a sensible default; categories are optional.
+    let detector: DetectorDefinition = serde_json::from_str(
+        r#"{"kind":"workers_ai_llama_guard","fingerprint_secret_ref":"env://FP"}"#,
+    )
+    .unwrap();
+    match &detector {
+        DetectorDefinition::WorkersAiLlamaGuard {
+            model,
+            categories,
+            fingerprint_secret_ref,
+            ..
+        } => {
+            assert!(model.starts_with("@cf/meta/llama-guard"));
+            assert!(categories.is_none());
+            assert_eq!(fingerprint_secret_ref, "env://FP");
+        }
+        other => panic!("unexpected variant: {other:?}"),
+    }
+    assert!(detector.validate().is_ok());
+    // Round-trips through serialization.
+    let json = serde_json::to_string(&detector).unwrap();
+    let back: DetectorDefinition = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, detector);
+}
+
+#[test]
+fn workers_ai_llama_guard_validate_accepts_valid_categories() {
+    let detector = DetectorDefinition::WorkersAiLlamaGuard {
+        model: "@cf/meta/llama-guard-3-8b".to_string(),
+        categories: Some(vec!["S2".to_string(), "S9".to_string()]),
+        timeout_ms: 3_000,
+        max_payload_bytes: 1 << 20,
+        fingerprint_secret_ref: "env://FP".to_string(),
+    };
+    assert!(detector.validate().is_ok());
+}
+
+#[test]
+fn workers_ai_llama_guard_validate_rejects_bad_model_and_categories() {
+    // Non-llama-guard model is rejected.
+    let bad_model = DetectorDefinition::WorkersAiLlamaGuard {
+        model: "@cf/openai/whisper".to_string(),
+        categories: None,
+        timeout_ms: 3_000,
+        max_payload_bytes: 1 << 20,
+        fingerprint_secret_ref: "env://FP".to_string(),
+    };
+    assert!(bad_model.validate().is_err());
+
+    // Duplicate / invalid S-codes are rejected.
+    let bad_categories = DetectorDefinition::WorkersAiLlamaGuard {
+        model: "@cf/meta/llama-guard-3-8b".to_string(),
+        categories: Some(vec!["S2".to_string(), "s2".to_string()]),
+        timeout_ms: 3_000,
+        max_payload_bytes: 1 << 20,
+        fingerprint_secret_ref: "env://FP".to_string(),
+    };
+    assert!(bad_categories.validate().is_err());
+
+    let out_of_range = DetectorDefinition::WorkersAiLlamaGuard {
+        model: "@cf/meta/llama-guard-3-8b".to_string(),
+        categories: Some(vec!["S99".to_string()]),
+        timeout_ms: 3_000,
+        max_payload_bytes: 1 << 20,
+        fingerprint_secret_ref: "env://FP".to_string(),
+    };
+    assert!(out_of_range.validate().is_err());
+
+    // Empty fingerprint_secret_ref is rejected (keyed evidence is mandatory).
+    let missing_fp = DetectorDefinition::WorkersAiLlamaGuard {
+        model: "@cf/meta/llama-guard-3-8b".to_string(),
+        categories: None,
+        timeout_ms: 3_000,
+        max_payload_bytes: 1 << 20,
+        fingerprint_secret_ref: "  ".to_string(),
+    };
+    assert!(missing_fp.validate().is_err());
+}
