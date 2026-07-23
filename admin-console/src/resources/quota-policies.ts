@@ -50,17 +50,48 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
         { labelKey: "resource.quotaPolicies.option.scopeType.key", value: "key" },
       ],
     },
-    // scope_id targets a different entity kind per scope_type (tenant / project
-    // / workspace / key). The shared reference config binds a single static
-    // `target`, so a scope-kind-driven picker needs a config extension (target
-    // selected by a sibling field) rather than a fork — tracked as remaining
-    // #341 work; left as free-text for now (#341).
+    // scope_id targets a different entity kind per scope_type (#341). The scoped
+    // reference switches the picker's target by the sibling `scope_type` value,
+    // so operators pick a real tenant/project/workspace/key row (with enough
+    // context to tell duplicates apart) and cannot submit an ID from the wrong
+    // scope. Changing scope_type clears any stale selection. It stays
+    // `createOnly` — a policy's scope is fixed at creation (the PUT path is
+    // `${scope_type}/${scope_id}`).
     {
       name: "scope_id",
       labelKey: "resource.quotaPolicies.field.scopeId",
-      type: "text",
+      type: "entity",
       required: true,
       createOnly: true,
+      scopedReference: {
+        field: "scope_type",
+        byValue: {
+          tenant: {
+            target: "tenant-accounts",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["slug"],
+          },
+          project: {
+            target: "projects",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["slug", "tenant_id"],
+          },
+          workspace: {
+            target: "workspaces",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["slug", "project_id"],
+          },
+          key: {
+            target: "virtual-keys",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["key_prefix", "workspace_id"],
+          },
+        },
+      },
     },
     {
       name: "model_allowlist",

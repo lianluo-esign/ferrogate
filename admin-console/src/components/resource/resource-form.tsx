@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   clearDependentReferenceValues,
+  resolveActiveReference,
   resolveConfigText,
   resolveOptionalConfigText,
   type FieldConfig,
@@ -177,17 +178,48 @@ export function ResourceForm({
               </SelectContent>
             </Select>
           ) : field.type === "entity" || field.type === "entities" ? (
-            <EntityReferencePicker
-              id={field.name}
-              label={fieldLabel}
-              reference={field.reference}
-              value={values[field.name]}
-              dependencyValues={values}
-              multiple={field.type === "entities"}
-              required={field.required}
-              placeholder={fieldPlaceholder}
-              onChange={(value) => setField(field.name, value)}
-            />
+            (() => {
+              // A scoped reference resolves its target kind from a sibling field
+              // (#341); until that sibling is chosen there is nothing to list, so
+              // the picker is disabled with a "select {scope} first" prompt that
+              // mirrors the picker's own missing-dependency affordance.
+              const activeReference = resolveActiveReference(field, values);
+              if (!activeReference) {
+                const scopeField = fields.find(
+                  (candidate) => candidate.name === field.scopedReference?.field,
+                );
+                const scopeLabel = scopeField
+                  ? resolveConfigText(t, scopeField.labelKey, scopeField.label)
+                  : "";
+                return (
+                  <Button
+                    id={field.name}
+                    type="button"
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={false}
+                    aria-required={field.required}
+                    disabled
+                    className="h-auto min-h-10 w-full justify-start px-3 py-2 font-normal text-muted-foreground"
+                  >
+                    {t("resource.picker.selectDependencyFirst", { name: scopeLabel })}
+                  </Button>
+                );
+              }
+              return (
+                <EntityReferencePicker
+                  id={field.name}
+                  label={fieldLabel}
+                  reference={activeReference}
+                  value={values[field.name]}
+                  dependencyValues={values}
+                  multiple={field.type === "entities"}
+                  required={field.required}
+                  placeholder={fieldPlaceholder}
+                  onChange={(value) => setField(field.name, value)}
+                />
+              );
+            })()
           ) : field.type === "textarea" || field.type === "json" ? (
             <Textarea
               id={field.name}

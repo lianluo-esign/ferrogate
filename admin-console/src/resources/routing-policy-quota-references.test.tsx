@@ -28,6 +28,12 @@ const projects = [
   { id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" },
 ];
 const tenants = [{ id: "tenant-1", name: "Acme", slug: "acme" }];
+const workspaces = [
+  { id: "workspace-1", project_id: "project-1", name: "Prod workspace", slug: "prod-ws" },
+];
+const virtualKeys = [
+  { id: "vk-1", name: "CI key", key_prefix: "sk-ci", workspace_id: "workspace-1" },
+];
 
 function installCatalogHandlers() {
   server.use(
@@ -40,6 +46,12 @@ function installCatalogHandlers() {
     http.get(gatewayUrl("/admin/v1/projects"), () =>
       HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
     ),
+    http.get(gatewayUrl("/admin/v1/workspaces"), () =>
+      HttpResponse.json({ object: "list", data: workspaces, total: workspaces.length, offset: 0, limit: 20 }),
+    ),
+    http.get(gatewayUrl("/admin/v1/virtual-keys"), () =>
+      HttpResponse.json({ object: "list", data: virtualKeys }),
+    ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
       HttpResponse.json({ object: "list", data: tenants, total: tenants.length, offset: 0, limit: 20 }),
     ),
@@ -47,6 +59,12 @@ function installCatalogHandlers() {
       const tenant = tenants.find((item) => item.id === params.id);
       return tenant
         ? HttpResponse.json({ object: "tenant", tenant })
+        : HttpResponse.json({ error: { code: "not_found", message: "x" } }, { status: 404 });
+    }),
+    http.get(gatewayUrl("/admin/v1/projects/:id"), ({ params }) => {
+      const project = projects.find((item) => item.id === params.id);
+      return project
+        ? HttpResponse.json({ object: "project", project })
         : HttpResponse.json({ error: { code: "not_found", message: "x" } }, { status: 404 });
     }),
   );
@@ -126,6 +144,71 @@ describe("routing/policy/quota entity-reference conversions", () => {
         expect.objectContaining({ model_allowlist: ["claude-sonnet"] }),
       ),
     );
+  });
+
+  it("quota scope_id switches its picker target by scope_type and clears the stale value on change", async () => {
+    installCatalogHandlers();
+    const user = userEvent.setup();
+    const onSubmit = renderForm(quotaPoliciesConfig.fields);
+
+    // Before a scope kind is chosen the scope target is a disabled prompt, not a
+    // free-text box that could accept an ID from any scope.
+    const scopePrompt = screen.getByRole("combobox", { name: /Scope ID/ });
+    expect(scopePrompt).toBeDisabled();
+    expect(scopePrompt).toHaveTextContent("Select Scope type first");
+
+    // Project scope → the picker lists projects.
+    await user.click(screen.getByRole("combobox", { name: /Scope type/ }));
+    await user.click(await screen.findByRole("option", { name: "Project" }));
+    await user.click(screen.getByRole("combobox", { name: /Scope ID/ }));
+    await user.click(await screen.findByRole("option", { name: /Production/ }));
+    expect(
+      await screen.findByRole("list", { name: "Selected Scope ID" }),
+    ).toHaveTextContent("Production");
+
+    // Switching to Tenant scope clears the project selection (no wrong-scope
+    // leak) and re-targets the picker at tenant accounts.
+    await user.click(screen.getByRole("combobox", { name: /Scope type/ }));
+    await user.click(await screen.findByRole("option", { name: "Tenant" }));
+    expect(
+      screen.queryByRole("list", { name: "Selected Scope ID" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: /Scope ID/ }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ scope_type: "tenant", scope_id: "tenant-1" }),
+      ),
+    );
+  });
+
+  it("quota scope_id targets virtual keys when scope_type is key", async () => {
+    installCatalogHandlers();
+    const user = userEvent.setup();
+    renderForm(quotaPoliciesConfig.fields);
+
+    await user.click(screen.getByRole("combobox", { name: /Scope type/ }));
+    await user.click(await screen.findByRole("option", { name: "Key" }));
+    await user.click(screen.getByRole("combobox", { name: /Scope ID/ }));
+    // The key catalog surfaces the human name plus its prefix, not just the ID.
+    expect(await screen.findByRole("option", { name: /CI key/ })).toBeVisible();
+  });
+
+  it("renders an unresolved-reference badge for a model allowlist ID missing from the catalog", async () => {
+    installCatalogHandlers();
+    renderForm(quotaPoliciesConfig.fields, {
+      ...defaultFieldValues(quotaPoliciesConfig.fields),
+      scope_type: "tenant",
+      scope_id: "tenant-1",
+      model_allowlist: ["ghost-model"],
+    });
+
+    const selected = await screen.findByRole("list", { name: "Selected Model allowlist" });
+    // The stale/unknown reference stays visible with a badge, never silently dropped.
+    await waitFor(() => expect(selected).toHaveTextContent("Unresolved reference"));
+    expect(selected).toHaveTextContent("ghost-model");
   });
 
   it("prompt template model field renders a single-select model picker", async () => {

@@ -88,6 +88,15 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
   providers: {
     listPath: "/admin/v1/providers",
   },
+  // #341: quota/policy scope pickers target a virtual key by its canonical `id`
+  // when scope_type is `key`. The list endpoint returns the full key set with no
+  // server-side search/offset (same shape as the routing catalogs above), so
+  // this adapter has no detailPath — `hydrateEntityReference` resolves an
+  // existing value from the list response. Only non-secret metadata (name,
+  // prefix) is surfaced; the plaintext secret is never listed.
+  "virtual-keys": {
+    listPath: "/admin/v1/virtual-keys",
+  },
 };
 
 function adapterFor(

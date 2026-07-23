@@ -53,7 +53,8 @@ export type EntityReferenceTarget =
   | "permissions"
   | "models"
   | "providers"
-  | "plans";
+  | "plans"
+  | "virtual-keys";
 
 export interface FieldOption {
   /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
@@ -93,6 +94,22 @@ export interface EntityReferenceConfig {
   allowRawValue?: boolean;
 }
 
+/**
+ * Scope-kind-driven reference (#341): the target entity kind is chosen at
+ * render time by a sibling field's value rather than being fixed. Quota and
+ * access-policy scope pickers use this so `scope_id` targets a tenant, project,
+ * workspace, or key depending on the selected `scope_type`. Because the picker
+ * only ever lists rows of the currently-selected kind, submitting an ID that
+ * belongs to a different scope is structurally impossible, and changing the
+ * scope kind clears the stale selection (see {@link clearDependentReferenceValues}).
+ */
+export interface ScopedEntityReference {
+  /** Sibling field whose value selects the active target reference. */
+  field: string;
+  /** Reference config keyed by the sibling field's value; an unmatched value disables the picker. */
+  byValue: Record<string, EntityReferenceConfig>;
+}
+
 interface FieldConfigBase {
   name: string;
   /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
@@ -121,7 +138,13 @@ export interface ScalarFieldConfig extends FieldConfigBase {
 
 export interface EntityReferenceFieldConfig extends FieldConfigBase {
   type: "entity" | "entities";
-  reference: EntityReferenceConfig;
+  /** Fixed target reference. Mutually exclusive with `scopedReference`. */
+  reference?: EntityReferenceConfig;
+  /**
+   * Scope-kind-driven target selected by a sibling field's value (#341).
+   * Exactly one of `reference` / `scopedReference` must be set on a field.
+   */
+  scopedReference?: ScopedEntityReference;
   options?: never;
 }
 
@@ -274,6 +297,35 @@ export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknow
   return values;
 }
 
+/**
+ * Resolve the active reference for an entity field under the current form
+ * values (#341). Fixed-target fields return their static `reference`; scoped
+ * fields return the per-value reference chosen by their sibling field, or
+ * `undefined` when the sibling has no (or an unmatched) value.
+ */
+export function resolveActiveReference(
+  field: EntityReferenceFieldConfig,
+  values: Record<string, unknown>,
+): EntityReferenceConfig | undefined {
+  if (field.scopedReference) {
+    const key = String(values[field.scopedReference.field] ?? "");
+    return field.scopedReference.byValue[key];
+  }
+  return field.reference;
+}
+
+/** True when a field's selection depends on the given parent field. */
+function referenceDependsOn(field: FieldConfig, parent: string): boolean {
+  if (field.type !== "entity" && field.type !== "entities") return false;
+  if (field.scopedReference?.field === parent) return true;
+  if (field.reference?.dependencies?.some((dependency) => dependency.field === parent)) {
+    return true;
+  }
+  return Object.values(field.scopedReference?.byValue ?? {}).some((reference) =>
+    reference.dependencies?.some((dependency) => dependency.field === parent),
+  );
+}
+
 export function clearDependentReferenceValues(
   fields: FieldConfig[],
   values: Record<string, unknown>,
@@ -286,10 +338,7 @@ export function clearDependentReferenceValues(
   while (pending.length > 0) {
     const parent = pending.shift()!;
     for (const field of fields) {
-      if (
-        cleared.has(field.name) ||
-        !field.reference?.dependencies?.some((dependency) => dependency.field === parent)
-      ) {
+      if (cleared.has(field.name) || !referenceDependsOn(field, parent)) {
         continue;
       }
       next[field.name] = field.type === "entities" ? [] : "";

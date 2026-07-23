@@ -12,6 +12,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -400,24 +401,45 @@ export default function GuardrailPolicyDetailPage() {
               <Label htmlFor="dry-run-model">
                 {t("page.guardrailPolicyDetail.dryRun.model")}
               </Label>
-              <Input
+              {/* #341: the dry-run target model reuses the shared reference
+                  picker so operators plan against a real routing-catalog model
+                  (searchable, human labels) instead of typing a raw name. An
+                  existing value hydrates to its label; an unresolved one stays
+                  visible with its badge. */}
+              <EntityReferencePicker
                 id="dry-run-model"
+                label={t("page.guardrailPolicyDetail.dryRun.model")}
+                reference={{
+                  target: "models",
+                  valueKey: "name",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["provider", "provider_model"],
+                }}
                 value={dryRunModel}
-                onChange={(event) => setDryRunModel(event.target.value)}
-                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example model id, identical in every locale
-                placeholder="gpt-4o"
+                dependencyValues={{}}
+                onChange={(value) =>
+                  setDryRunModel(typeof value === "string" ? value : (value[0] ?? ""))
+                }
               />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="dry-run-provider">
                 {t("page.guardrailPolicyDetail.dryRun.provider")}
               </Label>
-              <Input
+              <EntityReferencePicker
                 id="dry-run-provider"
+                label={t("page.guardrailPolicyDetail.dryRun.provider")}
+                reference={{
+                  target: "providers",
+                  valueKey: "name",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["kind", "base_url"],
+                }}
                 value={dryRunProvider}
-                onChange={(event) => setDryRunProvider(event.target.value)}
-                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example provider id, identical in every locale
-                placeholder="openai"
+                dependencyValues={{}}
+                onChange={(value) =>
+                  setDryRunProvider(typeof value === "string" ? value : (value[0] ?? ""))
+                }
               />
             </div>
             <div className="grid gap-2 sm:col-span-2">
