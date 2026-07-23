@@ -85,6 +85,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { titleKey: "nav.item.agentRuns", url: APP_ROUTES.agentRuns },
       { titleKey: "nav.item.agentSchedules", url: APP_ROUTES.agentSchedules },
       { titleKey: "nav.item.assets", url: APP_ROUTES.assets },
+      { titleKey: "nav.item.withheldAssets", url: APP_ROUTES.withheldAssets },
       { titleKey: "nav.item.workerRegistrations", url: "/app/self-hosted-workers" },
       { titleKey: "nav.item.managedWorkerPools", url: "/app/managed-workers" },
       { titleKey: "nav.item.selfHostedLifecycle", url: APP_ROUTES.selfHostedWorkerOperations },

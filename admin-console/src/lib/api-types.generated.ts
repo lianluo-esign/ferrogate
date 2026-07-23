@@ -1970,6 +1970,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/tenant-accounts/{tenant_id}/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Assign a subscription plan to a tenant. */
+        put: operations["assignTenantPlan"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/projects": {
         parameters: {
             query?: never;
@@ -2303,6 +2320,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assets/withheld": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List withheld (pending_scan/quarantined) assets for operators.
+         * @description Operator-only inverse of GET /v1/assets: returns the assets the ordinary list/manifest/resolution paths hide from consumers (issue #366), each row carrying its durable visibility state and the screening evidence (scan/signature/approval + verification manifest) recorded at push/commit time. Read-only; use POST /v1/assets/{asset_type}/{name}/{version}/visibility to promote or quarantine. Tenant-scoped and paginated.
+         */
+        get: operations["listWithheldAssets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/assets/{asset_type}": {
         parameters: {
             query?: never;
@@ -2486,6 +2523,23 @@ export interface paths {
         get: operations["listBillingOutboxDeadLetters"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/billing-outbox-dead-letters/{report_id}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replay a dead-lettered billing outbox record. */
+        post: operations["replayBillingOutboxDeadLetter"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2738,6 +2792,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assets/{asset_type}/{name}/{version}/visibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Promote a pending_scan asset after an out-of-band scan.
+         * @description Flips a withheld pending_scan asset version to visible (clean verdict) or quarantined (flagged verdict) after a completed out-of-band/async scan. The transition is a fail-closed compare-and-swap that fires only from the pending_scan state: an already-visible or already-quarantined asset returns 409 and a missing asset returns 404, so a completed scan can never silently re-promote a terminal asset. An unknown scan_outcome or missing evidence returns 400 and never promotes. Every attempt (committed or rejected) emits a durable audit event linking the promotion to the scan outcome, evidence, asset id, tenant, and request/trace id. Select a platform variant with the platform query parameter. Asset hosting requires the tenant plan flag or assets.host permission.
+         */
+        post: operations["promoteAssetVisibility"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/assets/presign/upload/{asset_type}/{name}/{version}": {
         parameters: {
             query?: never;
@@ -2769,7 +2843,7 @@ export interface paths {
         put?: never;
         /**
          * Verify and commit a presigned asset upload.
-         * @description Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and applies the built-in asset content/type validation. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.
+         * @description Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and then runs the SAME full trust screening the inline push applies over the final verified bytes: detached-signature verification, the cross-tenant approval gate, the configured malware scanner, and the built-in content/type policy (issue #366). Invalid signature, missing approval, and scanner reject/unavailable fail closed with no durable write; a pending/quarantined scan verdict is persisted with an explicit visibility state and withheld from every list, manifest, resolution, and download surface until promoted clean. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.
          */
         post: operations["commitAssetUpload"];
         delete?: never;
@@ -2790,6 +2864,26 @@ export interface paths {
          * @description Returns a short-lived direct GET URL plus the stored size, content type, and SHA-256 for client verification. Inline assets return 409 and must be fetched through the ordinary asset GET route. URL issuance is audited and metered as egress.
          */
         get: operations["getAssetDownloadUrl"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/observed-agent-activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List tenant-scoped Unknown (unattributed virtual-API-key) agent activity.
+         * @description Presents traffic authenticated by a durable virtual API key that carries no verified managed-worker session, self-hosted worker/run, or agent-run identity as a third presentation/source category (source=virtual_api_key, identity_status=unattributed, display_name=Unknown). It is NOT a WorkerType and NOT a persistent agent entity: the stable identity is the observed key activity, and it never claims how many real agents share the key. status=running is derived from a recent-activity window (running_ttl_seconds) over already-recorded evidence; expiry reports inactive without fabricating a stop event.
+         */
+        get: operations["listAdminObservedAgentActivity"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3617,6 +3711,9 @@ export interface components {
             /** @constant */
             object: "list";
             data: components["schemas"]["AdminProvider"][];
+            total?: number;
+            offset?: number;
+            limit?: number;
         };
         AdminList_ProviderHealthCheck: {
             /** @constant */
@@ -3655,6 +3752,9 @@ export interface components {
             /** @constant */
             object: "list";
             data: components["schemas"]["Model"][];
+            total?: number;
+            offset?: number;
+            limit?: number;
         };
         AdminList_AdminApiKey: {
             /** @constant */
@@ -5211,6 +5311,9 @@ export interface components {
             object: "tenant_account";
             tenant: components["schemas"]["AdminTenantAccount"];
         };
+        AdminTenantPlanAssignmentRequest: {
+            plan_id: string;
+        };
         AdminTenantResolvedDefaults: {
             object: string;
             tenant_id: string;
@@ -5421,6 +5524,17 @@ export interface components {
             object: "plan";
             plan: components["schemas"]["AdminPlan"];
         };
+        AdminBillingOutboxReplayResponse: {
+            /** @constant */
+            object: "billing_outbox_dead_letter_replay";
+            id: string;
+            replayed: boolean;
+            dead_lettered: boolean;
+            /** Format: int64 */
+            attempts: number;
+            /** Format: int64 */
+            next_attempt_unix: number;
+        };
         AdminWallet: {
             tenant_id: string;
             /** Format: int64 */
@@ -5505,6 +5619,34 @@ export interface components {
             created_at_unix: number;
             /** Format: int64 */
             updated_at_unix: number;
+        };
+        /** @description One withheld (pending_scan/quarantined) asset for the operator-only inspection surface (issue #379). Carries the ordinary AssetSummary metadata plus the durable visibility state and the screening evidence recorded at push/commit time (#366). */
+        WithheldAssetSummary: {
+            id: string;
+            asset_type: string;
+            name: string;
+            version: string;
+            content_type: string;
+            /** @description Lowercase SHA-256 digest of the exact stored bytes. */
+            content_hash: string;
+            /**
+             * Format: int64
+             * @description Authoritative stored byte count.
+             */
+            size_bytes: number;
+            /** @description True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized. */
+            storage_backed: boolean;
+            /** Format: int64 */
+            created_at_unix: number;
+            /** Format: int64 */
+            updated_at_unix: number;
+            /**
+             * @description Durable trust-screening state on the asset row. A visible asset is never listed here.
+             * @enum {string}
+             */
+            visibility: "pending_scan" | "quarantined";
+            /** @description Screening evidence detail (scan outcome, signature status, cross-tenant approval state, verification manifest) captured on the asset's push/commit audit event. Omitted when that audit row is no longer retained. */
+            screening_evidence?: string;
         };
         AssetMutationResponse: {
             /** @constant */
@@ -5686,6 +5828,36 @@ export interface components {
             object: "list";
             data: components["schemas"]["AssetSummary"][];
         };
+        /** @description Completed out-of-band scan result driving a pending_scan promotion (issue #378). */
+        AssetVisibilityPromotionRequest: {
+            /**
+             * @description Terminal scan verdict. clean (or visible) promotes to visible; quarantined (or quarantine/infected) withholds permanently. Any other value is rejected fail-closed and never promotes.
+             * @enum {string}
+             */
+            scan_outcome: "clean" | "visible" | "quarantined" | "quarantine" | "infected";
+            /** @description Durable, human-readable justification (scanner id, verdict detail, ticket) recorded verbatim in the promotion audit event. Required and non-empty. */
+            evidence: string;
+            /** @description Optional identifier of the out-of-band scanner/backend that produced the verdict, echoed into the audit evidence. */
+            scanner?: string;
+        };
+        /** @description Result of a completed-scan visibility promotion (issue #378). */
+        AssetVisibilityPromotionResponse: {
+            /** @constant */
+            object: "asset.visibility_promotion";
+            /** @description Variant-aware stored asset id that was promoted. */
+            id: string;
+            /**
+             * @description The durable terminal visibility the gateway persisted.
+             * @enum {string}
+             */
+            visibility: "visible" | "quarantined";
+            /**
+             * @description The terminal target the supplied scan_outcome resolved to.
+             * @enum {string}
+             */
+            scan_outcome: "visible" | "quarantined";
+            asset: components["schemas"]["AssetSummary"];
+        };
         AssetPresignUploadIntentRequest: {
             /** Format: int64 */
             size_bytes: number;
@@ -5701,6 +5873,22 @@ export interface components {
             sha256: string;
             /** @description Stored content type; null or omission defaults to application/octet-stream. */
             content_type?: string | null;
+            /** @description Detached minisign file or base64 Ed25519 signature material over the uploaded bytes. Screened identically to the inline x-asset-signature header; omission is an unsigned publish (rejected only when the tenant requires signatures). */
+            signature?: string | null;
+            /**
+             * @description Detached signature encoding; defaults to minisign when a signature is present without a format.
+             * @enum {string|null}
+             */
+            signature_format?: "minisign" | "ed25519" | "cosign" | null;
+            /** @description Publisher key hint for bare Ed25519 signatures. */
+            signature_key_id?: string | null;
+            /**
+             * @description Publish visibility. Cross-tenant values require a durable approval record. Omission defaults to tenant-private.
+             * @enum {string|null}
+             */
+            visibility?: "private" | "tenant" | "tenant_private" | "shared" | "cross_tenant" | "cross_tenant_shared" | "public" | null;
+            /** @description Durable tool-approval record used for cross-tenant publication; its status is read server-side, never client-asserted. */
+            approval_id?: string | null;
         };
         AssetPresignUploadIntentResponse: {
             /** @constant */
@@ -5765,6 +5953,170 @@ export interface components {
         DeleteWorkspaceResponse: components["schemas"]["DeleteResponse"] & {
             /** @constant */
             object?: "workspace";
+        };
+        AdminObservedAgentActivityList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminObservedAgentActivity"][];
+            total: number;
+            offset: number;
+            limit: number;
+        };
+        /** @description One tenant/key-scoped Unknown activity row observed through a durable virtual API key. */
+        AdminObservedAgentActivity: {
+            /** @description Stable identity of the observed activity: observed:<tenant_id>:<api_key_id>. Not a per-process/agent UUID. */
+            id: string;
+            /** @constant */
+            source: "virtual_api_key";
+            /** @constant */
+            identity_status: "unattributed";
+            /** @constant */
+            display_name: "Unknown";
+            /** @enum {string} */
+            status: "running" | "inactive";
+            /** @constant */
+            status_basis: "recent_api_key_activity";
+            tenant_id: string;
+            project_id?: string;
+            workspace_id?: string;
+            api_key_id: string;
+            /** @description Redacted operator hint (the virtual key's name) the tenant may already view. Never the inferred agent name. */
+            credential_name?: string;
+            first_seen_at_unix: number;
+            last_seen_at_unix: number;
+            running_ttl_seconds: number;
+            evidence: components["schemas"]["AdminObservedAgentActivityEvidence"];
+        };
+        /** @description Inspectable evidence justifying the row's derived status. */
+        AdminObservedAgentActivityEvidence: {
+            /** @constant */
+            evidence_source: "request_logs";
+            request_count: number;
+            seconds_since_last_seen: number;
+            running_ttl_seconds: number;
+            within_running_window: boolean;
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            cost_usd?: number;
+            usage_evidence_available: boolean;
+            reason: string;
+        };
+        /**
+         * @description A recognised Solana network, encoded as its canonical CAIP-2 identifier. A mainnet pin is always explicit and self-describing on the wire; a token symbol such as USDC is never accepted as a network.
+         * @example solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+         * @enum {string}
+         */
+        X402PolicyNetwork: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" | "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+        /**
+         * @description Rounding direction applied when an atomic->credits conversion does not divide evenly. 'up' (ceil) is the safe default for cap enforcement because it never under-counts a spend.
+         * @enum {string}
+         */
+        X402Rounding: "down" | "up";
+        /** @description Checked-integer conversion from atomic token units to internal credits: credits = round(atomic * numerator / denominator). A zero numerator or denominator is an impossible ratio and is rejected by config validation. */
+        X402ConversionRule: {
+            /** Format: int64 */
+            numerator: number;
+            /** Format: int64 */
+            denominator: number;
+            rounding: components["schemas"]["X402Rounding"];
+            /** @description Opaque operator-set version tag for this ratio, persisted into every conversion snapshot. */
+            version: string;
+        };
+        /** @description One explicitly allowlisted (network, mint) pair. The mint is a canonical base58 SPL mint address, never a token symbol. */
+        X402AllowedAsset: {
+            network: components["schemas"]["X402PolicyNetwork"];
+            /** @description Canonical base58 SPL mint address (validated 32 bytes). */
+            mint: string;
+        };
+        /** @description A canonicalised resource rule: which HTTPS origin + path prefix a payment may unlock. Both the challenge resource and the already-authorized egress URL must match one of these. */
+        X402ResourceRule: {
+            /** @description Canonical origin scheme://host[:port]. Must be https unless allow_insecure_local_resources is set. */
+            origin: string;
+            /** @description Path prefix that gates the origin. '/' allows the whole origin. */
+            path_prefix: string;
+        };
+        /** @description Spend caps, denominated in internal credits except the two atomic bounds which act directly on the on-chain amount. null means uncapped for that dimension; an explicit 0 is rejected by validation. */
+        X402SpendCaps: {
+            /** Format: int64 */
+            max_credits_per_payment?: number | null;
+            /** Format: int64 */
+            max_credits_per_run?: number | null;
+            /** Format: int64 */
+            max_credits_per_window?: number | null;
+            /** Format: int64 */
+            window_seconds?: number | null;
+            /** Format: int64 */
+            max_atomic_per_payment?: number | null;
+            /** Format: int64 */
+            min_atomic_per_payment?: number | null;
+        };
+        /** @description Approval-mode policy: payments whose computed credits exceed the threshold require explicit out-of-band approval instead of auto-allow. null never requires approval. */
+        X402ApprovalPolicy: {
+            /** Format: int64 */
+            threshold_credits?: number | null;
+        };
+        /**
+         * @description The typed, disabled-by-default x402 spend policy an operator declares through FerroGate's structured config (issue #351). Parsed and validated into a runtime-evaluable policy; x402 spending is off unless enabled is explicitly true. This is config-in shape only; the runtime never evaluates a policy that failed validation.
+         * @example {
+         *       "enabled": true,
+         *       "revision": 7,
+         *       "allowed_networks": [
+         *         "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+         *       ],
+         *       "allowed_assets": [
+         *         {
+         *           "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+         *           "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+         *         }
+         *       ],
+         *       "allowed_recipients": [
+         *         "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+         *       ],
+         *       "allowed_resources": [
+         *         {
+         *           "origin": "https://api.example.com",
+         *           "path_prefix": "/paid"
+         *         }
+         *       ],
+         *       "caps": {
+         *         "max_credits_per_payment": 1000,
+         *         "max_credits_per_run": 5000,
+         *         "max_credits_per_window": 10000,
+         *         "window_seconds": 3600,
+         *         "max_atomic_per_payment": 2000000,
+         *         "min_atomic_per_payment": 10
+         *       },
+         *       "conversion": {
+         *         "numerator": 1,
+         *         "denominator": 1000,
+         *         "rounding": "up",
+         *         "version": "usdc-devnet-v1"
+         *       },
+         *       "approval": {
+         *         "threshold_credits": 500
+         *       },
+         *       "allow_insecure_local_resources": false
+         *     }
+         */
+        X402SpendPolicy: {
+            /** @description Master switch. x402 spending is OFF unless explicitly true. */
+            enabled: boolean;
+            /**
+             * Format: int64
+             * @description Monotonic policy revision echoed into every decision for audit/diagnostics.
+             */
+            revision: number;
+            allowed_networks: components["schemas"]["X402PolicyNetwork"][];
+            allowed_assets: components["schemas"]["X402AllowedAsset"][];
+            /** @description Explicit recipient (payTo) allowlist, canonical base58. Empty => nothing payable. */
+            allowed_recipients: string[];
+            allowed_resources: components["schemas"]["X402ResourceRule"][];
+            caps: components["schemas"]["X402SpendCaps"];
+            conversion: components["schemas"]["X402ConversionRule"];
+            approval: components["schemas"]["X402ApprovalPolicy"];
+            /** @description Test-only escape hatch permitting http:// resource origins. MUST be false in production. */
+            allow_insecure_local_resources?: boolean;
         };
     };
     responses: {
@@ -6514,7 +6866,12 @@ export interface operations {
     };
     listAdminProviders: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive match against provider name or kind. */
+                search?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -7317,7 +7674,12 @@ export interface operations {
     };
     listAdminModels: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive match against model name, provider, or provider model. */
+                search?: string;
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9983,6 +10345,36 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    assignTenantPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminTenantPlanAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Assign a subscription plan to a tenant. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTenantAccountMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listProjects: {
         parameters: {
             query?: {
@@ -11019,6 +11411,45 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    listWithheldAssets: {
+        parameters: {
+            query?: {
+                /** @description Optional asset family filter (cli_tool, mcp_manifest, skill_bundle, static_site, config_file, or a custom family). */
+                asset_type?: string;
+                /** @description Case-insensitive match against asset id, name, version, asset_type, or visibility. */
+                search?: string;
+                offset?: components["parameters"]["Offset"];
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List withheld (pending_scan/quarantined) assets for operators. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        object: "list";
+                        data: components["schemas"]["WithheldAssetSummary"][];
+                        total?: number;
+                        offset?: number;
+                        limit?: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     listAssetsByType: {
         parameters: {
             query?: never;
@@ -11632,6 +12063,32 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    replayBillingOutboxDeadLetter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Replay a dead-lettered billing outbox record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminBillingOutboxReplayResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
     rotateVirtualKey: {
         parameters: {
             query?: never;
@@ -12122,6 +12579,47 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    promoteAssetVisibility: {
+        parameters: {
+            query?: {
+                /** @description Platform/arch variant key (issue #260), e.g. linux-x86_64. Omit for the default no-variant artifact. */
+                platform?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetVisibilityPromotionRequest"];
+            };
+        };
+        responses: {
+            /** @description The asset was promoted to its terminal visibility. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetVisibilityPromotionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["AssetNotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     createAssetUploadIntent: {
         parameters: {
             query?: never;
@@ -12233,6 +12731,32 @@ export interface operations {
             405: components["responses"]["MethodNotAllowed"];
             409: components["responses"]["AssetConflict"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listAdminObservedAgentActivity: {
+        parameters: {
+            query?: {
+                offset?: components["parameters"]["Offset"];
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated observed unattributed virtual-API-key activity rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminObservedAgentActivityList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }

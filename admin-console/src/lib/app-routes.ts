@@ -1,6 +1,7 @@
 export const APP_ROUTES = {
   dashboard: "/app",
   assets: "/app/assets",
+  withheldAssets: "/app/withheld-assets",
   tenantResolvedDefaults: "/app/tenant-resolved-defaults",
   toolApprovals: "/app/tool-approvals",
   agentRuns: "/app/agent-runs",

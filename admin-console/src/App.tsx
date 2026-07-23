@@ -15,6 +15,7 @@ const LoginPage = lazy(() => import("@/pages/login"));
 const RegisterPage = lazy(() => import("@/pages/register"));
 const DashboardPage = lazy(() => import("@/pages/dashboard"));
 const AssetsPage = lazy(() => import("@/pages/assets"));
+const WithheldAssetsPage = lazy(() => import("@/pages/withheld-assets"));
 const TenantResolvedDefaultsPage = lazy(() => import("@/pages/tenant-resolved-defaults"));
 const ToolApprovalsPage = lazy(() => import("@/pages/tool-approvals"));
 const AgentRunsPage = lazy(() => import("@/pages/agent-runs"));
@@ -78,6 +79,10 @@ function App() {
               <Route element={<AppShell />}>
                 <Route path={APP_ROUTES.dashboard} element={routeElement(DashboardPage)} />
                 <Route path={APP_ROUTES.assets} element={routeElement(AssetsPage)} />
+                <Route
+                  path={APP_ROUTES.withheldAssets}
+                  element={routeElement(WithheldAssetsPage)}
+                />
                 <Route
                   path={APP_ROUTES.tenantResolvedDefaults}
                   element={routeElement(TenantResolvedDefaultsPage)}

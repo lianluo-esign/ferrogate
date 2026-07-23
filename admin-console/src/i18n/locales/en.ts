@@ -178,6 +178,7 @@ export const en = {
   "nav.item.agentRuns": "Agent Runs",
   "nav.item.agentSchedules": "Agent Schedules",
   "nav.item.assets": "Assets",
+  "nav.item.withheldAssets": "Withheld Assets",
   "nav.item.workerRegistrations": "Worker Registrations",
   "nav.item.managedWorkerPools": "Managed Worker Pools",
   "nav.item.selfHostedLifecycle": "Self-hosted Lifecycle",
@@ -1664,6 +1665,52 @@ export const en = {
   "page.assets.storage.bucket": "Bucket",
   "page.assets.storage.inline": "Inline",
   "page.assets.action.download": "Download",
+
+  // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
+  "page.withheldAssets.title": "Withheld assets",
+  "page.withheldAssets.description":
+    "Pending-scan and quarantined assets hidden from consumers. Review the evidence, then promote or quarantine each one.",
+  "page.withheldAssets.filter.assetType": "Asset type",
+  "page.withheldAssets.filter.allTypes": "All types",
+  "page.withheldAssets.filter.search": "Search",
+  "page.withheldAssets.list.error": "Failed to load withheld assets: {message}",
+  "page.withheldAssets.empty": "No withheld assets.",
+  "page.withheldAssets.col.type": "Type",
+  "page.withheldAssets.col.name": "Name",
+  "page.withheldAssets.col.version": "Version",
+  "page.withheldAssets.col.visibility": "State",
+  "page.withheldAssets.col.size": "Size",
+  "page.withheldAssets.col.evidence": "Evidence",
+  "page.withheldAssets.visibility.pendingScan": "Pending scan",
+  "page.withheldAssets.visibility.quarantined": "Quarantined",
+  "page.withheldAssets.evidence.view": "View evidence",
+  "page.withheldAssets.evidence.none": "No evidence retained",
+  "page.withheldAssets.evidence.dialogTitle": "Screening evidence",
+  "page.withheldAssets.evidence.dialogDescription": "Recorded for {asset}.",
+  "page.withheldAssets.action.promote": "Promote",
+  "page.withheldAssets.action.quarantine": "Quarantine",
+  "page.withheldAssets.promote.title": "Promote to visible",
+  "page.withheldAssets.promote.description":
+    "Record a clean verdict for {asset}. It becomes visible and leaves this queue.",
+  "page.withheldAssets.promote.success": "Asset promoted to visible",
+  "page.withheldAssets.quarantine.title": "Quarantine asset",
+  "page.withheldAssets.quarantine.description":
+    "Record a flagged verdict for {asset}. It stays permanently withheld.",
+  "page.withheldAssets.quarantine.success": "Asset quarantined",
+  "page.withheldAssets.field.evidence": "Evidence",
+  "page.withheldAssets.field.evidencePlaceholder":
+    "Scanner id, verdict detail, or ticket reference",
+  "page.withheldAssets.error.evidenceRequired": "Evidence is required.",
+  "page.withheldAssets.error.notFound":
+    "That asset no longer exists — it may have been deleted.",
+  "page.withheldAssets.error.conflict":
+    "That asset is no longer pending a scan — it was already promoted or quarantined.",
+  "page.withheldAssets.error.badRequest": "The gateway rejected the verdict: {message}",
+  "page.withheldAssets.error.generic": "Could not update visibility: {message}",
+  "page.withheldAssets.submitting": "Submitting…",
+  "page.withheldAssets.pagination.summary": "{from}–{to} of {total}",
+  "page.withheldAssets.pagination.previous": "Previous",
+  "page.withheldAssets.pagination.next": "Next",
 
   // Managed worker sessions (src/pages/managed-worker-sessions.tsx).
   "page.managedWorkerSessions.title": "Managed worker sessions",
