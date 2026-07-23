@@ -54,7 +54,12 @@ export type EntityReferenceTarget =
   | "models"
   | "providers"
   | "plans"
-  | "virtual-keys";
+  | "virtual-keys"
+  | "plugins"
+  | "tools"
+  | "mcp-servers"
+  | "prompt-templates"
+  | "agent-workflows";
 
 export interface FieldOption {
   /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
@@ -148,7 +153,58 @@ export interface EntityReferenceFieldConfig extends FieldConfigBase {
   options?: never;
 }
 
-export type FieldConfig = ScalarFieldConfig | EntityReferenceFieldConfig;
+/**
+ * One selectable kind inside a {@link ReferenceListFieldConfig} row (#342). The
+ * `value` is the discriminant written to the row's `discriminantKey` (e.g. a
+ * skill-package capability `kind` such as `plugin`/`mcp_server`). When
+ * `reference` is set the row's id is chosen from that entity catalog with a
+ * resolved human label; kinds with no list/get API (e.g. an MCP sub-tool) omit
+ * it and fall back to a validated raw-id text input, so no reference kind is
+ * silently excluded.
+ */
+export interface ReferenceListKind {
+  value: string;
+  /** Legacy inline label; migrated configs use `labelKey` (#348). */
+  label?: string;
+  labelKey?: TranslationKey;
+  reference?: EntityReferenceConfig;
+}
+
+/** A non-reference scalar preserved verbatim per row (e.g. a description). */
+export interface ReferenceListExtraField {
+  key: string;
+  label?: string;
+  labelKey?: TranslationKey;
+  type: "text" | "textarea";
+  placeholder?: string;
+  placeholderKey?: TranslationKey;
+}
+
+/**
+ * Structured editor for an array of typed references embedded in a JSON
+ * document (#342): each row is `{ [discriminantKey]: kind, [valueKey]: id,
+ * ...extraFields }`. The reference id is edited through the shared #337 picker
+ * (per-kind target) while unrelated per-row fields (`extraFields`) and any keys
+ * the console does not model round-trip unchanged, satisfying the acceptance
+ * that reference arrays are editable via structured controls without disturbing
+ * neighbouring free-form document fields.
+ */
+export interface ReferenceListFieldConfig extends FieldConfigBase {
+  type: "reference-list";
+  /** Row property that selects the kind, e.g. `kind`. */
+  discriminantKey: string;
+  /** Row property holding the referenced entity id, e.g. `id`. */
+  valueKey: string;
+  kinds: ReferenceListKind[];
+  extraFields?: ReferenceListExtraField[];
+  reference?: never;
+  options?: never;
+}
+
+export type FieldConfig =
+  | ScalarFieldConfig
+  | EntityReferenceFieldConfig
+  | ReferenceListFieldConfig;
 
 export interface ColumnConfig<T> {
   key: string;
@@ -288,6 +344,7 @@ export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknow
         values[field.name] = undefined;
         break;
       case "entities":
+      case "reference-list":
         values[field.name] = [];
         break;
       default:

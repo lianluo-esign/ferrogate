@@ -49,11 +49,84 @@ export const skillPackagesConfig: ResourceConfig<AdminSkillPackage> = {
       placeholder:
         '{"tools":[],"network":[],"filesystem":false,"shell":false,"tenant_scope":false,"secrets":false,"admin_mutation":false}',
     },
+    // #342: capabilities is an array of typed references embedded in the skill
+    // package document. It becomes a structured reference editor (kind + entity
+    // picker + optional description) so operators pick known plugins/tools/MCP
+    // servers/prompts/workflows by name instead of hand-writing ids, while the
+    // per-row `description` and the surrounding JSON fields (compatibility/
+    // permissions/resources/metadata) round-trip unchanged. `mcp_tool` has no
+    // flat list endpoint, so it stays a validated raw-id input (no silent
+    // exclusion).
     {
       name: "capabilities",
       labelKey: "resource.skillPackages.field.capabilities",
-      type: "json",
-      placeholder: '[{"kind":"plugin","id":"my-plugin"}]',
+      descriptionKey: "resource.skillPackages.field.capabilities.desc",
+      type: "reference-list",
+      discriminantKey: "kind",
+      valueKey: "id",
+      kinds: [
+        {
+          value: "plugin",
+          labelKey: "resource.skillPackages.capabilityKind.plugin",
+          reference: {
+            target: "plugins",
+            valueKey: "id",
+            primaryLabelKey: "id",
+            secondaryLabelKeys: ["kind", "version"],
+          },
+        },
+        {
+          value: "tool",
+          labelKey: "resource.skillPackages.capabilityKind.tool",
+          reference: {
+            target: "tools",
+            valueKey: "name",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["extension_id"],
+          },
+        },
+        {
+          value: "mcp_server",
+          labelKey: "resource.skillPackages.capabilityKind.mcpServer",
+          reference: {
+            target: "mcp-servers",
+            valueKey: "name",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["transport"],
+          },
+        },
+        {
+          value: "mcp_tool",
+          labelKey: "resource.skillPackages.capabilityKind.mcpTool",
+        },
+        {
+          value: "prompt_template",
+          labelKey: "resource.skillPackages.capabilityKind.promptTemplate",
+          reference: {
+            target: "prompt-templates",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["model", "status"],
+          },
+        },
+        {
+          value: "agent_workflow",
+          labelKey: "resource.skillPackages.capabilityKind.agentWorkflow",
+          reference: {
+            target: "agent-workflows",
+            valueKey: "id",
+            primaryLabelKey: "name",
+            secondaryLabelKeys: ["version"],
+          },
+        },
+      ],
+      extraFields: [
+        {
+          key: "description",
+          labelKey: "resource.skillPackages.field.capability.description",
+          type: "text",
+        },
+      ],
     },
     {
       name: "resources",

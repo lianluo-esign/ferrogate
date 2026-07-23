@@ -251,6 +251,13 @@ export const zhCN = {
   "resource.picker.copyValue": "复制 {value}",
   "resource.picker.copyId": "复制 ID",
   "resource.picker.removeOption": "移除 {name}",
+  "resource.referenceList.kind": "类型",
+  "resource.referenceList.reference": "引用",
+  "resource.referenceList.rawIdPlaceholder": "输入 ID",
+  "resource.referenceList.add": "添加{label}条目",
+  "resource.referenceList.remove": "移除{label}条目 {index}",
+  "resource.referenceList.rowLabel": "{label}条目 {index}",
+  "resource.referenceList.empty": "尚无{label}。",
 
   // 按资源的文案 —— 路由/策略/配额分组（#348）。
   "resource.quotaPolicies.title": "配额策略",
@@ -539,7 +546,16 @@ export const zhCN = {
   "resource.skillPackages.field.apiKeyIds": "API 密钥 ID（逗号分隔）",
   "resource.skillPackages.field.compatibility": "兼容性（JSON）",
   "resource.skillPackages.field.permissions": "权限（JSON）",
-  "resource.skillPackages.field.capabilities": "能力（JSON 数组）",
+  "resource.skillPackages.field.capabilities": "能力",
+  "resource.skillPackages.field.capabilities.desc":
+    "此包提供的类型化引用。先选择每项能力的类型，再选择对应实体；如有需要可为每行添加备注。",
+  "resource.skillPackages.field.capability.description": "备注（可选）",
+  "resource.skillPackages.capabilityKind.plugin": "插件",
+  "resource.skillPackages.capabilityKind.tool": "工具",
+  "resource.skillPackages.capabilityKind.mcpServer": "MCP 服务器",
+  "resource.skillPackages.capabilityKind.mcpTool": "MCP 工具",
+  "resource.skillPackages.capabilityKind.promptTemplate": "提示词模板",
+  "resource.skillPackages.capabilityKind.agentWorkflow": "智能体工作流",
   "resource.skillPackages.field.resources": "资源（JSON：plugins/mcp_servers/prompt_templates/agent_workflows）",
   "resource.skillPackages.field.metadata": "元数据（JSON）",
 

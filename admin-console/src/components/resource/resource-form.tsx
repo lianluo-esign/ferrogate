@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
+import { ReferenceListEditor } from "@/components/resource/reference-list-editor";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,7 +41,10 @@ function normalizeInitialValues(
     const raw = normalized[field.name];
     if (field.type === "json" && raw !== undefined && typeof raw !== "string") {
       normalized[field.name] = JSON.stringify(raw, null, 2);
-    } else if (field.type === "entities" && !Array.isArray(raw)) {
+    } else if (
+      (field.type === "entities" || field.type === "reference-list") &&
+      !Array.isArray(raw)
+    ) {
       normalized[field.name] = [];
     }
   }
@@ -112,6 +116,32 @@ export function ResourceForm({
               }),
             );
           }
+        } else if (field.type === "reference-list") {
+          // Emit the structured reference array (#342): keep only rows that
+          // carry both a kind and an id, trim string values, and drop
+          // empty-string extras so an untouched optional field submits as
+          // absent rather than "". Unknown keys spread through unchanged so any
+          // non-reference document fields the console does not model round-trip.
+          const rows = Array.isArray(raw) ? raw : [];
+          payload[field.name] = rows
+            .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+            .map((row) => {
+              const cleaned: Record<string, unknown> = {};
+              for (const [key, entry] of Object.entries(row)) {
+                if (typeof entry === "string") {
+                  const trimmed = entry.trim();
+                  if (trimmed !== "") cleaned[key] = trimmed;
+                } else if (entry !== undefined && entry !== null) {
+                  cleaned[key] = entry;
+                }
+              }
+              return cleaned;
+            })
+            .filter(
+              (row) =>
+                String(row[field.discriminantKey] ?? "") !== "" &&
+                String(row[field.valueKey] ?? "") !== "",
+            );
         } else if (field.type === "csv") {
           payload[field.name] = String(raw ?? "")
             .split(",")
@@ -220,6 +250,14 @@ export function ResourceForm({
                 />
               );
             })()
+          ) : field.type === "reference-list" ? (
+            <ReferenceListEditor
+              id={field.name}
+              label={fieldLabel}
+              field={field}
+              value={values[field.name]}
+              onChange={(rows) => setField(field.name, rows)}
+            />
           ) : field.type === "textarea" || field.type === "json" ? (
             <Textarea
               id={field.name}

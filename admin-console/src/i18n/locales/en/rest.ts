@@ -137,6 +137,16 @@ export const enRest = {
   "resource.picker.copyId": "Copy ID",
   "resource.picker.removeOption": "Remove {name}",
 
+  // Structured reference-array editor (#342): a row per typed reference embedded
+  // in a JSON document (kind + entity picker + optional per-row extras).
+  "resource.referenceList.kind": "Kind",
+  "resource.referenceList.reference": "Reference",
+  "resource.referenceList.rawIdPlaceholder": "Enter ID",
+  "resource.referenceList.add": "Add {label} entry",
+  "resource.referenceList.remove": "Remove {label} entry {index}",
+  "resource.referenceList.rowLabel": "{label} entry {index}",
+  "resource.referenceList.empty": "No {label} yet.",
+
   // Per-resource copy — routing/policy/quota group (#348). Titles, descriptions,
   // column headers, field labels/descriptions, and select-option labels for the
   // quota-policies, plugins, and policies resource configs. Resource IDs, field
@@ -461,7 +471,16 @@ export const enRest = {
   "resource.skillPackages.field.apiKeyIds": "API key IDs (comma-separated)",
   "resource.skillPackages.field.compatibility": "Compatibility (JSON)",
   "resource.skillPackages.field.permissions": "Permissions (JSON)",
-  "resource.skillPackages.field.capabilities": "Capabilities (JSON array)",
+  "resource.skillPackages.field.capabilities": "Capabilities",
+  "resource.skillPackages.field.capabilities.desc":
+    "Typed references this package ships. Pick each capability's kind, then its entity; add a note per row if useful.",
+  "resource.skillPackages.field.capability.description": "Note (optional)",
+  "resource.skillPackages.capabilityKind.plugin": "Plugin",
+  "resource.skillPackages.capabilityKind.tool": "Tool",
+  "resource.skillPackages.capabilityKind.mcpServer": "MCP server",
+  "resource.skillPackages.capabilityKind.mcpTool": "MCP tool",
+  "resource.skillPackages.capabilityKind.promptTemplate": "Prompt template",
+  "resource.skillPackages.capabilityKind.agentWorkflow": "Agent workflow",
   "resource.skillPackages.field.resources":
     "Resources (JSON: plugins/mcp_servers/prompt_templates/agent_workflows)",
   "resource.skillPackages.field.metadata": "Metadata (JSON)",

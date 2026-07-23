@@ -31,6 +31,14 @@ export interface EntityReferenceAdapter {
   detailPath?: (value: string) => string;
   detailValueKey?: string;
   unwrapDetail?: (body: Record<string, unknown>) => Record<string, unknown> | undefined;
+  /**
+   * Lift the option-bearing record out of a wrapped list row (#342). Some list
+   * endpoints envelope each item (e.g. agent-workflows returns
+   * `{ workflow, counters }`), so the flat `valueKey`/`primaryLabelKey` live one
+   * level down. Applied to every list row before it becomes an option; adapters
+   * over flat rows omit it.
+   */
+  unwrapListItem?: (record: Record<string, unknown>) => Record<string, unknown>;
 }
 
 export type EntityReferenceRegistry = Record<EntityReferenceTarget, EntityReferenceAdapter>;
@@ -97,6 +105,35 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
   "virtual-keys": {
     listPath: "/admin/v1/virtual-keys",
   },
+  // #342: skill-package capabilities reference these catalogs by a canonical id
+  // so the structured capability editor can resolve human labels instead of
+  // requiring hand-copied ids. Like the #341 routing catalogs, none of these
+  // list endpoints expose server-side search/offset or a per-item GET, so the
+  // adapters carry no detailPath — `hydrateEntityReference` resolves an existing
+  // value from the (full) list response instead.
+  plugins: {
+    listPath: "/admin/v1/plugins",
+  },
+  tools: {
+    listPath: "/admin/v1/tools",
+  },
+  "mcp-servers": {
+    listPath: "/admin/v1/mcp-servers",
+  },
+  "prompt-templates": {
+    listPath: "/admin/v1/prompt-templates",
+  },
+  // agent-workflows envelopes each list row as `{ workflow, counters }`, so the
+  // canonical `id`/`name` live under `workflow` (see unwrapListItem).
+  "agent-workflows": {
+    listPath: "/admin/v1/agent-workflows",
+    unwrapListItem: (record) => {
+      const workflow = record.workflow;
+      return workflow && typeof workflow === "object"
+        ? (workflow as Record<string, unknown>)
+        : record;
+    },
+  },
 };
 
 function adapterFor(
@@ -151,6 +188,7 @@ export async function loadEntityReferencePage(
     },
   );
   const options = response.data
+    .map((record) => (adapter.unwrapListItem ? adapter.unwrapListItem(record) : record))
     .map((record) => toEntityReferenceOption(record, reference))
     .filter((option): option is EntityReferenceOption => Boolean(option));
   const responseOffset = response.offset ?? request.offset;
