@@ -681,8 +681,6 @@ export const zhCN = {
   "page.staticSites.publish.submit": "发布",
   "page.staticSites.publish.submitting": "发布中…",
   "page.staticSites.publish.uploading": "正在上传包…",
-  "page.staticSites.field.project": "项目",
-  "page.staticSites.field.project.select": "选择项目",
   "page.staticSites.field.cacheControl": "Cache-Control",
   "page.staticSites.field.cacheControl.hint": "可选覆盖；默认值为 public, max-age=300。",
   "page.staticSites.field.bundle": "站点包（ZIP）",

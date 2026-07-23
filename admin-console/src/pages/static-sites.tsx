@@ -11,7 +11,7 @@
 //     joined from the tenant asset listing, each site's manifest, and the
 //     site-domains registry;
 //   - a PUBLISH/republish flow that uploads a ZIP bundle with explicit tenant/
-//     project/site selection, a bundle version, public/private + SPA-fallback
+//     site selection, a bundle version, public/private + SPA-fallback
 //     toggles, and a Cache-Control override, validating the archive CLIENT-SIDE
 //     for fast feedback while the gateway stays authoritative — scan / zip-bomb
 //     / quota rejections are surfaced VERBATIM and accessibly — and reporting
@@ -797,7 +797,6 @@ export default function StaticSitesPage() {
 
   // Publish form state.
   const [formTenant, setFormTenant] = useState(tenantId);
-  const [formProject, setFormProject] = useState("");
   const [site, setSite] = useState("");
   const [version, setVersion] = useState("");
   const [isPublic, setIsPublic] = useState(false);
@@ -1112,23 +1111,6 @@ export default function StaticSitesPage() {
                 dependencyValues={{}}
                 placeholder={t("page.siteDomains.field.tenant.select")}
                 onChange={(value) => setFormTenant(typeof value === "string" ? value : "")}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="site-project">{t("page.staticSites.field.project")}</Label>
-              <EntityReferencePicker
-                id="site-project"
-                label={t("page.staticSites.field.project")}
-                reference={{
-                  target: "projects",
-                  valueKey: "id",
-                  primaryLabelKey: "name",
-                  secondaryLabelKeys: ["slug", "tenant_id"],
-                }}
-                value={formProject}
-                dependencyValues={{}}
-                placeholder={t("page.staticSites.field.project.select")}
-                onChange={(value) => setFormProject(typeof value === "string" ? value : "")}
               />
             </div>
             <div className="grid gap-1.5">

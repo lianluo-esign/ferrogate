@@ -618,8 +618,6 @@ export const enRest = {
   "page.staticSites.publish.submit": "Publish",
   "page.staticSites.publish.submitting": "Publishing…",
   "page.staticSites.publish.uploading": "Uploading bundle…",
-  "page.staticSites.field.project": "Project",
-  "page.staticSites.field.project.select": "Select project",
   "page.staticSites.field.cacheControl": "Cache-Control",
   "page.staticSites.field.cacheControl.hint": "Optional override; default is public, max-age=300.",
   "page.staticSites.field.bundle": "Bundle (ZIP)",
