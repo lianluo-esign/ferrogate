@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 import { formatUnix, shortFingerprint, verdictVariant } from "@/lib/guardrails";
 
@@ -52,6 +53,7 @@ function orUndefined(value: string): string | undefined {
 
 export default function GuardrailEvaluationsPage() {
   const { session } = useAuth();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [form, setForm] = useState<EvaluationFilters>(EMPTY_FILTERS);
@@ -90,26 +92,25 @@ export default function GuardrailEvaluationsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Guardrail evaluations</h1>
+        <h1 className="text-lg font-semibold">{t("page.guardrailEvaluations.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Sanitized guardrail evaluation evidence (no matched text). Includes the stored
-          canonical decision, decision reason and target-level action fingerprint (#306)
-          alongside the recorded verdict / action / enforcement triple.
+          {t("page.guardrailEvaluations.description")}
         </p>
       </div>
 
       <form className="grid gap-4 rounded-md border p-4 sm:grid-cols-3" onSubmit={handleSubmit}>
         <div className="grid gap-2">
-          <Label htmlFor="filter-request-id">Request ID</Label>
+          <Label htmlFor="filter-request-id">{t("page.guardrailEvaluations.filter.requestId")}</Label>
           <Input
             id="filter-request-id"
             value={form.request_id}
             onChange={(event) => setField("request_id", event.target.value)}
+            // eslint-disable-next-line ferrogate/no-untranslated-literal -- example ID-prefix format hint, identical in every locale
             placeholder="req_..."
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-trace-id">Trace ID</Label>
+          <Label htmlFor="filter-trace-id">{t("page.guardrailEvaluations.filter.traceId")}</Label>
           <Input
             id="filter-trace-id"
             value={form.trace_id}
@@ -117,7 +118,7 @@ export default function GuardrailEvaluationsPage() {
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-agent-run-id">Agent run ID</Label>
+          <Label htmlFor="filter-agent-run-id">{t("page.guardrailEvaluations.filter.agentRunId")}</Label>
           <Input
             id="filter-agent-run-id"
             value={form.agent_run_id}
@@ -125,7 +126,7 @@ export default function GuardrailEvaluationsPage() {
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-policy-id">Policy ID</Label>
+          <Label htmlFor="filter-policy-id">{t("page.guardrailEvaluations.filter.policyId")}</Label>
           <Input
             id="filter-policy-id"
             value={form.policy_id}
@@ -133,16 +134,17 @@ export default function GuardrailEvaluationsPage() {
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-scope-id">Scope ID (tenant / project / key)</Label>
+          <Label htmlFor="filter-scope-id">{t("page.guardrailEvaluations.filter.scopeId")}</Label>
           <Input
             id="filter-scope-id"
             value={form.scope_id}
             onChange={(event) => setField("scope_id", event.target.value)}
+            // eslint-disable-next-line ferrogate/no-untranslated-literal -- example ID-prefix format hint, identical in every locale
             placeholder="tenant-..."
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-verdict">Verdict</Label>
+          <Label htmlFor="filter-verdict">{t("page.guardrailEvaluations.filter.verdict")}</Label>
           <Select
             value={form.verdict}
             onValueChange={(value) => setField("verdict", value as Verdict | "any")}
@@ -151,15 +153,15 @@ export default function GuardrailEvaluationsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="any">any</SelectItem>
-              <SelectItem value="pass">pass</SelectItem>
-              <SelectItem value="fail">fail</SelectItem>
-              <SelectItem value="error">error</SelectItem>
+              <SelectItem value="any">{t("page.guardrailEvaluations.option.any")}</SelectItem>
+              <SelectItem value="pass">{t("page.guardrailEvaluations.verdict.pass")}</SelectItem>
+              <SelectItem value="fail">{t("page.guardrailEvaluations.verdict.fail")}</SelectItem>
+              <SelectItem value="error">{t("page.guardrailEvaluations.verdict.error")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-action">Action</Label>
+          <Label htmlFor="filter-action">{t("page.guardrailEvaluations.filter.action")}</Label>
           <Select
             value={form.action}
             onValueChange={(value) => setField("action", value as Action | "any")}
@@ -168,16 +170,16 @@ export default function GuardrailEvaluationsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="any">any</SelectItem>
-              <SelectItem value="allow">allow</SelectItem>
-              <SelectItem value="block">block</SelectItem>
-              <SelectItem value="redact">redact</SelectItem>
-              <SelectItem value="record">record</SelectItem>
+              <SelectItem value="any">{t("page.guardrailEvaluations.option.any")}</SelectItem>
+              <SelectItem value="allow">{t("page.guardrailEvaluations.action.allow")}</SelectItem>
+              <SelectItem value="block">{t("page.guardrailEvaluations.action.block")}</SelectItem>
+              <SelectItem value="redact">{t("page.guardrailEvaluations.action.redact")}</SelectItem>
+              <SelectItem value="record">{t("page.guardrailEvaluations.action.record")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
         <div className="flex items-end gap-2">
-          <Button type="submit">Apply filters</Button>
+          <Button type="submit">{t("page.guardrailEvaluations.filter.apply")}</Button>
           <Button
             type="button"
             variant="outline"
@@ -186,20 +188,23 @@ export default function GuardrailEvaluationsPage() {
               setApplied(EMPTY_FILTERS);
             }}
           >
-            Reset
+            {t("page.guardrailEvaluations.filter.reset")}
           </Button>
         </div>
       </form>
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load guardrail evaluations: {error.message}
+          {t("page.guardrailEvaluations.loadError", { message: error.message })}
         </p>
       )}
 
       {data && (
         <p className="text-sm text-muted-foreground">
-          {data.total} evaluation{data.total === 1 ? "" : "s"} matched.
+          {format.plural(data.total, {
+            one: t("page.guardrailEvaluations.matched.one", { count: data.total }),
+            other: t("page.guardrailEvaluations.matched.other", { count: data.total }),
+          })}
         </p>
       )}
 
@@ -207,30 +212,30 @@ export default function GuardrailEvaluationsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Occurred</TableHead>
-              <TableHead>Request</TableHead>
-              <TableHead>Policy</TableHead>
-              <TableHead>Stage</TableHead>
-              <TableHead>Verdict</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Enforcement</TableHead>
-              <TableHead>Decision</TableHead>
-              <TableHead>Decision reason</TableHead>
-              <TableHead>Action fingerprint</TableHead>
-              <TableHead>Findings</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.occurred")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.request")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.policy")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.stage")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.verdict")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.action")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.enforcement")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.decision")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.decisionReason")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.actionFingerprint")}</TableHead>
+              <TableHead>{t("page.guardrailEvaluations.col.findings")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={11} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={11} className="h-24 text-center">
-                  No guardrail evaluations match the current filters.
+                  {t("page.guardrailEvaluations.empty")}
                 </TableCell>
               </TableRow>
             ) : (

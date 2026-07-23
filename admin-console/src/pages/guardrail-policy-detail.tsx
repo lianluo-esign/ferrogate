@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, adminPost } from "@/lib/gateway-client";
 import {
   describeActions,
@@ -51,6 +52,7 @@ import {
 export default function GuardrailPolicyDetailPage() {
   const { policyId = "" } = useParams<{ policyId: string }>();
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const historyQueryKey = ["guardrail-policy-revisions", policyId];
@@ -89,7 +91,11 @@ export default function GuardrailPolicyDetailPage() {
       ),
     onSuccess: (binding) => {
       queryClient.invalidateQueries({ queryKey: historyQueryKey });
-      toast.success(`Revision ${binding.active_revision} activated`);
+      toast.success(
+        t("page.guardrailPolicyDetail.toast.activated", {
+          revision: binding.active_revision,
+        }),
+      );
     },
     onError: (activateError: Error) => toast.error(activateError.message),
   });
@@ -107,7 +113,11 @@ export default function GuardrailPolicyDetailPage() {
       ),
     onSuccess: (binding) => {
       queryClient.invalidateQueries({ queryKey: historyQueryKey });
-      toast.success(`Rolled back to revision ${binding.active_revision}`);
+      toast.success(
+        t("page.guardrailPolicyDetail.toast.rolledBack", {
+          revision: binding.active_revision,
+        }),
+      );
     },
     onError: (rollbackError: Error) => toast.error(rollbackError.message),
   });
@@ -144,11 +154,12 @@ export default function GuardrailPolicyDetailPage() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 className="text-lg font-semibold">
-            Guardrail policy <span className="font-mono">{policyId}</span>
+            {t("page.guardrailPolicyDetail.title")}{" "}
+            <span className="font-mono">{policyId}</span>
           </h1>
           <p className="text-sm text-muted-foreground">
             <Link className="underline underline-offset-2" to="/app/guardrail-policies">
-              All guardrail policies
+              {t("page.guardrailPolicyDetail.allPolicies")}
             </Link>
           </p>
         </div>
@@ -157,55 +168,79 @@ export default function GuardrailPolicyDetailPage() {
           onClick={() => setRollbackOpen(true)}
           disabled={rollbackMutation.isPending}
         >
-          Rollback...
+          {t("page.guardrailPolicyDetail.rollbackOpen")}
         </Button>
       </div>
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load revisions: {error.message}
+          {t("page.guardrailPolicyDetail.loadError", { message: error.message })}
         </p>
       )}
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Active revision</CardTitle>
+          <CardTitle className="text-base">
+            {t("page.guardrailPolicyDetail.active.title")}
+          </CardTitle>
           <CardDescription>
-            The revision currently bound to the guardrail runtime for this policy.
+            {t("page.guardrailPolicyDetail.active.description")}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
           ) : active ? (
             <div className="grid gap-2 text-sm sm:grid-cols-2">
               <div>
-                <span className="text-muted-foreground">Revision:</span>{" "}
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.revision")}
+                </span>{" "}
                 <Badge variant="secondary">r{active.revision}</Badge>
               </div>
               <div>
-                <span className="text-muted-foreground">Name:</span> {active.name}
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.name")}
+                </span>{" "}
+                {active.name}
               </div>
               <div>
-                <span className="text-muted-foreground">Mode:</span> {active.mode}
-                {active.enforced ? " (enforced)" : " (not enforced)"}
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.mode")}
+                </span>{" "}
+                {t(
+                  active.enforced
+                    ? "page.guardrailPolicyDetail.field.modeEnforced"
+                    : "page.guardrailPolicyDetail.field.modeNotEnforced",
+                  { mode: active.mode },
+                )}
               </div>
               <div>
-                <span className="text-muted-foreground">Execution:</span> {active.execution},
-                streaming {active.streaming}, deadline {active.deadline_ms} ms
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.execution")}
+                </span>{" "}
+                {t("page.guardrailPolicyDetail.field.executionValue", {
+                  execution: active.execution,
+                  streaming: active.streaming,
+                  deadline: active.deadline_ms,
+                })}
               </div>
               <div>
-                <span className="text-muted-foreground">Checks:</span>{" "}
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.checks")}
+                </span>{" "}
                 {active.checks.map((check) => check.id).join(", ") || "—"}
               </div>
               <div>
-                <span className="text-muted-foreground">On fail:</span>{" "}
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.field.onFail")}
+                </span>{" "}
                 {describeActions(active.on_fail)}
               </div>
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
-              No active revision — activate one from the history below.
+              {t("page.guardrailPolicyDetail.active.none")}
             </p>
           )}
         </CardContent>
@@ -213,10 +248,11 @@ export default function GuardrailPolicyDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Revision history</CardTitle>
+          <CardTitle className="text-base">
+            {t("page.guardrailPolicyDetail.history.title")}
+          </CardTitle>
           <CardDescription>
-            Activating a revision archives the previously active one; a failed runtime
-            reload restores the prior binding.
+            {t("page.guardrailPolicyDetail.history.description")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -224,12 +260,12 @@ export default function GuardrailPolicyDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Revision</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Mode</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Created by</TableHead>
+                  <TableHead>{t("page.guardrailPolicyDetail.history.col.revision")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
+                  <TableHead>{t("page.guardrailPolicyDetail.history.col.name")}</TableHead>
+                  <TableHead>{t("page.guardrailPolicyDetail.history.col.mode")}</TableHead>
+                  <TableHead>{t("page.guardrailPolicyDetail.history.col.created")}</TableHead>
+                  <TableHead>{t("page.guardrailPolicyDetail.history.col.createdBy")}</TableHead>
                   <TableHead className="w-40" />
                 </TableRow>
               </TableHeader>
@@ -237,7 +273,9 @@ export default function GuardrailPolicyDetailPage() {
                 {revisions.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={7} className="h-24 text-center">
-                      {isLoading ? "Loading…" : "No revisions."}
+                      {isLoading
+                        ? t("resource.table.loading")
+                        : t("page.guardrailPolicyDetail.history.empty")}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -261,7 +299,7 @@ export default function GuardrailPolicyDetailPage() {
                           size="sm"
                           onClick={() => setInspectedRevision(revision.revision)}
                         >
-                          View
+                          {t("page.guardrailPolicyDetail.action.view")}
                         </Button>
                         {revision.status !== "active" && (
                           <Button
@@ -269,7 +307,7 @@ export default function GuardrailPolicyDetailPage() {
                             onClick={() => setActivateTarget(revision.revision)}
                             disabled={activateMutation.isPending}
                           >
-                            Activate
+                            {t("page.guardrailPolicyDetail.action.activate")}
                           </Button>
                         )}
                       </TableCell>
@@ -286,20 +324,22 @@ export default function GuardrailPolicyDetailPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
-              Revision r{inspectedRevision} definition
+              {t("page.guardrailPolicyDetail.inspect.title", { revision: inspectedRevision })}
             </CardTitle>
           </CardHeader>
           <CardContent>
             {revisionQuery.error ? (
               <p className="text-sm text-destructive">
-                Failed to load revision: {revisionQuery.error.message}
+                {t("page.guardrailPolicyDetail.inspect.loadError", {
+                  message: revisionQuery.error.message,
+                })}
               </p>
             ) : revisionQuery.data ? (
               <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs">
                 {JSON.stringify(revisionQuery.data.policy, null, 2)}
               </pre>
             ) : (
-              <p className="text-sm text-muted-foreground">Loading…</p>
+              <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
             )}
           </CardContent>
         </Card>
@@ -307,11 +347,11 @@ export default function GuardrailPolicyDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Dry-run</CardTitle>
+          <CardTitle className="text-base">
+            {t("page.guardrailPolicyDetail.dryRun.title")}
+          </CardTitle>
           <CardDescription>
-            Plans the policy against a sample payload without dispatching to any provider
-            or external action. Sample text is used only by local deterministic checks and
-            is never persisted.
+            {t("page.guardrailPolicyDetail.dryRun.description")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -324,7 +364,9 @@ export default function GuardrailPolicyDetailPage() {
             }}
           >
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-stage">Stage</Label>
+              <Label htmlFor="dry-run-stage">
+                {t("page.guardrailPolicyDetail.dryRun.stage")}
+              </Label>
               <Select
                 value={dryRunStage}
                 onValueChange={(value) => setDryRunStage(value as "request" | "response")}
@@ -333,52 +375,68 @@ export default function GuardrailPolicyDetailPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="request">request</SelectItem>
-                  <SelectItem value="response">response</SelectItem>
+                  <SelectItem value="request">
+                    {t("page.guardrailPolicyDetail.dryRun.stageRequest")}
+                  </SelectItem>
+                  <SelectItem value="response">
+                    {t("page.guardrailPolicyDetail.dryRun.stageResponse")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-revision">Revision (blank = active)</Label>
+              <Label htmlFor="dry-run-revision">
+                {t("page.guardrailPolicyDetail.dryRun.revision")}
+              </Label>
               <Input
                 id="dry-run-revision"
                 type="number"
                 value={dryRunRevision}
                 onChange={(event) => setDryRunRevision(event.target.value)}
-                placeholder="active"
+                placeholder={t("page.guardrailPolicyDetail.dryRun.revisionPlaceholder")}
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-model">Model (optional)</Label>
+              <Label htmlFor="dry-run-model">
+                {t("page.guardrailPolicyDetail.dryRun.model")}
+              </Label>
               <Input
                 id="dry-run-model"
                 value={dryRunModel}
                 onChange={(event) => setDryRunModel(event.target.value)}
+                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example model id, identical in every locale
                 placeholder="gpt-4o"
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-provider">Provider (optional)</Label>
+              <Label htmlFor="dry-run-provider">
+                {t("page.guardrailPolicyDetail.dryRun.provider")}
+              </Label>
               <Input
                 id="dry-run-provider"
                 value={dryRunProvider}
                 onChange={(event) => setDryRunProvider(event.target.value)}
+                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example provider id, identical in every locale
                 placeholder="openai"
               />
             </div>
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="dry-run-text">Sample payload text</Label>
+              <Label htmlFor="dry-run-text">
+                {t("page.guardrailPolicyDetail.dryRun.text")}
+              </Label>
               <Textarea
                 id="dry-run-text"
                 value={dryRunText}
                 onChange={(event) => setDryRunText(event.target.value)}
-                placeholder="Paste a sample prompt/response to evaluate against local checks"
+                placeholder={t("page.guardrailPolicyDetail.dryRun.textPlaceholder")}
                 rows={5}
               />
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={dryRunMutation.isPending}>
-                {dryRunMutation.isPending ? "Running…" : "Run dry-run"}
+                {dryRunMutation.isPending
+                  ? t("page.guardrailPolicyDetail.dryRun.running")
+                  : t("page.guardrailPolicyDetail.dryRun.submit")}
               </Button>
             </div>
           </form>
@@ -386,28 +444,32 @@ export default function GuardrailPolicyDetailPage() {
           {dryRunResult && (
             <div className="mt-4 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="text-muted-foreground">Planned against</span>
+                <span className="text-muted-foreground">
+                  {t("page.guardrailPolicyDetail.dryRun.plannedAgainst")}
+                </span>
                 <Badge variant="outline" className="font-mono">
                   {dryRunResult.policy_revision}
                 </Badge>
                 <Badge variant={dryRunResult.selected ? "secondary" : "outline"}>
-                  {dryRunResult.selected ? "policy selected" : "policy not selected"}
+                  {dryRunResult.selected
+                    ? t("page.guardrailPolicyDetail.dryRun.selected")
+                    : t("page.guardrailPolicyDetail.dryRun.notSelected")}
                 </Badge>
               </div>
               <div className="rounded-md border">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Check</TableHead>
-                      <TableHead>Detector</TableHead>
-                      <TableHead>Result</TableHead>
+                      <TableHead>{t("page.guardrailPolicyDetail.dryRun.col.check")}</TableHead>
+                      <TableHead>{t("page.guardrailPolicyDetail.dryRun.col.detector")}</TableHead>
+                      <TableHead>{t("page.guardrailPolicyDetail.dryRun.col.result")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {dryRunResult.checks.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={3} className="h-16 text-center">
-                          No checks planned.
+                          {t("page.guardrailPolicyDetail.dryRun.noChecks")}
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -428,15 +490,21 @@ export default function GuardrailPolicyDetailPage() {
               </div>
               <div className="grid gap-1 text-sm">
                 <p>
-                  <span className="text-muted-foreground">On pass:</span>{" "}
+                  <span className="text-muted-foreground">
+                    {t("page.guardrailPolicyDetail.field.onPass")}
+                  </span>{" "}
                   {describeActions(dryRunResult.on_pass)}
                 </p>
                 <p>
-                  <span className="text-muted-foreground">On fail:</span>{" "}
+                  <span className="text-muted-foreground">
+                    {t("page.guardrailPolicyDetail.field.onFail")}
+                  </span>{" "}
                   {describeActions(dryRunResult.on_fail)}
                 </p>
                 <p>
-                  <span className="text-muted-foreground">On error:</span>{" "}
+                  <span className="text-muted-foreground">
+                    {t("page.guardrailPolicyDetail.field.onError")}
+                  </span>{" "}
                   {describeActions(dryRunResult.on_error)}
                 </p>
               </div>
@@ -453,22 +521,27 @@ export default function GuardrailPolicyDetailPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Activate revision r{activateTarget}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("page.guardrailPolicyDetail.activateDialog.title", {
+                revision: activateTarget ?? "",
+              })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              The currently active revision of {policyId} will be archived and the
-              guardrail runtime reloads with revision r{activateTarget}. A failed reload
-              restores the prior binding.
+              {t("page.guardrailPolicyDetail.activateDialog.description", {
+                policyId,
+                revision: activateTarget ?? "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (activateTarget !== null) activateMutation.mutate(activateTarget);
                 setActivateTarget(null);
               }}
             >
-              Activate
+              {t("page.guardrailPolicyDetail.action.activate")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -477,24 +550,27 @@ export default function GuardrailPolicyDetailPage() {
       <AlertDialog open={rollbackOpen} onOpenChange={setRollbackOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Roll back {policyId}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("page.guardrailPolicyDetail.rollbackDialog.title", { policyId })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Re-activates an archived revision. Leave the revision blank to roll back to
-              the highest archived revision.
+              {t("page.guardrailPolicyDetail.rollbackDialog.description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="grid gap-2">
-            <Label htmlFor="rollback-revision">Target revision (optional)</Label>
+            <Label htmlFor="rollback-revision">
+              {t("page.guardrailPolicyDetail.rollbackDialog.targetLabel")}
+            </Label>
             <Input
               id="rollback-revision"
               type="number"
               value={rollbackRevision}
               onChange={(event) => setRollbackRevision(event.target.value)}
-              placeholder="highest archived"
+              placeholder={t("page.guardrailPolicyDetail.rollbackDialog.targetPlaceholder")}
             />
           </div>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 rollbackMutation.mutate(
@@ -504,7 +580,7 @@ export default function GuardrailPolicyDetailPage() {
                 setRollbackRevision("");
               }}
             >
-              Roll back
+              {t("page.guardrailPolicyDetail.action.rollback")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

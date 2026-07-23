@@ -3,9 +3,13 @@
 // catalog in BOTH `en` and `zh-CN`. This proves the migration actually routes
 // through `t()` (no residual hard-coded English) — the runtime companion to the
 // `ferrogate/no-untranslated-literal` lint gate now enforced on these files.
-import { screen, within } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
+import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import VirtualKeysPage from "@/pages/virtual-keys";
@@ -13,8 +17,16 @@ import SiteDomainsPage from "@/pages/site-domains";
 import OpsStatusPage from "@/pages/ops-status";
 import AgentRunsPage from "@/pages/agent-runs";
 import AgentSchedulesPage from "@/pages/agent-schedules";
+import GuardrailPoliciesPage from "@/pages/guardrail-policies";
+import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
+import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
+import { policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
+import {
+  createTestQueryClient,
+  renderWithProviders,
+  seedSession,
+} from "@/test/test-utils";
 
 beforeEach(() => {
   seedSession();
@@ -214,5 +226,126 @@ describe("agent-schedules page copy is localized", () => {
       screen.getByRole("button", { name: zhCN["page.agentSchedules.new"] }),
     ).toBeInTheDocument();
     expect(await screen.findByText(zhCN["page.agentSchedules.empty"])).toBeInTheDocument();
+  });
+});
+
+describe("guardrail-policies page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/guardrail-policies", []);
+  });
+
+  it("renders English title, description, and empty state", async () => {
+    renderWithProviders(<GuardrailPoliciesPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.guardrailPolicies.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.guardrailPolicies.description"])).toBeInTheDocument();
+    expect(await screen.findByText(en["page.guardrailPolicies.empty"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, description, and empty state", async () => {
+    renderWithProviders(<GuardrailPoliciesPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.guardrailPolicies.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.guardrailPolicies.description"])).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.guardrailPolicies.empty"])).toBeInTheDocument();
+  });
+});
+
+describe("guardrail-evaluations page copy is localized", () => {
+  beforeEach(() => {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/guardrail-evaluations"), () =>
+        HttpResponse.json({ object: "list", data: [], total: 0, offset: 0, limit: 100 }),
+      ),
+    );
+  });
+
+  it("renders English title, filter action, and empty state", async () => {
+    renderWithProviders(<GuardrailEvaluationsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.guardrailEvaluations.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.guardrailEvaluations.filter.apply"] }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.guardrailEvaluations.empty"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, filter action, and empty state", async () => {
+    renderWithProviders(<GuardrailEvaluationsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.guardrailEvaluations.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.guardrailEvaluations.filter.apply"] }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.guardrailEvaluations.empty"]),
+    ).toBeInTheDocument();
+  });
+});
+
+// The detail page reads its policyId from the route, so it needs a real router
+// entry (renderWithProviders' bare MemoryRouter has no param). This mirrors the
+// guardrail-policy-detail.test.tsx harness with a forced locale.
+function renderDetail(locale: Locale, policyId = "pol-pii") {
+  return render(
+    <MemoryRouter initialEntries={[`/app/guardrail-policies/${policyId}`]}>
+      <I18nProvider initialLocale={locale}>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route
+                path="/app/guardrail-policies/:policyId"
+                element={<GuardrailPolicyDetailPage />}
+              />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe("guardrail-policy-detail page copy is localized", () => {
+  beforeEach(() => {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/guardrail-policies/pol-pii/revisions"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [policyRevision({ revision: 1, status: "active" })],
+        }),
+      ),
+    );
+  });
+
+  it("renders English active-revision, history, and dry-run copy", async () => {
+    renderDetail("en");
+    expect(
+      await screen.findByText(en["page.guardrailPolicyDetail.active.title"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(en["page.guardrailPolicyDetail.history.title"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(en["page.guardrailPolicyDetail.dryRun.title"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese active-revision, history, and dry-run copy", async () => {
+    renderDetail("zh-CN");
+    expect(
+      await screen.findByText(zhCN["page.guardrailPolicyDetail.active.title"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["page.guardrailPolicyDetail.history.title"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["page.guardrailPolicyDetail.dryRun.title"]),
+    ).toBeInTheDocument();
   });
 });

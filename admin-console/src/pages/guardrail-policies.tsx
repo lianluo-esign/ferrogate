@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 import { formatUnix, type GuardrailPolicyRevisionView } from "@/lib/guardrails";
 
@@ -48,6 +49,7 @@ function groupByPolicy(revisions: GuardrailPolicyRevisionView[]): PolicySummary[
 
 export default function GuardrailPoliciesPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -60,17 +62,15 @@ export default function GuardrailPoliciesPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Guardrail policies</h1>
+        <h1 className="text-lg font-semibold">{t("page.guardrailPolicies.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Versioned guardrail policy revisions: drafts are created, then activated one at a
-          time per policy. Open a policy to inspect its revision history, activate or roll
-          back a revision, and dry-run the active binding.
+          {t("page.guardrailPolicies.description")}
         </p>
       </div>
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load guardrail policies: {error.message}
+          {t("page.guardrailPolicies.loadError", { message: error.message })}
         </p>
       )}
 
@@ -78,27 +78,27 @@ export default function GuardrailPoliciesPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Policy</TableHead>
-              <TableHead>Name</TableHead>
-              <TableHead>Active revision</TableHead>
-              <TableHead>Revisions</TableHead>
-              <TableHead>Mode</TableHead>
-              <TableHead>Enforced</TableHead>
-              <TableHead>Checks</TableHead>
-              <TableHead>Latest change</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.policy")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.name")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.activeRevision")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.revisions")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.mode")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.enforced")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.checks")}</TableHead>
+              <TableHead>{t("page.guardrailPolicies.col.latestChange")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : policies.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  No guardrail policies yet.
+                  {t("page.guardrailPolicies.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -117,14 +117,22 @@ export default function GuardrailPoliciesPage() {
                     <TableCell>{shown.name}</TableCell>
                     <TableCell>
                       {active ? (
-                        <Badge variant="secondary">r{active.revision} active</Badge>
+                        <Badge variant="secondary">
+                          {t("page.guardrailPolicies.revisionActive", {
+                            revision: active.revision,
+                          })}
+                        </Badge>
                       ) : (
-                        <Badge variant="outline">none ({latest.status})</Badge>
+                        <Badge variant="outline">
+                          {t("page.guardrailPolicies.revisionNone", {
+                            status: latest.status,
+                          })}
+                        </Badge>
                       )}
                     </TableCell>
                     <TableCell>{revisionCount}</TableCell>
                     <TableCell>{shown.mode}</TableCell>
-                    <TableCell>{shown.enforced ? "Yes" : "No"}</TableCell>
+                    <TableCell>{shown.enforced ? t("common.yes") : t("common.no")}</TableCell>
                     <TableCell>{shown.checks.length}</TableCell>
                     <TableCell>{formatUnix(latest.created_at_unix)}</TableCell>
                   </TableRow>

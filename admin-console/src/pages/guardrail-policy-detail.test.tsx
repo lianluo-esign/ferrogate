@@ -5,6 +5,7 @@ import { HttpResponse, http } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
 import { dryRunResponse, policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, server } from "@/test/msw";
@@ -14,16 +15,18 @@ import { createTestQueryClient, seedSession } from "@/test/test-utils";
 function renderDetail(policyId = "pol-pii") {
   return render(
     <MemoryRouter initialEntries={[`/app/guardrail-policies/${policyId}`]}>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <Routes>
-            <Route
-              path="/app/guardrail-policies/:policyId"
-              element={<GuardrailPolicyDetailPage />}
-            />
-          </Routes>
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route
+                path="/app/guardrail-policies/:policyId"
+                element={<GuardrailPolicyDetailPage />}
+              />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }
