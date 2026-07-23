@@ -34,6 +34,7 @@ mod mcp_identity;
 mod mcp_rpc;
 mod messages;
 mod messages_stream;
+pub(crate) mod observed_agent_activity;
 pub(crate) mod payments;
 mod plans;
 mod proxy;

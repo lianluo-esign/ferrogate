@@ -6715,6 +6715,10 @@ pub(crate) mod semantic_cache;
 
 #[path = "state_agent_runtime.rs"]
 mod state_agent_runtime;
+// #357: observed unattributed virtual-API-key activity ("Unknown" running
+// agent activity) derived read-only from already-recorded evidence.
+#[path = "state_observed_activity.rs"]
+mod state_observed_activity;
 // #309: bounded background evidence writer keeping request-log/audit/agent-run
 // persistence off the Pingora request path on the durable backend.
 #[path = "state_evidence_writer.rs"]

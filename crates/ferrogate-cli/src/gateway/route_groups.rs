@@ -558,6 +558,17 @@ impl FerroGateway {
                 .await?;
             return Ok(true);
         }
+        if req.path == "/admin/v1/observed-agent-activity" {
+            self.handle_admin_observed_agent_activity(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
         Ok(false)
     }
 

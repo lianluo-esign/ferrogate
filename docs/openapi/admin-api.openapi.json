@@ -11929,6 +11929,50 @@
           }
         ]
       }
+    },
+    "/admin/v1/observed-agent-activity": {
+      "get": {
+        "operationId": "listAdminObservedAgentActivity",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List tenant-scoped Unknown (unattributed virtual-API-key) agent activity.",
+        "description": "Presents traffic authenticated by a durable virtual API key that carries no verified managed-worker session, self-hosted worker/run, or agent-run identity as a third presentation/source category (source=virtual_api_key, identity_status=unattributed, display_name=Unknown). It is NOT a WorkerType and NOT a persistent agent entity: the stable identity is the observed key activity, and it never claims how many real agents share the key. status=running is derived from a recent-activity window (running_ttl_seconds) over already-recorded evidence; expiry reports inactive without fabricating a stop event.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated observed unattributed virtual-API-key activity rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminObservedAgentActivityList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -24724,6 +24768,176 @@
             }
           }
         ]
+      },
+      "AdminObservedAgentActivityList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminObservedAgentActivity"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminObservedAgentActivity": {
+        "type": "object",
+        "description": "One tenant/key-scoped Unknown activity row observed through a durable virtual API key.",
+        "required": [
+          "id",
+          "source",
+          "identity_status",
+          "display_name",
+          "status",
+          "status_basis",
+          "tenant_id",
+          "api_key_id",
+          "first_seen_at_unix",
+          "last_seen_at_unix",
+          "running_ttl_seconds",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable identity of the observed activity: observed:<tenant_id>:<api_key_id>. Not a per-process/agent UUID."
+          },
+          "source": {
+            "type": "string",
+            "const": "virtual_api_key"
+          },
+          "identity_status": {
+            "type": "string",
+            "const": "unattributed"
+          },
+          "display_name": {
+            "type": "string",
+            "const": "Unknown"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "inactive"
+            ]
+          },
+          "status_basis": {
+            "type": "string",
+            "const": "recent_api_key_activity"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "api_key_id": {
+            "type": "string"
+          },
+          "credential_name": {
+            "type": "string",
+            "description": "Redacted operator hint (the virtual key's name) the tenant may already view. Never the inferred agent name."
+          },
+          "first_seen_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_seen_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "running_ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/AdminObservedAgentActivityEvidence"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminObservedAgentActivityEvidence": {
+        "type": "object",
+        "description": "Inspectable evidence justifying the row's derived status.",
+        "required": [
+          "evidence_source",
+          "request_count",
+          "seconds_since_last_seen",
+          "running_ttl_seconds",
+          "within_running_window",
+          "usage_evidence_available",
+          "reason"
+        ],
+        "properties": {
+          "evidence_source": {
+            "type": "string",
+            "const": "request_logs"
+          },
+          "request_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "seconds_since_last_seen": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "running_ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "within_running_window": {
+            "type": "boolean"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cost_usd": {
+            "type": "number"
+          },
+          "usage_evidence_available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

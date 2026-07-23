@@ -57,6 +57,7 @@ fn every_previously_flat_route_still_resolves_to_a_group() {
         "/admin/v1/managed-workers",
         "/admin/v1/managed-worker-sessions",
         "/admin/v1/framework-adapters",
+        "/admin/v1/observed-agent-activity",
         "/admin/v1/self-hosted-workers",
         "/admin/v1/self-hosted-workers/worker-1",
         "/admin/v1/self-hosted-worker-records",
