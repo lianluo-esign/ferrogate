@@ -6695,6 +6695,11 @@ mod state_tenancy;
 #[path = "state_wallets.rs"]
 mod state_wallets;
 
+// #354: runtime orchestration for the x402 managed paid-egress settle/release
+// loop, composing the #281 wallet holds with the #352 payment-attempt CAS.
+#[path = "state_x402_settlement.rs"]
+mod state_x402_settlement;
+
 #[path = "state_quota_and_policy.rs"]
 mod state_quota_and_policy;
 

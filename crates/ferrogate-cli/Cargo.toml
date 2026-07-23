@@ -75,6 +75,7 @@ tracing-subscriber.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
+proptest.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 

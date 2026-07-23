@@ -1205,6 +1205,7 @@ dependencies = [
  "jsonwebtoken",
  "matchit",
  "pingora",
+ "proptest",
  "rcgen",
  "redis",
  "regex",
