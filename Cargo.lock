@@ -1391,13 +1391,17 @@ name = "ferrogate-secrets"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "ferrogate-cloudflare",
  "http",
  "rcgen",
  "rustls",
  "rustls-native-certs 0.8.3",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

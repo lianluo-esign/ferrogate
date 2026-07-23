@@ -15,11 +15,18 @@
 //!   config surface.
 //! - `vault://<mount>/<path>#<field>` — reads a HashiCorp Vault KV v2 secret,
 //!   e.g. `vault://secret/data/openai#api_key`.
+//! - `cf://<store>/<name>` — reads a secret from a Cloudflare Secrets Store
+//!   (issue #417), e.g. `cf://provider-keys/openai-api-key`. Resolved through
+//!   the shared `ferrogate-cloudflare` API client behind its injectable
+//!   transport seam.
 //!
-//! This is intentionally a minimal, dependency-light HTTP(S) client (mirrors
-//! the pattern already used in `ferrogate-cli`'s `telemetry.rs`/`acme.rs` and
-//! `ferrogate-mcp`) rather than a full Vault SDK, since only a KV v2 read is
-//! needed.
+//! The Vault backend is intentionally a minimal, dependency-light HTTP(S)
+//! client (mirrors the pattern already used in `ferrogate-cli`'s
+//! `telemetry.rs`/`acme.rs` and `ferrogate-mcp`) rather than a full Vault SDK,
+//! since only a KV v2 read is needed. The Cloudflare backend instead reuses the
+//! shared [`ferrogate_cloudflare::CloudflareClient`] (auth, retries, envelope +
+//! error mapping written once, in #405) so every FerroGate Cloudflare
+//! integration talks to the REST API the same way.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -27,9 +34,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result as AnyResult};
+use ferrogate_cloudflare::{
+    CloudflareClient, CloudflareConfig, CloudflareError, EnvTokenResolver, HttpMethod,
+};
 use http::Uri;
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::{pem::PemObject, CertificateDer};
+use serde::Deserialize;
 
 /// A parsed secret reference. See the crate-level docs for the supported
 /// URI schemes.
@@ -42,6 +53,13 @@ pub enum SecretRef {
         mount: String,
         path: String,
         field: String,
+    },
+    /// A Cloudflare Secrets Store reference: `cf://<store>/<name>`, where
+    /// `store` is a Secrets Store id (or name) and `name` is the secret's
+    /// name. Resolved by [`CloudflareSecretResolver`] (issue #417).
+    CfSecret {
+        store: String,
+        name: String,
     },
 }
 
@@ -81,7 +99,23 @@ impl SecretRef {
                 field: field.to_string(),
             });
         }
-        bail!("unsupported secret reference scheme (expected env:// or vault://): {raw}");
+        if let Some(rest) = raw.strip_prefix("cf://") {
+            let (store, name) = rest.split_once('/').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cf:// secret reference requires <store>/<name>, e.g. cf://provider-keys/openai-api-key (got {raw})"
+                )
+            })?;
+            if store.is_empty() || name.is_empty() {
+                bail!(
+                    "cf:// secret reference requires a non-empty store and name, e.g. cf://provider-keys/openai-api-key (got {raw})"
+                );
+            }
+            return Ok(Self::CfSecret {
+                store: store.to_string(),
+                name: name.to_string(),
+            });
+        }
+        bail!("unsupported secret reference scheme (expected env://, vault://, or cf://): {raw}");
     }
 }
 
@@ -187,32 +221,391 @@ impl SecretResolver for VaultSecretResolver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cloudflare Secrets Store backend (issue #417)
+// ---------------------------------------------------------------------------
+
+/// Cloudflare Secrets Store **beta** capacity caps, per account. The resolver
+/// surfaces these in its errors/docs rather than letting an operator discover
+/// them via an opaque Cloudflare API rejection. See the resolver docs.
+///
+/// - At most **one** Secrets Store per account.
+pub const CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT: usize = 1;
+/// - At most **100** secrets per account.
+pub const CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT: usize = 100;
+/// - At most **1024 bytes** per secret value.
+pub const CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES: usize = 1024;
+
+/// Connection details for a Cloudflare Secrets Store, sourced from environment
+/// variables (mirroring how [`VaultConfig::from_env`] reads `VAULT_ADDR` /
+/// `VAULT_TOKEN`) so the synchronous [`SecretResolverRegistry::from_env`] can
+/// enable the backend without threading the parsed `[cloudflare]` config block
+/// through this crate. The same account id + token an operator writes under
+/// `[cloudflare]` are exported here for the loader that constructs the
+/// registry.
+///
+/// - `CLOUDFLARE_ACCOUNT_ID` — the account the Secrets Store lives in.
+/// - `CLOUDFLARE_API_TOKEN` — a token with Secrets Store Read/Write.
+/// - `CLOUDFLARE_API_BASE_URL` — optional `client/v4` base override (defaults
+///   to the public Cloudflare API; handy for tests / self-hosted proxies).
+#[derive(Debug, Clone)]
+pub struct CfSecretsStoreConfig {
+    pub account_id: String,
+    pub api_token: String,
+    pub api_base_url: Option<String>,
+}
+
+impl CfSecretsStoreConfig {
+    /// Reads `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optionally
+    /// `CLOUDFLARE_API_BASE_URL`). Returns `None` if either required value is
+    /// unset/empty, so callers can treat "no Cloudflare Secrets Store
+    /// configured" as a normal, non-error case (mirrors Vault).
+    pub fn from_env() -> Option<Self> {
+        let account_id = non_empty_env("CLOUDFLARE_ACCOUNT_ID")?;
+        let api_token = non_empty_env("CLOUDFLARE_API_TOKEN")?;
+        Some(Self {
+            account_id,
+            api_token,
+            api_base_url: non_empty_env("CLOUDFLARE_API_BASE_URL"),
+        })
+    }
+}
+
+/// A Cloudflare Secrets Store list/detail item (`GET .../stores` and
+/// `GET .../secrets`). Only the fields we match on are decoded; unknown fields
+/// (timestamps, `status`, `comment`, `scopes`, …) are ignored.
+#[derive(Debug, Deserialize)]
+struct CfNamedResource {
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// The `GET .../secrets/{secret_id}` detail body. Crucially, a real Cloudflare
+/// Secrets Store **never** populates `value` — secret values are write-only and
+/// no REST response returns them. `value` is decoded only so the resolver can
+/// return it when a value IS present (e.g. a mock / a future value-bearing
+/// endpoint) and otherwise surface a precise, non-fabricated error.
+#[derive(Debug, Deserialize)]
+struct CfSecretDetail {
+    #[serde(default)]
+    value: Option<String>,
+}
+
+/// The write-side body for `POST .../secrets` (batch create). `value` is
+/// write-only on Cloudflare's side. `scopes` is fixed to `["workers"]` (the
+/// only scope Secrets Store currently supports).
+#[derive(Debug, serde::Serialize)]
+struct CfSecretCreate<'a> {
+    name: &'a str,
+    value: &'a str,
+    scopes: [&'a str; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment: Option<&'a str>,
+}
+
+/// Resolves `cf://<store>/<name>` references against a Cloudflare Secrets Store
+/// via the shared [`CloudflareClient`] (issue #417).
+///
+/// # Value retrieval
+///
+/// Cloudflare Secrets Store secret **values are write-only**: no documented
+/// REST endpoint returns a value (the intended consumption path is a Workers
+/// binding). This resolver therefore walks the documented read path —
+/// list stores → resolve the store id, list secrets → resolve the secret id,
+/// then `GET .../secrets/{id}` — and returns the value only if the detail body
+/// actually carries one. When it does not (the normal case for a live store),
+/// it surfaces a **precise error** explaining that the value cannot be read
+/// back, rather than fabricating a value or silently returning "unset".
+///
+/// # Beta caps
+///
+/// The Secrets Store beta caps an account at
+/// [`CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT`] store,
+/// [`CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT`] secrets, and
+/// [`CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES`] per value. The optional
+/// [`create_secret`](Self::create_secret) write path enforces the value-size
+/// cap client-side before any network call, and documents the account-level
+/// count caps (which Cloudflare enforces server-side).
+pub struct CloudflareSecretResolver {
+    client: CloudflareClient,
+}
+
+// `CloudflareClient` intentionally does not derive `Debug` (it holds redacted
+// credential + transport seams), so provide a hand-written impl that satisfies
+// the `SecretResolver: Debug` bound without leaking anything sensitive.
+impl std::fmt::Debug for CloudflareSecretResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudflareSecretResolver")
+            .field("account_id", &self.client.account_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudflareSecretResolver {
+    /// Build a production resolver from account/token config: a real reqwest
+    /// transport via [`CloudflareClient::new`]. The token is passed inline (the
+    /// value already resolved from `CLOUDFLARE_API_TOKEN`) so no further token
+    /// indirection is needed here.
+    pub fn new(config: CfSecretsStoreConfig) -> AnyResult<Self> {
+        let mut cf_config = CloudflareConfig::new(config.account_id, config.api_token);
+        if let Some(base) = config.api_base_url {
+            cf_config.api_base_url = base;
+        }
+        let client = CloudflareClient::new(cf_config, Arc::new(EnvTokenResolver::default()))
+            .map_err(|error| {
+                anyhow::anyhow!("failed to build Cloudflare Secrets Store client: {error}")
+            })?;
+        Ok(Self { client })
+    }
+
+    /// Assemble a resolver from an already-built [`CloudflareClient`] — the
+    /// seam tests use to inject a scripted [`ferrogate_cloudflare::HttpTransport`]
+    /// so resolution is exercised with no network.
+    pub fn from_client(client: CloudflareClient) -> Self {
+        Self { client }
+    }
+
+    /// Create (or overwrite) a secret value in the store — the **optional**
+    /// write path (`POST .../secrets`). Enforces the beta value-size cap
+    /// ([`CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES`]) client-side before any
+    /// network call; the account-level 1-store / 100-secret caps are enforced
+    /// by Cloudflare and surfaced verbatim through the returned error. Returns
+    /// the new secret's id on success.
+    pub fn create_secret(
+        &self,
+        store: &str,
+        name: &str,
+        value: &str,
+        comment: Option<&str>,
+    ) -> AnyResult<String> {
+        if value.len() > CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES {
+            bail!(
+                "Cloudflare Secrets Store value for cf://{store}/{name} is {} bytes, exceeding the beta cap of {} bytes per secret value",
+                value.len(),
+                CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES
+            );
+        }
+        if name.is_empty() {
+            bail!("Cloudflare Secrets Store secret name must not be empty");
+        }
+        block_on_cloudflare(self.create_secret_async(store, name, value, comment))
+    }
+
+    async fn create_secret_async(
+        &self,
+        store: &str,
+        name: &str,
+        value: &str,
+        comment: Option<&str>,
+    ) -> AnyResult<String> {
+        let store_id = self.resolve_store_id(store).await?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cloudflare Secrets Store {store} not found (the beta allows {CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT} store per account)"
+            )
+        })?;
+        let batch = [CfSecretCreate {
+            name,
+            value,
+            scopes: ["workers"],
+            comment,
+        }];
+        let body =
+            serde_json::to_vec(&batch).context("failed to encode Secrets Store create body")?;
+        let created: Vec<CfNamedResource> = self
+            .client
+            .request_json(
+                HttpMethod::Post,
+                &format!("accounts/{{account_id}}/secrets_store/stores/{store_id}/secrets"),
+                Some(body),
+                None,
+            )
+            .await
+            .map_err(|error| {
+                map_cf_error(
+                    error,
+                    &format!("failed to create Cloudflare secret cf://{store}/{name}"),
+                )
+            })?;
+        created
+            .into_iter()
+            .next()
+            .map(|resource| resource.id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cloudflare Secrets Store create for cf://{store}/{name} returned no secret id"
+                )
+            })
+    }
+
+    /// The async body of [`resolve`](SecretResolver::resolve), driven to
+    /// completion by [`block_on_cloudflare`] from the synchronous trait method.
+    async fn resolve_async(&self, store: &str, name: &str) -> AnyResult<Option<String>> {
+        let Some(store_id) = self.resolve_store_id(store).await? else {
+            // Store absent → treat as "not found" so callers can distinguish a
+            // missing ref from a hard failure (mirrors Vault's None-on-missing).
+            return Ok(None);
+        };
+        let Some(secret_id) = self.resolve_secret_id(&store_id, name).await? else {
+            return Ok(None);
+        };
+        let detail: CfSecretDetail = self
+            .client
+            .get_json(
+                &format!(
+                    "accounts/{{account_id}}/secrets_store/stores/{store_id}/secrets/{secret_id}"
+                ),
+                None,
+            )
+            .await
+            .map_err(|error| {
+                map_cf_error(
+                    error,
+                    &format!("failed to read Cloudflare secret cf://{store}/{name}"),
+                )
+            })?;
+        match detail.value {
+            Some(value) => Ok(Some(value)),
+            None => bail!(
+                "Cloudflare Secrets Store secret cf://{store}/{name} exists (id {secret_id}) but its \
+                 value cannot be read back: Secrets Store secret values are write-only and are never \
+                 returned by the REST API. Consume the secret via a Workers binding, or re-set its \
+                 value with the create/patch API — FerroGate will not fabricate a value."
+            ),
+        }
+    }
+
+    /// List stores and resolve `store` (a store id OR name) to a store id.
+    async fn resolve_store_id(&self, store: &str) -> AnyResult<Option<String>> {
+        let stores: Vec<CfNamedResource> = self
+            .client
+            .get_json("accounts/{account_id}/secrets_store/stores", None)
+            .await
+            .map_err(|error| map_cf_error(error, "failed to list Cloudflare Secrets Stores"))?;
+        Ok(stores
+            .into_iter()
+            .find(|candidate| candidate.id == store || candidate.name == store)
+            .map(|candidate| candidate.id))
+    }
+
+    /// List a store's secrets and resolve `name` to a secret id.
+    async fn resolve_secret_id(&self, store_id: &str, name: &str) -> AnyResult<Option<String>> {
+        let secrets: Vec<CfNamedResource> = self
+            .client
+            .get_json(
+                &format!("accounts/{{account_id}}/secrets_store/stores/{store_id}/secrets"),
+                None,
+            )
+            .await
+            .map_err(|error| {
+                map_cf_error(
+                    error,
+                    &format!("failed to list secrets in Cloudflare Secrets Store {store_id}"),
+                )
+            })?;
+        Ok(secrets
+            .into_iter()
+            .find(|candidate| candidate.name == name)
+            .map(|candidate| candidate.id))
+    }
+}
+
+impl SecretResolver for CloudflareSecretResolver {
+    fn resolve(&self, reference: &SecretRef) -> AnyResult<Option<String>> {
+        let SecretRef::CfSecret { store, name } = reference else {
+            bail!("CloudflareSecretResolver cannot resolve a non-cf:// reference: {reference:?}");
+        };
+        block_on_cloudflare(self.resolve_async(store, name))
+    }
+}
+
+/// Attach context to a [`CloudflareError`] while flattening it into `anyhow`.
+fn map_cf_error(error: CloudflareError, context: &str) -> anyhow::Error {
+    anyhow::anyhow!("{context}: {error}")
+}
+
+/// Drive a Cloudflare (async) future to completion from a synchronous context.
+///
+/// The [`SecretResolver`] trait is synchronous, but [`CloudflareClient`] is
+/// async (reqwest/tokio). A resolve can be invoked either outside any runtime
+/// (CLI validation) or from within the gateway's async runtime, so we run the
+/// future on a **dedicated thread with its own current-thread runtime**: this
+/// never panics with "cannot start a runtime from within a runtime" and needs
+/// no `Handle` to be in scope. The future is `Send` (the Cloudflare client and
+/// all transports are `Send + Sync`), so moving it across the thread boundary
+/// is sound.
+fn block_on_cloudflare<F>(future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build current-thread runtime for Cloudflare Secrets Store resolve")
+                    .block_on(future)
+            })
+            .join()
+            .expect("Cloudflare Secrets Store resolver bridge thread panicked")
+    })
+}
+
 /// Dispatches a `secret_ref` string to the right backend: `env://` always
 /// resolves via [`EnvSecretResolver`]; `vault://` requires a configured
-/// [`VaultSecretResolver`] (via [`SecretResolverRegistry::from_env`] or
-/// [`SecretResolverRegistry::with_vault`]) and fails clearly if none is set,
-/// rather than silently returning `None`.
+/// [`VaultSecretResolver`]; `cf://` requires a configured
+/// [`CloudflareSecretResolver`] (via [`SecretResolverRegistry::from_env`] or
+/// the `with_*` constructors). A reference whose backend is not configured
+/// fails clearly rather than silently returning `None`.
 #[derive(Debug, Default)]
 pub struct SecretResolverRegistry {
     vault: Option<VaultSecretResolver>,
+    cloudflare: Option<CloudflareSecretResolver>,
 }
 
 impl SecretResolverRegistry {
     pub fn new() -> Self {
-        Self { vault: None }
+        Self {
+            vault: None,
+            cloudflare: None,
+        }
     }
 
     pub fn with_vault(vault: VaultSecretResolver) -> Self {
-        Self { vault: Some(vault) }
+        Self {
+            vault: Some(vault),
+            cloudflare: None,
+        }
     }
 
-    /// Builds a registry with Vault support enabled if `VAULT_ADDR` and
-    /// `VAULT_TOKEN` are both set in the environment.
+    /// Enable the Cloudflare Secrets Store backend on this registry.
+    pub fn with_cloudflare(mut self, cloudflare: CloudflareSecretResolver) -> Self {
+        self.cloudflare = Some(cloudflare);
+        self
+    }
+
+    /// Builds a registry with backends enabled from the environment: Vault when
+    /// `VAULT_ADDR` + `VAULT_TOKEN` are set, and Cloudflare Secrets Store when
+    /// `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` are set. A Cloudflare
+    /// config that is present but whose client cannot be built is logged and
+    /// treated as "not configured" (the `cf://` path then errors clearly).
     pub fn from_env() -> Self {
-        match VaultConfig::from_env() {
-            Some(config) => Self::with_vault(VaultSecretResolver::new(config)),
-            None => Self::new(),
-        }
+        let vault = VaultConfig::from_env().map(VaultSecretResolver::new);
+        let cloudflare = CfSecretsStoreConfig::from_env().and_then(|config| {
+            match CloudflareSecretResolver::new(config) {
+                Ok(resolver) => Some(resolver),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Cloudflare Secrets Store is configured but its client could not be built; cf:// references will error"
+                    );
+                    None
+                }
+            }
+        });
+        Self { vault, cloudflare }
     }
 
     pub fn resolve(&self, raw: &str) -> AnyResult<Option<String>> {
@@ -223,6 +616,12 @@ impl SecretResolverRegistry {
                 Some(resolver) => resolver.resolve(&reference),
                 None => bail!(
                     "secret reference {raw} requires Vault, but VAULT_ADDR/VAULT_TOKEN are not configured"
+                ),
+            },
+            SecretRef::CfSecret { .. } => match &self.cloudflare {
+                Some(resolver) => resolver.resolve(&reference),
+                None => bail!(
+                    "cf:// secret {raw} requested but Cloudflare Secrets Store is not configured (set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)"
                 ),
             },
         }
@@ -427,6 +826,10 @@ fn send_http_request<S: Read + Write>(
 }
 
 #[cfg(test)]
+#[path = "cloudflare_test.rs"]
+mod cloudflare_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rcgen::CertifiedKey;
@@ -477,7 +880,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_scheme() {
         let error = SecretRef::parse("aws-sm://foo").unwrap_err().to_string();
-        assert!(error.contains("env:// or vault://"));
+        assert!(error.contains("env://, vault://, or cf://"));
     }
 
     #[test]

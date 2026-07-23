@@ -9,21 +9,31 @@ name = "ferrogate-secrets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "FerroGate secret-reference resolution (env, HashiCorp Vault)."
+description = "FerroGate secret-reference resolution (env, HashiCorp Vault, Cloudflare Secrets Store)."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Sibling foundation crate (#405): the shared Cloudflare API client with an
+# injectable HttpTransport seam. ferrogate-cloudflare depends on nothing in
+# this crate, so this edge introduces no dependency cycle.
+ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 anyhow.workspace = true
 http.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 rustls-pki-types.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# Bridges the async CloudflareClient to this crate's synchronous
+# SecretResolver trait via a dedicated current-thread runtime (see
+# `block_on_cloudflare`). Only the runtime + time/net drivers are used.
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
