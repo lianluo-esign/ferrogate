@@ -33,7 +33,10 @@ version = "2026.7.9"
 dependencies = [
  "anyhow",
  "clap",
+ "ferrogate-payments",
+ "ferrogate-policy",
  "ferrogate-runtime",
+ "proptest",
  "rustix",
  "serde",
  "serde_json",

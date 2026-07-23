@@ -21,6 +21,7 @@ mod local_process_backend;
 mod management;
 mod self_hosted_execution;
 mod state;
+mod x402_client;
 
 #[cfg(test)]
 mod test_support {
