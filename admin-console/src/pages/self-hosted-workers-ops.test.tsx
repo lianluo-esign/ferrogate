@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
@@ -56,16 +57,18 @@ function mockRecords(records: WorkerRecord[]): void {
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={["/app/workers/self-hosted"]}>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <Routes>
-            <Route
-              path="/app/workers/self-hosted"
-              element={<SelfHostedWorkersOpsPage />}
-            />
-          </Routes>
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route
+                path="/app/workers/self-hosted"
+                element={<SelfHostedWorkersOpsPage />}
+              />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }

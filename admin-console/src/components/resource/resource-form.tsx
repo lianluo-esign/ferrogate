@@ -17,6 +17,7 @@ import {
   clearDependentReferenceValues,
   type FieldConfig,
 } from "@/lib/resource-config";
+import { useI18n } from "@/i18n";
 
 interface ResourceFormProps {
   fields: FieldConfig[];
@@ -59,6 +60,7 @@ export function ResourceForm({
   onSubmit,
   onCancel,
 }: ResourceFormProps) {
+  const { t } = useI18n();
   const [values, setValues] = useState<Record<string, unknown>>(() =>
     normalizeInitialValues(fields, initialValues),
   );
@@ -91,13 +93,13 @@ export function ResourceForm({
           field.required &&
           (raw === "" || raw === undefined || (Array.isArray(raw) && raw.length === 0))
         ) {
-          throw new Error(`${field.label} is required`);
+          throw new Error(t("resource.validation.required", { field: field.label }));
         }
         if (field.type === "json" && typeof raw === "string" && raw.trim() !== "") {
           try {
             payload[field.name] = JSON.parse(raw);
           } catch {
-            throw new Error(`${field.label} must be valid JSON`);
+            throw new Error(t("resource.validation.invalidJson", { field: field.label }));
           }
         } else if (field.type === "csv") {
           payload[field.name] = String(raw ?? "")
@@ -112,7 +114,7 @@ export function ResourceForm({
       }
       await onSubmit(payload);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save");
+      setError(err instanceof Error ? err.message : t("resource.form.saveError"));
     } finally {
       setSubmitting(false);
     }
@@ -140,7 +142,7 @@ export function ResourceForm({
               onValueChange={(value) => setField(field.name, value)}
             >
               <SelectTrigger id={field.name}>
-                <SelectValue placeholder={field.placeholder ?? "Select..."} />
+                <SelectValue placeholder={field.placeholder ?? t("resource.form.selectPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
                 {field.options?.map((option) => (
@@ -201,10 +203,10 @@ export function ResourceForm({
       ) : null}
       <div className="flex justify-end gap-2 pt-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {t("resource.action.cancel")}
         </Button>
         <Button type="submit" disabled={submitting}>
-          {submitting ? "Saving…" : submitLabel}
+          {submitting ? t("resource.action.saving") : submitLabel}
         </Button>
       </div>
     </form>

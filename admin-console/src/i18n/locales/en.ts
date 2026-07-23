@@ -181,4 +181,74 @@ export const en = {
   "nav.item.providerHealth": "Provider Health",
   "nav.item.telemetryExports": "Telemetry Exports",
   "nav.item.siteDomains": "Site Domains",
+
+  // Generated resource-CRUD framework chrome (#348). These localize the shared
+  // scaffolding that renders every resource page. Resource-specific display
+  // names (`config.title`, field labels, row labels) stay data-driven and are
+  // interpolated as `{name}` / `{field}` / `{label}` — later slices translate
+  // the per-resource catalogs, not this chrome.
+  "resource.action.new": "New",
+  "resource.action.create": "Create",
+  "resource.action.saveChanges": "Save changes",
+  "resource.action.saving": "Saving…",
+  "resource.action.cancel": "Cancel",
+  "resource.action.edit": "Edit",
+  "resource.action.delete": "Delete",
+  "resource.action.retry": "Retry",
+  "resource.action.loadMore": "Load more",
+  "resource.action.remove": "Remove",
+  "resource.action.rowActions": "Actions for {label}",
+
+  "resource.table.loading": "Loading…",
+  "resource.table.empty": "No records yet.",
+  "resource.table.unavailable": "Data unavailable.",
+  "resource.table.moreDetails": "More details",
+  "resource.table.actionsColumn": "Actions",
+
+  "resource.pagination.label": "{name} pagination",
+  "resource.pagination.range": "Showing {start}-{end}",
+  "resource.pagination.rangeOf": "Showing {start}-{end} of {total}",
+  "resource.pagination.previous": "Previous",
+  "resource.pagination.next": "Next",
+
+  "resource.dialog.createTitle": "New {name}",
+  "resource.dialog.editTitle": "Edit {name}",
+  "resource.dialog.deleteTitle": "Delete {name}?",
+  "resource.dialog.deleteDescription": "This action cannot be undone.",
+
+  "resource.validation.required": "{field} is required",
+  "resource.validation.invalidJson": "{field} must be valid JSON",
+
+  "resource.form.saveError": "Failed to save",
+  "resource.form.selectPlaceholder": "Select...",
+
+  "resource.list.loadError": "Failed to load {name}: {message}",
+
+  "resource.toast.created": "{name} created",
+  "resource.toast.updated": "{name} updated",
+  "resource.toast.deleted": "{name} deleted",
+
+  "resource.secret.title": "Save this secret now",
+  "resource.secret.description":
+    "This value will not be shown again. Store it somewhere safe.",
+  "resource.secret.copyClose": "Copy & close",
+  "resource.secret.copyError":
+    "Could not copy to clipboard; the secret is shown above.",
+
+  "resource.picker.selectDependencyFirst": "Select {name} first",
+  "resource.picker.selectPlaceholder": "Select {label}",
+  "resource.picker.dialogTitle": "Select {label}",
+  "resource.picker.dialogDescription": "Search and select {label}.",
+  "resource.picker.loadError": "Could not load options: {message}",
+  "resource.picker.noMatches": "No matching records.",
+  "resource.picker.searchPlaceholder": "Search by name or ID",
+  "resource.picker.searchLabel": "Search {label}",
+  "resource.picker.optionsLabel": "{label} options",
+  "resource.picker.useExactId": "Use exact ID",
+  "resource.picker.selectedLabel": "Selected {label}",
+  "resource.picker.resolutionUnavailable": "Resolution unavailable",
+  "resource.picker.unresolvedReference": "Unresolved reference",
+  "resource.picker.copyValue": "Copy {value}",
+  "resource.picker.copyId": "Copy ID",
+  "resource.picker.removeOption": "Remove {name}",
 } as const;

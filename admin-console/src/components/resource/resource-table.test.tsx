@@ -1,8 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ResourceTable } from "@/components/resource/resource-table";
 import type { ColumnConfig } from "@/lib/resource-config";
+import { renderWithProviders } from "@/test/test-utils";
 
 interface WidgetRow extends Record<string, unknown> {
   id: string;
@@ -40,7 +41,7 @@ beforeEach(() => setDesktopViewport(true));
 
 describe("ResourceTable", () => {
   it("renders column headers and one row per record (custom render applied)", () => {
-    render(
+    renderWithProviders(
       <ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />,
     );
 
@@ -54,12 +55,12 @@ describe("ResourceTable", () => {
   });
 
   it("shows the loading state", () => {
-    render(<ResourceTable columns={columns} rows={[]} isLoading readOnly />);
+    renderWithProviders(<ResourceTable columns={columns} rows={[]} isLoading readOnly />);
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
   it("shows the empty state when there are no rows", () => {
-    render(
+    renderWithProviders(
       <ResourceTable columns={columns} rows={[]} isLoading={false} readOnly />,
     );
     expect(screen.getByText("No records yet.")).toBeInTheDocument();
@@ -67,7 +68,7 @@ describe("ResourceTable", () => {
 
   it("uses a prioritized record layout below the desktop breakpoint", () => {
     setDesktopViewport(false);
-    render(<ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />);
+    renderWithProviders(<ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />);
 
     expect(screen.getAllByRole("article")).toHaveLength(2);
     expect(screen.getByText("Sprocket")).toBeInTheDocument();
@@ -78,7 +79,7 @@ describe("ResourceTable", () => {
     const user = userEvent.setup();
     const onEdit = vi.fn();
     const onDelete = vi.fn();
-    render(
+    renderWithProviders(
       <ResourceTable
         columns={columns}
         rows={rows}

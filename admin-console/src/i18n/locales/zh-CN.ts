@@ -163,4 +163,68 @@ export const zhCN: Messages = {
   "nav.item.providerHealth": "提供商健康",
   "nav.item.telemetryExports": "遥测导出",
   "nav.item.siteDomains": "站点域名",
+
+  // 生成的资源 CRUD 框架界面文案（#348）。
+  "resource.action.new": "新建",
+  "resource.action.create": "创建",
+  "resource.action.saveChanges": "保存更改",
+  "resource.action.saving": "正在保存…",
+  "resource.action.cancel": "取消",
+  "resource.action.edit": "编辑",
+  "resource.action.delete": "删除",
+  "resource.action.retry": "重试",
+  "resource.action.loadMore": "加载更多",
+  "resource.action.remove": "移除",
+  "resource.action.rowActions": "{label} 的操作",
+
+  "resource.table.loading": "加载中…",
+  "resource.table.empty": "暂无记录。",
+  "resource.table.unavailable": "数据不可用。",
+  "resource.table.moreDetails": "更多详情",
+  "resource.table.actionsColumn": "操作",
+
+  "resource.pagination.label": "{name}分页",
+  "resource.pagination.range": "显示第 {start}-{end} 条",
+  "resource.pagination.rangeOf": "显示第 {start}-{end} 条，共 {total} 条",
+  "resource.pagination.previous": "上一页",
+  "resource.pagination.next": "下一页",
+
+  "resource.dialog.createTitle": "新建{name}",
+  "resource.dialog.editTitle": "编辑{name}",
+  "resource.dialog.deleteTitle": "删除{name}？",
+  "resource.dialog.deleteDescription": "此操作无法撤销。",
+
+  "resource.validation.required": "{field}为必填项",
+  "resource.validation.invalidJson": "{field}必须是有效的 JSON",
+
+  "resource.form.saveError": "保存失败",
+  "resource.form.selectPlaceholder": "请选择…",
+
+  "resource.list.loadError": "加载{name}失败：{message}",
+
+  "resource.toast.created": "{name}已创建",
+  "resource.toast.updated": "{name}已更新",
+  "resource.toast.deleted": "{name}已删除",
+
+  "resource.secret.title": "请立即保存此密钥",
+  "resource.secret.description": "此值不会再次显示，请妥善保管。",
+  "resource.secret.copyClose": "复制并关闭",
+  "resource.secret.copyError": "无法复制到剪贴板；密钥已显示在上方。",
+
+  "resource.picker.selectDependencyFirst": "请先选择{name}",
+  "resource.picker.selectPlaceholder": "选择{label}",
+  "resource.picker.dialogTitle": "选择{label}",
+  "resource.picker.dialogDescription": "搜索并选择{label}。",
+  "resource.picker.loadError": "无法加载选项：{message}",
+  "resource.picker.noMatches": "没有匹配的记录。",
+  "resource.picker.searchPlaceholder": "按名称或 ID 搜索",
+  "resource.picker.searchLabel": "搜索{label}",
+  "resource.picker.optionsLabel": "{label}选项",
+  "resource.picker.useExactId": "使用精确 ID",
+  "resource.picker.selectedLabel": "已选{label}",
+  "resource.picker.resolutionUnavailable": "无法解析",
+  "resource.picker.unresolvedReference": "未解析的引用",
+  "resource.picker.copyValue": "复制 {value}",
+  "resource.picker.copyId": "复制 ID",
+  "resource.picker.removeOption": "移除 {name}",
 };

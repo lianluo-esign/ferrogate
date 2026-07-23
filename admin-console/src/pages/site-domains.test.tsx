@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import SiteDomainsPage from "@/pages/site-domains";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, server } from "@/test/msw";
@@ -36,11 +37,13 @@ function mockList(domains: SiteDomain[]): void {
 function renderPage() {
   return render(
     <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <SiteDomainsPage />
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <SiteDomainsPage />
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }

@@ -6,6 +6,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ResourcePage } from "@/components/resource/resource-page";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import type { ResourceConfig } from "@/lib/resource-config";
 import { plansConfig, type AdminPlan } from "@/resources/plans";
 import {
@@ -58,12 +59,14 @@ function LocationProbe() {
 function renderAt(entry: string) {
   return render(
     <MemoryRouter initialEntries={[entry]}>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <ResourcePage config={widgetsConfig} />
-          <LocationProbe />
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <ResourcePage config={widgetsConfig} />
+            <LocationProbe />
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }

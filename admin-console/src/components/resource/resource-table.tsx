@@ -18,6 +18,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { useI18n } from "@/i18n";
 import type { ColumnConfig } from "@/lib/resource-config";
 
 interface ResourceTableProps<T extends Record<string, unknown>> {
@@ -59,6 +60,7 @@ function RowActions<T extends Record<string, unknown>>({
   onDelete?: (row: T, trigger?: HTMLElement | null) => void;
   renderActions?: (row: T) => ReactNode;
 }) {
+  const { t } = useI18n();
   const triggerRef = useRef<HTMLButtonElement>(null);
   if (renderActions) return <>{renderActions(row)}</>;
   if (!onEdit && !onDelete) return null;
@@ -70,18 +72,18 @@ function RowActions<T extends Record<string, unknown>>({
           variant="ghost"
           size="icon"
           className="size-11 lg:size-8"
-          aria-label={`Actions for ${label}`}
+          aria-label={t("resource.action.rowActions", { label })}
         >
           <MoreHorizontal className="size-4" aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {onEdit ? (
-          <DropdownMenuItem onSelect={() => onEdit(row, triggerRef.current)}>Edit</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onEdit(row, triggerRef.current)}>{t("resource.action.edit")}</DropdownMenuItem>
         ) : null}
         {onDelete ? (
           <DropdownMenuItem className="text-destructive" onSelect={() => onDelete(row, triggerRef.current)}>
-            Delete
+            {t("resource.action.delete")}
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
@@ -94,28 +96,30 @@ export function ResourceTable<T extends Record<string, unknown>>({
   rows,
   isLoading,
   readOnly,
-  emptyLabel = "No records yet.",
+  emptyLabel,
   rowLabel,
   onEdit,
   onDelete,
   renderActions,
 }: ResourceTableProps<T>) {
+  const { t } = useI18n();
   const isDesktop = useMediaQuery("(min-width: 1024px)");
   const hasActions = !readOnly && Boolean(onEdit || onDelete || renderActions);
   const labelFor = (row: T) => rowLabel?.(row) ?? rawColumnValue(columns[0], row);
+  const resolvedEmptyLabel = emptyLabel ?? t("resource.table.empty");
 
   if (!isDesktop) {
     if (isLoading) {
       return (
         <div className="flex min-h-24 items-center justify-center rounded-md border">
-          <AsyncStatus>Loading…</AsyncStatus>
+          <AsyncStatus>{t("resource.table.loading")}</AsyncStatus>
         </div>
       );
     }
     if (rows.length === 0) {
       return (
         <div className="flex min-h-24 items-center justify-center rounded-md border text-sm text-muted-foreground">
-          {emptyLabel}
+          {resolvedEmptyLabel}
         </div>
       );
     }
@@ -147,7 +151,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
               {detailColumns.length > 0 ? (
                 <details className="border-t">
                   <summary className="flex min-h-11 cursor-pointer items-center text-sm font-medium">
-                    More details
+                    {t("resource.table.moreDetails")}
                   </summary>
                   <dl className="divide-y border-t">
                     {detailColumns.map((column) => (
@@ -188,19 +192,19 @@ export function ResourceTable<T extends Record<string, unknown>>({
                 {column.header}
               </TableHead>
             ))}
-            {hasActions ? <TableHead className="w-14"><span className="sr-only">Actions</span></TableHead> : null}
+            {hasActions ? <TableHead className="w-14"><span className="sr-only">{t("resource.table.actionsColumn")}</span></TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
           {isLoading ? (
             <TableRow>
               <TableCell colSpan={colSpan} className="h-24 text-center">
-                <AsyncStatus>Loading…</AsyncStatus>
+                <AsyncStatus>{t("resource.table.loading")}</AsyncStatus>
               </TableCell>
             </TableRow>
           ) : rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={colSpan} className="h-24 text-center">{emptyLabel}</TableCell>
+              <TableCell colSpan={colSpan} className="h-24 text-center">{resolvedEmptyLabel}</TableCell>
             </TableRow>
           ) : (
             rows.map((row, rowIndex) => {

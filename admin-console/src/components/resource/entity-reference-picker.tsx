@@ -20,6 +20,7 @@ import {
   type EntityReferenceOption,
 } from "@/lib/entity-reference-registry";
 import type { EntityReferenceConfig } from "@/lib/resource-config";
+import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 
 interface EntityReferencePickerProps {
@@ -76,6 +77,7 @@ export function EntityReferencePicker({
 }: EntityReferencePickerProps) {
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 250);
@@ -216,11 +218,11 @@ export function EntityReferencePicker({
           >
             <span className={cn("truncate", selectedValues.length === 0 && "text-muted-foreground")}>
               {missingDependency
-                ? `Select ${dependencyLabel} first`
+                ? t("resource.picker.selectDependencyFirst", { name: dependencyLabel ?? "" })
                 : selectedValues.length === 0
-                  ? placeholder ?? `Select ${label.toLowerCase()}`
+                  ? placeholder ?? t("resource.picker.selectPlaceholder", { label: label.toLowerCase() })
                   : multiple
-                    ? `${selectedValues.length} selected`
+                    ? t("common.selected", { count: selectedValues.length })
                     : selectedOptions[0]?.primaryLabel}
             </span>
             <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -228,9 +230,9 @@ export function EntityReferencePicker({
         </DialogTrigger>
         <DialogContent id={dialogId} className="max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100%-2rem)] gap-3 overflow-hidden p-4 sm:max-w-xl sm:p-6">
           <DialogHeader>
-            <DialogTitle>Select {label}</DialogTitle>
+            <DialogTitle>{t("resource.picker.dialogTitle", { label })}</DialogTitle>
             <DialogDescription className="sr-only">
-              Search and select {label.toLowerCase()}.
+              {t("resource.picker.dialogDescription", { label: label.toLowerCase() })}
             </DialogDescription>
           </DialogHeader>
           <div className="relative">
@@ -247,8 +249,8 @@ export function EntityReferencePicker({
                 }
               }}
               className="pl-9"
-              placeholder="Search by name or ID"
-              aria-label={`Search ${label}`}
+              placeholder={t("resource.picker.searchPlaceholder")}
+              aria-label={t("resource.picker.searchLabel", { label })}
               aria-controls={listboxId}
             />
           </div>
@@ -256,27 +258,27 @@ export function EntityReferencePicker({
             ref={listboxRef}
             id={listboxId}
             role="listbox"
-            aria-label={`${label} options`}
+            aria-label={t("resource.picker.optionsLabel", { label })}
             aria-multiselectable={multiple || undefined}
             className="min-h-40 flex-1 overflow-y-auto rounded-md border p-1"
           >
             {listQuery.isPending ? (
               <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground" role="status">
                 <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
-                Loading…
+                {t("resource.table.loading")}
               </div>
             ) : listQuery.error ? (
               <div className="grid gap-2 p-3">
                 <AsyncStatus tone="error">
-                  Could not load options: {listQuery.error.message}
+                  {t("resource.picker.loadError", { message: listQuery.error.message })}
                 </AsyncStatus>
                 <Button type="button" variant="outline" size="sm" onClick={() => listQuery.refetch()}>
-                  Retry
+                  {t("resource.action.retry")}
                 </Button>
               </div>
             ) : options.length === 0 ? (
               <p className="flex min-h-40 items-center justify-center text-sm text-muted-foreground" role="status">
-                No matching records.
+                {t("resource.picker.noMatches")}
               </p>
             ) : (
               options.map((option) => {
@@ -320,7 +322,7 @@ export function EntityReferencePicker({
           </div>
           {reference.allowRawValue && search.trim() && !options.some((option) => option.value === search.trim()) ? (
             <Button type="button" variant="outline" onClick={() => selectOption(search.trim())}>
-              Use exact ID <code className="ml-1 max-w-52 truncate" translate="no">{search.trim()}</code>
+              {t("resource.picker.useExactId")} <code className="ml-1 max-w-52 truncate" translate="no">{search.trim()}</code>
             </Button>
           ) : null}
           {listQuery.hasNextPage ? (
@@ -330,23 +332,23 @@ export function EntityReferencePicker({
               disabled={listQuery.isFetchingNextPage}
               onClick={() => listQuery.fetchNextPage()}
             >
-              {listQuery.isFetchingNextPage ? "Loading…" : "Load more"}
+              {listQuery.isFetchingNextPage ? t("resource.table.loading") : t("resource.action.loadMore")}
             </Button>
           ) : null}
         </DialogContent>
       </Dialog>
 
       {selectedOptions.length > 0 ? (
-        <ul className="grid gap-1" aria-label={`Selected ${label}`}>
+        <ul className="grid gap-1" aria-label={t("resource.picker.selectedLabel", { label })}>
           {selectedOptions.map((option) => (
             <li key={option.value} className="flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-sm">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate font-medium">{option.primaryLabel}</span>
                   {option.resolutionError ? (
-                    <Badge variant="outline">Resolution unavailable</Badge>
+                    <Badge variant="outline">{t("resource.picker.resolutionUnavailable")}</Badge>
                   ) : option.unresolved ? (
-                    <Badge variant="outline">Unresolved reference</Badge>
+                    <Badge variant="outline">{t("resource.picker.unresolvedReference")}</Badge>
                   ) : null}
                 </div>
                 <code className="block truncate text-xs text-muted-foreground" translate="no">
@@ -358,8 +360,8 @@ export function EntityReferencePicker({
                 variant="ghost"
                 size="icon"
                 className="size-9 shrink-0"
-                aria-label={`Copy ${option.value}`}
-                title="Copy ID"
+                aria-label={t("resource.picker.copyValue", { value: option.value })}
+                title={t("resource.picker.copyId")}
                 onClick={() => void navigator.clipboard.writeText(option.value)}
               >
                 <Copy className="size-4" aria-hidden="true" />
@@ -369,8 +371,8 @@ export function EntityReferencePicker({
                 variant="ghost"
                 size="icon"
                 className="size-9 shrink-0"
-                aria-label={`Remove ${option.primaryLabel}`}
-                title="Remove"
+                aria-label={t("resource.picker.removeOption", { name: option.primaryLabel })}
+                title={t("resource.action.remove")}
                 onClick={() => removeOption(option.value)}
               >
                 <X className="size-4" aria-hidden="true" />

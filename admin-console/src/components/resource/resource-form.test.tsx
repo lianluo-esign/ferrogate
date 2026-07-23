@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
 import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
+import { renderWithProviders } from "@/test/test-utils";
 
 const fields: FieldConfig[] = [
   { name: "name", label: "Name", type: "text", required: true },
@@ -15,7 +16,7 @@ const fields: FieldConfig[] = [
 function renderForm(overrides: Partial<Parameters<typeof ResourceForm>[0]> = {}) {
   const onSubmit = vi.fn().mockResolvedValue(undefined);
   const onCancel = vi.fn();
-  render(
+  renderWithProviders(
     <ResourceForm
       fields={fields}
       initialValues={defaultFieldValues(fields)}

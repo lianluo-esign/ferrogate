@@ -24,6 +24,7 @@ import {
 import { ResourceForm } from "@/components/resource/resource-form";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import {
   gatewayDelete,
   gatewayGet,
@@ -40,6 +41,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
 }) {
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const paginationMode = config.pagination ?? (config.fetchList ? "none" : "offset");
@@ -78,7 +80,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       gatewayPost<Record<string, unknown>>(apiKey, config.basePath, values),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(`${config.title} created`);
+      toast.success(t("resource.toast.created", { name: config.title }));
       setFormOpen(false);
       if (config.secretResponseKey) {
         const secret = response[config.secretResponseKey];
@@ -92,7 +94,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       gatewayPut(apiKey, `${config.basePath}/${id}`, values),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(`${config.title} updated`);
+      toast.success(t("resource.toast.updated", { name: config.title }));
       setEditingRow(null);
     },
   });
@@ -101,7 +103,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
     mutationFn: (id: string) => gatewayDelete(apiKey, `${config.basePath}/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(`${config.title} deleted`);
+      toast.success(t("resource.toast.deleted", { name: config.title }));
       setDeletingRow(null);
     },
     onError: (error: Error) => {
@@ -136,14 +138,17 @@ export function ResourcePage<T extends Record<string, unknown>>({
             }}
           >
             <Plus className="mr-1 h-4 w-4" />
-            New
+            {t("resource.action.new")}
           </Button>
         )}
       </div>
 
       {listError && (
         <AsyncStatus tone="error">
-          Failed to load {config.title.toLowerCase()}: {listError.message}
+          {t("resource.list.loadError", {
+            name: config.title.toLowerCase(),
+            message: listError.message,
+          })}
         </AsyncStatus>
       )}
 
@@ -152,7 +157,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
         rows={rows}
         isLoading={isLoading}
         readOnly={!canEdit && !canDelete}
-        emptyLabel={listError ? "Data unavailable." : "No records yet."}
+        emptyLabel={
+          listError ? t("resource.table.unavailable") : t("resource.table.empty")
+        }
         rowLabel={config.rowLabel}
         onEdit={
           canEdit
@@ -169,11 +176,15 @@ export function ResourcePage<T extends Record<string, unknown>>({
         } : undefined}
       />
 
-      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={`${config.title} pagination`}>
+      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={t("resource.pagination.label", { name: config.title })}>
         <span aria-live="polite">
           {total !== undefined
-            ? `Showing ${rangeStart}-${rangeEnd} of ${total}`
-            : `Showing ${rangeStart}-${rangeEnd}`}
+            ? t("resource.pagination.rangeOf", {
+                start: rangeStart,
+                end: rangeEnd,
+                total,
+              })
+            : t("resource.pagination.range", { start: rangeStart, end: rangeEnd })}
         </span>
         <div className="flex gap-2">
           <Button
@@ -190,7 +201,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
             }}
           >
             <ChevronLeft className="size-4" aria-hidden="true" />
-            Previous
+            {t("resource.pagination.previous")}
           </Button>
           <Button
             variant="outline"
@@ -203,7 +214,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
               setSearchParams(next);
             }}
           >
-            Next
+            {t("resource.pagination.next")}
             <ChevronRight className="size-4" aria-hidden="true" />
           </Button>
         </div>
@@ -220,7 +231,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
         >
           <SheetHeader>
             <SheetTitle>
-              {editingRow ? `Edit ${config.title}` : `New ${config.title}`}
+              {editingRow
+                ? t("resource.dialog.editTitle", { name: config.title })
+                : t("resource.dialog.createTitle", { name: config.title })}
             </SheetTitle>
           </SheetHeader>
           <div className="px-4 pb-4">
@@ -234,7 +247,11 @@ export function ResourcePage<T extends Record<string, unknown>>({
                     : (editingRow as Record<string, unknown>)
                   : defaultFieldValues(config.fields)
               }
-              submitLabel={editingRow ? "Save changes" : "Create"}
+              submitLabel={
+                editingRow
+                  ? t("resource.action.saveChanges")
+                  : t("resource.action.create")
+              }
               onCancel={() => setFormOpen(false)}
               onSubmit={async (values) => {
                 if (editingRow) {
@@ -262,13 +279,17 @@ export function ResourcePage<T extends Record<string, unknown>>({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {config.title.toLowerCase()}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("resource.dialog.deleteTitle", {
+                name: config.title.toLowerCase(),
+              })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This action cannot be undone.
+              {t("resource.dialog.deleteDescription")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (deletingRow) {
@@ -280,7 +301,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
                 }
               }}
             >
-              Delete
+              {t("resource.action.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -289,9 +310,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
       <AlertDialog open={Boolean(revealedSecret)} onOpenChange={(open) => !open && setRevealedSecret(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Save this secret now</AlertDialogTitle>
+            <AlertDialogTitle>{t("resource.secret.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This value will not be shown again. Store it somewhere safe.
+              {t("resource.secret.description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <code className="block break-all rounded-md bg-muted p-3 text-sm">
@@ -302,13 +323,13 @@ export function ResourcePage<T extends Record<string, unknown>>({
               onClick={() => {
                 if (revealedSecret) {
                   navigator.clipboard.writeText(revealedSecret).catch(() => {
-                    toast.error("Could not copy to clipboard; the secret is shown above.");
+                    toast.error(t("resource.secret.copyError"));
                   });
                 }
                 setRevealedSecret(null);
               }}
             >
-              Copy & close
+              {t("resource.secret.copyClose")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
