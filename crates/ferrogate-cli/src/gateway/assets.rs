@@ -22,6 +22,7 @@ use ferrogate_storage::{
 };
 
 use super::admin_list_query::{list_response, matches_search, query_value};
+use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -672,17 +673,35 @@ impl FerroGateway {
 
         let now = now_unix_seconds();
 
-        // Bucket-backed storage (issue #176): when configured, the real
-        // bytes go to the bucket and only a reference (`storage_uri`) is
-        // persisted in Postgres, instead of duplicating them inline. A
-        // bucket PUT failure fails the whole push (not a silent fallback
-        // to inline storage) -- an operator who configured a bucket
-        // expects assets to actually land there.
-        let (stored_content, storage_uri) =
-            match self.store_asset_bytes(&id, &content, &content_type).await {
-                Ok(pair) => pair,
-                Err(error) => return error.write(session, &ctx.request_id).await,
-            };
+        // Bucket-backed storage (issue #176): when configured, the real bytes go
+        // to the bucket and only a reference (`storage_uri`) is persisted, rather
+        // than duplicated inline. A bucket PUT failure fails the whole push (not
+        // a silent fallback to inline storage) -- an operator who configured a
+        // bucket expects assets to actually land there.
+        //
+        // Atomic first-push publication (#369): the bytes go to a UNIQUE
+        // per-attempt candidate key so two concurrent first pushes of this same
+        // version can never overwrite each other's object -- the winner's
+        // metadata references only the bytes IT wrote. The former deterministic
+        // key (= `id`) let the losing push clobber the winner's bytes. Pure
+        // inline (no bucket) needs no candidate: the bytes live in the row and
+        // the atomic row create is the whole invariant.
+        let candidate_key = if state.asset_bucket_client().is_some() {
+            match asset_inline_publish::inline_candidate_object_key(&id) {
+                Ok(key) => Some(key),
+                Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
+            }
+        } else {
+            None
+        };
+        let write_key = candidate_key.clone().unwrap_or_else(|| id.clone());
+        let (stored_content, storage_uri) = match self
+            .store_asset_bytes(&write_key, &content, &content_type)
+            .await
+        {
+            Ok(pair) => pair,
+            Err(error) => return error.write(session, &ctx.request_id).await,
+        };
 
         let asset = StoredAsset {
             id: id.clone(),
@@ -695,7 +714,7 @@ impl FerroGateway {
             content_hash: sha256_hex(&content),
             size_bytes: content.len() as u64,
             content: stored_content,
-            storage_uri,
+            storage_uri: storage_uri.clone(),
             variant: variant.clone(),
             yanked: false,
             // #366: persist the screening verdict so a pending/quarantined push
@@ -705,9 +724,71 @@ impl FerroGateway {
             created_at_unix: now,
             updated_at_unix: now,
         };
-        if let Err(error) = state.upsert_asset(asset.clone()).await {
-            return storage_unavailable(session, ctx, error.to_string()).await;
+
+        // Publish with the CREATE-IF-ABSENT primitive, never an immutable-version
+        // upsert (#369). The candidate to reclaim on a loss is exactly the bucket
+        // key this attempt wrote (`storage_uri`); a losing/failed attempt cleans
+        // ONLY its own unreferenced candidate and an outcome-unknown create
+        // preserves every candidate.
+        let sink: Box<dyn asset_inline_publish::AssetCandidateSink> =
+            match state.asset_bucket_client() {
+                Some(bucket) => Box::new(asset_inline_publish::BucketCandidateSink::new(bucket)),
+                None => Box::new(asset_inline_publish::NoCandidateSink),
+            };
+        match asset_inline_publish::publish_inline_asset(
+            &state,
+            sink.as_ref(),
+            asset.clone(),
+            storage_uri.as_deref(),
+        )
+        .await
+        {
+            asset_inline_publish::InlinePublishOutcome::Published => {}
+            asset_inline_publish::InlinePublishOutcome::Conflict => {
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "asset_version_immutable",
+                    format!(
+                        "{asset_type}/{name}/{version}{} already exists and is immutable; \
+                         delete it before republishing",
+                        variant_suffix(&variant)
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            asset_inline_publish::InlinePublishOutcome::OutcomeUnknown => {
+                // The create may have committed even though its result was lost.
+                // Preserve every candidate and report unknown; a retry of the
+                // identical push resolves it (create-if-absent is idempotent for
+                // the same winner). Never delete a possibly-referenced winner.
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.push",
+                    &id,
+                    "outcome_unknown",
+                    format!(
+                        "asset {id} inline push has an unknown durable create outcome; \
+                         the candidate object was preserved"
+                    ),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_commit_outcome_unknown",
+                    "asset publish outcome is unknown; retry the identical push before cleanup",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            asset_inline_publish::InlinePublishOutcome::StorageFailed(message)
+            | asset_inline_publish::InlinePublishOutcome::ReconcileFailed(message) => {
+                return storage_unavailable(session, ctx, message).await;
+            }
         }
+
         // Immutable trust evidence (#261): the scan/signature/approval outcome
         // and the verification manifest are recorded on the push audit event,
         // retrievable via the Admin audit API.
