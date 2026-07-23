@@ -2419,3 +2419,44 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 53 (#357): durable, coalesced observed-agent presence. The
+-- observed-agent-activity surface reports unattributed virtual-API-key traffic
+-- as tenant-scoped "Unknown" activity and decides running vs inactive from a
+-- recency window. Deriving that recency by scanning request_logs alone is
+-- fragile: request_logs are retention-bounded (#284) and a scan is O(rows). This
+-- table backs the recency signal with ONE durable row per (tenant_id,
+-- api_key_id) whose last_seen is bumped by a single conditional upsert on the
+-- primary key (INSERT ... ON CONFLICT DO UPDATE SET last_seen = GREATEST(...),
+-- request_count = request_count + 1). GREATEST/LEAST keep last/first-seen
+-- monotonic so a delayed touch can never regress the row, and the coalescing
+-- keeps a per-key burst to a single-row hot write with no table growth.
+-- Attribution (which keys surface as Unknown) and token/cost evidence still come
+-- from the request-log/billing correlation in ferrogate-cli; this store only
+-- refines recency. The insert-first/IF FOUND gate keeps the one-time DDL off the
+-- repeated startup schema-validation path (mirrors migration 52).
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (53, '053_observed_agent_presence')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE TABLE IF NOT EXISTS observed_agent_presence (
+            tenant_id TEXT NOT NULL,
+            api_key_id TEXT NOT NULL,
+            first_seen_at_unix BIGINT NOT NULL,
+            last_seen_at_unix BIGINT NOT NULL,
+            request_count BIGINT NOT NULL DEFAULT 0,
+            updated_at_unix BIGINT NOT NULL,
+            PRIMARY KEY (tenant_id, api_key_id)
+        );
+        -- Tenant-scoped window read (recent presence, newest first) served
+        -- straight from the index; also the target of the coalescing upsert.
+        CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_tenant_last_seen
+            ON observed_agent_presence(tenant_id, last_seen_at_unix DESC);
+        -- Platform-operator cross-tenant window read.
+        CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_last_seen
+            ON observed_agent_presence(last_seen_at_unix DESC);
+    END IF;
+END
+$$;

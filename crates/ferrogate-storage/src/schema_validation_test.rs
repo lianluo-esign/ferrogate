@@ -224,6 +224,28 @@ fn schema_contract_defines_the_agent_schedule_tables() {
 }
 
 #[test]
+fn schema_contract_defines_the_observed_agent_presence_table() {
+    // #357: one durable row per (tenant_id, api_key_id) whose last_seen is
+    // bumped by a single coalescing upsert on the composite PK. The PK is the
+    // ON CONFLICT target for the coalesced touch; the tenant/last_seen index
+    // serves the recency window read.
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (53, '053_observed_agent_presence')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("CREATE TABLE IF NOT EXISTS observed_agent_presence"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("PRIMARY KEY (tenant_id, api_key_id)"));
+    assert!(POSTGRES_SCHEMA_SQL.contains("idx_observed_agent_presence_tenant_last_seen"));
+    let create_table = POSTGRES_SCHEMA_SQL
+        .find("CREATE TABLE IF NOT EXISTS observed_agent_presence")
+        .expect("observed_agent_presence table present");
+    let create_index = POSTGRES_SCHEMA_SQL
+        .find("idx_observed_agent_presence_tenant_last_seen")
+        .expect("observed_agent_presence index present");
+    assert!(
+        create_table < create_index,
+        "the presence index must come after its CREATE TABLE"
+    );
+}
+
+#[test]
 fn schema_contract_tenant_scopes_admin_refresh_tokens() {
     // #232: refresh tokens carry the tenant/role their session was issued
     // for, both on fresh installs (CREATE TABLE) and legacy databases

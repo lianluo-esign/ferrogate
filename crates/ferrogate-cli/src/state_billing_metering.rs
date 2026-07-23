@@ -470,11 +470,28 @@ impl AppState {
         // in-memory backend keeps the inline bridged write: it completes
         // without I/O and unit tests rely on read-after-write. Metrics above
         // stay synchronous either way.
+        // #357: fold a durable, coalesced presence touch for the virtual API
+        // key that authenticated this request. Extracted BEFORE the log is
+        // consumed by the write below. The observed-agent-activity surface
+        // reads this durable recency signal (attribution/evidence still come
+        // from the request-log/billing correlation), so it survives request-log
+        // retention pruning without a hot-path heavy write.
+        let presence_touch = observed_presence_touch_from_log(&log);
         if self.evidence_writes_deferred() {
             self.evidence_writer
                 .enqueue(EvidenceWriteJob::RequestLog(log));
+            if let Some(touch) = presence_touch {
+                self.evidence_writer
+                    .enqueue(EvidenceWriteJob::ObservedPresenceTouch(touch));
+            }
         } else {
             crate::gateway::block_on_sync_bridge(self.repositories.append_request_log(log));
+            if let Some(touch) = presence_touch {
+                crate::gateway::block_on_sync_bridge(
+                    self.repositories.touch_observed_agent_presence(touch),
+                )
+                .ok();
+            }
         }
     }
 
@@ -942,6 +959,31 @@ impl AppState {
         snapshot.evidence_writer_dropped_total = evidence_writer.dropped_total;
         snapshot
     }
+}
+
+/// Build a coalesced observed-agent presence touch (#357) from a request log,
+/// or `None` when the request cannot be attributed to a tenant-owned virtual
+/// API key (no durable tenant owner, no key id, or no temporal evidence). The
+/// touch records only that this virtual key was active at `seen_at_unix`;
+/// whether that key surfaces as `Unknown` running activity is decided later by
+/// the observed-activity derivation, which owns attribution.
+fn observed_presence_touch_from_log(
+    log: &StoredRequestLog,
+) -> Option<ferrogate_storage::ObservedAgentPresenceTouch> {
+    let tenant_id = log.tenant.organization_id.as_deref()?;
+    if tenant_id.is_empty() {
+        return None;
+    }
+    let api_key_id = log.tenant.api_key_id.as_deref()?;
+    if api_key_id.is_empty() {
+        return None;
+    }
+    let seen_at_unix = log.completed_at_unix.or(log.started_at_unix)? as i64;
+    Some(ferrogate_storage::ObservedAgentPresenceTouch {
+        tenant_id: tenant_id.to_string(),
+        api_key_id: api_key_id.to_string(),
+        seen_at_unix,
+    })
 }
 
 #[cfg(test)]

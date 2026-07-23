@@ -25512,6 +25512,7 @@
           "seconds_since_last_seen",
           "running_ttl_seconds",
           "within_running_window",
+          "durable_presence_backed",
           "usage_evidence_available",
           "reason"
         ],
@@ -25534,6 +25535,10 @@
           },
           "within_running_window": {
             "type": "boolean"
+          },
+          "durable_presence_backed": {
+            "type": "boolean",
+            "description": "Whether the durable observed-agent presence store contributed the recency used for the running decision (its last-seen was at least as fresh as the request-log evidence)."
           },
           "prompt_tokens": {
             "type": "integer",

@@ -47,6 +47,7 @@ fn config_model_supports_serde_roundtrip() {
             otlp_endpoint: Some("http://vector:4318".into()),
             prometheus_metrics_path: "/metrics".into(),
             export_timeout_secs: 4,
+            ..ObservabilityConfig::default()
         },
         reliability: ReliabilityConfig {
             provider_circuit_breaker_failure_threshold: Some(2),

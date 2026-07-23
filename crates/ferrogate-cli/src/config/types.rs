@@ -1502,6 +1502,14 @@ pub(crate) struct ObservabilityConfig {
     pub(crate) prometheus_metrics_path: String,
     #[serde(default = "default_observability_export_timeout_secs")]
     pub(crate) export_timeout_secs: u64,
+    /// #357: running-presence TTL (seconds) for the observed-agent-activity
+    /// surface. A virtual API key whose most recent observed request is within
+    /// this window is reported `running`; older evidence expires to `inactive`.
+    /// Default 60. An operator can raise/lower it here or, without editing the
+    /// config, via the `FERROGATE_OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS` env
+    /// override (see `resolve_observed_activity_running_ttl_seconds`).
+    #[serde(default = "default_observability_observed_activity_running_ttl_secs")]
+    pub(crate) observed_activity_running_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2142,6 +2150,12 @@ fn default_observability_export_timeout_secs() -> u64 {
     3
 }
 
+/// #357: default running-presence TTL (seconds) for the observed-agent-activity
+/// surface. Matches the value the issue's view contract proposes.
+pub(crate) fn default_observability_observed_activity_running_ttl_secs() -> u64 {
+    60
+}
+
 fn default_analytics_export_timeout_secs() -> u64 {
     3
 }
@@ -2251,6 +2265,8 @@ impl Default for ObservabilityConfig {
             otlp_endpoint: None,
             prometheus_metrics_path: default_observability_prometheus_metrics_path(),
             export_timeout_secs: default_observability_export_timeout_secs(),
+            observed_activity_running_ttl_secs:
+                default_observability_observed_activity_running_ttl_secs(),
         }
     }
 }

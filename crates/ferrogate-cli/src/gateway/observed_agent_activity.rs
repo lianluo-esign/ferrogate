@@ -34,12 +34,36 @@ use crate::{
     responses::{write_json_error, write_json_response, AdminList},
 };
 
-/// Running-presence TTL: a key whose most recent observed request is within
-/// this many seconds is reported `running`; older evidence expires to
-/// `inactive` automatically (it never fabricates a stop event). Surfaced on
-/// every row as `running_ttl_seconds` so the window is operator-visible.
-/// Matches the value proposed in the issue's view contract.
-pub(crate) const OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS: u64 = 60;
+/// Environment override for the running-presence TTL (#357). Lets an operator
+/// retune the window without editing/reloading the config file; when unset or
+/// unparseable, the typed `observability.observed_activity_running_ttl_secs`
+/// config value (default 60) is used. See
+/// [`resolve_observed_activity_running_ttl_seconds`].
+pub(crate) const OBSERVED_ACTIVITY_RUNNING_TTL_ENV: &str =
+    "FERROGATE_OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS";
+
+/// Resolve the effective running-presence TTL: a key whose most recent observed
+/// request is within this many seconds is reported `running`; older evidence
+/// expires to `inactive` automatically (it never fabricates a stop event). The
+/// value is surfaced on every row as `running_ttl_seconds` so the window is
+/// operator-visible.
+///
+/// Precedence: a well-formed, positive env override wins; otherwise the typed
+/// config value is used as-is. A zero/blank/garbage env value is ignored (a
+/// zero TTL would report every key inactive) rather than silently clamping the
+/// operator's config choice -- explicit config wins over a malformed override.
+pub(crate) fn resolve_observed_activity_running_ttl_seconds(
+    config_value: u64,
+    env_value: Option<&str>,
+) -> u64 {
+    match env_value.map(str::trim) {
+        Some(raw) if !raw.is_empty() => match raw.parse::<u64>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            _ => config_value,
+        },
+        _ => config_value,
+    }
+}
 
 // Contract-level constants. These strings are part of the API surface: the UI
 // and other consumers key off them to keep the trust levels distinct.
@@ -91,6 +115,11 @@ pub(crate) struct ObservedAgentActivityEvidence {
     pub(crate) seconds_since_last_seen: u64,
     pub(crate) running_ttl_seconds: u64,
     pub(crate) within_running_window: bool,
+    /// #357: whether the durable presence store contributed the recency used
+    /// for the `running` decision (its last-seen was at least as fresh as the
+    /// request-log evidence). Makes the "which signal decided running" answer
+    /// inspectable rather than an opaque merge.
+    pub(crate) durable_presence_backed: bool,
     /// Token/cost activity for the SAME key+requests, folded from settled
     /// billing/metering evidence. `None`/`false` when no such evidence exists
     /// for the observed requests -- shown as unavailable, never invented.
@@ -130,6 +159,15 @@ pub(crate) struct ObservedActivityInputs<'a> {
     pub(crate) usage_by_request_id: &'a HashMap<String, UsageContribution>,
     /// `api_key_id` -> redacted credential hint (the key's name).
     pub(crate) credential_names: &'a HashMap<String, String>,
+    /// Durable coalesced presence (#357): `(tenant_id, api_key_id)` -> the MAX
+    /// last-seen timestamp recorded by the presence store. This is the durable,
+    /// cheaply-updated recency signal that backs the `running` decision, so the
+    /// window survives request-log retention pruning and does not depend on a
+    /// full request-log scan. Attribution and token/cost evidence still come
+    /// from `request_logs`/`usage_by_request_id`; presence only refines
+    /// recency. A group with no presence row falls back to its request-log
+    /// last-seen.
+    pub(crate) presence_last_seen: &'a HashMap<(String, String), u64>,
     /// When `Some`, only this tenant's activity is considered (tenant-scoped
     /// caller). `None` is the platform operator's cross-tenant view.
     pub(crate) tenant_scope: Option<&'a str>,
@@ -236,7 +274,19 @@ pub(crate) fn derive_observed_agent_activity(
     let mut rows: Vec<ObservedAgentActivity> = groups
         .into_iter()
         .map(|((tenant_id, api_key_id), acc)| {
-            let seconds_since_last_seen = inputs.now_unix.saturating_sub(acc.last_seen);
+            // Refine recency with the durable presence signal: the running
+            // decision uses the FRESHER of the request-log last-seen and the
+            // durable presence last-seen. Presence survives request-log
+            // retention pruning and is a single-row upsert, so it is the
+            // authoritative recency source when it is at least as fresh.
+            let presence_last_seen = inputs
+                .presence_last_seen
+                .get(&(tenant_id.clone(), api_key_id.clone()))
+                .copied()
+                .unwrap_or(0);
+            let durable_presence_backed = presence_last_seen >= acc.last_seen;
+            let effective_last_seen = acc.last_seen.max(presence_last_seen);
+            let seconds_since_last_seen = inputs.now_unix.saturating_sub(effective_last_seen);
             let within_running_window = seconds_since_last_seen <= inputs.running_ttl_seconds;
             let status = if within_running_window {
                 OBSERVED_STATUS_RUNNING
@@ -264,6 +314,7 @@ pub(crate) fn derive_observed_agent_activity(
                 seconds_since_last_seen,
                 running_ttl_seconds: inputs.running_ttl_seconds,
                 within_running_window,
+                durable_presence_backed,
                 prompt_tokens: acc.usage_evidence.then_some(acc.prompt_tokens),
                 completion_tokens: acc.usage_evidence.then_some(acc.completion_tokens),
                 total_tokens: acc.usage_evidence.then_some(acc.total_tokens),
@@ -284,7 +335,7 @@ pub(crate) fn derive_observed_agent_activity(
                 api_key_id,
                 credential_name,
                 first_seen_at_unix: acc.first_seen,
-                last_seen_at_unix: acc.last_seen,
+                last_seen_at_unix: effective_last_seen,
                 running_ttl_seconds: inputs.running_ttl_seconds,
                 evidence,
             }

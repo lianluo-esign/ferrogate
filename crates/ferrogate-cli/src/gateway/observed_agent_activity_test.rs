@@ -7,14 +7,24 @@
 // running/TTL boundary is exercised exactly.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use ferrogate_core::TenantContext;
 use ferrogate_storage::StoredRequestLog;
 
 use super::{
-    derive_observed_agent_activity, ObservedActivityInputs, UsageContribution,
-    OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS,
+    derive_observed_agent_activity, resolve_observed_activity_running_ttl_seconds,
+    ObservedActivityInputs, UsageContribution,
 };
+
+/// The default running-presence TTL (seconds) the issue's view contract
+/// proposes; also the `observability.observed_activity_running_ttl_secs`
+/// config default.
+const RUNNING_TTL_SECONDS: u64 = 60;
+
+/// Shared empty durable-presence map for the request-log-only cases (no durable
+/// presence recorded). `'static` coerces to the inputs' borrow lifetime.
+static EMPTY_PRESENCE: LazyLock<HashMap<(String, String), u64>> = LazyLock::new(HashMap::new);
 
 fn log(
     request_id: &str,
@@ -72,9 +82,10 @@ fn empty_inputs<'a>(
         attributed_run_ids: attributed,
         usage_by_request_id: usage,
         credential_names: names,
+        presence_last_seen: &EMPTY_PRESENCE,
         tenant_scope: None,
         now_unix,
-        running_ttl_seconds: OBSERVED_ACTIVITY_RUNNING_TTL_SECONDS,
+        running_ttl_seconds: RUNNING_TTL_SECONDS,
     }
 }
 
@@ -399,4 +410,110 @@ fn serialized_row_carries_exact_contract_strings() {
     assert!(json["evidence"].get("total_tokens").is_none());
     // Optional credential hint omitted when absent.
     assert!(json.get("credential_name").is_none());
+}
+
+#[test]
+fn configured_ttl_flips_running_inactive_at_its_own_boundary() {
+    // #357: the running decision uses the CONFIGURED ttl, not a hardcoded 60.
+    // With a 120s window, a key last seen 100s ago is running; with a 30s
+    // window the SAME evidence is inactive. Deterministic (injected now_unix),
+    // no sleeps.
+    let logs = vec![log(
+        "r1",
+        Some("tenant-a"),
+        Some("key-1"),
+        None,
+        Some(1_000),
+        Some(1_010),
+    )];
+    let attributed = HashSet::new();
+    let usage = HashMap::new();
+    let names = HashMap::new();
+    // now = 1_110 -> 100s since last seen (1_010).
+    let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_110);
+
+    inputs.running_ttl_seconds = 120;
+    let rows = derive_observed_agent_activity(&inputs);
+    assert_eq!(rows[0].status, "running", "100s <= 120s window -> running");
+    assert_eq!(rows[0].running_ttl_seconds, 120);
+    assert_eq!(rows[0].evidence.running_ttl_seconds, 120);
+
+    inputs.running_ttl_seconds = 30;
+    let rows = derive_observed_agent_activity(&inputs);
+    assert_eq!(rows[0].status, "inactive", "100s > 30s window -> inactive");
+    assert_eq!(rows[0].running_ttl_seconds, 30);
+}
+
+#[test]
+fn durable_presence_refines_recency_and_can_flip_a_key_to_running() {
+    // The request-log evidence alone is stale (last log at 1_010, now 1_200 ->
+    // 190s), but the durable presence store recorded a fresher touch at 1_180.
+    // The running decision must use the fresher durable signal.
+    let logs = vec![log(
+        "r1",
+        Some("tenant-a"),
+        Some("key-1"),
+        None,
+        Some(1_000),
+        Some(1_010),
+    )];
+    let attributed = HashSet::new();
+    let usage = HashMap::new();
+    let names = HashMap::new();
+
+    // Without presence: 190s since last seen, TTL 60 -> inactive.
+    let inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
+    let rows = derive_observed_agent_activity(&inputs);
+    assert_eq!(rows[0].status, "inactive");
+    assert!(!rows[0].evidence.durable_presence_backed);
+
+    // With a durable presence touch at 1_180: 20s since last seen -> running,
+    // and the row reports the durable last-seen + flags the presence backing.
+    let mut presence = HashMap::new();
+    presence.insert(("tenant-a".to_string(), "key-1".to_string()), 1_180u64);
+    let mut inputs = empty_inputs(&logs, &attributed, &usage, &names, 1_200);
+    inputs.presence_last_seen = &presence;
+    let rows = derive_observed_agent_activity(&inputs);
+    assert_eq!(rows[0].status, "running");
+    assert_eq!(
+        rows[0].last_seen_at_unix, 1_180,
+        "durable last-seen presented"
+    );
+    assert_eq!(rows[0].evidence.seconds_since_last_seen, 20);
+    assert!(rows[0].evidence.durable_presence_backed);
+}
+
+#[test]
+fn ttl_resolver_defaults_to_config_and_honors_env_override() {
+    // No env override -> the typed config value is used as-is (config default is
+    // 60, exercised here explicitly).
+    assert_eq!(resolve_observed_activity_running_ttl_seconds(60, None), 60);
+    assert_eq!(resolve_observed_activity_running_ttl_seconds(90, None), 90);
+
+    // A well-formed positive env override wins over the config value.
+    assert_eq!(
+        resolve_observed_activity_running_ttl_seconds(60, Some("120")),
+        120
+    );
+    assert_eq!(
+        resolve_observed_activity_running_ttl_seconds(60, Some("  45 ")),
+        45,
+        "surrounding whitespace is tolerated"
+    );
+
+    // Malformed / zero / blank overrides are ignored -> config wins (a zero TTL
+    // would report every key inactive; a garbage value must not silently break
+    // the surface).
+    assert_eq!(
+        resolve_observed_activity_running_ttl_seconds(60, Some("0")),
+        60
+    );
+    assert_eq!(
+        resolve_observed_activity_running_ttl_seconds(60, Some("not-a-number")),
+        60
+    );
+    assert_eq!(
+        resolve_observed_activity_running_ttl_seconds(60, Some("")),
+        60
+    );
 }

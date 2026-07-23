@@ -72,6 +72,10 @@ pub(crate) enum EvidenceWriteJob {
     AuditEvent(ferrogate_storage::StoredAuditEvent),
     AgentRun(ferrogate_storage::StoredAgentRun),
     AgentRunEvent(ferrogate_storage::StoredAgentRunEvent),
+    /// #357: a coalesced observed-agent presence touch. Enqueued off the
+    /// request hot path so the durable single-row upsert never parks a Pingora
+    /// worker on DB I/O; folded into the presence row for (tenant, api_key).
+    ObservedPresenceTouch(ferrogate_storage::ObservedAgentPresenceTouch),
     /// Test-only: parks the writer thread until the paired sender fires,
     /// simulating a stalled Postgres writer for backpressure tests. The
     /// writer signals `started` when it picks the gate up, then blocks on
@@ -90,6 +94,7 @@ impl EvidenceWriteJob {
             EvidenceWriteJob::AuditEvent(_) => "audit_event",
             EvidenceWriteJob::AgentRun(_) => "agent_run",
             EvidenceWriteJob::AgentRunEvent(_) => "agent_run_event",
+            EvidenceWriteJob::ObservedPresenceTouch(_) => "observed_presence_touch",
             #[cfg(test)]
             EvidenceWriteJob::Gate { .. } => "test_gate",
         }
@@ -320,6 +325,11 @@ async fn process_job(repositories: &RuntimeStorageRepositories, job: EvidenceWri
         EvidenceWriteJob::AgentRunEvent(event) => {
             if let Err(error) = repositories.append_agent_run_event(event).await {
                 warn!("failed to persist agent run event record: {error}");
+            }
+        }
+        EvidenceWriteJob::ObservedPresenceTouch(touch) => {
+            if let Err(error) = repositories.touch_observed_agent_presence(touch).await {
+                warn!("failed to record observed agent presence touch: {error}");
             }
         }
         #[cfg(test)]

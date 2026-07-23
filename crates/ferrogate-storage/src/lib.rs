@@ -228,6 +228,13 @@ pub use agent_schedule::{
 mod site_domain;
 pub use site_domain::StoredSiteDomain;
 
+// #357: durable, coalesced observed-agent presence backing the observed-agent
+// -activity surface's "recent activity" (running) signal.
+mod observed_agent_presence;
+pub use observed_agent_presence::{
+    observed_agent_presence_key, ObservedAgentPresenceTouch, StoredObservedAgentPresence,
+};
+
 mod metadata_rollups;
 use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
@@ -1299,6 +1306,9 @@ pub struct RuntimeControlPlaneState {
     retention_policies: InMemoryRepository<StoredRetentionPolicy>,
     /// Custom-domain -> static-site bindings keyed by hostname (#265).
     site_domains: InMemoryRepository<StoredSiteDomain>,
+    /// Durable coalesced virtual-key presence keyed by
+    /// `observed_agent_presence_key(tenant_id, api_key_id)` (#357).
+    observed_agent_presence: InMemoryRepository<StoredObservedAgentPresence>,
 }
 
 struct PostgresControlPlaneStore {
@@ -8632,6 +8642,7 @@ where
         "workflow_run_budgets",
         "retention_policies",
         "site_domains",
+        "observed_agent_presence",
     ];
     for table in TABLES {
         let exists = client
@@ -10405,6 +10416,7 @@ impl RuntimeControlPlaneState {
             workflow_run_budgets: InMemoryRepository::new(),
             retention_policies: InMemoryRepository::new(),
             site_domains: InMemoryRepository::new(),
+            observed_agent_presence: InMemoryRepository::new(),
         }
     }
 
