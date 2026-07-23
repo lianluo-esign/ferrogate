@@ -63,6 +63,25 @@ describe("SiteDomainsPage", () => {
 
   it("binds a valid hostname and reports ACME posture", async () => {
     mockList([]);
+    // #342: the Tenant field is the shared entity picker; it hydrates a human
+    // display name from the tenant-accounts catalog and submits the canonical id.
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [{ id: "org-acme", name: "Acme", slug: "acme" }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/org-acme"), () =>
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "org-acme", name: "Acme", slug: "acme" },
+        }),
+      ),
+    );
     let bound: unknown = null;
     server.use(
       http.post(gatewayUrl("/admin/v1/site-domains"), async ({ request }) => {
@@ -83,7 +102,9 @@ describe("SiteDomainsPage", () => {
 
     const hostnameInput = screen.getByLabelText("Hostname (FQDN)");
     await user.type(hostnameInput, "new.example.com");
-    await user.type(screen.getByLabelText("Tenant"), "org-acme");
+    // Select the tenant by its display name; the picker submits the id.
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
     await user.type(screen.getByLabelText("Site"), "docs");
     await user.click(screen.getByRole("button", { name: "Bind hostname" }));
 

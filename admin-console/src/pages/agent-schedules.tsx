@@ -53,6 +53,7 @@ import {
   fireOutcomeBadgeVariant,
   formatUnix,
 } from "@/components/agent-ops/agent-ops-primitives";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { useAuth } from "@/hooks/use-auth";
 import {
   adminDelete,
@@ -123,6 +124,8 @@ function mutationFromForm(form: ScheduleFormState): ScheduleMutation {
   } catch {
     throw new Error("Target must be valid JSON");
   }
+  if (!form.tenant_id.trim()) throw new Error("Tenant is required");
+  if (!form.workspace_id.trim()) throw new Error("Workspace is required");
   const body: ScheduleMutation = {
     name: form.name.trim(),
     tenant_id: form.tenant_id.trim(),
@@ -484,21 +487,49 @@ export default function AgentSchedulesPage() {
               <Label htmlFor="schedule-enabled">Enabled</Label>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-tenant">Tenant ID</Label>
-              <Input
+              <Label htmlFor="schedule-tenant">Tenant</Label>
+              {/* #342: pick the owning tenant account from the shared entity
+                  registry; the schedule's tenant_id (canonical `id`) is
+                  submitted unchanged. */}
+              <EntityReferencePicker
                 id="schedule-tenant"
+                label="Tenant"
+                reference={{
+                  target: "tenant-accounts",
+                  valueKey: "id",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["slug"],
+                }}
                 value={form.tenant_id}
-                onChange={(event) => setForm({ ...form, tenant_id: event.target.value })}
+                dependencyValues={{}}
                 required
+                placeholder="Select tenant"
+                onChange={(value) =>
+                  setForm({ ...form, tenant_id: typeof value === "string" ? value : "" })
+                }
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-workspace">Workspace ID</Label>
-              <Input
+              <Label htmlFor="schedule-workspace">Workspace</Label>
+              {/* #342: workspace rows are scoped by project, not tenant, and the
+                  workspaces list carries no tenant_id filter (see #340), so this
+                  is an independent picker submitting the workspace `id`. */}
+              <EntityReferencePicker
                 id="schedule-workspace"
+                label="Workspace"
+                reference={{
+                  target: "workspaces",
+                  valueKey: "id",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["slug", "project_id"],
+                }}
                 value={form.workspace_id}
-                onChange={(event) => setForm({ ...form, workspace_id: event.target.value })}
+                dependencyValues={{}}
                 required
+                placeholder="Select workspace"
+                onChange={(value) =>
+                  setForm({ ...form, workspace_id: typeof value === "string" ? value : "" })
+                }
               />
             </div>
             <div className="grid gap-2">
@@ -624,6 +655,11 @@ export default function AgentSchedulesPage() {
                 </SelectContent>
               </Select>
             </div>
+            {/* target is a kind-discriminated dispatch document (agent_run vs
+                self_hosted_dispatch) whose embedded entity references vary by
+                target_kind; a structured target-entity selector is deferred to
+                the follow-up structured-panel work (#342 remains open) and stays
+                raw JSON here so the free-form payload round-trips unchanged. */}
             <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="schedule-target">Target (JSON)</Label>
               <Textarea

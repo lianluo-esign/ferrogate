@@ -83,6 +83,28 @@ describe("AgentSchedulesPage", () => {
   it("creates a cron schedule posting the contract mutation body", async () => {
     const user = userEvent.setup();
     mockAdminList("/admin/v1/agent-schedules", []);
+    // #342: tenant/workspace are shared entity pickers; the schedule submits the
+    // canonical ids while operators pick by human display name.
+    mockAdminList("/admin/v1/tenant-accounts", [
+      { id: "tenant-1", name: "Acme", slug: "acme" },
+    ]);
+    mockAdminList("/admin/v1/workspaces", [
+      { id: "ws-1", name: "Prod workspace", slug: "prod", project_id: "proj-1" },
+    ]);
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+        }),
+      ),
+      http.get(gatewayUrl("/admin/v1/workspaces/ws-1"), () =>
+        HttpResponse.json({
+          object: "workspace",
+          workspace: { id: "ws-1", name: "Prod workspace", slug: "prod", project_id: "proj-1" },
+        }),
+      ),
+    );
     let createdBody: unknown = null;
     server.use(
       http.post(gatewayUrl("/admin/v1/agent-schedules"), async ({ request }) => {
@@ -99,8 +121,10 @@ describe("AgentSchedulesPage", () => {
 
     await user.click(screen.getByRole("button", { name: "New schedule" }));
     await user.type(await screen.findByLabelText("Name"), "Nightly report");
-    await user.type(screen.getByLabelText("Tenant ID"), "tenant-1");
-    await user.type(screen.getByLabelText("Workspace ID"), "ws-1");
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
+    await user.click(screen.getByRole("combobox", { name: "Workspace" }));
+    await user.click(await screen.findByRole("option", { name: /Prod workspace/ }));
     await user.type(screen.getByLabelText("Cron expression"), "0 2 * * *");
     await user.click(screen.getByRole("button", { name: "Create" }));
 

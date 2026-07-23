@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import {
   Table,
   TableBody,
@@ -168,15 +169,29 @@ export default function SiteDomainsPage() {
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="bind-tenant">Tenant</Label>
-            <Input
+            {/* #342: bind a hostname to a known tenant account via the shared
+                entity picker; the underlying tenant_id (canonical `id`) is
+                submitted unchanged. */}
+            <EntityReferencePicker
               id="bind-tenant"
+              label="Tenant"
+              reference={{
+                target: "tenant-accounts",
+                valueKey: "id",
+                primaryLabelKey: "name",
+                secondaryLabelKeys: ["slug"],
+              }}
               value={tenantId}
-              onChange={(e) => setTenantId(e.target.value)}
-              placeholder="org-acme"
+              dependencyValues={{}}
+              placeholder="Select tenant"
+              onChange={(value) => setTenantId(typeof value === "string" ? value : "")}
             />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="bind-site">Site</Label>
+            {/* `site` names a published static-site slug within the tenant's
+                hosting bundle, not an entity row the admin API lists/gets, so it
+                stays free-text (no list/get endpoint exists to back a picker). */}
             <Input
               id="bind-site"
               value={site}

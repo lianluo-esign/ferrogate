@@ -54,9 +54,29 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
     { name: "name", label: "Name", type: "text", required: true },
     { name: "version", label: "Version", type: "number", placeholder: "1" },
     { name: "enabled", label: "Enabled", type: "boolean" },
+    // organization_ids and api_key_ids scope a workflow to the raw identifiers a
+    // caller presents at request time (ferrogate-cli agent-workflow evaluation),
+    // which are not guaranteed to be admin-console tenant/key rows, so they stay
+    // free-text rather than being force-mapped to an entity source (mirrors the
+    // policies.ts decision from #341).
     { name: "organization_ids", label: "Organization IDs (comma-separated)", type: "csv" },
-    { name: "project_ids", label: "Project IDs (comma-separated)", type: "csv" },
+    {
+      name: "project_ids",
+      label: "Projects",
+      type: "entities",
+      reference: {
+        target: "projects",
+        valueKey: "id",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["slug", "tenant_id"],
+      },
+    },
     { name: "api_key_ids", label: "API key IDs (comma-separated)", type: "csv" },
+    // nodes/edges are a structured workflow document whose model/provider/MCP/
+    // tool/prompt references live inside per-node JSON. Converting those to inline
+    // pickers needs a structured reference panel (issue #342 acceptance) and is
+    // explicitly a non-goal for this slice ("not a full visual DAG editor"); they
+    // stay raw JSON so non-reference document fields round-trip unchanged.
     {
       name: "nodes",
       label: "Nodes (JSON array)",
