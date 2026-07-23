@@ -463,6 +463,10 @@
       "group": "billing"
     },
     {
+      "pattern": "/admin/v1/billing-outbox-dead-letters/{*rest}",
+      "group": "billing"
+    },
+    {
       "pattern": "/admin/v1/guardrail-evaluations",
       "group": "admin_request_log"
     },
@@ -2979,6 +2983,28 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-outbox-dead-letters/{report_id}/replay",
+      "method": "post",
+      "operation_id": "replayBillingOutboxDeadLetter",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/tenant-accounts/{tenant_id}/plan",
+      "method": "put",
+      "operation_id": "assignTenantPlan",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     },

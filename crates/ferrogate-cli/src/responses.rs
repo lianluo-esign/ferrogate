@@ -1093,6 +1093,21 @@ pub(crate) struct AdminPlanMutationResponse {
     pub(crate) plan: AdminPlan,
 }
 
+/// `POST /admin/v1/billing-outbox-dead-letters/{report_id}/replay` (issue
+/// #388): the result of re-enqueuing a dead-lettered billing report for
+/// redelivery. `id` is the ledger-entry idempotency key the billing service
+/// dedups on (so replay never double-bills); `attempts`/`next_attempt_unix`
+/// echo the reset delivery schedule as inspectable evidence.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminBillingOutboxReplayResponse {
+    pub(crate) object: &'static str,
+    pub(crate) id: String,
+    pub(crate) replayed: bool,
+    pub(crate) dead_lettered: bool,
+    pub(crate) attempts: i64,
+    pub(crate) next_attempt_unix: i64,
+}
+
 // --- Prepaid-credit wallets and payment methods (issue #169) ---
 
 #[derive(Debug, Serialize)]
@@ -1209,6 +1224,15 @@ pub(crate) struct AdminTenantAccountCreateRequest {
 pub(crate) struct AdminTenantAccountMutationResponse {
     pub(crate) object: &'static str,
     pub(crate) tenant: AdminTenantAccount,
+}
+
+/// `PUT /admin/v1/tenant-accounts/{tenant_id}/plan` (issue #388): the
+/// focused plan-assignment payload the #364 CLI drives, distinct from the
+/// general `AdminTenantAccountCreateRequest` merge -- assigning a plan is a
+/// single, named, platform-operator action rather than a whole-account edit.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminTenantPlanAssignmentRequest {
+    pub(crate) plan_id: Option<String>,
 }
 
 /// `GET /admin/v1/tenant-accounts/{id}/resolved-defaults` (issue #168):

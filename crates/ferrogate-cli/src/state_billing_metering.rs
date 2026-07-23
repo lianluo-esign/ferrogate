@@ -311,6 +311,30 @@ impl AppState {
             .await
     }
 
+    /// Fetch a single billing-report outbox entry by id (issue #388), used to
+    /// tenant-authorize a dead-letter replay before mutating.
+    pub(crate) async fn billing_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        self.repositories.get_billing_report_outbox_entry(id).await
+    }
+
+    /// Conditionally replay (re-enqueue) a dead-lettered billing report for
+    /// redelivery (issue #388). Schedules the redelivery for "now" so the
+    /// outbox sweeper (`sweep_billing_outbox_once`) picks it up on its next
+    /// batch. Returns the typed CAS outcome; the delivery itself is idempotent
+    /// on the billing side, so replay never double-bills.
+    pub(crate) async fn replay_billing_outbox_dead_letter(
+        &self,
+        id: &str,
+    ) -> Result<ferrogate_storage::ReplayDeadLetterOutcome, StorageError> {
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        self.repositories
+            .replay_dead_lettered_billing_report(id, now)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
         let persisted = crate::gateway::block_on_sync_bridge(self.repositories.billing_events());

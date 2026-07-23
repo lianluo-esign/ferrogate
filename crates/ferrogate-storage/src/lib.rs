@@ -5204,6 +5204,105 @@ impl PostgresControlPlaneStore {
         rows.iter().map(billing_report_outbox_from_row).collect()
     }
 
+    /// Conditionally re-enqueue a dead-lettered report for redelivery (issue
+    /// #388). One short conditional `UPDATE ... WHERE dead_lettered_at_unix
+    /// IS NOT NULL` performs the CAS: it clears the dead-letter mark, resets
+    /// the attempt counter, and schedules the row for immediate delivery,
+    /// returning the updated row so the memory and Postgres backends agree on
+    /// the re-enqueued state. When zero rows match, a single follow-up SELECT
+    /// distinguishes a missing id (`NotFound`) from a live/already-replayed
+    /// row (`NotDeadLettered`) -- fail closed either way, no mutation.
+    async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        let now = saturating_i64(now_unix_seconds());
+        let operation = self.billing_outbox_operation("replay dead lettered billing report");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#238); a bare
+        // query would resolve `billing_report_outbox` against the connection
+        // default schema (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let replayed = transaction
+            .query_opt(
+                "UPDATE billing_report_outbox \
+                 SET dead_lettered_at_unix = NULL, attempts = 0, \
+                     next_attempt_unix = $2, updated_at_unix = $3 \
+                 WHERE id = $1 AND dead_lettered_at_unix IS NOT NULL \
+                 RETURNING id, event_json::text, attempts, next_attempt_unix, \
+                     dead_lettered_at_unix",
+                &[&id, &next_attempt_unix, &now],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let outcome = match replayed {
+            Some(row) => ReplayDeadLetterOutcome::Replayed(billing_report_outbox_from_row(&row)?),
+            None => {
+                let existing = transaction
+                    .query_opt(
+                        "SELECT id, event_json::text, attempts, next_attempt_unix, \
+                             dead_lettered_at_unix \
+                         FROM billing_report_outbox WHERE id = $1",
+                        &[&id],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                match existing {
+                    Some(row) => ReplayDeadLetterOutcome::NotDeadLettered(
+                        billing_report_outbox_from_row(&row)?,
+                    ),
+                    None => ReplayDeadLetterOutcome::NotFound,
+                }
+            }
+        };
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(outcome)
+    }
+
+    /// Fetch a single billing-report outbox row by id (issue #388), used to
+    /// tenant-authorize a dead-letter replay before the mutation runs.
+    async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        let operation = self.billing_outbox_operation("get billing report outbox entry");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#238); a bare
+        // query would resolve `billing_report_outbox` against the connection
+        // default schema (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_opt(
+                "SELECT id, event_json::text, attempts, next_attempt_unix, \
+                     dead_lettered_at_unix \
+                 FROM billing_report_outbox WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        row.as_ref().map(billing_report_outbox_from_row).transpose()
+    }
+
     async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
         let operation = self.billing_outbox_operation("delete billing report");
         let mut client = self
@@ -9221,6 +9320,28 @@ pub struct StoredBillingReportOutboxEntry {
     pub dead_lettered_at_unix: Option<i64>,
 }
 
+/// Outcome of the conditional (CAS) dead-letter replay mutation
+/// [`RuntimeStorageRepositories::replay_dead_lettered_billing_report`]
+/// (issue #388). The transition only fires for a row that is *actually*
+/// dead-lettered, so an operator (or the #364 CLI) driving a replay always
+/// learns which of the three terminal states it hit instead of a bare
+/// success/failure. The re-enqueued entry is returned on success so the
+/// caller can surface its idempotency key (the ledger-entry `id`, on which
+/// the billing service dedups delivery, so a replay never double-bills) and
+/// its reset attempt schedule as audit evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplayDeadLetterOutcome {
+    /// The row was dead-lettered and has been cleared + re-scheduled for
+    /// immediate redelivery. Carries the updated entry.
+    Replayed(StoredBillingReportOutboxEntry),
+    /// A row with this id exists but is NOT dead-lettered (still pending
+    /// delivery, or already replayed) -- fail closed, nothing changed. The
+    /// current entry is returned so the caller can report a precise conflict.
+    NotDeadLettered(StoredBillingReportOutboxEntry),
+    /// No outbox row with this id exists.
+    NotFound,
+}
+
 /// Outcome of [`RuntimeStorageRepositories::append_billing_event_with_outbox_enqueue`]
 /// (issue #150).
 #[derive(Debug)]
@@ -11080,6 +11201,38 @@ impl RuntimeControlPlaneState {
         dead.sort_by_key(|entry| std::cmp::Reverse(entry.dead_lettered_at_unix));
         dead.truncate(limit);
         dead
+    }
+
+    /// In-memory twin of the Postgres CAS replay (issue #388): only a row
+    /// that is actually dead-lettered transitions. The whole read-modify-write
+    /// runs under the caller's control-plane lock, so the check-then-write is
+    /// atomic against a concurrent replay of the same id -- the second caller
+    /// observes a cleared `dead_lettered_at_unix` and gets `NotDeadLettered`.
+    pub fn replay_dead_lettered_billing_report(
+        &mut self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> ReplayDeadLetterOutcome {
+        match self.billing_report_outbox.get(id) {
+            None => ReplayDeadLetterOutcome::NotFound,
+            Some(entry) if entry.dead_lettered_at_unix.is_none() => {
+                ReplayDeadLetterOutcome::NotDeadLettered(entry)
+            }
+            Some(mut entry) => {
+                entry.dead_lettered_at_unix = None;
+                entry.attempts = 0;
+                entry.next_attempt_unix = next_attempt_unix;
+                self.billing_report_outbox.insert(id, entry.clone());
+                ReplayDeadLetterOutcome::Replayed(entry)
+            }
+        }
+    }
+
+    pub fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Option<StoredBillingReportOutboxEntry> {
+        self.billing_report_outbox.get(id)
     }
 
     pub fn delete_billing_report(&mut self, id: &str) {
@@ -14555,6 +14708,56 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Conditionally replay (re-enqueue) a dead-lettered billing report for
+    /// redelivery (issue #388). Returns a typed [`ReplayDeadLetterOutcome`] so
+    /// the admin handler can map missing / not-dead-lettered / replayed to
+    /// distinct HTTP results. `next_attempt_unix` schedules the redelivery
+    /// (pass "now" for the sweeper to pick it up on its next batch). Fails
+    /// closed on a poisoned in-memory lock rather than silently reporting a
+    /// no-op success.
+    pub async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.replay_dead_lettered_billing_report(id, next_attempt_unix)
+                })
+                .map_err(|_| {
+                    StorageError::Runtime(
+                        "in-memory control-plane mutex poisoned during dead-letter replay"
+                            .to_string(),
+                    )
+                }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .replay_dead_lettered_billing_report(id, next_attempt_unix)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch a single billing-report outbox row by id (issue #388). Used to
+    /// tenant-authorize a dead-letter replay before the CAS mutation runs, so
+    /// a tenant-scoped admin key can never re-enqueue another tenant's report.
+    pub async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_billing_report_outbox_entry(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_billing_report_outbox_entry(id).await
+            }
+        }
+    }
+
     /// Delete a delivered report from the outbox.
     pub async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
         match &self.control_plane {
@@ -16594,6 +16797,10 @@ mod asset_withheld_listing_test;
 #[cfg(test)]
 #[path = "payment_attempt_test.rs"]
 mod payment_attempt_test;
+
+#[cfg(test)]
+#[path = "billing_outbox_replay_test.rs"]
+mod billing_outbox_replay_test;
 
 #[cfg(test)]
 mod tests {

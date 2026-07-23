@@ -103,6 +103,77 @@ fn sweep_dead_letters_after_max_attempts_and_stops_retrying() {
     );
 }
 
+/// #388: an operator-driven replay re-enqueues a dead-lettered report for
+/// redelivery. Drives the real dead-letter path (sweep to the give-up
+/// threshold), then replays and proves the row is redeliverable again and no
+/// longer dead-lettered.
+#[test]
+fn replay_re_enqueues_a_dead_lettered_report_for_redelivery() {
+    let state = AppState::new(unreachable_billing_config());
+    let event = sample_billing_event("req-replay");
+    let id = ferrogate_billing::ledger::ledger_entry_id(&event);
+    block_on(state.repositories.enqueue_billing_report(&id, &event, 0))
+        .expect("enqueue must succeed");
+    for _ in 0..MAX_BILLING_OUTBOX_ATTEMPTS {
+        block_on(state.repositories.reschedule_billing_report(&id, 0)).expect("reschedule");
+    }
+    block_on(state.sweep_billing_outbox_once());
+    assert_eq!(
+        block_on(state.billing_outbox_dead_letters()).unwrap().len(),
+        1,
+        "precondition: the report is dead-lettered"
+    );
+
+    let outcome = block_on(state.replay_billing_outbox_dead_letter(&id)).unwrap();
+    let entry = match outcome {
+        ferrogate_storage::ReplayDeadLetterOutcome::Replayed(entry) => entry,
+        other => panic!("expected Replayed, got {other:?}"),
+    };
+    assert_eq!(entry.id, id);
+    assert_eq!(entry.dead_lettered_at_unix, None);
+    assert_eq!(entry.attempts, 0);
+
+    // No longer dead-lettered, and redeliverable (due) again.
+    assert!(block_on(state.billing_outbox_dead_letters())
+        .unwrap()
+        .is_empty());
+    let due = block_on(state.repositories.list_due_billing_reports(i64::MAX, 10)).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, id);
+}
+
+/// #388 fail-closed: replay only fires for an actually-dead-lettered row. A
+/// missing id and a still-pending (never dead-lettered) row are both rejected
+/// with a distinct typed outcome and leave state untouched.
+#[test]
+fn replay_rejects_missing_and_non_dead_lettered_reports() {
+    let state = AppState::new(unreachable_billing_config());
+
+    let missing = block_on(state.replay_billing_outbox_dead_letter("nope")).unwrap();
+    assert_eq!(
+        missing,
+        ferrogate_storage::ReplayDeadLetterOutcome::NotFound
+    );
+
+    let event = sample_billing_event("req-live");
+    let id = ferrogate_billing::ledger::ledger_entry_id(&event);
+    block_on(state.repositories.enqueue_billing_report(&id, &event, 7))
+        .expect("enqueue must succeed");
+    let outcome = block_on(state.replay_billing_outbox_dead_letter(&id)).unwrap();
+    match outcome {
+        ferrogate_storage::ReplayDeadLetterOutcome::NotDeadLettered(entry) => {
+            assert_eq!(entry.id, id);
+        }
+        other => panic!("expected NotDeadLettered, got {other:?}"),
+    }
+    // The pending row keeps its original schedule.
+    let entry = block_on(state.repositories.get_billing_report_outbox_entry(&id))
+        .unwrap()
+        .expect("row present");
+    assert_eq!(entry.next_attempt_unix, 7);
+    assert_eq!(entry.dead_lettered_at_unix, None);
+}
+
 #[test]
 fn sweep_reschedules_with_backoff_before_the_attempt_threshold() {
     let state = AppState::new(unreachable_billing_config());

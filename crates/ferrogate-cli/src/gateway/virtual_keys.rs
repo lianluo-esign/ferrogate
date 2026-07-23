@@ -29,9 +29,10 @@ use crate::{
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminList, AdminProject,
         AdminProjectCreateRequest, AdminProjectMutationResponse, AdminTenantAccount,
-        AdminTenantAccountCreateRequest, AdminTenantAccountMutationResponse, AdminVirtualApiKey,
-        AdminVirtualApiKeyCreateRequest, AdminVirtualApiKeyMutationResponse, AdminWorkspace,
-        AdminWorkspaceCreateRequest, AdminWorkspaceMutationResponse,
+        AdminTenantAccountCreateRequest, AdminTenantAccountMutationResponse,
+        AdminTenantPlanAssignmentRequest, AdminVirtualApiKey, AdminVirtualApiKeyCreateRequest,
+        AdminVirtualApiKeyMutationResponse, AdminWorkspace, AdminWorkspaceCreateRequest,
+        AdminWorkspaceMutationResponse,
     },
 };
 
@@ -72,6 +73,21 @@ impl FerroGateway {
                 }
                 return self
                     .handle_admin_tenant_resolved_defaults(session, ctx, headers, method, tenant_id)
+                    .await;
+            }
+            if let Some(tenant_id) = id.strip_suffix("/plan") {
+                if tenant_id.is_empty() {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "tenant account endpoint not found",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                return self
+                    .handle_admin_assign_tenant_plan(session, ctx, headers, method, tenant_id)
                     .await;
             }
             return self
@@ -464,6 +480,135 @@ impl FerroGateway {
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
                     "tenant account endpoint supports GET, PUT, and PATCH",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// `PUT /admin/v1/tenant-accounts/{tenant_id}/plan` (issue #388): the
+    /// focused plan-assignment operation the #364 CLI drives. The general
+    /// `handle_admin_tenant_account_by_id` PATCH/PUT already merges `plan_id`,
+    /// but a dedicated, single-purpose endpoint gives the CLI a clean
+    /// `assignTenantPlan` operation and a self-documenting audit action
+    /// instead of overloading a whole-account edit. Assigning a plan
+    /// self-grants paid-tier entitlements + multiplied quotas, so -- exactly
+    /// like the plan-change guard in the merge path -- it is a
+    /// platform-operator action: a tenant-scoped key is rejected.
+    async fn handle_admin_assign_tenant_plan(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        tenant_id: &str,
+    ) -> PingoraResult<()> {
+        if !matches!(*method, Method::PUT | Method::POST) {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "tenant plan-assignment endpoint supports PUT",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let payload = match read_json_body::<AdminTenantPlanAssignmentRequest>(
+            session,
+            state.limits().admin_body_max_bytes(),
+            &ctx.request_id,
+        )
+        .await?
+        {
+            Ok(payload) => payload,
+            Err(()) => return Ok(()),
+        };
+        let Some(plan_id) = payload.plan_id.filter(|plan_id| !plan_id.trim().is_empty()) else {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_plan_assignment",
+                "field plan_id is required",
+                &ctx.request_id,
+            )
+            .await;
+        };
+        let Some(existing) = state.get_tenant_account(tenant_id).await.ok().flatten() else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "tenant_account_not_found",
+                format!("no tenant account with id {tenant_id}"),
+                &ctx.request_id,
+            )
+            .await;
+        };
+        if state.get_plan(&plan_id).await.ok().flatten().is_none() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_plan_assignment",
+                format!("plan {plan_id} does not exist"),
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let account = StoredTenantAccount {
+            id: existing.id,
+            name: existing.name,
+            slug: existing.slug,
+            status: existing.status,
+            plan_id: plan_id.clone(),
+            created_at_unix: existing.created_at_unix,
+            updated_at_unix: now_unix_seconds(),
+        };
+        match state.upsert_tenant_account(account.clone()).await {
+            Ok(()) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "tenant_account.assign_plan",
+                    tenant_id,
+                    "committed",
+                    format!("tenant account {tenant_id} assigned plan {plan_id}"),
+                ));
+                let body = AdminTenantAccountMutationResponse {
+                    object: "tenant_account",
+                    tenant: admin_tenant_account(&account),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
                     &ctx.request_id,
                 )
                 .await

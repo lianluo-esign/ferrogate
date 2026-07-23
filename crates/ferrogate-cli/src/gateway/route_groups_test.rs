@@ -95,6 +95,7 @@ fn every_previously_flat_route_still_resolves_to_a_group() {
         "/admin/v1/guardrail-policies/policy-1/activate",
         "/admin/v1/guardrail-policies/policy-1/dry-run",
         "/admin/v1/tenant-accounts",
+        "/admin/v1/tenant-accounts/tenant-1/plan",
         "/admin/v1/projects",
         "/admin/v1/projects/project-1",
         "/admin/v1/workspaces",
@@ -117,6 +118,7 @@ fn every_previously_flat_route_still_resolves_to_a_group() {
         "/admin/v1/usage-aggregates",
         "/admin/v1/usage-reports",
         "/admin/v1/billing-outbox-dead-letters",
+        "/admin/v1/billing-outbox-dead-letters/report-1/replay",
         "/metrics",
     ];
     for path in paths {

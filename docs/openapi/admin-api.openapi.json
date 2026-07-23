@@ -7390,6 +7390,67 @@
         ]
       }
     },
+    "/admin/v1/tenant-accounts/{tenant_id}/plan": {
+      "put": {
+        "operationId": "assignTenantPlan",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Assign a subscription plan to a tenant.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Assign a subscription plan to a tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTenantAccountMutationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminTenantPlanAssignmentRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/admin/v1/projects": {
       "get": {
         "operationId": "listProjects",
@@ -10861,6 +10922,57 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      }
+    },
+    "/admin/v1/billing-outbox-dead-letters/{report_id}/replay": {
+      "post": {
+        "operationId": "replayBillingOutboxDeadLetter",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replay a dead-lettered billing outbox record.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "Replay a dead-lettered billing outbox record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminBillingOutboxReplayResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "parameters": [
+          {
+            "name": "report_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/admin/v1/virtual-keys/{key_id}/rotate": {
@@ -22931,6 +23043,18 @@
           "tenant"
         ]
       },
+      "AdminTenantPlanAssignmentRequest": {
+        "type": "object",
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan_id"
+        ]
+      },
       "AdminTenantResolvedDefaults": {
         "type": "object",
         "properties": {
@@ -23815,6 +23939,40 @@
         "required": [
           "object",
           "plan"
+        ]
+      },
+      "AdminBillingOutboxReplayResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "const": "billing_outbox_dead_letter_replay"
+          },
+          "id": {
+            "type": "string"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "dead_lettered": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_attempt_unix": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "id",
+          "replayed",
+          "dead_lettered",
+          "attempts",
+          "next_attempt_unix"
         ]
       },
       "AdminWallet": {

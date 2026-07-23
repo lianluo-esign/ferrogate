@@ -18,6 +18,7 @@
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use super::{FerroGateway, ProxyContext};
+use crate::responses::write_json_error;
 
 /// Parsed request-line data threaded through every route group so each one
 /// takes a single parameter instead of separately re-deriving
@@ -993,6 +994,32 @@ impl FerroGateway {
         if req.path == "/admin/v1/billing-outbox-dead-letters" {
             self.handle_admin_billing_outbox_dead_letters(session, ctx, &req.headers)
                 .await?;
+            return Ok(true);
+        }
+        if let Some(report_id) = req
+            .path
+            .strip_prefix("/admin/v1/billing-outbox-dead-letters/")
+            .and_then(|rest| rest.strip_suffix("/replay"))
+            .filter(|report_id| !report_id.is_empty())
+        {
+            if req.method != http::Method::POST {
+                write_json_error(
+                    session,
+                    http::StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "dead-letter replay only supports POST",
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(true);
+            }
+            self.handle_admin_billing_outbox_dead_letter_replay(
+                session,
+                ctx,
+                &req.headers,
+                report_id,
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)
