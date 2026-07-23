@@ -531,6 +531,7 @@ git diff --check
 - Analytics warehouse: [`docs/analytics-warehouse.md`](docs/analytics-warehouse.md)
 - Cluster deployment: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
 - Auth service contract: [`docs/auth-service-contract.md`](docs/auth-service-contract.md)
+- Cloudflare integration reference (AI Gateway, MCP, R2/Workers/Pages, managed agents, Secrets Store, D1): [`docs/cloudflare-integration.md`](docs/cloudflare-integration.md)
 - Performance testing: [`docs/performance-testing.md`](docs/performance-testing.md)
 - Security controls: [`docs/security-controls.md`](docs/security-controls.md)
 - Guardrail investigation view (who/why/target/action/cost for a blocked request): [`docs/guardrails/investigation-view.md`](docs/guardrails/investigation-view.md)
