@@ -13269,6 +13269,1423 @@ impl RuntimeStorageRepositorySets {
     }
 }
 
+/// Async engine abstraction over the control-plane store surface (#419).
+///
+/// Extracted from the inherent CRUD methods of [`PostgresControlPlaneStore`] so
+/// a third backend (e.g. per-tenant Cloudflare D1) can be added by implementing
+/// this trait and adding one arm to [`RuntimeControlPlaneBackend::store`],
+/// instead of editing every dispatch method. The Postgres backend forwards to
+/// its existing inherent methods; the in-memory backend is `Mutex<RuntimeControlPlaneState>`.
+#[async_trait::async_trait]
+trait ControlPlaneStore: Send + Sync {
+    async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError>;
+    async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError>;
+    async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError>;
+    async fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError>;
+    async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError>;
+    async fn get_admin_user_by_id(&self, id: &str)
+        -> Result<Option<StoredAdminUser>, StorageError>;
+    async fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError>;
+    async fn upsert_admin_user_membership(
+        &self,
+        membership: StoredAdminUserMembership,
+    ) -> Result<(), StorageError>;
+    async fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError>;
+    async fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError>;
+    async fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError>;
+    async fn upsert_sso_provider_config(
+        &self,
+        config: StoredSsoProviderConfig,
+    ) -> Result<(), StorageError>;
+    async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError>;
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError>;
+    async fn insert_sso_pending_flow(&self, flow: StoredSsoPendingFlow)
+        -> Result<(), StorageError>;
+    async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError>;
+    async fn upsert_admin_user_refresh_token(
+        &self,
+        token: StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError>;
+    async fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError>;
+    async fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError>;
+    async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError>;
+    async fn upsert_tenant_account(&self, account: StoredTenantAccount)
+        -> Result<(), StorageError>;
+    async fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError>;
+    async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError>;
+    async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError>;
+    async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError>;
+    async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError>;
+    async fn delete_project(&self, id: &str) -> Result<bool, StorageError>;
+    async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError>;
+    async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError>;
+    async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError>;
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError>;
+    async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError>;
+    async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError>;
+    async fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError>;
+    async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError>;
+    async fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError>;
+    async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError>;
+    async fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError>;
+    async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError>;
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError>;
+    async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError>;
+    async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError>;
+    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError>;
+    async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError>;
+    async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError>;
+    async fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError>;
+    async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError>;
+    async fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> Result<u64, StorageError>;
+    async fn delete_asset(&self, id: &str) -> Result<bool, StorageError>;
+    async fn upsert_asset_channel(&self, channel: StoredAssetChannel) -> Result<(), StorageError>;
+    async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError>;
+    async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError>;
+    async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError>;
+    async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError>;
+    async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError>;
+    async fn upsert_retention_policy(
+        &self,
+        policy: StoredRetentionPolicy,
+    ) -> Result<(), StorageError>;
+    async fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError>;
+    async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError>;
+    async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError>;
+    async fn get_usage_monthly_rollup(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError>;
+    async fn list_usage_monthly_rollups(
+        &self,
+    ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError>;
+    async fn append_billing_ledger_entry(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError>;
+    async fn list_billing_ledger_entries(
+        &self,
+        filter: &ferrogate_billing::LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError>;
+    async fn billing_ledger_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError>;
+    async fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError>;
+    async fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError>;
+    async fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError>;
+    async fn dead_letter_billing_report(
+        &self,
+        id: &str,
+        dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError>;
+    async fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError>;
+    async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError>;
+    async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError>;
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError>;
+}
+
+#[async_trait::async_trait]
+impl ControlPlaneStore for PostgresControlPlaneStore {
+    async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
+        self.upsert_api_key_record(&api_key).await
+    }
+
+    async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        self.get_api_key_record(id).await
+    }
+
+    async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        self.list_api_key_records().await
+    }
+
+    async fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        self.find_api_key_records_by_prefix(key_prefix).await
+    }
+
+    async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+        self.upsert_admin_user(&user).await
+    }
+
+    async fn get_admin_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        self.get_admin_user_by_id(id).await
+    }
+
+    async fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        self.get_admin_user_by_email(email).await
+    }
+
+    async fn upsert_admin_user_membership(
+        &self,
+        membership: StoredAdminUserMembership,
+    ) -> Result<(), StorageError> {
+        self.upsert_admin_user_membership(&membership).await
+    }
+
+    async fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        self.list_admin_user_memberships_by_user(user_id).await
+    }
+
+    async fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        self.list_admin_user_memberships_by_tenant(tenant_id).await
+    }
+
+    async fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_admin_user_membership(user_id, tenant_id).await
+    }
+
+    async fn upsert_sso_provider_config(
+        &self,
+        config: StoredSsoProviderConfig,
+    ) -> Result<(), StorageError> {
+        self.upsert_sso_provider_config(&config).await
+    }
+
+    async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
+        self.get_sso_provider_config(tenant_id).await
+    }
+
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        self.delete_sso_provider_config(tenant_id).await
+    }
+
+    async fn insert_sso_pending_flow(
+        &self,
+        flow: StoredSsoPendingFlow,
+    ) -> Result<(), StorageError> {
+        self.insert_sso_pending_flow(&flow).await
+    }
+
+    async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
+        self.take_sso_pending_flow(state, now_unix).await
+    }
+
+    async fn upsert_admin_user_refresh_token(
+        &self,
+        token: StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError> {
+        self.upsert_admin_user_refresh_token(&token).await
+    }
+
+    async fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
+        self.get_admin_user_refresh_token_by_hash(token_hash).await
+    }
+
+    async fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        self.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+            .await
+    }
+
+    async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        self.revoke_admin_user_refresh_tokens_for_tenant(user_id, tenant_id, revoked_at_unix)
+            .await
+    }
+
+    async fn upsert_tenant_account(
+        &self,
+        account: StoredTenantAccount,
+    ) -> Result<(), StorageError> {
+        self.upsert_tenant_account(&account).await
+    }
+
+    async fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError> {
+        self.get_tenant_account(id).await
+    }
+
+    async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        self.list_tenant_accounts().await
+    }
+
+    async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
+        self.upsert_project(&project).await
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        self.get_project(id).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        self.list_projects().await
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_project(id).await
+    }
+
+    async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        self.delete_project_if_unreferenced(id).await
+    }
+
+    async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
+        self.upsert_workspace(&workspace).await
+    }
+
+    async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        self.get_workspace(id).await
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        self.list_workspaces().await
+    }
+
+    async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_workspace(id).await
+    }
+
+    async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError> {
+        self.delete_workspace_if_unreferenced(id).await
+    }
+
+    async fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        self.resolve_workspace_scope(workspace_id).await
+    }
+
+    async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        self.upsert_quota_policy(&policy).await
+    }
+
+    async fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
+        self.get_quota_policy(scope_type, scope_id).await
+    }
+
+    async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        self.list_quota_policies().await
+    }
+
+    async fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_quota_policy(scope_type, scope_id).await
+    }
+
+    async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+        self.upsert_plan(&plan).await
+    }
+
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        self.get_plan(id).await
+    }
+
+    async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        self.list_plans().await
+    }
+
+    async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
+        self.upsert_asset(&asset).await
+    }
+
+    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
+        self.create_asset_if_absent(&asset).await
+    }
+
+    async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        self.create_asset_within_quota(&asset, quota_bytes).await
+    }
+
+    async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        self.get_asset(id).await
+    }
+
+    async fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        self.list_assets(tenant_id, asset_type).await
+    }
+
+    async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        self.list_withheld_assets(tenant_id, asset_type).await
+    }
+
+    async fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> Result<u64, StorageError> {
+        self.tenant_asset_storage_bytes_used(tenant_id).await
+    }
+
+    async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_asset(id).await
+    }
+
+    async fn upsert_asset_channel(&self, channel: StoredAssetChannel) -> Result<(), StorageError> {
+        self.upsert_asset_channel(&channel).await
+    }
+
+    async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        self.list_asset_channels(tenant_id, asset_type, name).await
+    }
+
+    async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_asset_channel(id).await
+    }
+
+    async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError> {
+        self.move_asset_channel_if_resolvable(&channel).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError> {
+        self.set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
+            .await
+    }
+
+    async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError> {
+        self.delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
+            .await
+    }
+
+    async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
+        self.promote_pending_asset_visibility(id, target, now_unix)
+            .await
+    }
+
+    async fn upsert_retention_policy(
+        &self,
+        policy: StoredRetentionPolicy,
+    ) -> Result<(), StorageError> {
+        self.upsert_retention_policy(&policy).await
+    }
+
+    async fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
+        self.list_retention_policies(tenant_id, resource_type).await
+    }
+
+    async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
+        self.list_all_assets().await
+    }
+
+    async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        self.list_all_asset_channels().await
+    }
+
+    async fn get_usage_monthly_rollup(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
+        self.get_usage_monthly_rollup(scope_type, scope_id, period_month)
+            .await
+    }
+
+    async fn list_usage_monthly_rollups(
+        &self,
+    ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
+        self.list_usage_monthly_rollups().await
+    }
+
+    async fn append_billing_ledger_entry(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        self.append_billing_ledger_entry(entry).await
+    }
+
+    async fn list_billing_ledger_entries(
+        &self,
+        filter: &ferrogate_billing::LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        self.list_billing_ledger_entries(
+            filter,
+            saturating_i64(offset as u64),
+            saturating_i64(limit as u64),
+        )
+        .await
+    }
+
+    async fn billing_ledger_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        self.get_billing_ledger_entry(id).await
+    }
+
+    async fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.enqueue_billing_report(id, event, next_attempt_unix)
+            .await
+    }
+
+    async fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        self.list_due_billing_reports(now_unix, saturating_i64(limit as u64))
+            .await
+    }
+
+    async fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.reschedule_billing_report(id, next_attempt_unix).await
+    }
+
+    async fn dead_letter_billing_report(
+        &self,
+        id: &str,
+        _dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.dead_letter_billing_report(id).await
+    }
+
+    async fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        self.list_dead_lettered_billing_reports(saturating_i64(limit as u64))
+            .await
+    }
+
+    async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        self.replay_dead_lettered_billing_report(id, next_attempt_unix)
+            .await
+    }
+
+    async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        self.get_billing_report_outbox_entry(id).await
+    }
+
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        self.delete_billing_report(id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ControlPlaneStore for Mutex<RuntimeControlPlaneState> {
+    async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_api_key_record(api_key);
+        }
+        Ok(())
+    }
+
+    async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_api_key_record(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_api_key_records())
+            .unwrap_or_default())
+    }
+
+    async fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.find_api_key_records_by_prefix(key_prefix))
+            .unwrap_or_default())
+    }
+
+    async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_admin_user(user);
+        }
+        Ok(())
+    }
+
+    async fn get_admin_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_admin_user_by_id(id))
+            .unwrap_or(None))
+    }
+
+    async fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_admin_user_by_email(email))
+            .unwrap_or(None))
+    }
+
+    async fn upsert_admin_user_membership(
+        &self,
+        membership: StoredAdminUserMembership,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_admin_user_membership(membership);
+        }
+        Ok(())
+    }
+
+    async fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_admin_user_memberships_by_user(user_id))
+            .unwrap_or_default())
+    }
+
+    async fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_admin_user_memberships_by_tenant(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_admin_user_membership(user_id, tenant_id))
+            .unwrap_or(false))
+    }
+
+    async fn upsert_sso_provider_config(
+        &self,
+        config: StoredSsoProviderConfig,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_sso_provider_config(config);
+        }
+        Ok(())
+    }
+
+    async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_sso_provider_config(tenant_id))
+            .unwrap_or(None))
+    }
+
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_sso_provider_config(tenant_id))
+            .unwrap_or(false))
+    }
+
+    async fn insert_sso_pending_flow(
+        &self,
+        flow: StoredSsoPendingFlow,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.insert_sso_pending_flow(flow);
+        }
+        Ok(())
+    }
+
+    async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.take_sso_pending_flow(state, now_unix))
+            .unwrap_or(None))
+    }
+
+    async fn upsert_admin_user_refresh_token(
+        &self,
+        token: StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_admin_user_refresh_token(token);
+        }
+        Ok(())
+    }
+
+    async fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_admin_user_refresh_token_by_hash(token_hash))
+            .unwrap_or(None))
+    }
+
+    async fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| {
+                control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+            })
+            .unwrap_or(0))
+    }
+
+    async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| {
+                control_plane.revoke_admin_user_refresh_tokens_for_tenant(
+                    user_id,
+                    tenant_id,
+                    revoked_at_unix,
+                )
+            })
+            .unwrap_or(0))
+    }
+
+    async fn upsert_tenant_account(
+        &self,
+        account: StoredTenantAccount,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_tenant_account(account);
+        }
+        Ok(())
+    }
+
+    async fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_tenant_account(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_tenant_accounts())
+            .unwrap_or_default())
+    }
+
+    async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_project(project);
+        }
+        Ok(())
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_project(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_projects())
+            .unwrap_or_default())
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_project(id))
+            .unwrap_or(false))
+    }
+
+    async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.delete_project_if_unreferenced(id))
+            .map_err(|_| {
+                StorageError::Runtime(
+                    "in-memory control-plane mutex poisoned during project delete".to_string(),
+                )
+            })
+    }
+
+    async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_workspace(workspace);
+        }
+        Ok(())
+    }
+
+    async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_workspace(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_workspaces())
+            .unwrap_or_default())
+    }
+
+    async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_workspace(id))
+            .unwrap_or(false))
+    }
+
+    async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.delete_workspace_if_unreferenced(id))
+            .map_err(|_| {
+                StorageError::Runtime(
+                    "in-memory control-plane mutex poisoned during workspace delete".to_string(),
+                )
+            })
+    }
+
+    async fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.resolve_workspace_scope(workspace_id))
+            .unwrap_or(None))
+    }
+
+    async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_quota_policy(policy);
+        }
+        Ok(())
+    }
+
+    async fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_quota_policy(scope_type, scope_id))
+            .unwrap_or(None))
+    }
+
+    async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_quota_policies())
+            .unwrap_or_default())
+    }
+
+    async fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_quota_policy(scope_type, scope_id))
+            .unwrap_or(false))
+    }
+
+    async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_plan(plan);
+        }
+        Ok(())
+    }
+
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_plan(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_plans())
+            .unwrap_or_default())
+    }
+
+    async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.upsert_asset(asset))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.create_asset_if_absent(asset))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn create_asset_within_quota(
+        &self,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.create_asset_within_quota(asset, quota_bytes))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        self.lock()
+            .map(|control_plane| control_plane.get_asset(id))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        self.lock()
+            .map(|control_plane| control_plane.list_assets(tenant_id, asset_type))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        self.lock()
+            .map(|control_plane| control_plane.list_withheld_assets(tenant_id, asset_type))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> Result<u64, StorageError> {
+        self.lock()
+            .map(|control_plane| control_plane.tenant_asset_storage_bytes_used(tenant_id))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.delete_asset(id))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn upsert_asset_channel(&self, channel: StoredAssetChannel) -> Result<(), StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.upsert_asset_channel(channel))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn list_asset_channels(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        self.lock()
+            .map(|control_plane| control_plane.list_asset_channels(tenant_id, asset_type, name))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.delete_asset_channel(id))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| control_plane.move_asset_channel_if_resolvable(channel))
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| {
+                control_plane
+                    .set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
+            })
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| {
+                control_plane
+                    .delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
+            })
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn promote_pending_asset_visibility(
+        &self,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| {
+                control_plane.promote_pending_asset_visibility(id, target, now_unix)
+            })
+            .map_err(|_| poisoned_asset_repository_lock())
+    }
+
+    async fn upsert_retention_policy(
+        &self,
+        policy: StoredRetentionPolicy,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_retention_policy(policy);
+        }
+        Ok(())
+    }
+
+    async fn list_retention_policies(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_retention_policies(tenant_id, resource_type))
+            .unwrap_or_default())
+    }
+
+    async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_all_assets())
+            .unwrap_or_default())
+    }
+
+    async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_all_asset_channels())
+            .unwrap_or_default())
+    }
+
+    async fn get_usage_monthly_rollup(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| {
+                control_plane.get_usage_monthly_rollup(scope_type, scope_id, period_month)
+            })
+            .unwrap_or(None))
+    }
+
+    async fn list_usage_monthly_rollups(
+        &self,
+    ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_usage_monthly_rollups())
+            .unwrap_or_default())
+    }
+
+    async fn append_billing_ledger_entry(
+        &self,
+        _entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        Err(billing_ledger_supabase_only_error())
+    }
+
+    async fn list_billing_ledger_entries(
+        &self,
+        _filter: &ferrogate_billing::LedgerListFilter,
+        _offset: usize,
+        _limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        Err(billing_ledger_supabase_only_error())
+    }
+
+    async fn billing_ledger_entry(
+        &self,
+        _id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        Err(billing_ledger_supabase_only_error())
+    }
+
+    async fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.enqueue_billing_report(id, event, next_attempt_unix);
+        }
+        Ok(())
+    }
+
+    async fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_due_billing_reports(now_unix, limit))
+            .unwrap_or_default())
+    }
+
+    async fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.reschedule_billing_report(id, next_attempt_unix);
+        }
+        Ok(())
+    }
+
+    async fn dead_letter_billing_report(
+        &self,
+        id: &str,
+        dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.dead_letter_billing_report(id, dead_lettered_at_unix);
+        }
+        Ok(())
+    }
+
+    async fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_dead_lettered_billing_reports(limit))
+            .unwrap_or_default())
+    }
+
+    async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        self.lock()
+            .map(|mut control_plane| {
+                control_plane.replay_dead_lettered_billing_report(id, next_attempt_unix)
+            })
+            .map_err(|_| {
+                StorageError::Runtime(
+                    "in-memory control-plane mutex poisoned during dead-letter replay".to_string(),
+                )
+            })
+    }
+
+    async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_billing_report_outbox_entry(id))
+            .unwrap_or(None))
+    }
+
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.delete_billing_report(id);
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeControlPlaneBackend {
+    /// Returns the active backend as a `ControlPlaneStore` trait object so
+    /// dispatch methods route through one trait call instead of matching the
+    /// enum per method (#419).
+    fn store(&self) -> &dyn ControlPlaneStore {
+        match self {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane.as_ref(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.as_ref(),
+        }
+    }
+}
+
 impl RuntimeStorageRepositories {
     pub fn new(
         backend: RuntimeStorageBackend,
@@ -13748,140 +15165,70 @@ impl RuntimeStorageRepositories {
     // --- Durable virtual API keys bound to workspaces ---
 
     pub async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_api_key_record(api_key);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_api_key_record(&api_key).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_api_key_record(api_key)
+            .await
     }
 
     pub async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_api_key_record(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_api_key_record(id).await
-            }
-        }
+        self.control_plane.store().get_api_key_record(id).await
     }
 
     pub async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_api_key_records())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_api_key_records().await
-            }
-        }
+        self.control_plane.store().list_api_key_records().await
     }
 
     pub async fn find_api_key_records_by_prefix(
         &self,
         key_prefix: &str,
     ) -> Result<Vec<StoredApiKey>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.find_api_key_records_by_prefix(key_prefix))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .find_api_key_records_by_prefix(key_prefix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .find_api_key_records_by_prefix(key_prefix)
+            .await
     }
 
     // --- Multi-tenant hierarchy: Tenant -> Project -> Workspace ---
-
     pub async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_admin_user(user);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_admin_user(&user).await
-            }
-        }
+        self.control_plane.store().upsert_admin_user(user).await
     }
 
     pub async fn get_admin_user_by_id(
         &self,
         id: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_admin_user_by_id(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_admin_user_by_id(id).await
-            }
-        }
+        self.control_plane.store().get_admin_user_by_id(id).await
     }
 
     pub async fn get_admin_user_by_email(
         &self,
         email: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_admin_user_by_email(email))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_admin_user_by_email(email).await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_admin_user_by_email(email)
+            .await
     }
 
     pub async fn upsert_admin_user_membership(
         &self,
         membership: StoredAdminUserMembership,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_admin_user_membership(membership);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .upsert_admin_user_membership(&membership)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_admin_user_membership(membership)
+            .await
     }
 
     pub async fn list_admin_user_memberships_by_user(
         &self,
         user_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_admin_user_memberships_by_user(user_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_admin_user_memberships_by_user(user_id)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_admin_user_memberships_by_user(user_id)
+            .await
     }
 
     /// Lists every teammate membership for a tenant (issue #162), used by the
@@ -13890,17 +15237,10 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_admin_user_memberships_by_tenant(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_admin_user_memberships_by_tenant(tenant_id)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_admin_user_memberships_by_tenant(tenant_id)
+            .await
     }
 
     /// Revokes a teammate's membership in a tenant (issue #162). Returns
@@ -13910,19 +15250,10 @@ impl RuntimeStorageRepositories {
         user_id: &str,
         tenant_id: &str,
     ) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.delete_admin_user_membership(user_id, tenant_id)
-                })
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .delete_admin_user_membership(user_id, tenant_id)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_admin_user_membership(user_id, tenant_id)
+            .await
     }
 
     /// Persists (creates or replaces) the per-tenant SSO configuration (#283).
@@ -13930,17 +15261,10 @@ impl RuntimeStorageRepositories {
         &self,
         config: StoredSsoProviderConfig,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_sso_provider_config(config);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_sso_provider_config(&config).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_sso_provider_config(config)
+            .await
     }
 
     /// Reads the per-tenant SSO configuration, if any (#283).
@@ -13948,29 +15272,19 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_sso_provider_config(tenant_id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_sso_provider_config(tenant_id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_sso_provider_config(tenant_id)
+            .await
     }
 
     /// Removes the per-tenant SSO configuration (#283). Returns `true` if one
     /// existed.
     pub async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_sso_provider_config(tenant_id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_sso_provider_config(tenant_id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_sso_provider_config(tenant_id)
+            .await
     }
 
     /// Records an in-flight SSO authorize->callback flow (#283).
@@ -13978,17 +15292,10 @@ impl RuntimeStorageRepositories {
         &self,
         flow: StoredSsoPendingFlow,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.insert_sso_pending_flow(flow);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.insert_sso_pending_flow(&flow).await
-            }
-        }
+        self.control_plane
+            .store()
+            .insert_sso_pending_flow(flow)
+            .await
     }
 
     /// Consumes (removes and returns) a pending SSO flow by its `state` token,
@@ -13998,49 +15305,30 @@ impl RuntimeStorageRepositories {
         state: &str,
         now_unix: i64,
     ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.take_sso_pending_flow(state, now_unix))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.take_sso_pending_flow(state, now_unix).await
-            }
-        }
+        self.control_plane
+            .store()
+            .take_sso_pending_flow(state, now_unix)
+            .await
     }
 
     pub async fn upsert_admin_user_refresh_token(
         &self,
         token: StoredAdminUserRefreshToken,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_admin_user_refresh_token(token);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_admin_user_refresh_token(&token).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_admin_user_refresh_token(token)
+            .await
     }
 
     pub async fn get_admin_user_refresh_token_by_hash(
         &self,
         token_hash: &str,
     ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_admin_user_refresh_token_by_hash(token_hash))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .get_admin_user_refresh_token_by_hash(token_hash)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_admin_user_refresh_token_by_hash(token_hash)
+            .await
     }
 
     /// Revokes every live refresh token for a user (issue #161), so a SCIM
@@ -14051,19 +15339,10 @@ impl RuntimeStorageRepositories {
         user_id: &str,
         revoked_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
-                })
-                .unwrap_or(0)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+            .await
     }
 
     /// Revokes only the refresh tokens a user holds for one tenant (issue
@@ -14075,121 +15354,47 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         revoked_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.revoke_admin_user_refresh_tokens_for_tenant(
-                        user_id,
-                        tenant_id,
-                        revoked_at_unix,
-                    )
-                })
-                .unwrap_or(0)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .revoke_admin_user_refresh_tokens_for_tenant(
-                        user_id,
-                        tenant_id,
-                        revoked_at_unix,
-                    )
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .revoke_admin_user_refresh_tokens_for_tenant(user_id, tenant_id, revoked_at_unix)
+            .await
     }
 
     pub async fn upsert_tenant_account(
         &self,
         account: StoredTenantAccount,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_tenant_account(account);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_tenant_account(&account).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_tenant_account(account)
+            .await
     }
 
     pub async fn get_tenant_account(
         &self,
         id: &str,
     ) -> Result<Option<StoredTenantAccount>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_tenant_account(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_tenant_account(id).await
-            }
-        }
+        self.control_plane.store().get_tenant_account(id).await
     }
 
     pub async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_tenant_accounts())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_tenant_accounts().await
-            }
-        }
+        self.control_plane.store().list_tenant_accounts().await
     }
 
     pub async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_project(project);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_project(&project).await
-            }
-        }
+        self.control_plane.store().upsert_project(project).await
     }
 
     pub async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_project(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_project(id).await
-            }
-        }
+        self.control_plane.store().get_project(id).await
     }
 
     pub async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_projects())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_projects().await
-            }
-        }
+        self.control_plane.store().list_projects().await
     }
 
     pub async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_project(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_project(id).await
-            }
-        }
+        self.control_plane.store().delete_project(id).await
     }
 
     /// Atomic reject-if-referenced project delete (issue #328, finding 4):
@@ -14201,69 +15406,26 @@ impl RuntimeStorageRepositories {
         &self,
         id: &str,
     ) -> Result<DeleteProjectOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_project_if_unreferenced(id))
-                .map_err(|_| {
-                    StorageError::Runtime(
-                        "in-memory control-plane mutex poisoned during project delete".to_string(),
-                    )
-                }),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_project_if_unreferenced(id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_project_if_unreferenced(id)
+            .await
     }
 
     pub async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_workspace(workspace);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_workspace(&workspace).await
-            }
-        }
+        self.control_plane.store().upsert_workspace(workspace).await
     }
 
     pub async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_workspace(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_workspace(id).await
-            }
-        }
+        self.control_plane.store().get_workspace(id).await
     }
 
     pub async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_workspaces())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_workspaces().await
-            }
-        }
+        self.control_plane.store().list_workspaces().await
     }
 
     pub async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_workspace(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_workspace(id).await
-            }
-        }
+        self.control_plane.store().delete_workspace(id).await
     }
 
     /// Atomic reject-if-referenced workspace delete (issue #328, finding 4).
@@ -14272,20 +15434,10 @@ impl RuntimeStorageRepositories {
         &self,
         id: &str,
     ) -> Result<DeleteWorkspaceOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_workspace_if_unreferenced(id))
-                .map_err(|_| {
-                    StorageError::Runtime(
-                        "in-memory control-plane mutex poisoned during workspace delete"
-                            .to_string(),
-                    )
-                }),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_workspace_if_unreferenced(id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_workspace_if_unreferenced(id)
+            .await
     }
 
     /// Resolve a workspace id to its full `tenant -> project -> workspace`
@@ -14294,32 +15446,16 @@ impl RuntimeStorageRepositories {
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceScope>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.resolve_workspace_scope(workspace_id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.resolve_workspace_scope(workspace_id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .resolve_workspace_scope(workspace_id)
+            .await
     }
 
     // --- Multi-level quota/rate-limit policies (tenant/project/workspace/key) ---
-
     pub async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
         validate_quota_policy(&policy)?;
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_quota_policy(policy);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_quota_policy(&policy).await
-            }
-        }
+        self.control_plane.store().upsert_quota_policy(policy).await
     }
 
     pub async fn get_quota_policy(
@@ -14327,27 +15463,14 @@ impl RuntimeStorageRepositories {
         scope_type: QuotaScopeKind,
         scope_id: &str,
     ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_quota_policy(scope_type, scope_id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_quota_policy(scope_type, scope_id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_quota_policy(scope_type, scope_id)
+            .await
     }
 
     pub async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_quota_policies())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_quota_policies().await
-            }
-        }
+        self.control_plane.store().list_quota_policies().await
     }
 
     pub async fn delete_quota_policy(
@@ -14355,84 +15478,42 @@ impl RuntimeStorageRepositories {
         scope_type: QuotaScopeKind,
         scope_id: &str,
     ) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_quota_policy(scope_type, scope_id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .delete_quota_policy(scope_type, scope_id)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_quota_policy(scope_type, scope_id)
+            .await
     }
 
     /// Creates or replaces a plan (issue #168). Plans are shared across
     /// tenants, so any authenticated admin-write caller may define one --
     /// same trust model as [`Self::upsert_quota_policy`].
     pub async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_plan(plan);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_plan(&plan).await
-            }
-        }
+        self.control_plane.store().upsert_plan(plan).await
     }
 
     pub async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_plan(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_plan(id).await,
-        }
+        self.control_plane.store().get_plan(id).await
     }
 
     pub async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_plans())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans().await,
-        }
+        self.control_plane.store().list_plans().await
     }
 
     /// Creates or replaces an asset (issue #176). Unlike plans/quota
     /// policies (shared/scope-keyed), assets are tenant-owned -- same trust
     /// model as tenant account CRUD.
     pub async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.upsert_asset(asset))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_asset(&asset).await
-            }
-        }
+        self.control_plane.store().upsert_asset(asset).await
     }
 
     /// Publishes an immutable asset version exactly once. The Postgres backend
     /// uses one `INSERT ... ON CONFLICT DO NOTHING` statement; the memory
     /// backend performs the equivalent check and insert under one lock.
     pub async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.create_asset_if_absent(asset))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.create_asset_if_absent(&asset).await
-            }
-        }
+        self.control_plane
+            .store()
+            .create_asset_if_absent(asset)
+            .await
     }
 
     /// Atomically admit a push against the tenant asset-storage quota and publish
@@ -14455,31 +15536,14 @@ impl RuntimeStorageRepositories {
         asset: StoredAsset,
         quota_bytes: Option<u64>,
     ) -> Result<AssetQuotaAdmission, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.create_asset_within_quota(asset, quota_bytes)
-                })
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .create_asset_within_quota(&asset, quota_bytes)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .create_asset_within_quota(asset, quota_bytes)
+            .await
     }
 
     pub async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_asset(id))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_asset(id).await
-            }
-        }
+        self.control_plane.store().get_asset(id).await
     }
 
     pub async fn list_assets(
@@ -14487,15 +15551,10 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_assets(tenant_id, asset_type))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_assets(tenant_id, asset_type).await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_assets(tenant_id, asset_type)
+            .await
     }
 
     /// Operator-only listing of WITHHELD assets (issue #379): every non-`visible`
@@ -14509,17 +15568,10 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_withheld_assets(tenant_id, asset_type))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_withheld_assets(tenant_id, asset_type)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_withheld_assets(tenant_id, asset_type)
+            .await
     }
 
     /// Authoritative tenant storage usage without loading stored object bytes.
@@ -14527,29 +15579,14 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<u64, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|control_plane| control_plane.tenant_asset_storage_bytes_used(tenant_id))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .tenant_asset_storage_bytes_used(tenant_id)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .tenant_asset_storage_bytes_used(tenant_id)
+            .await
     }
 
     pub async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_asset(id))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_asset(id).await
-            }
-        }
+        self.control_plane.store().delete_asset(id).await
     }
 
     /// Creates or moves a channel pointer (issue #260). Idempotent per
@@ -14558,15 +15595,10 @@ impl RuntimeStorageRepositories {
         &self,
         channel: StoredAssetChannel,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.upsert_asset_channel(channel))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_asset_channel(&channel).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_asset_channel(channel)
+            .await
     }
 
     pub async fn list_asset_channels(
@@ -14575,29 +15607,14 @@ impl RuntimeStorageRepositories {
         asset_type: &str,
         name: &str,
     ) -> Result<Vec<StoredAssetChannel>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_asset_channels(tenant_id, asset_type, name))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_asset_channels(tenant_id, asset_type, name)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_asset_channels(tenant_id, asset_type, name)
+            .await
     }
 
     pub async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_asset_channel(id))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_asset_channel(id).await
-            }
-        }
+        self.control_plane.store().delete_asset_channel(id).await
     }
 
     /// Atomically move a channel pointer only when its target version is durably
@@ -14610,17 +15627,10 @@ impl RuntimeStorageRepositories {
         &self,
         channel: StoredAssetChannel,
     ) -> Result<ChannelMoveOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.move_asset_channel_if_resolvable(channel))
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .move_asset_channel_if_resolvable(&channel)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .move_asset_channel_if_resolvable(channel)
+            .await
     }
 
     /// Atomically set/clear the yank flag on every variant of a version (issue
@@ -14637,21 +15647,10 @@ impl RuntimeStorageRepositories {
         yanked: bool,
         now_unix: i64,
     ) -> Result<VersionYankOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.set_asset_version_yank(
-                        tenant_id, asset_type, name, version, yanked, now_unix,
-                    )
-                })
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
+            .await
     }
 
     /// Atomically delete one variant row unless it would strand a channel on an
@@ -14665,21 +15664,10 @@ impl RuntimeStorageRepositories {
         name: &str,
         version: &str,
     ) -> Result<VariantDeleteOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.delete_asset_variant_if_unreferenced(
-                        id, tenant_id, asset_type, name, version,
-                    )
-                })
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
+            .await
     }
 
     /// Atomically promote a `pending_scan` asset row to `visible`/`quarantined`
@@ -14695,39 +15683,22 @@ impl RuntimeStorageRepositories {
         target: AssetPromotionTarget,
         now_unix: i64,
     ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.promote_pending_asset_visibility(id, target, now_unix)
-                })
-                .map_err(|_| poisoned_asset_repository_lock()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .promote_pending_asset_visibility(id, target, now_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .promote_pending_asset_visibility(id, target, now_unix)
+            .await
     }
 
     // #263: asset lifecycle -- retention policies + whole-registry reconcile
     // scans the lifecycle sweeper drives.
-
     pub async fn upsert_retention_policy(
         &self,
         policy: StoredRetentionPolicy,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_retention_policy(policy);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_retention_policy(&policy).await
-            }
-        }
+        self.control_plane
+            .store()
+            .upsert_retention_policy(policy)
+            .await
     }
 
     pub async fn list_retention_policies(
@@ -14735,84 +15706,44 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         resource_type: &str,
     ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| {
-                    control_plane.list_retention_policies(tenant_id, resource_type)
-                })
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_retention_policies(tenant_id, resource_type)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_retention_policies(tenant_id, resource_type)
+            .await
     }
 
     /// Every asset row across every tenant, for the lifecycle sweeper's
     /// retention grouping + GC referenced-key derivation (#263).
     pub async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_all_assets())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_all_assets().await
-            }
-        }
+        self.control_plane.store().list_all_assets().await
     }
 
     /// Every channel pointer across every tenant, so the sweeper knows which
     /// versions are channel-pinned (never pruned) (#263).
     pub async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_all_asset_channels())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_all_asset_channels().await
-            }
-        }
+        self.control_plane.store().list_all_asset_channels().await
     }
 
     // --- P1-4 usage/cost monthly rollups ---
-
     pub async fn get_usage_monthly_rollup(
         &self,
         scope_type: QuotaScopeKind,
         scope_id: &str,
         period_month: &str,
     ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| {
-                    control_plane.get_usage_monthly_rollup(scope_type, scope_id, period_month)
-                })
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .get_usage_monthly_rollup(scope_type, scope_id, period_month)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_usage_monthly_rollup(scope_type, scope_id, period_month)
+            .await
     }
 
     pub async fn list_usage_monthly_rollups(
         &self,
     ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_usage_monthly_rollups())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_usage_monthly_rollups().await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_usage_monthly_rollups()
+            .await
     }
 
     /// Persist a settled billing ledger entry (issue #129). Idempotent on the
@@ -14821,12 +15752,10 @@ impl RuntimeStorageRepositories {
         &self,
         entry: &ferrogate_billing::LedgerEntry,
     ) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.append_billing_ledger_entry(entry).await
-            }
-            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
-        }
+        self.control_plane
+            .store()
+            .append_billing_ledger_entry(entry)
+            .await
     }
 
     /// List settled ledger entries matching `filter`, oldest first, paginated.
@@ -14837,18 +15766,10 @@ impl RuntimeStorageRepositories {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_billing_ledger_entries(
-                        filter,
-                        saturating_i64(offset as u64),
-                        saturating_i64(limit as u64),
-                    )
-                    .await
-            }
-            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
-        }
+        self.control_plane
+            .store()
+            .list_billing_ledger_entries(filter, offset, limit)
+            .await
     }
 
     /// Fetch a single settled ledger entry by id. Supabase-only.
@@ -14856,12 +15777,7 @@ impl RuntimeStorageRepositories {
         &self,
         id: &str,
     ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_billing_ledger_entry(id).await
-            }
-            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
-        }
+        self.control_plane.store().billing_ledger_entry(id).await
     }
 
     /// Enqueue a gateway→billing usage report for durable delivery (issue #137).
@@ -14873,19 +15789,10 @@ impl RuntimeStorageRepositories {
         event: &ferrogate_billing::BillingEvent,
         next_attempt_unix: i64,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.enqueue_billing_report(id, event, next_attempt_unix);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .enqueue_billing_report(id, event, next_attempt_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .enqueue_billing_report(id, event, next_attempt_unix)
+            .await
     }
 
     /// List billing report outbox entries whose `next_attempt_unix <= now`.
@@ -14894,17 +15801,10 @@ impl RuntimeStorageRepositories {
         now_unix: i64,
         limit: usize,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_due_billing_reports(now_unix, limit))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_due_billing_reports(now_unix, saturating_i64(limit as u64))
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_due_billing_reports(now_unix, limit)
+            .await
     }
 
     /// Bump the attempt count and next-attempt time of a pending report.
@@ -14913,19 +15813,10 @@ impl RuntimeStorageRepositories {
         id: &str,
         next_attempt_unix: i64,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.reschedule_billing_report(id, next_attempt_unix);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .reschedule_billing_report(id, next_attempt_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .reschedule_billing_report(id, next_attempt_unix)
+            .await
     }
 
     /// Mark a permanently-failing report dead-lettered (issue #143) instead of
@@ -14937,17 +15828,10 @@ impl RuntimeStorageRepositories {
         id: &str,
         dead_lettered_at_unix: i64,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.dead_letter_billing_report(id, dead_lettered_at_unix);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.dead_letter_billing_report(id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .dead_letter_billing_report(id, dead_lettered_at_unix)
+            .await
     }
 
     /// List dead-lettered billing reports, most recently given-up-on first.
@@ -14955,17 +15839,10 @@ impl RuntimeStorageRepositories {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_dead_lettered_billing_reports(limit))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_dead_lettered_billing_reports(saturating_i64(limit as u64))
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .list_dead_lettered_billing_reports(limit)
+            .await
     }
 
     /// Conditionally replay (re-enqueue) a dead-lettered billing report for
@@ -14980,24 +15857,10 @@ impl RuntimeStorageRepositories {
         id: &str,
         next_attempt_unix: i64,
     ) -> Result<ReplayDeadLetterOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.replay_dead_lettered_billing_report(id, next_attempt_unix)
-                })
-                .map_err(|_| {
-                    StorageError::Runtime(
-                        "in-memory control-plane mutex poisoned during dead-letter replay"
-                            .to_string(),
-                    )
-                }),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .replay_dead_lettered_billing_report(id, next_attempt_unix)
-                    .await
-            }
-        }
+        self.control_plane
+            .store()
+            .replay_dead_lettered_billing_report(id, next_attempt_unix)
+            .await
     }
 
     /// Fetch a single billing-report outbox row by id (issue #388). Used to
@@ -15007,32 +15870,16 @@ impl RuntimeStorageRepositories {
         &self,
         id: &str,
     ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_billing_report_outbox_entry(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_billing_report_outbox_entry(id).await
-            }
-        }
+        self.control_plane
+            .store()
+            .get_billing_report_outbox_entry(id)
+            .await
     }
 
     /// Delete a delivered report from the outbox.
     pub async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.delete_billing_report(id);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_billing_report(id).await
-            }
-        }
+        self.control_plane.store().delete_billing_report(id).await
     }
-
     pub fn upsert_control_plane_policy(
         &self,
         id: impl Into<String>,
