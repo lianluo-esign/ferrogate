@@ -12,6 +12,7 @@ import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useI18n, type I18nContextValue } from "@/i18n";
 import type { AdminSchema } from "@/lib/gateway-client";
 
 export type TimelineEventFamily = "capability" | "guardrail" | "audit" | "lifecycle";
@@ -109,12 +110,12 @@ export function tenantMatches(
   ].some((id) => id?.toLowerCase().includes(needle));
 }
 
-async function copyToClipboard(value: string, label: string) {
+async function copyToClipboard(value: string, label: string, t: I18nContextValue["t"]) {
   try {
     await navigator.clipboard.writeText(value);
-    toast.success(`${label} copied`);
+    toast.success(t("common.copied", { label }));
   } catch {
-    toast.error("Copy failed (clipboard unavailable)");
+    toast.error(t("common.copyFailed"));
   }
 }
 
@@ -132,6 +133,7 @@ export function TruncatedCopyable({
   label: string;
   prefixLength?: number;
 }) {
+  const { t } = useI18n();
   if (!value) return <span className="text-muted-foreground">—</span>;
   const shown = value.length > prefixLength ? `${value.slice(0, prefixLength)}…` : value;
   return (
@@ -144,8 +146,8 @@ export function TruncatedCopyable({
         variant="ghost"
         size="icon"
         className="h-5 w-5"
-        aria-label={`Copy ${label}`}
-        onClick={() => void copyToClipboard(value, label)}
+        aria-label={t("common.copyLabel", { label })}
+        onClick={() => void copyToClipboard(value, label, t)}
       >
         <Copy className="h-3 w-3" />
       </Button>

@@ -44,6 +44,8 @@ export const zhCN = {
   "common.more": "更多",
   "common.loading": "加载中…",
   "common.copied": "已复制{label}",
+  "common.copyLabel": "复制{label}",
+  "common.copyFailed": "复制失败（剪贴板不可用）",
   "common.breadcrumb": "面包屑导航",
   "common.toggleSidebar": "切换侧边栏",
 

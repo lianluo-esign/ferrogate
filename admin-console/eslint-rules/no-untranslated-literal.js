@@ -21,9 +21,15 @@
 // -------------
 //   * JSX text that is human copy:  <Button>Save changes</Button>
 //   * Operator-facing string props: placeholder / title / alt / aria-label /
-//     aria-description / label / description  set to a bare string literal.
-// It does NOT flag `{t("...")}` (that is an expression, not a literal), so the
-// migrated idiom always passes.
+//     aria-description / label / description  set to a bare string literal OR an
+//     interpolated template literal (`aria-label={`Copy ${label}`}` — #391: the
+//     static extractor can't see the copy inside a template, so it silently
+//     renders English even under zh-CN unless flagged explicitly).
+//   * String / template args to `toast.*(...)`: `toast.error("Copy failed")` and
+//     `toast.success(`${label} copied`)` (#391). These render in a NON-JSX
+//     position the JSX handlers never visit, so they need their own check.
+// It does NOT flag `{t("...")}` (that is an expression, not a literal) nor
+// `toast.success(t("..."))`, so the migrated idiom always passes.
 //
 // WHAT IT INTENTIONALLY IGNORES (not operator copy)
 // -------------------------------------------------
@@ -92,6 +98,20 @@ function staticStringValue(node) {
   return null;
 }
 
+/**
+ * Copy text of a string arg: a bare Literal, OR any template literal's static
+ * quasis joined together (interpolated or not). We join with a space so an
+ * interpolation boundary can't fuse two words into one and hide a letter run
+ * (#391). Returns null for anything that is not a string/template.
+ */
+function stringArgCopy(node) {
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  if (node.type === "TemplateLiteral") {
+    return node.quasis.map((q) => q.value.cooked ?? "").join(" ");
+  }
+  return null;
+}
+
 /** @type {import("eslint").Rule.RuleModule} */
 const rule = {
   meta: {
@@ -105,6 +125,8 @@ const rule = {
         'Hard-coded operator-facing text "{{ text }}". Move it into the @/i18n catalog and render with t("<key>"). See eslint-rules/no-untranslated-literal.js.',
       prop:
         'Hard-coded operator-facing string on `{{ prop }}`. Use `{{ prop }}={t("<key>")}` from @/i18n. See eslint-rules/no-untranslated-literal.js.',
+      toast:
+        'Hard-coded operator-facing string passed to `toast.{{ method }}(...)`. Route it through the @/i18n catalog: `toast.{{ method }}(t("<key>"))`. See eslint-rules/no-untranslated-literal.js.',
     },
     schema: [],
   },
@@ -132,9 +154,38 @@ const rule = {
         // `placeholder="..."` -> Literal; `placeholder={"..."}` / `{`..`}` -> container.
         let valueNode = node.value;
         if (valueNode.type === "JSXExpressionContainer") valueNode = valueNode.expression;
+        // Interpolated template (`aria-label={`Copy ${label}`}`, #391): the static
+        // extractor returns null, so match it here on the joined static quasis.
+        if (valueNode.type === "TemplateLiteral" && valueNode.expressions.length > 0) {
+          const templateText = valueNode.quasis.map((q) => q.value.cooked ?? "").join(" ");
+          if (looksLikeCopy(templateText)) {
+            context.report({ node, messageId: "prop", data: { prop: name } });
+          }
+          return;
+        }
         const text = staticStringValue(valueNode);
         if (text === null || !looksLikeCopy(text)) return;
         context.report({ node, messageId: "prop", data: { prop: name } });
+      },
+      CallExpression(node) {
+        // `toast.<method>("copy")` / `toast.<method>(`${x} copied`)` (#391): copy
+        // in a non-JSX position the JSX handlers never visit. `toast.<method>(t(...))`
+        // passes because the arg is a CallExpression, not a string/template.
+        const callee = node.callee;
+        if (
+          callee.type !== "MemberExpression" ||
+          callee.computed ||
+          callee.object.type !== "Identifier" ||
+          callee.object.name !== "toast" ||
+          callee.property.type !== "Identifier"
+        ) {
+          return;
+        }
+        const arg = node.arguments[0];
+        if (!arg) return;
+        const text = stringArgCopy(arg);
+        if (text === null || !looksLikeCopy(text)) return;
+        context.report({ node, messageId: "toast", data: { method: callee.property.name } });
       },
     };
   },

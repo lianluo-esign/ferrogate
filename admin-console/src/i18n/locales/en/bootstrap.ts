@@ -50,6 +50,8 @@ export const enBootstrap = {
   "common.more": "More",
   "common.loading": "Loading…",
   "common.copied": "{label} copied",
+  "common.copyLabel": "Copy {label}",
+  "common.copyFailed": "Copy failed (clipboard unavailable)",
   "common.breadcrumb": "Breadcrumb",
   "common.toggleSidebar": "Toggle Sidebar",
 

@@ -47,6 +47,13 @@ ruleTester.run("no-untranslated-literal", rule, {
     // Technical elements: code/pre/kbd hold literals, not copy.
     { code: "const x = <code>SELECT * FROM t</code>;" },
     { code: "const x = <pre>const y = 1;</pre>;" },
+    // #391: the migrated toast + interpolated aria-label idioms go through t().
+    { code: "toast.success(t('common.copied', { label }));" },
+    { code: "const x = <button aria-label={t('common.copyLabel', { label })} />;" },
+    // #391: a toast arg with no letter run (an id / number) is not copy.
+    { code: "toast.success(`${id}`);" },
+    // Non-toast callee with a string arg is out of scope.
+    { code: "logger.error('Copy failed');" },
   ],
   invalid: [
     {
@@ -69,6 +76,21 @@ ruleTester.run("no-untranslated-literal", rule, {
       // Static template literal (no interpolation) is still a hard-coded string.
       code: "const x = <div title={`Danger zone`} />;",
       errors: [{ messageId: "prop" }],
+    },
+    {
+      // #391: interpolated operator-facing template the static extractor misses.
+      code: "const x = <button aria-label={`Copy ${label}`} />;",
+      errors: [{ messageId: "prop" }],
+    },
+    {
+      // #391: bare string arg to a toast call.
+      code: "toast.error('Copy failed (clipboard unavailable)');",
+      errors: [{ messageId: "toast" }],
+    },
+    {
+      // #391: interpolated template arg to a toast call.
+      code: "toast.success(`${label} copied`);",
+      errors: [{ messageId: "toast" }],
     },
   ],
 });
