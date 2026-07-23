@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/card";
 import { BoolBadge, DefinitionRow } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import { useState } from "react";
 
@@ -35,6 +36,7 @@ const DRAIN_REFETCH_INTERVAL_MS = 5_000;
 
 export default function OpsDrainPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["ops-drain"];
@@ -52,13 +54,15 @@ export default function OpsDrainPage() {
       adminPost(apiKey, "/admin/v1/drain", { drain }),
     onSuccess: (result: DrainStatus) => {
       toast.success(
-        result.draining ? "Node is now draining" : "Node resumed serving",
+        result.draining
+          ? t("page.opsDrain.toast.draining")
+          : t("page.opsDrain.toast.serving"),
       );
       queryClient.setQueryData(queryKey, result);
       queryClient.invalidateQueries({ queryKey });
     },
     onError: (err: Error) => {
-      toast.error(`Drain change failed: ${err.message}`);
+      toast.error(t("page.opsDrain.toast.failed", { message: err.message }));
     },
   });
 
@@ -67,51 +71,58 @@ export default function OpsDrainPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Graceful drain</h1>
+        <h1 className="text-lg font-semibold">{t("page.opsDrain.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Drain stops this node from accepting new AI requests while in-flight
-          requests finish, so it can be rolled or removed from the pool safely.
+          {t("page.opsDrain.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load drain status: {(error as Error).message}
+          {t("page.opsDrain.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            Drain status
+            {t("page.opsDrain.status.title")}
             {data ? (
               <Badge variant={draining ? "destructive" : "default"}>
-                {draining ? "draining" : "serving"}
+                {draining
+                  ? t("page.opsDrain.status.draining")
+                  : t("page.opsDrain.status.serving")}
               </Badge>
             ) : null}
           </CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading || !data ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
           ) : (
             <div className="divide-y">
               <DefinitionRow
-                label="Draining"
+                label={t("page.opsDrain.field.draining")}
                 value={
                   <BoolBadge
                     value={data.draining}
-                    trueLabel="draining"
-                    falseLabel="serving"
+                    trueLabel={t("page.opsDrain.status.draining")}
+                    falseLabel={t("page.opsDrain.status.serving")}
                     good="false"
                   />
                 }
               />
               <DefinitionRow
-                label="Accepting new requests"
-                value={<BoolBadge value={data.accepting_new_requests} />}
+                label={t("page.opsDrain.field.accepting")}
+                value={
+                  <BoolBadge
+                    value={data.accepting_new_requests}
+                    trueLabel={t("common.yes")}
+                    falseLabel={t("common.no")}
+                  />
+                }
               />
-              <DefinitionRow label="Reason" value={data.drain_reason} />
+              <DefinitionRow label={t("page.opsDrain.field.reason")} value={data.drain_reason} />
             </div>
           )}
           <div className="mt-4 flex gap-2">
@@ -120,14 +131,14 @@ export default function OpsDrainPage() {
               disabled={draining || mutation.isPending || !data}
               onClick={() => setConfirmDrain(true)}
             >
-              Start drain
+              {t("page.opsDrain.action.start")}
             </Button>
             <Button
               variant="outline"
               disabled={!draining || mutation.isPending || !data}
               onClick={() => setConfirmDrain(false)}
             >
-              Resume serving
+              {t("page.opsDrain.action.resume")}
             </Button>
           </div>
         </CardContent>
@@ -142,23 +153,27 @@ export default function OpsDrainPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {confirmDrain ? "Start draining this node?" : "Resume serving?"}
+              {confirmDrain
+                ? t("page.opsDrain.confirm.startTitle")
+                : t("page.opsDrain.confirm.resumeTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {confirmDrain
-                ? "This node will stop accepting new AI requests and report unready to the load balancer. In-flight requests keep running until they finish. Use this before a rollout or shutdown."
-                : "This node will resume accepting new AI requests and report ready again."}
+                ? t("page.opsDrain.confirm.startBody")
+                : t("page.opsDrain.confirm.resumeBody")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (confirmDrain !== null) mutation.mutate(confirmDrain);
                 setConfirmDrain(null);
               }}
             >
-              {confirmDrain ? "Confirm drain" : "Confirm resume"}
+              {confirmDrain
+                ? t("page.opsDrain.confirm.start")
+                : t("page.opsDrain.confirm.resume")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

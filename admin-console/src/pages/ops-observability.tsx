@@ -34,6 +34,7 @@ import {
   HealthBadge,
 } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
@@ -70,6 +71,7 @@ function buildExportUrl(filters: ExportFilters): string {
 
 export default function OpsObservabilityPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -90,14 +92,16 @@ export default function OpsObservabilityPage() {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
       if (!response.ok) {
-        throw new Error(`export failed (${response.status})`);
+        throw new Error(
+          t("page.opsObservability.exportFailed", { status: response.status }),
+        );
       }
       const body = await response.text();
       const recordCount = body
         .split("\n")
         .filter((line) => line.trim().length > 0).length;
       setPreview({ recordCount, body });
-      toast.success(`Fetched ${recordCount} export records`);
+      toast.success(t("page.opsObservability.toast.fetched", { count: recordCount }));
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -119,46 +123,46 @@ export default function OpsObservabilityPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Observability &amp; exports</h1>
+        <h1 className="text-lg font-semibold">{t("page.opsObservability.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Telemetry exporter status and on-demand request-log (JSONL) exports.
+          {t("page.opsObservability.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load observability: {(error as Error).message}
+          {t("page.opsObservability.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Telemetry exporters</CardTitle>
+          <CardTitle className="text-base">{t("page.opsObservability.exporters.title")}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Provider</TableHead>
-                  <TableHead>Health</TableHead>
-                  <TableHead>Active</TableHead>
-                  <TableHead>Endpoint</TableHead>
-                  <TableHead>Dropped</TableHead>
-                  <TableHead>Last success</TableHead>
+                  <TableHead>{t("page.opsObservability.col.provider")}</TableHead>
+                  <TableHead>{t("page.opsObservability.col.health")}</TableHead>
+                  <TableHead>{t("page.opsObservability.col.active")}</TableHead>
+                  <TableHead>{t("page.opsObservability.col.endpoint")}</TableHead>
+                  <TableHead>{t("page.opsObservability.col.dropped")}</TableHead>
+                  <TableHead>{t("page.opsObservability.col.lastSuccess")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {isLoading ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-24 text-center">
-                      Loading…
+                      {t("resource.table.loading")}
                     </TableCell>
                   </TableRow>
                 ) : exporters.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-24 text-center">
-                      No exporters configured.
+                      {t("page.opsObservability.exporters.empty")}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -179,7 +183,11 @@ export default function OpsObservabilityPage() {
                         <HealthBadge health={row.health} />
                       </TableCell>
                       <TableCell>
-                        <BoolBadge value={row.active} />
+                        <BoolBadge
+                          value={row.active}
+                          trueLabel={t("common.yes")}
+                          falseLabel={t("common.no")}
+                        />
                       </TableCell>
                       <TableCell className="text-xs">{row.endpoint ?? "-"}</TableCell>
                       <TableCell className="tabular-nums">
@@ -199,12 +207,12 @@ export default function OpsObservabilityPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Request-log export</CardTitle>
+          <CardTitle className="text-base">{t("page.opsObservability.export.title")}</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="grid gap-3 sm:grid-cols-4">
             <div className="grid gap-2">
-              <Label htmlFor="exp-model">Model</Label>
+              <Label htmlFor="exp-model">{t("page.opsObservability.filter.model")}</Label>
               <Input
                 id="exp-model"
                 value={filters.model}
@@ -214,7 +222,7 @@ export default function OpsObservabilityPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="exp-provider">Provider</Label>
+              <Label htmlFor="exp-provider">{t("page.opsObservability.filter.provider")}</Label>
               <Input
                 id="exp-provider"
                 value={filters.provider}
@@ -224,7 +232,7 @@ export default function OpsObservabilityPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="exp-status">Status code</Label>
+              <Label htmlFor="exp-status">{t("page.opsObservability.filter.status")}</Label>
               <Input
                 id="exp-status"
                 type="number"
@@ -235,7 +243,7 @@ export default function OpsObservabilityPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="exp-limit">Limit</Label>
+              <Label htmlFor="exp-limit">{t("page.opsObservability.filter.limit")}</Label>
               <Input
                 id="exp-limit"
                 type="number"
@@ -250,26 +258,30 @@ export default function OpsObservabilityPage() {
           </div>
           <div className="flex gap-2">
             <Button onClick={runExport} disabled={exporting}>
-              {exporting ? "Fetching…" : "Fetch export"}
+              {exporting
+                ? t("page.opsObservability.fetching")
+                : t("page.opsObservability.fetch")}
             </Button>
             <Button
               variant="outline"
               onClick={downloadExport}
               disabled={preview === null}
             >
-              Download JSONL
+              {t("page.opsObservability.download")}
             </Button>
           </div>
           {preview ? (
             <div className="divide-y rounded-md border p-3">
               <DefinitionRow
-                label="Records"
+                label={t("page.opsObservability.records")}
                 value={<Badge variant="secondary">{preview.recordCount}</Badge>}
               />
               <div className="pt-2">
-                <span className="text-xs text-muted-foreground">Preview</span>
+                <span className="text-xs text-muted-foreground">
+                  {t("page.opsObservability.preview")}
+                </span>
                 <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted px-2 py-1 font-mono text-xs">
-                  {preview.body.trim() || "(empty)"}
+                  {preview.body.trim() || t("page.opsObservability.empty")}
                 </pre>
               </div>
             </div>

@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/table";
 import { BoolBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n, type TranslationKey } from "@/i18n";
 import {
   adminDelete,
   adminGet,
@@ -50,6 +51,19 @@ import {
 type GatewayConfigProfile = AdminSchema<"AdminGatewayConfigProfile">;
 
 type CacheOverride = "inherit" | "on" | "off";
+
+const CACHE_LABEL_KEYS: Record<CacheOverride, TranslationKey> = {
+  inherit: "page.opsGatewayConfigs.cache.inherit",
+  on: "page.opsGatewayConfigs.cache.on",
+  off: "page.opsGatewayConfigs.cache.off",
+};
+
+function cacheOverrideOf(
+  cacheEnabled: boolean | null | undefined,
+): CacheOverride {
+  if (cacheEnabled === null || cacheEnabled === undefined) return "inherit";
+  return cacheEnabled ? "on" : "off";
+}
 
 interface FormState {
   id: string;
@@ -101,6 +115,7 @@ function mutationBody(form: FormState): AdminSchema<"AdminGatewayConfigMutation"
 
 export default function OpsGatewayConfigsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["ops-gateway-configs"];
@@ -129,7 +144,11 @@ export default function OpsGatewayConfigsPage() {
         : adminPost(apiKey, "/admin/v1/gateway-configs", body);
     },
     onSuccess: () => {
-      toast.success(editingId ? "Config profile updated" : "Config profile created");
+      toast.success(
+        editingId
+          ? t("page.opsGatewayConfigs.toast.updated")
+          : t("page.opsGatewayConfigs.toast.created"),
+      );
       setDialogOpen(false);
       queryClient.invalidateQueries({ queryKey });
     },
@@ -142,7 +161,7 @@ export default function OpsGatewayConfigsPage() {
         params: { id },
       }),
     onSuccess: () => {
-      toast.success("Config profile deleted");
+      toast.success(t("page.opsGatewayConfigs.toast.deleted"));
       queryClient.invalidateQueries({ queryKey });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -167,18 +186,17 @@ export default function OpsGatewayConfigsPage() {
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold">Gateway config profiles</h1>
+          <h1 className="text-lg font-semibold">{t("page.opsGatewayConfigs.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            Reusable per-api-key config overlays. Changes apply through a
-            process-local reload.
+            {t("page.opsGatewayConfigs.description")}
           </p>
         </div>
-        <Button onClick={openCreate}>New profile</Button>
+        <Button onClick={openCreate}>{t("page.opsGatewayConfigs.new")}</Button>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load gateway configs: {(error as Error).message}
+          {t("page.opsGatewayConfigs.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
 
@@ -186,12 +204,12 @@ export default function OpsGatewayConfigsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Id</TableHead>
-              <TableHead>Name</TableHead>
-              <TableHead>Revision</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead>API keys</TableHead>
-              <TableHead>Cache</TableHead>
+              <TableHead>{t("page.opsGatewayConfigs.col.id")}</TableHead>
+              <TableHead>{t("page.opsGatewayConfigs.col.name")}</TableHead>
+              <TableHead>{t("page.opsGatewayConfigs.col.revision")}</TableHead>
+              <TableHead>{t("common.enabled")}</TableHead>
+              <TableHead>{t("page.opsGatewayConfigs.col.apiKeys")}</TableHead>
+              <TableHead>{t("page.opsGatewayConfigs.col.cache")}</TableHead>
               <TableHead className="w-40" />
             </TableRow>
           </TableHeader>
@@ -199,13 +217,13 @@ export default function OpsGatewayConfigsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={7} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : profiles.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="h-24 text-center">
-                  No config profiles.
+                  {t("page.opsGatewayConfigs.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -215,7 +233,11 @@ export default function OpsGatewayConfigsPage() {
                   <TableCell>{profile.name}</TableCell>
                   <TableCell className="tabular-nums">{profile.revision}</TableCell>
                   <TableCell>
-                    <BoolBadge value={profile.enabled} />
+                    <BoolBadge
+                      value={profile.enabled}
+                      trueLabel={t("common.yes")}
+                      falseLabel={t("common.no")}
+                    />
                   </TableCell>
                   <TableCell className="text-xs">
                     {profile.api_key_ids.length > 0
@@ -224,12 +246,7 @@ export default function OpsGatewayConfigsPage() {
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">
-                      {profile.cache_enabled === null ||
-                      profile.cache_enabled === undefined
-                        ? "inherit"
-                        : profile.cache_enabled
-                          ? "on"
-                          : "off"}
+                      {t(CACHE_LABEL_KEYS[cacheOverrideOf(profile.cache_enabled)])}
                     </Badge>
                   </TableCell>
                   <TableCell>
@@ -239,14 +256,14 @@ export default function OpsGatewayConfigsPage() {
                         size="sm"
                         onClick={() => openEdit(profile)}
                       >
-                        Edit
+                        {t("resource.action.edit")}
                       </Button>
                       <Button
                         variant="destructive"
                         size="sm"
                         onClick={() => setDeleteTarget(profile)}
                       >
-                        Delete
+                        {t("resource.action.delete")}
                       </Button>
                     </div>
                   </TableCell>
@@ -261,15 +278,17 @@ export default function OpsGatewayConfigsPage() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              {editingId ? "Edit config profile" : "New config profile"}
+              {editingId
+                ? t("page.opsGatewayConfigs.dialog.editTitle")
+                : t("page.opsGatewayConfigs.dialog.newTitle")}
             </DialogTitle>
             <DialogDescription>
-              Applied through a process-local reload on save.
+              {t("page.opsGatewayConfigs.dialog.description")}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label htmlFor="gc-id">Id</Label>
+              <Label htmlFor="gc-id">{t("page.opsGatewayConfigs.field.id")}</Label>
               <Input
                 id="gc-id"
                 value={form.id}
@@ -280,7 +299,7 @@ export default function OpsGatewayConfigsPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="gc-name">Name</Label>
+              <Label htmlFor="gc-name">{t("page.opsGatewayConfigs.field.name")}</Label>
               <Input
                 id="gc-name"
                 value={form.name}
@@ -290,7 +309,7 @@ export default function OpsGatewayConfigsPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="gc-revision">Revision</Label>
+              <Label htmlFor="gc-revision">{t("page.opsGatewayConfigs.field.revision")}</Label>
               <Input
                 id="gc-revision"
                 type="number"
@@ -305,18 +324,18 @@ export default function OpsGatewayConfigsPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="gc-keys">API key ids (comma-separated)</Label>
+              <Label htmlFor="gc-keys">{t("page.opsGatewayConfigs.field.apiKeys")}</Label>
               <Input
                 id="gc-keys"
                 value={form.apiKeyIds}
-                placeholder="key_dev, key_prod"
+                placeholder={t("page.opsGatewayConfigs.field.apiKeysPlaceholder")}
                 onChange={(event) =>
                   setForm((prev) => ({ ...prev, apiKeyIds: event.target.value }))
                 }
               />
             </div>
             <div className="flex items-center justify-between">
-              <Label htmlFor="gc-enabled">Enabled</Label>
+              <Label htmlFor="gc-enabled">{t("common.enabled")}</Label>
               <Switch
                 id="gc-enabled"
                 checked={form.enabled}
@@ -326,7 +345,7 @@ export default function OpsGatewayConfigsPage() {
               />
             </div>
             <div className="flex items-center justify-between">
-              <Label htmlFor="gc-cache">Cache override</Label>
+              <Label htmlFor="gc-cache">{t("page.opsGatewayConfigs.field.cacheOverride")}</Label>
               <div className="flex gap-1">
                 {(["inherit", "on", "off"] as CacheOverride[]).map((value) => (
                   <Button
@@ -336,7 +355,7 @@ export default function OpsGatewayConfigsPage() {
                     variant={form.cache === value ? "default" : "outline"}
                     onClick={() => setForm((prev) => ({ ...prev, cache: value }))}
                   >
-                    {value}
+                    {t(CACHE_LABEL_KEYS[value])}
                   </Button>
                 ))}
               </div>
@@ -344,13 +363,15 @@ export default function OpsGatewayConfigsPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
-              Cancel
+              {t("resource.action.cancel")}
             </Button>
             <Button
               disabled={saveMutation.isPending || idInvalid || nameInvalid}
               onClick={() => saveMutation.mutate(form)}
             >
-              {saveMutation.isPending ? "Saving…" : "Save"}
+              {saveMutation.isPending
+                ? t("resource.action.saving")
+                : t("page.opsGatewayConfigs.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -364,21 +385,23 @@ export default function OpsGatewayConfigsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete config profile?</AlertDialogTitle>
+            <AlertDialogTitle>{t("page.opsGatewayConfigs.delete.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes "{deleteTarget?.name}" ({deleteTarget?.id})
-              and applies the change through a process-local reload.
+              {t("page.opsGatewayConfigs.delete.description", {
+                name: deleteTarget?.name ?? "",
+                id: deleteTarget?.id ?? "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
                 setDeleteTarget(null);
               }}
             >
-              Delete
+              {t("resource.action.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

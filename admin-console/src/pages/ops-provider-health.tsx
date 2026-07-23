@@ -16,6 +16,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BoolBadge, formatUnix, HealthBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type ProviderHealthCheck = AdminSchema<"ProviderHealthCheck">;
@@ -33,6 +34,7 @@ function ErrorLine({ error }: { error: unknown }) {
 }
 
 function ProviderHealthTab({ apiKey }: { apiKey: string }) {
+  const { t } = useI18n();
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-provider-health"],
     queryFn: () => adminGet(apiKey, "/admin/v1/provider-health"),
@@ -46,25 +48,25 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Provider</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Reachable</TableHead>
-              <TableHead>Circuit</TableHead>
-              <TableHead>Failures</TableHead>
-              <TableHead>Checked</TableHead>
+              <TableHead>{t("page.opsProviderHealth.providers.col.provider")}</TableHead>
+              <TableHead>{t("common.status")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.providers.col.reachable")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.providers.col.circuit")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.providers.col.failures")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.providers.col.checked")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  No providers configured.
+                  {t("page.opsProviderHealth.providers.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -83,18 +85,22 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
                     <div className="flex items-center gap-2">
                       <HealthBadge health={row.status} />
                       {!row.enabled ? (
-                        <Badge variant="outline">disabled</Badge>
+                        <Badge variant="outline">{t("common.disabled")}</Badge>
                       ) : null}
                     </div>
                   </TableCell>
                   <TableCell>
-                    <BoolBadge value={row.reachable} />
+                    <BoolBadge
+                      value={row.reachable}
+                      trueLabel={t("common.yes")}
+                      falseLabel={t("common.no")}
+                    />
                   </TableCell>
                   <TableCell>
                     <BoolBadge
                       value={row.circuit_open}
-                      trueLabel="open"
-                      falseLabel="closed"
+                      trueLabel={t("page.opsProviderHealth.circuit.open")}
+                      falseLabel={t("page.opsProviderHealth.circuit.closed")}
                       good="false"
                     />
                   </TableCell>
@@ -115,6 +121,7 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
 }
 
 function ProviderModelsTab({ apiKey }: { apiKey: string }) {
+  const { t } = useI18n();
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-provider-models"],
     queryFn: () => adminGet(apiKey, "/admin/v1/provider-models"),
@@ -124,9 +131,9 @@ function ProviderModelsTab({ apiKey }: { apiKey: string }) {
     <div className="flex flex-col gap-3">
       <ErrorLine error={error} />
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
       ) : catalogs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No provider catalogs.</p>
+        <p className="text-sm text-muted-foreground">{t("page.opsProviderHealth.models.empty")}</p>
       ) : (
         catalogs.map((catalog: ProviderModelCatalog) => (
           <div key={catalog.provider} className="rounded-md border p-3">
@@ -135,7 +142,9 @@ function ProviderModelsTab({ apiKey }: { apiKey: string }) {
               <Badge variant="outline">{catalog.kind}</Badge>
               <HealthBadge health={catalog.status} />
               <span className="text-xs text-muted-foreground">
-                {catalog.models.length} models
+                {t("page.opsProviderHealth.models.count", {
+                  count: catalog.models.length,
+                })}
               </span>
             </div>
             {catalog.error ? (
@@ -150,7 +159,9 @@ function ProviderModelsTab({ apiKey }: { apiKey: string }) {
                 ))}
                 {catalog.models.length > 24 ? (
                   <span className="text-xs text-muted-foreground">
-                    +{catalog.models.length - 24} more
+                    {t("page.opsProviderHealth.models.more", {
+                      count: catalog.models.length - 24,
+                    })}
                   </span>
                 ) : null}
               </div>
@@ -163,6 +174,7 @@ function ProviderModelsTab({ apiKey }: { apiKey: string }) {
 }
 
 function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
+  const { t } = useI18n();
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-framework-adapters"],
     queryFn: () => adminGet(apiKey, "/admin/v1/framework-adapters"),
@@ -175,24 +187,24 @@ function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Adapter</TableHead>
-              <TableHead>Framework</TableHead>
-              <TableHead>Integration</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead>Modes</TableHead>
+              <TableHead>{t("page.opsProviderHealth.adapters.col.adapter")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.adapters.col.framework")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.adapters.col.integration")}</TableHead>
+              <TableHead>{t("common.enabled")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.adapters.col.modes")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  No framework adapters.
+                  {t("page.opsProviderHealth.adapters.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -209,7 +221,11 @@ function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
                     <HealthBadge health={row.integration_status} />
                   </TableCell>
                   <TableCell>
-                    <BoolBadge value={row.enabled} />
+                    <BoolBadge
+                      value={row.enabled}
+                      trueLabel={t("common.yes")}
+                      falseLabel={t("common.no")}
+                    />
                   </TableCell>
                   <TableCell className="text-xs">{row.modes.join(", ")}</TableCell>
                 </TableRow>
@@ -223,6 +239,7 @@ function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
 }
 
 function ExtensionsTab({ apiKey }: { apiKey: string }) {
+  const { t } = useI18n();
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-extensions"],
     queryFn: () => adminGet(apiKey, "/admin/v1/extensions"),
@@ -235,24 +252,24 @@ function ExtensionsTab({ apiKey }: { apiKey: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Extension</TableHead>
-              <TableHead>Kind</TableHead>
-              <TableHead>Lifecycle</TableHead>
-              <TableHead>Health</TableHead>
-              <TableHead>Active</TableHead>
+              <TableHead>{t("page.opsProviderHealth.extensions.col.extension")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.extensions.col.kind")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.extensions.col.lifecycle")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.extensions.col.health")}</TableHead>
+              <TableHead>{t("page.opsProviderHealth.extensions.col.active")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="h-24 text-center">
-                  No extensions.
+                  {t("page.opsProviderHealth.extensions.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -275,7 +292,11 @@ function ExtensionsTab({ apiKey }: { apiKey: string }) {
                     <HealthBadge health={row.health} />
                   </TableCell>
                   <TableCell>
-                    <BoolBadge value={row.active} />
+                    <BoolBadge
+                      value={row.active}
+                      trueLabel={t("common.yes")}
+                      falseLabel={t("common.no")}
+                    />
                   </TableCell>
                 </TableRow>
               ))
@@ -289,24 +310,24 @@ function ExtensionsTab({ apiKey }: { apiKey: string }) {
 
 export default function OpsProviderHealthPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Provider &amp; runtime health</h1>
+        <h1 className="text-lg font-semibold">{t("page.opsProviderHealth.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Upstream provider reachability, discovered model catalogs, framework
-          adapter runtimes and loaded extensions.
+          {t("page.opsProviderHealth.description")}
         </p>
       </div>
 
       <Tabs defaultValue="providers">
         <TabsList>
-          <TabsTrigger value="providers">Provider health</TabsTrigger>
-          <TabsTrigger value="models">Provider models</TabsTrigger>
-          <TabsTrigger value="adapters">Framework adapters</TabsTrigger>
-          <TabsTrigger value="extensions">Extensions</TabsTrigger>
+          <TabsTrigger value="providers">{t("page.opsProviderHealth.tab.providers")}</TabsTrigger>
+          <TabsTrigger value="models">{t("page.opsProviderHealth.tab.models")}</TabsTrigger>
+          <TabsTrigger value="adapters">{t("page.opsProviderHealth.tab.adapters")}</TabsTrigger>
+          <TabsTrigger value="extensions">{t("page.opsProviderHealth.tab.extensions")}</TabsTrigger>
         </TabsList>
         <TabsContent value="providers">
           <ProviderHealthTab apiKey={apiKey} />
