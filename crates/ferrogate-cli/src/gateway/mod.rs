@@ -232,6 +232,9 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _asset_lifecycle_sweeper = start_asset_lifecycle_sweeper(&state);
     // #354: TTL sweeper reclaiming overdue pre-submission x402 payment holds.
     let _x402_ttl_sweeper = start_x402_ttl_sweeper(&state);
+    // #354: on-chain settlement reconciler driving left-behind submitted/
+    // outcome_unknown attempts to a definite terminal from on-chain evidence.
+    let _x402_reconciler = start_x402_settlement_reconciler(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -618,6 +621,66 @@ fn start_x402_ttl_sweeper(state: &SharedAppState) -> X402TtlSweeperHandle {
         }
     });
     X402TtlSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that drives the left-behind `submitted`/`outcome_unknown`
+/// x402 attempts (the ones the TTL sweeper deliberately never touches) to a
+/// definite terminal from on-chain evidence, or keeps them `outcome_unknown`
+/// with bounded backoff (issue #354).
+struct X402ReconcilerHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for X402ReconcilerHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the x402 settlement-reconcile tick loop, unconditionally, like
+/// the billing outbox / scheduler / asset-lifecycle / TTL sweepers:
+/// `reconcile_x402_settlements_tick` re-reads `state.current()` and no-ops when
+/// `x402_reconciler.enabled = false` (or when no on-chain RPC client is bound
+/// yet), so enabling it later via the admin hot config-reload path starts
+/// reconciling on the next tick with no restart. The tick interval is re-read
+/// each iteration so a reload of `x402_reconciler.tick_interval_secs` also takes
+/// effect live. Every edge it drives is idempotent under the CAS generation
+/// token and only ever captures on a confirmed exact amount / releases on a
+/// definite failure, so this loop is money-safe to run on every gateway instance
+/// concurrently. Wall-clock time is supplied here (the tick takes an injected
+/// `now_unix` so tests can drive the trust order deterministically without
+/// timing sleeps).
+fn start_x402_settlement_reconciler(state: &SharedAppState) -> X402ReconcilerHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let current = state.current();
+            let tick_secs = current
+                .config
+                .x402_reconciler
+                .tick_interval_secs
+                .clamp(1, 3_600);
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or_default();
+            block_on_sync_bridge(state.current().reconcile_x402_settlements_tick(now_unix));
+        }
+    });
+    X402ReconcilerHandle {
         stop,
         handle: Some(handle),
     }

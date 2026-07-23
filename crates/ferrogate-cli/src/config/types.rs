@@ -98,6 +98,11 @@ pub(crate) struct Config {
     /// pre-submission x402 payment attempt.
     #[serde(default)]
     pub(crate) x402_sweeper: X402SweeperConfig,
+    /// #354: background on-chain settlement reconciler that drives left-behind
+    /// `submitted`/`outcome_unknown` attempts to a definite terminal from
+    /// on-chain evidence (or keeps them `outcome_unknown` with bounded backoff).
+    #[serde(default)]
+    pub(crate) x402_reconciler: X402ReconcilerConfig,
     /// #262: asset-egress (download bandwidth) rate in USD per GB used to
     /// settle per-download metering events. `None` (the default) leaves
     /// egress metered + audited but unpriced (cost_usd = None, no wallet
@@ -317,6 +322,90 @@ impl Default for X402SweeperConfig {
             tick_interval_secs: default_x402_sweeper_tick_interval_secs(),
             max_expiries_per_tick: default_x402_sweeper_max_expiries_per_tick(),
             hold_ttl_grace_secs: 0,
+        }
+    }
+}
+
+/// Background on-chain settlement reconciler for x402 payment attempts (issue
+/// #354). The TTL sweeper deliberately leaves `submitted`/`outcome_unknown`
+/// attempts alone -- after proof submission an attempt's stablecoin may already
+/// have moved on-chain, so releasing its hold could spend without charging the
+/// wallet. This reconciler is the loop that resolves exactly those left-behind
+/// attempts: on each tick it fetches a bounded batch of post-submission attempts
+/// due for a re-check, queries an injected on-chain-RPC seam for each attempt's
+/// transaction signature, and applies an EXPLICIT trust order:
+///
+/// - a confirmed on-chain transfer of the EXACT owed amount -> SETTLE (capture
+///   the hold, attempt -> settled);
+/// - a transfer the chain definitively rejected, or one still absent PAST
+///   `confirmation_deadline_secs` since submission -> FAIL (release the hold,
+///   attempt -> failed);
+/// - anything still pending/ambiguous, or an amount MISMATCH -> remain
+///   `outcome_unknown` (hold RETAINED), advancing the backoff cursor. NEVER a
+///   guess.
+///
+/// On-chain RPC evidence is authoritative over any merchant-reported header.
+/// `enabled = false` (the default) is a complete no-op -- the tick loop is
+/// always spawned (like the sweeper) and re-reads `state.current()`, so enabling
+/// it via `/admin/v1/config/reload` needs no restart. Reuses the settlement
+/// loop's existing SETTLE/FAIL/UNKNOWN edges (idempotent under the CAS
+/// `generation` token), so it is money-safe to run on every gateway instance
+/// concurrently.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct X402ReconcilerConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Seconds between reconcile scans. Default 30s -- settlement latency is
+    /// second-to-minute scale; reconciliation is housekeeping, not a hot path.
+    #[serde(default = "default_x402_reconciler_tick_interval_secs")]
+    pub(crate) tick_interval_secs: u64,
+    /// Upper bound on attempts reconciled per tick, so one pass can never issue
+    /// an unbounded number of on-chain RPC queries / edge drives. Default 100.
+    #[serde(default = "default_x402_reconciler_max_reconciles_per_tick")]
+    pub(crate) max_reconciles_per_tick: usize,
+    /// Minimum age (seconds) since an attempt's last state update before it is
+    /// eligible for an on-chain re-check: an attempt is reconciled only once
+    /// `updated_at_unix + reconcile_check_delay_secs <= now`. This both gives a
+    /// freshly-submitted proof time to propagate before the first check AND is
+    /// the bounded-backoff interval -- re-parking a still-pending attempt bumps
+    /// `updated_at_unix`, deferring its next check by this delay. Default 60s.
+    #[serde(default = "default_x402_reconciler_check_delay_secs")]
+    pub(crate) reconcile_check_delay_secs: i64,
+    /// Confirmation deadline (seconds since `submitted_at_unix`) after which a
+    /// transfer the chain reports ABSENT (never landed) is treated as a definite
+    /// FAIL and its hold released. Before the deadline, an absent signature stays
+    /// `outcome_unknown` (it may still be propagating). A transfer the chain
+    /// reports as definitively rejected fails immediately regardless of this
+    /// deadline; a pending (seen but unconfirmed) transfer NEVER fails on this
+    /// deadline (its money may still confirm). Default 900s (15 min).
+    #[serde(default = "default_x402_reconciler_confirmation_deadline_secs")]
+    pub(crate) confirmation_deadline_secs: i64,
+}
+
+fn default_x402_reconciler_tick_interval_secs() -> u64 {
+    30
+}
+
+fn default_x402_reconciler_max_reconciles_per_tick() -> usize {
+    100
+}
+
+fn default_x402_reconciler_check_delay_secs() -> i64 {
+    60
+}
+
+fn default_x402_reconciler_confirmation_deadline_secs() -> i64 {
+    900
+}
+
+impl Default for X402ReconcilerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval_secs: default_x402_reconciler_tick_interval_secs(),
+            max_reconciles_per_tick: default_x402_reconciler_max_reconciles_per_tick(),
+            reconcile_check_delay_secs: default_x402_reconciler_check_delay_secs(),
+            confirmation_deadline_secs: default_x402_reconciler_confirmation_deadline_secs(),
         }
     }
 }
@@ -2517,6 +2606,7 @@ impl Default for Config {
             scheduler: SchedulerConfig::default(),
             asset_lifecycle: AssetLifecycleConfig::default(),
             x402_sweeper: X402SweeperConfig::default(),
+            x402_reconciler: X402ReconcilerConfig::default(),
             asset_egress_price_per_gb: None,
         }
     }

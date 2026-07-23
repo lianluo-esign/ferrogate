@@ -240,6 +240,7 @@ impl Config {
             scheduler: crate::config::SchedulerConfig::default(),
             asset_lifecycle: crate::config::AssetLifecycleConfig::default(),
             x402_sweeper: crate::config::X402SweeperConfig::default(),
+            x402_reconciler: crate::config::X402ReconcilerConfig::default(),
             asset_egress_price_per_gb: None,
         }
     }

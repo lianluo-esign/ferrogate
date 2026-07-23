@@ -6713,6 +6713,15 @@ mod state_x402_negotiation;
 #[path = "state_x402_sweeper.rs"]
 mod state_x402_sweeper;
 
+// #354: background on-chain settlement reconciler that drives the left-behind
+// `submitted`/`outcome_unknown` attempts (which the TTL sweeper deliberately
+// never touches) to a definite terminal (settled/failed) from on-chain
+// evidence, or keeps them `outcome_unknown` with bounded backoff. Reuses the
+// settlement loop's SETTLE/FAIL/UNKNOWN edges under an injected on-chain-RPC
+// seam; never guesses.
+#[path = "state_x402_reconciler.rs"]
+mod state_x402_reconciler;
+
 #[path = "state_quota_and_policy.rs"]
 mod state_quota_and_policy;
 

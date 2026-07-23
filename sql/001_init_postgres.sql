@@ -2460,3 +2460,31 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 54 (#354): partial index backing the on-chain settlement
+-- reconciler's due-query. The reconciler drives post-submission attempts still
+-- in a non-terminal 'submitted'/'outcome_unknown' state toward a definite
+-- terminal (settled/failed) from on-chain evidence, or re-parks them
+-- outcome_unknown with bounded backoff. Its bounded batch read is
+--   WHERE state IN ('submitted','outcome_unknown') AND updated_at_unix <= $2
+--   ORDER BY updated_at_unix ASC LIMIT $3
+-- so a PARTIAL index over exactly those two in-flight states, keyed by the
+-- updated_at_unix re-check cursor, serves both the predicate and the ordering
+-- without a full-table scan or a separate sort. The partial WHERE keeps the
+-- index tiny -- terminal attempts (the overwhelming majority over time) are
+-- never indexed. Kept SEPARATE from idx_payment_attempts_tenant_time (admin
+-- listing) and idx_payment_attempts_hold (hold linkage); this one exists solely
+-- for the reconciler. A new migration (not folded into 52) so deployments that
+-- already applied 52 pick the index up.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (54, '054_x402_reconcile_index')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE INDEX IF NOT EXISTS idx_payment_attempts_reconcile
+            ON payment_attempts(updated_at_unix)
+            WHERE state IN ('submitted', 'outcome_unknown');
+    END IF;
+END
+$$;

@@ -104,6 +104,21 @@ pub fn payment_attempt_state_is_terminal(state: &str) -> bool {
 pub const PAYMENT_ATTEMPT_EXPIRABLE_STATES: &[&str] =
     &[PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED];
 
+/// The non-terminal post-submission states the on-chain settlement reconciler
+/// (#354) drives toward a definite terminal. A `submitted` attempt's proof went
+/// on-chain but was never finalized; an `outcome_unknown` attempt was parked
+/// under post-submission ambiguity with its hold RETAINED. Both need on-chain
+/// evidence to resolve: a confirmed exact-amount transfer settles them (capture),
+/// a definitively-failed/absent-past-deadline transfer fails them (release), and
+/// anything still pending leaves them `outcome_unknown` with the hold retained.
+/// Deliberately DISJOINT from [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`]: the TTL
+/// sweeper only ever releases pre-submission holds, the reconciler only ever
+/// touches post-submission ones, so the two background loops can never both act
+/// on the same attempt. Keep in lockstep with the `settle`/`fail`/
+/// `mark_outcome_unknown` allowed-from sets the loop drives for these edges.
+pub const PAYMENT_ATTEMPT_RECONCILABLE_STATES: &[&str] =
+    &[PAYMENT_ATTEMPT_SUBMITTED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN];
+
 // ---------------------------------------------------------------------------
 // Record
 // ---------------------------------------------------------------------------
@@ -751,6 +766,51 @@ impl PostgresControlPlaneStore {
         transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.iter().map(payment_attempt_from_row).collect())
     }
+
+    /// Reconcile read (#354): a bounded, indexed batch of post-submission
+    /// attempts still in a non-terminal [`PAYMENT_ATTEMPT_RECONCILABLE_STATES`]
+    /// state (`submitted`/`outcome_unknown`) that have not been re-checked since
+    /// `checked_at_or_before_unix` (their `updated_at_unix` cursor). Never scans
+    /// the whole table: the `state IN (...)` predicate is served by the partial
+    /// `idx_payment_attempts_reconcile(updated_at_unix)` index over exactly those
+    /// two in-flight states, and `LIMIT` caps the batch. Ordered
+    /// oldest-checked-first so a due backlog drains deterministically and the
+    /// most-overdue attempts reconcile first. No wallet JOIN: the reconciler
+    /// resolves settlement from the attempt's own `transaction_signature` via an
+    /// injected on-chain RPC seam, not from the hold row.
+    pub(super) async fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        let operation = self.payment_attempt_operation("list reconcilable payment attempts");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let reconcilable: Vec<&str> = PAYMENT_ATTEMPT_RECONCILABLE_STATES.to_vec();
+        let rows = transaction
+            .query(
+                &format!(
+                    "SELECT {PAYMENT_ATTEMPT_COLUMNS} FROM payment_attempts \
+                     WHERE state = ANY($1) AND updated_at_unix <= $2 \
+                     ORDER BY updated_at_unix ASC, id ASC \
+                     LIMIT $3"
+                ),
+                &[&reconcilable, &checked_at_or_before_unix, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(payment_attempt_from_row).collect())
+    }
 }
 
 impl RuntimeControlPlaneState {
@@ -867,6 +927,32 @@ impl RuntimeControlPlaneState {
             .map(|(_, attempt)| attempt)
             .collect()
     }
+
+    /// Memory twin of the Postgres reconcile read (#354). Same predicate
+    /// (post-submission reconcilable state whose `updated_at_unix` cursor is at
+    /// or before the reconcile-check horizon), same oldest-checked-first order
+    /// and `limit` cap, so a bounded batch drains identically across backends.
+    pub fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Vec<StoredPaymentAttempt> {
+        let mut due: Vec<StoredPaymentAttempt> = self
+            .payment_attempts
+            .list()
+            .into_iter()
+            .filter(|attempt| {
+                PAYMENT_ATTEMPT_RECONCILABLE_STATES.contains(&attempt.state.as_str())
+                    && attempt.updated_at_unix <= checked_at_or_before_unix
+            })
+            .collect();
+        due.sort_by(|a, b| {
+            a.updated_at_unix
+                .cmp(&b.updated_at_unix)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        due.into_iter().take(limit).collect()
+    }
 }
 
 /// The typed transition edges of the truth table. Each maps to exactly one CAS
@@ -943,9 +1029,20 @@ payment_attempt_transitions! {
             ..Default::default()
         } };
 
-    /// `submitted -> outcome_unknown`: post-submission ambiguity; retain the hold.
+    /// `submitted | outcome_unknown -> outcome_unknown`: post-submission
+    /// ambiguity; retain the hold. The `outcome_unknown` self-edge is
+    /// deliberate and load-bearing for the #354 reconciler: re-parking an
+    /// already-`outcome_unknown` attempt is an *applied* transition (it bumps
+    /// `generation` and `updated_at_unix`), not a no-op. `updated_at_unix` is
+    /// the reconciler's bounded-backoff cursor -- its due-query only re-picks an
+    /// attempt whose `updated_at_unix` is older than the reconcile-check delay,
+    /// so advancing it on every "still pending" pass spaces the next on-chain
+    /// re-check by that delay instead of hammering the RPC every tick. Still
+    /// non-terminal, still hold-retained; only durable Settled/Failed evidence
+    /// ever leaves this state.
     mark_payment_attempt_outcome_unknown, "mark payment attempt outcome unknown",
-        [PAYMENT_ATTEMPT_SUBMITTED], PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+        [PAYMENT_ATTEMPT_SUBMITTED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN],
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
         a => { TransitionEvidence {
             settlement_response: a.settlement_response,
             ..Default::default()
@@ -1062,6 +1159,32 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane
                     .list_expirable_due_payment_attempts(due_at_or_before_unix, limit as i64)
+                    .await
+            }
+        }
+    }
+
+    /// Bounded reconcile read (#354): up to `limit` post-submission attempts in
+    /// a non-terminal `submitted`/`outcome_unknown` state whose `updated_at_unix`
+    /// re-check cursor is at or before `checked_at_or_before_unix`, oldest-first.
+    /// The runtime reconciler queries an injected on-chain RPC seam for each
+    /// attempt's `transaction_signature` and re-drives the settlement loop's
+    /// SETTLE/FAIL edge (or re-parks `outcome_unknown`, advancing the cursor for
+    /// bounded backoff) under the CAS `generation` token -- never a false
+    /// terminal.
+    pub async fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+                .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit as i64)
                     .await
             }
         }
