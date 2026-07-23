@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/table";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useI18n } from "@/i18n";
-import type { ColumnConfig } from "@/lib/resource-config";
+import { resolveConfigText, type ColumnConfig } from "@/lib/resource-config";
 
 interface ResourceTableProps<T extends Record<string, unknown>> {
   columns: ColumnConfig<T>[];
@@ -39,9 +39,14 @@ function rawColumnValue<T>(column: ColumnConfig<T>, row: T): string {
   return String(value ?? "-");
 }
 
-function columnValue<T>(column: ColumnConfig<T>, row: T, compact: boolean): ReactNode {
+function columnValue<T>(
+  column: ColumnConfig<T>,
+  row: T,
+  compact: boolean,
+  header: string,
+): ReactNode {
   if (column.copyable) {
-    return <TruncatedCopyable value={rawColumnValue(column, row)} label={column.header} />;
+    return <TruncatedCopyable value={rawColumnValue(column, row)} label={header} />;
   }
   const renderer = compact ? column.compactRender ?? column.render : column.render;
   return renderer ? renderer(row) : rawColumnValue(column, row);
@@ -106,6 +111,10 @@ export function ResourceTable<T extends Record<string, unknown>>({
   const isDesktop = useMediaQuery("(min-width: 1024px)");
   const hasActions = !readOnly && Boolean(onEdit || onDelete || renderActions);
   const labelFor = (row: T) => rowLabel?.(row) ?? rawColumnValue(columns[0], row);
+  // Column headers prefer the typed catalog key (migrated resources) and fall
+  // back to the legacy inline literal for resources not yet migrated (#348).
+  const headerFor = (column: ColumnConfig<T>) =>
+    resolveConfigText(t, column.headerKey, column.header);
   const resolvedEmptyLabel = emptyLabel ?? t("resource.table.empty");
 
   if (!isDesktop) {
@@ -143,8 +152,8 @@ export function ResourceTable<T extends Record<string, unknown>>({
               <dl className="divide-y">
                 {summaryColumns.map((column) => (
                   <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
-                    <dt className="text-xs font-medium text-muted-foreground">{column.header}</dt>
-                    <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true)}</dd>
+                    <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
+                    <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column))}</dd>
                   </div>
                 ))}
               </dl>
@@ -156,8 +165,8 @@ export function ResourceTable<T extends Record<string, unknown>>({
                   <dl className="divide-y border-t">
                     {detailColumns.map((column) => (
                       <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
-                        <dt className="text-xs font-medium text-muted-foreground">{column.header}</dt>
-                        <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true)}</dd>
+                        <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
+                        <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column))}</dd>
                       </div>
                     ))}
                   </dl>
@@ -189,7 +198,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
           <TableRow>
             {columns.map((column) => (
               <TableHead key={column.key} style={{ minWidth: column.minWidth, width: column.minWidth }}>
-                {column.header}
+                {headerFor(column)}
               </TableHead>
             ))}
             {hasActions ? <TableHead className="w-14"><span className="sr-only">{t("resource.table.actionsColumn")}</span></TableHead> : null}
@@ -213,7 +222,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
                 <TableRow key={`${label}-${rowIndex}`}>
                   {columns.map((column) => (
                     <TableCell key={column.key} className="min-w-0 overflow-hidden">
-                      {columnValue(column, row, false)}
+                      {columnValue(column, row, false, headerFor(column))}
                     </TableCell>
                   ))}
                   {hasActions ? (

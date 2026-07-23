@@ -14,34 +14,43 @@ export interface AdminQuotaPolicy extends Record<string, unknown> {
   updated_at_unix: number;
 }
 
+// Per-resource operator copy is migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
+// `descriptionKey`, and select-option `labelKey` resolve under the active
+// locale in the shared resource-CRUD framework. Resource IDs, field `name`s,
+// option `value`s, and the boolean Yes/No cell render stay data-driven.
 export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
   key: "quota-policies",
-  title: "Quota policies",
-  description: "Rate and budget limits applied to a tenant, project, workspace, or key.",
+  titleKey: "resource.quotaPolicies.title",
+  descriptionKey: "resource.quotaPolicies.description",
   basePath: "/admin/v1/quota-policies",
   idField: "id",
   resolveDetailPath: (row) => `${row.scope_type}/${row.scope_id}`,
   columns: [
-    { key: "scope_type", header: "Scope" },
-    { key: "scope_id", header: "Scope ID" },
-    { key: "rpm_limit", header: "RPM limit" },
-    { key: "tpm_limit", header: "TPM limit" },
-    { key: "monthly_budget_usd", header: "Monthly budget (USD)" },
-    { key: "asset_storage_quota_bytes", header: "Tenant asset quota (bytes)" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "scope_type", headerKey: "resource.quotaPolicies.col.scope" },
+    { key: "scope_id", headerKey: "resource.quotaPolicies.col.scopeId" },
+    { key: "rpm_limit", headerKey: "resource.quotaPolicies.col.rpmLimit" },
+    { key: "tpm_limit", headerKey: "resource.quotaPolicies.col.tpmLimit" },
+    { key: "monthly_budget_usd", headerKey: "resource.quotaPolicies.col.monthlyBudget" },
+    { key: "asset_storage_quota_bytes", headerKey: "resource.quotaPolicies.col.assetQuota" },
+    {
+      key: "enabled",
+      headerKey: "resource.quotaPolicies.col.enabled",
+      render: (row) => (row.enabled ? "Yes" : "No"),
+    },
   ],
   fields: [
     {
       name: "scope_type",
-      label: "Scope type",
+      labelKey: "resource.quotaPolicies.field.scopeType",
       type: "select",
       required: true,
       createOnly: true,
       options: [
-        { label: "Tenant", value: "tenant" },
-        { label: "Project", value: "project" },
-        { label: "Workspace", value: "workspace" },
-        { label: "Key", value: "key" },
+        { labelKey: "resource.quotaPolicies.option.scopeType.tenant", value: "tenant" },
+        { labelKey: "resource.quotaPolicies.option.scopeType.project", value: "project" },
+        { labelKey: "resource.quotaPolicies.option.scopeType.workspace", value: "workspace" },
+        { labelKey: "resource.quotaPolicies.option.scopeType.key", value: "key" },
       ],
     },
     // scope_id targets a different entity kind per scope_type (tenant / project
@@ -49,12 +58,18 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     // `target`, so a scope-kind-driven picker needs a config extension (target
     // selected by a sibling field) rather than a fork — tracked as remaining
     // #341 work; left as free-text for now (#341).
-    { name: "scope_id", label: "Scope ID", type: "text", required: true, createOnly: true },
+    {
+      name: "scope_id",
+      labelKey: "resource.quotaPolicies.field.scopeId",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     {
       name: "model_allowlist",
-      label: "Model allowlist",
+      labelKey: "resource.quotaPolicies.field.modelAllowlist",
       type: "entities",
-      description: "Models this scope may call; leave empty to allow all models.",
+      descriptionKey: "resource.quotaPolicies.field.modelAllowlist.desc",
       reference: {
         target: "models",
         valueKey: "name",
@@ -62,15 +77,19 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
         secondaryLabelKeys: ["provider", "provider_model"],
       },
     },
-    { name: "rpm_limit", label: "Requests per minute", type: "number" },
-    { name: "tpm_limit", label: "Tokens per minute", type: "number" },
-    { name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number" },
+    { name: "rpm_limit", labelKey: "resource.quotaPolicies.field.rpmLimit", type: "number" },
+    { name: "tpm_limit", labelKey: "resource.quotaPolicies.field.tpmLimit", type: "number" },
+    {
+      name: "monthly_budget_usd",
+      labelKey: "resource.quotaPolicies.field.monthlyBudget",
+      type: "number",
+    },
     {
       name: "asset_storage_quota_bytes",
-      label: "Tenant-only asset storage quota (bytes)",
+      labelKey: "resource.quotaPolicies.field.assetQuota",
       type: "number",
-      description: "Valid only when scope type is tenant.",
+      descriptionKey: "resource.quotaPolicies.field.assetQuota.desc",
     },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "enabled", labelKey: "resource.quotaPolicies.field.enabled", type: "boolean" },
   ],
 };

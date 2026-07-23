@@ -1,4 +1,41 @@
 import type { ReactNode } from "react";
+import type { InterpolationValues, TranslationKey } from "@/i18n";
+
+/**
+ * Translator shape (the subset of `useI18n().t` the framework needs) used to
+ * resolve the optional `*Key` catalog indirections below. Kept as a local type
+ * so this pure-data module never imports the React i18n runtime (#348).
+ */
+export type ResourceTranslator = (
+  key: TranslationKey,
+  values?: InterpolationValues,
+) => string;
+
+/**
+ * Resolve operator-facing config copy, preferring a typed catalog `key` (a
+ * resource whose per-resource copy has migrated to the i18n catalog, #348) and
+ * falling back to a legacy inline `literal` for resources not yet migrated.
+ * Mirrors how `nav-config.ts` gained `titleKey` in slice 2: the config carries
+ * the key, the component resolves it at render time under the active locale.
+ */
+export function resolveConfigText(
+  t: ResourceTranslator,
+  key: TranslationKey | undefined,
+  literal: string | undefined,
+): string {
+  if (key) return t(key);
+  return literal ?? "";
+}
+
+/** Optional-copy variant: preserves `undefined` so callers can branch on it. */
+export function resolveOptionalConfigText(
+  t: ResourceTranslator,
+  key: TranslationKey | undefined,
+  literal: string | undefined,
+): string | undefined {
+  if (key) return t(key);
+  return literal;
+}
 
 export type ScalarFieldType =
   | "text"
@@ -19,7 +56,10 @@ export type EntityReferenceTarget =
   | "plans";
 
 export interface FieldOption {
-  label: string;
+  /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
+  label?: string;
+  /** Typed catalog key resolved under the active locale (#348). */
+  labelKey?: TranslationKey;
   value: string;
 }
 
@@ -55,10 +95,17 @@ export interface EntityReferenceConfig {
 
 interface FieldConfigBase {
   name: string;
-  label: string;
+  /** Legacy inline label; migrated resources use `labelKey` instead (#348). */
+  label?: string;
+  /** Typed catalog key for the field label, resolved per locale (#348). */
+  labelKey?: TranslationKey;
   required?: boolean;
   placeholder?: string;
+  /** Typed catalog key for the placeholder, resolved per locale (#348). */
+  placeholderKey?: TranslationKey;
   description?: string;
+  /** Typed catalog key for the helper description, resolved per locale (#348). */
+  descriptionKey?: TranslationKey;
   autoComplete?: string;
   inputMode?: "none" | "text" | "decimal" | "numeric" | "tel" | "search" | "email" | "url";
   spellCheck?: boolean;
@@ -82,7 +129,10 @@ export type FieldConfig = ScalarFieldConfig | EntityReferenceFieldConfig;
 
 export interface ColumnConfig<T> {
   key: string;
-  header: string;
+  /** Legacy inline header; migrated resources use `headerKey` instead (#348). */
+  header?: string;
+  /** Typed catalog key for the column header, resolved per locale (#348). */
+  headerKey?: TranslationKey;
   render?: (row: T) => ReactNode;
   /** Information hierarchy used by the compact record view. */
   priority?: "primary" | "secondary" | "detail";
@@ -110,8 +160,13 @@ export interface ResourceListResult<T> {
 
 export interface ResourceConfig<T extends Record<string, unknown>> {
   key: string;
-  title: string;
+  /** Legacy inline title; migrated resources use `titleKey` instead (#348). */
+  title?: string;
+  /** Typed catalog key for the resource title, resolved per locale (#348). */
+  titleKey?: TranslationKey;
   description?: string;
+  /** Typed catalog key for the resource description, resolved per locale (#348). */
+  descriptionKey?: TranslationKey;
   /** Path relative to the gateway admin base URL, e.g. "/admin/v1/tenants". */
   basePath: string;
   idField: keyof T & string;

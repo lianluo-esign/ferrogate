@@ -13,49 +13,56 @@ export interface AdminPlugin extends Record<string, unknown> {
   last_error: string | null;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348).
+// Resource ID, field `name`s, and option `value`s stay data-driven; the
+// boolean Yes/No cell render is a cross-cutting concern left for a later slice.
 export const pluginsConfig: ResourceConfig<AdminPlugin> = {
   key: "plugins",
-  title: "Plugins",
-  description: "Request hooks, tool providers, and event sinks loaded into the gateway.",
+  titleKey: "resource.plugins.title",
+  descriptionKey: "resource.plugins.description",
   basePath: "/admin/v1/plugins",
   idField: "id",
   columns: [
-    { key: "id", header: "ID" },
-    { key: "kind", header: "Kind" },
-    { key: "version", header: "Version" },
-    { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "health", header: "Health" },
-    { key: "last_error", header: "Last error" },
+    { key: "id", headerKey: "resource.plugins.col.id" },
+    { key: "kind", headerKey: "resource.plugins.col.kind" },
+    { key: "version", headerKey: "resource.plugins.col.version" },
+    {
+      key: "enabled",
+      headerKey: "resource.plugins.col.enabled",
+      render: (row) => (row.enabled ? "Yes" : "No"),
+    },
+    { key: "health", headerKey: "resource.plugins.col.health" },
+    { key: "last_error", headerKey: "resource.plugins.col.lastError" },
   ],
   fields: [
-    { name: "id", label: "ID", type: "text", required: true, createOnly: true },
+    { name: "id", labelKey: "resource.plugins.field.id", type: "text", required: true, createOnly: true },
     {
       name: "kind",
-      label: "Kind",
+      labelKey: "resource.plugins.field.kind",
       type: "select",
       required: true,
       options: [
-        { label: "Request hook", value: "request_hook" },
-        { label: "Tool provider", value: "tool_provider" },
-        { label: "Event sink", value: "event_sink" },
+        { labelKey: "resource.plugins.option.kind.requestHook", value: "request_hook" },
+        { labelKey: "resource.plugins.option.kind.toolProvider", value: "tool_provider" },
+        { labelKey: "resource.plugins.option.kind.eventSink", value: "event_sink" },
       ],
     },
-    { name: "version", label: "Version", type: "text" },
-    { name: "source", label: "Source", type: "text" },
-    { name: "order", label: "Order", type: "number" },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "version", labelKey: "resource.plugins.field.version", type: "text" },
+    { name: "source", labelKey: "resource.plugins.field.source", type: "text" },
+    { name: "order", labelKey: "resource.plugins.field.order", type: "number" },
+    { name: "enabled", labelKey: "resource.plugins.field.enabled", type: "boolean" },
     {
       name: "approval_policy",
-      label: "Approval policy",
+      labelKey: "resource.plugins.field.approvalPolicy",
       type: "select",
       options: [
-        { label: "Never", value: "never" },
-        { label: "Always", value: "always" },
+        { labelKey: "resource.plugins.option.approvalPolicy.never", value: "never" },
+        { labelKey: "resource.plugins.option.approvalPolicy.always", value: "always" },
       ],
     },
-    { name: "manifest", label: "Manifest (JSON)", type: "json" },
-    { name: "compatibility", label: "Compatibility (JSON)", type: "json" },
-    { name: "permissions", label: "Permissions (JSON)", type: "json" },
-    { name: "config", label: "Config (JSON)", type: "json" },
+    { name: "manifest", labelKey: "resource.plugins.field.manifest", type: "json" },
+    { name: "compatibility", labelKey: "resource.plugins.field.compatibility", type: "json" },
+    { name: "permissions", labelKey: "resource.plugins.field.permissions", type: "json" },
+    { name: "config", labelKey: "resource.plugins.field.config", type: "json" },
   ],
 };

@@ -32,7 +32,12 @@ import {
   gatewayPut,
   type AdminPage,
 } from "@/lib/gateway-client";
-import { defaultFieldValues, type ResourceConfig } from "@/lib/resource-config";
+import {
+  defaultFieldValues,
+  resolveConfigText,
+  resolveOptionalConfigText,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 export function ResourcePage<T extends Record<string, unknown>>({
   config,
@@ -42,6 +47,14 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const { t } = useI18n();
+  // Per-resource copy resolves the typed catalog key when present (migrated
+  // resources) and falls back to the legacy inline literal otherwise (#348).
+  const title = resolveConfigText(t, config.titleKey, config.title);
+  const description = resolveOptionalConfigText(
+    t,
+    config.descriptionKey,
+    config.description,
+  );
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const paginationMode = config.pagination ?? (config.fetchList ? "none" : "offset");
@@ -80,7 +93,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       gatewayPost<Record<string, unknown>>(apiKey, config.basePath, values),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(t("resource.toast.created", { name: config.title }));
+      toast.success(t("resource.toast.created", { name: title }));
       setFormOpen(false);
       if (config.secretResponseKey) {
         const secret = response[config.secretResponseKey];
@@ -94,7 +107,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       gatewayPut(apiKey, `${config.basePath}/${id}`, values),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(t("resource.toast.updated", { name: config.title }));
+      toast.success(t("resource.toast.updated", { name: title }));
       setEditingRow(null);
     },
   });
@@ -103,7 +116,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
     mutationFn: (id: string) => gatewayDelete(apiKey, `${config.basePath}/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(t("resource.toast.deleted", { name: config.title }));
+      toast.success(t("resource.toast.deleted", { name: title }));
       setDeletingRow(null);
     },
     onError: (error: Error) => {
@@ -123,9 +136,9 @@ export function ResourcePage<T extends Record<string, unknown>>({
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold">{config.title}</h1>
-          {config.description && (
-            <p className="text-sm text-muted-foreground">{config.description}</p>
+          <h1 className="text-lg font-semibold">{title}</h1>
+          {description && (
+            <p className="text-sm text-muted-foreground">{description}</p>
           )}
         </div>
         {!config.readOnly && (
@@ -146,7 +159,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       {listError && (
         <AsyncStatus tone="error">
           {t("resource.list.loadError", {
-            name: config.title.toLowerCase(),
+            name: title.toLowerCase(),
             message: listError.message,
           })}
         </AsyncStatus>
@@ -176,7 +189,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
         } : undefined}
       />
 
-      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={t("resource.pagination.label", { name: config.title })}>
+      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={t("resource.pagination.label", { name: title })}>
         <span aria-live="polite">
           {total !== undefined
             ? t("resource.pagination.rangeOf", {
@@ -232,8 +245,8 @@ export function ResourcePage<T extends Record<string, unknown>>({
           <SheetHeader>
             <SheetTitle>
               {editingRow
-                ? t("resource.dialog.editTitle", { name: config.title })
-                : t("resource.dialog.createTitle", { name: config.title })}
+                ? t("resource.dialog.editTitle", { name: title })
+                : t("resource.dialog.createTitle", { name: title })}
             </SheetTitle>
           </SheetHeader>
           <div className="px-4 pb-4">
@@ -281,7 +294,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t("resource.dialog.deleteTitle", {
-                name: config.title.toLowerCase(),
+                name: title.toLowerCase(),
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>

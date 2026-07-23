@@ -15,6 +15,8 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   clearDependentReferenceValues,
+  resolveConfigText,
+  resolveOptionalConfigText,
   type FieldConfig,
 } from "@/lib/resource-config";
 import { useI18n } from "@/i18n";
@@ -93,13 +95,21 @@ export function ResourceForm({
           field.required &&
           (raw === "" || raw === undefined || (Array.isArray(raw) && raw.length === 0))
         ) {
-          throw new Error(t("resource.validation.required", { field: field.label }));
+          throw new Error(
+            t("resource.validation.required", {
+              field: resolveConfigText(t, field.labelKey, field.label),
+            }),
+          );
         }
         if (field.type === "json" && typeof raw === "string" && raw.trim() !== "") {
           try {
             payload[field.name] = JSON.parse(raw);
           } catch {
-            throw new Error(t("resource.validation.invalidJson", { field: field.label }));
+            throw new Error(
+              t("resource.validation.invalidJson", {
+                field: resolveConfigText(t, field.labelKey, field.label),
+              }),
+            );
           }
         } else if (field.type === "csv") {
           payload[field.name] = String(raw ?? "")
@@ -122,10 +132,24 @@ export function ResourceForm({
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-      {visibleFields.map((field) => (
+      {visibleFields.map((field) => {
+        // Per-field copy prefers the typed catalog key (migrated resources) and
+        // falls back to the legacy inline literal otherwise (#348).
+        const fieldLabel = resolveConfigText(t, field.labelKey, field.label);
+        const fieldPlaceholder = resolveOptionalConfigText(
+          t,
+          field.placeholderKey,
+          field.placeholder,
+        );
+        const fieldDescription = resolveOptionalConfigText(
+          t,
+          field.descriptionKey,
+          field.description,
+        );
+        return (
         <div key={field.name} className="grid gap-2">
           <Label htmlFor={field.name}>
-            {field.label}
+            {fieldLabel}
             {field.required ? " *" : ""}
           </Label>
           {field.type === "boolean" ? (
@@ -142,12 +166,12 @@ export function ResourceForm({
               onValueChange={(value) => setField(field.name, value)}
             >
               <SelectTrigger id={field.name}>
-                <SelectValue placeholder={field.placeholder ?? t("resource.form.selectPlaceholder")} />
+                <SelectValue placeholder={fieldPlaceholder ?? t("resource.form.selectPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
                 {field.options?.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
-                    {option.label}
+                    {resolveConfigText(t, option.labelKey, option.label)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -155,13 +179,13 @@ export function ResourceForm({
           ) : field.type === "entity" || field.type === "entities" ? (
             <EntityReferencePicker
               id={field.name}
-              label={field.label}
+              label={fieldLabel}
               reference={field.reference}
               value={values[field.name]}
               dependencyValues={values}
               multiple={field.type === "entities"}
               required={field.required}
-              placeholder={field.placeholder}
+              placeholder={fieldPlaceholder}
               onChange={(value) => setField(field.name, value)}
             />
           ) : field.type === "textarea" || field.type === "json" ? (
@@ -172,7 +196,7 @@ export function ResourceForm({
               inputMode={field.inputMode}
               spellCheck={field.spellCheck ?? field.type === "textarea"}
               required={field.required}
-              placeholder={field.placeholder}
+              placeholder={fieldPlaceholder}
               value={String(values[field.name] ?? "")}
               onChange={(event) => setField(field.name, event.target.value)}
               rows={field.type === "json" ? 6 : 3}
@@ -186,16 +210,17 @@ export function ResourceForm({
               inputMode={field.inputMode ?? (field.type === "number" ? "decimal" : "text")}
               spellCheck={field.spellCheck ?? false}
               required={field.required}
-              placeholder={field.placeholder}
+              placeholder={fieldPlaceholder}
               value={String(values[field.name] ?? "")}
               onChange={(event) => setField(field.name, event.target.value)}
             />
           )}
-          {field.description && (
-            <p className="text-xs text-muted-foreground">{field.description}</p>
+          {fieldDescription && (
+            <p className="text-xs text-muted-foreground">{fieldDescription}</p>
           )}
         </div>
-      ))}
+        );
+      })}
       {error ? (
         <AsyncStatus ref={errorRef} tone="error">
           {error}
