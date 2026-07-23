@@ -14,6 +14,13 @@
 use super::{build_supabase_storage_config, ServeArgs};
 
 fn serve_args(tls_ca_cert_path: Option<&str>) -> ServeArgs {
+    serve_args_with_pool_acquire_timeout(tls_ca_cert_path, None)
+}
+
+fn serve_args_with_pool_acquire_timeout(
+    tls_ca_cert_path: Option<&str>,
+    pool_acquire_timeout_millis: Option<u64>,
+) -> ServeArgs {
     ServeArgs {
         listen: "127.0.0.1:8090".to_string(),
         data: None,
@@ -25,6 +32,7 @@ fn serve_args(tls_ca_cert_path: Option<&str>) -> ServeArgs {
         supabase_pool_size: 4,
         supabase_connect_timeout_secs: 10,
         supabase_statement_timeout_millis: 30_000,
+        supabase_pool_acquire_timeout_millis: pool_acquire_timeout_millis,
         supabase_init_schema: false,
     }
 }
@@ -76,5 +84,30 @@ fn trims_surrounding_whitespace_from_ca_path() {
         config.tls_ca_cert_path.as_deref(),
         Some("/tmp/ca.pem"),
         "surrounding whitespace must be trimmed consistently with the mode/schema handling"
+    );
+}
+
+#[test]
+fn defaults_pool_acquire_timeout_to_30s_when_absent() {
+    // The old 1s default failed the first connect through Supabase's Supavisor
+    // pooler ("exceeded its deadline during pool acquisition", #387). Absent
+    // flag/env must land on 30s, mirroring the cli-side services
+    // (`service_storage.rs`, #255) — not the previous short deadline.
+    let config = build_supabase_storage_config(&serve_args_with_pool_acquire_timeout(None, None))
+        .expect("config builds without an explicit pool acquire timeout");
+    assert_eq!(
+        config.pool_acquire_timeout_millis, 30_000,
+        "absent pool acquire timeout must default to 30s, not the old 1s that failed first connect"
+    );
+}
+
+#[test]
+fn threads_explicit_pool_acquire_timeout_override() {
+    let config =
+        build_supabase_storage_config(&serve_args_with_pool_acquire_timeout(None, Some(45_000)))
+            .expect("config builds with an explicit pool acquire timeout");
+    assert_eq!(
+        config.pool_acquire_timeout_millis, 45_000,
+        "an operator-supplied --supabase-pool-acquire-timeout-millis must override the 30s default"
     );
 }

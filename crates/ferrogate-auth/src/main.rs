@@ -82,6 +82,15 @@ struct ServeArgs {
         default_value_t = 30_000
     )]
     supabase_statement_timeout_millis: u64,
+    /// Optional Supabase connection-pool acquire timeout in milliseconds.
+    /// The first acquisition includes the full TCP+TLS+SCRAM handshake through
+    /// Supabase's Supavisor pooler, which regularly exceeds 1s; a short deadline
+    /// fails the first connect with "exceeded its deadline during pool
+    /// acquisition" (#387, observed live-verifying #386). Unset defaults to 30s
+    /// in `build_supabase_storage_config`, mirroring the cli-side services
+    /// (`service_storage.rs`, #255); set explicitly to override.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_POOL_ACQUIRE_TIMEOUT_MILLIS")]
+    supabase_pool_acquire_timeout_millis: Option<u64>,
     /// Initialize missing Supabase schema objects before serving.
     #[arg(long, env = "FERROGATE_AUTH_SUPABASE_INIT_SCHEMA")]
     supabase_init_schema: bool,
@@ -158,7 +167,15 @@ fn build_supabase_storage_config(args: &ServeArgs) -> anyhow::Result<PostgresSto
     Ok(PostgresStorageConfig {
         dsn: dsn.to_string(),
         pool_size: args.supabase_pool_size,
-        pool_acquire_timeout_millis: 1_000,
+        // The first acquisition includes the full TCP+TLS+SCRAM handshake to a
+        // (often remote) Supabase Supavisor pooler, which regularly exceeds 1s
+        // — the old 1s default failed the first connect with "exceeded its
+        // deadline during pool acquisition" against a live pooler (#387,
+        // observed live-verifying #386). Default to 30s, mirroring the cli-side
+        // services (`service_storage.rs`, #255); an explicit
+        // `--supabase-pool-acquire-timeout-millis` overrides it.
+        // `statement_timeout_millis` below still bounds each individual query.
+        pool_acquire_timeout_millis: args.supabase_pool_acquire_timeout_millis.unwrap_or(30_000),
         tls_mode: parse_postgres_tls_mode(&args.supabase_tls_mode)?,
         // Thread the operator-supplied CA through, matching the gateway path
         // (`storage.rs`/`state.rs`) and #382: trim and drop empties so a blank
