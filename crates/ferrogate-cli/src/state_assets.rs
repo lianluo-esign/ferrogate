@@ -81,13 +81,12 @@ impl AppState {
         Ok(self.repositories.list_assets(tenant_id, asset_type).await?)
     }
 
-    pub(crate) async fn delete_asset(&self, id: &str) -> anyhow::Result<bool> {
-        Ok(self.repositories.delete_asset(id).await?)
-    }
-
-    /// Creates or moves a channel pointer (`latest`/`stable`/`canary` or a
-    /// free-form tag) for `{asset_type}/{name}` (issue #260). The caller
-    /// audits the move via the admin audit-event path.
+    /// Unconditionally upsert a channel pointer, bypassing the #367 resolvability
+    /// guard. Test-only: fixtures use it to pin a version (including deliberately
+    /// dangling states) that production code can only reach through the atomic
+    /// [`Self::move_asset_channel_if_resolvable`]. Production channel moves must
+    /// go through that guarded path.
+    #[cfg(test)]
     pub(crate) async fn upsert_asset_channel(
         &self,
         channel: ferrogate_storage::StoredAssetChannel,
@@ -109,6 +108,50 @@ impl AppState {
 
     pub(crate) async fn delete_asset_channel(&self, id: &str) -> anyhow::Result<bool> {
         Ok(self.repositories.delete_asset_channel(id).await?)
+    }
+
+    /// Atomically move a channel pointer only when its target version is durably
+    /// resolvable (issue #367). Replaces the former read-then-upsert pair whose
+    /// gap let a concurrent yank/delete strand the channel; the resolvability
+    /// check and the channel write now happen under one serialization point.
+    pub(crate) async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: ferrogate_storage::StoredAssetChannel,
+    ) -> Result<ferrogate_storage::ChannelMoveOutcome, StorageError> {
+        self.repositories
+            .move_asset_channel_if_resolvable(channel)
+            .await
+    }
+
+    /// Atomically set/clear the yank flag on every variant of a version (issue
+    /// #367). Yank is rejected while a channel references the version.
+    pub(crate) async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<ferrogate_storage::VersionYankOutcome, StorageError> {
+        self.repositories
+            .set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
+            .await
+    }
+
+    /// Atomically delete one variant row unless it would strand a channel on an
+    /// absent version (issue #367).
+    pub(crate) async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<ferrogate_storage::VariantDeleteOutcome, StorageError> {
+        self.repositories
+            .delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
+            .await
     }
 
     /// Binds (or re-binds) a custom hostname to a `{tenant}/{site}` static

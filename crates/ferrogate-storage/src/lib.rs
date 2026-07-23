@@ -4221,6 +4221,283 @@ impl PostgresControlPlaneStore {
         Ok(affected > 0)
     }
 
+    // #367: atomic channel/version lifecycle coordination.
+    //
+    // The invariant is: every `asset_channels` row points at a resolvable
+    // version (present, no yanked variant). Move (writes `asset_channels`, guards
+    // on `stored_assets`) and yank/delete (writes `stored_assets`, guards on
+    // `asset_channels`) touch two tables in opposite directions, which under
+    // READ COMMITTED is a classic write-skew hazard: two single statements could
+    // both pass their guard against a stale snapshot and both commit, leaving a
+    // channel on a yanked/absent version. To close it deterministically -- with
+    // no retry loop, no `pg_sleep`, no unbounded wait -- every coordination
+    // mutation first takes a `SELECT ... FOR UPDATE` row lock on the version's
+    // `stored_assets` rows (a single, shared lock ordering), then reads/writes
+    // the channel row inside the same short transaction. Whichever operation
+    // wins the row lock commits first and the other observes its committed
+    // effect, so the two can never both pass their guard. This is the "smallest
+    // irreducible transaction" AGENTS.md permits; `lock_timeout` /
+    // `statement_timeout` are pinned per transaction so no lock wait is
+    // unbounded.
+
+    /// Prefix SQL that pins `search_path` (when configured) plus a bounded
+    /// `lock_timeout`/`statement_timeout` for a coordination transaction, so a
+    /// `FOR UPDATE` wait can never block past the operation's own deadline.
+    fn coordination_session_sql(&self) -> String {
+        let timeout_ms = u64::try_from(self.async_pool.statement_timeout().as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let mut sql = String::new();
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            sql.push_str(search_path_sql);
+            sql.push(';');
+        }
+        sql.push_str(&format!("SET LOCAL lock_timeout = '{timeout_ms}ms';"));
+        sql.push_str(&format!("SET LOCAL statement_timeout = '{timeout_ms}ms';"));
+        sql
+    }
+
+    async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: &StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError> {
+        let operation = self.asset_operation("move asset channel");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .batch_execute(&self.coordination_session_sql())
+            .await
+            .map_err(postgres_error)?;
+        // Lock every variant row of the target version FIRST -- the shared lock
+        // ordering yank/delete also use -- so the resolvability check below and
+        // the channel upsert cannot be interleaved by a concurrent yank/delete.
+        let variant_rows = transaction
+            .query(
+                "SELECT yanked FROM stored_assets \
+                 WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4 \
+                 FOR UPDATE",
+                &[
+                    &channel.tenant_id,
+                    &channel.asset_type,
+                    &channel.name,
+                    &channel.version,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let resolvable =
+            !variant_rows.is_empty() && !variant_rows.iter().any(|row| row.get::<_, bool>(0));
+        if !resolvable {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(ChannelMoveOutcome::TargetNotResolvable);
+        }
+        // Prior target (the version this channel pointed at) for audit evidence.
+        let prior_version = transaction
+            .query_opt(
+                "SELECT version FROM asset_channels WHERE id = $1",
+                &[&channel.id],
+            )
+            .await
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, String>(0));
+        transaction
+            .execute(
+                "INSERT INTO asset_channels \
+                 (id, tenant_id, asset_type, name, channel, version, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 version = EXCLUDED.version, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &channel.id,
+                    &channel.tenant_id,
+                    &channel.asset_type,
+                    &channel.name,
+                    &channel.channel,
+                    &channel.version,
+                    &channel.updated_at_unix,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the channel move commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(ChannelMoveOutcome::Moved { prior_version })
+    }
+
+    async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError> {
+        let operation = self.asset_operation(if yanked {
+            "yank asset version"
+        } else {
+            "unyank asset version"
+        });
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .batch_execute(&self.coordination_session_sql())
+            .await
+            .map_err(postgres_error)?;
+        // Lock the version's variant rows FIRST (shared ordering with move).
+        let target_rows = transaction
+            .query(
+                "SELECT id FROM stored_assets \
+                 WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4 \
+                 FOR UPDATE",
+                &[&tenant_id, &asset_type, &name, &version],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if target_rows.is_empty() {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(VersionYankOutcome::NotFound);
+        }
+        // Yank is fail-closed while referenced; unyank restores resolvability and
+        // can never strand a channel, so it skips the reference guard.
+        if yanked {
+            let referenced = transaction
+                .query_opt(
+                    "SELECT 1 FROM asset_channels \
+                     WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4 \
+                     LIMIT 1",
+                    &[&tenant_id, &asset_type, &name, &version],
+                )
+                .await
+                .map_err(postgres_error)?
+                .is_some();
+            if referenced {
+                transaction.commit().await.map_err(postgres_error)?;
+                return Ok(VersionYankOutcome::ReferencedByChannel);
+            }
+        }
+        let affected = transaction
+            .execute(
+                "UPDATE stored_assets SET yanked = $5, updated_at_unix = $6 \
+                 WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4",
+                &[&tenant_id, &asset_type, &name, &version, &yanked, &now_unix],
+            )
+            .await
+            .map_err(postgres_error)?;
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the version yank commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(VersionYankOutcome::Applied {
+            variants: affected as usize,
+        })
+    }
+
+    async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError> {
+        let operation = self.asset_operation("delete asset variant");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        transaction
+            .batch_execute(&self.coordination_session_sql())
+            .await
+            .map_err(postgres_error)?;
+        // Lock the whole version's rows FIRST (shared ordering with move/yank),
+        // returning each row's id + yank state so the reject decision is made
+        // against the locked, committed state.
+        let version_rows = transaction
+            .query(
+                "SELECT id, yanked FROM stored_assets \
+                 WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4 \
+                 FOR UPDATE",
+                &[&tenant_id, &asset_type, &name, &version],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if !version_rows.iter().any(|row| row.get::<_, String>(0) == id) {
+            transaction.commit().await.map_err(postgres_error)?;
+            return Ok(VariantDeleteOutcome::NotFound);
+        }
+        // Would this delete leave the version with no resolvable (non-yanked)
+        // variant? If so and a channel still references the version, reject.
+        let remaining_resolvable = version_rows
+            .iter()
+            .any(|row| row.get::<_, String>(0) != id && !row.get::<_, bool>(1));
+        if !remaining_resolvable {
+            let referenced = transaction
+                .query_opt(
+                    "SELECT 1 FROM asset_channels \
+                     WHERE tenant_id = $1 AND asset_type = $2 AND name = $3 AND version = $4 \
+                     LIMIT 1",
+                    &[&tenant_id, &asset_type, &name, &version],
+                )
+                .await
+                .map_err(postgres_error)?
+                .is_some();
+            if referenced {
+                transaction.commit().await.map_err(postgres_error)?;
+                return Ok(VariantDeleteOutcome::BlockedByChannel);
+            }
+        }
+        let affected = transaction
+            .execute("DELETE FROM stored_assets WHERE id = $1", &[&id])
+            .await
+            .map_err(postgres_error)?;
+        operation.begin_commit("before transaction commit")?;
+        let commit_result = transaction.commit().await.map_err(|error| {
+            tracing::warn!(
+                operation = operation.name(),
+                storage_stage = "transaction commit",
+                sqlstate = error.code().map(tokio_postgres::error::SqlState::code),
+                outcome = "commit_outcome_unknown",
+                "PostgreSQL returned an error after the variant delete commit fence"
+            );
+            asset_transaction_commit_outcome_unknown(&operation)
+        });
+        operation.finish_commit();
+        commit_result?;
+        Ok(if affected > 0 {
+            VariantDeleteOutcome::Deleted
+        } else {
+            VariantDeleteOutcome::NotFound
+        })
+    }
+
     // #263: asset lifecycle -- retention policies + whole-table reconcile scans
     // for the lifecycle sweeper.
 
@@ -10263,6 +10540,151 @@ impl RuntimeControlPlaneState {
         self.asset_channels.remove(id).is_some()
     }
 
+    // #367: atomic channel/version lifecycle coordination. Each of these runs
+    // the whole check-and-mutate under the single control-plane lock the facade
+    // already holds, which is the memory-backend equivalent of the Postgres
+    // `FOR UPDATE` serialization point on the version's `stored_assets` rows.
+
+    /// Whether `version` of one `{tenant, asset_type, name}` line is resolvable:
+    /// at least one variant row exists and none of its variant rows is yanked
+    /// (resolution treats a version as yanked when any variant is yanked). This
+    /// is the memory counterpart of the Postgres resolvability guard and mirrors
+    /// the gateway's `channel_target_is_resolvable`.
+    fn asset_version_is_resolvable(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> bool {
+        let mut found = false;
+        for asset in self.assets.records.values().filter(|asset| {
+            asset.tenant_id == tenant_id
+                && asset.asset_type == asset_type
+                && asset.name == name
+                && asset.version == version
+        }) {
+            found = true;
+            if asset.yanked {
+                return false;
+            }
+        }
+        found
+    }
+
+    fn asset_version_is_channel_referenced(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> bool {
+        self.asset_channels.records.values().any(|channel| {
+            channel.tenant_id == tenant_id
+                && channel.asset_type == asset_type
+                && channel.name == name
+                && channel.version == version
+        })
+    }
+
+    /// Move a channel pointer only when its target version is durably
+    /// resolvable (issue #367). The resolvability check and the channel upsert
+    /// run under one lock, so a concurrent yank/delete cannot land between them.
+    pub fn move_asset_channel_if_resolvable(
+        &mut self,
+        channel: StoredAssetChannel,
+    ) -> ChannelMoveOutcome {
+        if !self.asset_version_is_resolvable(
+            &channel.tenant_id,
+            &channel.asset_type,
+            &channel.name,
+            &channel.version,
+        ) {
+            return ChannelMoveOutcome::TargetNotResolvable;
+        }
+        let prior_version = self
+            .asset_channels
+            .records
+            .get(&channel.id)
+            .map(|existing| existing.version.clone());
+        self.asset_channels.insert(channel.id.clone(), channel);
+        ChannelMoveOutcome::Moved { prior_version }
+    }
+
+    /// Set (or clear) the yank flag on every variant row of a version (issue
+    /// #367). Yank is rejected while a channel references the version; unyank
+    /// never coordinates because restoring resolvability cannot strand a
+    /// channel. Runs under one lock.
+    pub fn set_asset_version_yank(
+        &mut self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> VersionYankOutcome {
+        let target_ids: Vec<String> = self
+            .assets
+            .records
+            .values()
+            .filter(|asset| {
+                asset.tenant_id == tenant_id
+                    && asset.asset_type == asset_type
+                    && asset.name == name
+                    && asset.version == version
+            })
+            .map(|asset| asset.id.clone())
+            .collect();
+        if target_ids.is_empty() {
+            return VersionYankOutcome::NotFound;
+        }
+        if yanked && self.asset_version_is_channel_referenced(tenant_id, asset_type, name, version)
+        {
+            return VersionYankOutcome::ReferencedByChannel;
+        }
+        for id in &target_ids {
+            if let Some(asset) = self.assets.records.get_mut(id) {
+                asset.yanked = yanked;
+                asset.updated_at_unix = now_unix;
+            }
+        }
+        VersionYankOutcome::Applied {
+            variants: target_ids.len(),
+        }
+    }
+
+    /// Delete one variant row unless doing so would strand a channel (issue
+    /// #367): a delete that removes the last resolvable variant of a
+    /// channel-referenced version is rejected. Runs under one lock.
+    pub fn delete_asset_variant_if_unreferenced(
+        &mut self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> VariantDeleteOutcome {
+        if !self.assets.records.contains_key(id) {
+            return VariantDeleteOutcome::NotFound;
+        }
+        let remaining_resolvable = self.assets.records.values().any(|asset| {
+            asset.id != id
+                && asset.tenant_id == tenant_id
+                && asset.asset_type == asset_type
+                && asset.name == name
+                && asset.version == version
+                && !asset.yanked
+        });
+        if !remaining_resolvable
+            && self.asset_version_is_channel_referenced(tenant_id, asset_type, name, version)
+        {
+            return VariantDeleteOutcome::BlockedByChannel;
+        }
+        self.assets.remove(id);
+        VariantDeleteOutcome::Deleted
+    }
+
     // #263: asset lifecycle -- retention policies + reconcile scans.
 
     pub fn upsert_retention_policy(&mut self, policy: StoredRetentionPolicy) {
@@ -11045,6 +11467,54 @@ pub struct StoredAssetChannel {
 /// `(tenant_id, asset_type, name, channel)`.
 pub fn asset_channel_id(tenant_id: &str, asset_type: &str, name: &str, channel: &str) -> String {
     format!("{tenant_id}:{asset_type}:{name}:{channel}")
+}
+
+/// Outcome of the atomic channel move coordination mutation (issue #367). The
+/// move is durable only when its target version is resolvable (present and with
+/// no yanked variant) at the instant the channel row is written -- the check and
+/// the write happen under one serialization point (the version's `stored_assets`
+/// rows locked `FOR UPDATE` on Postgres, the single control-plane lock on
+/// memory), so a concurrent yank/delete can never interleave between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelMoveOutcome {
+    /// The channel now durably points at the requested version. `prior_version`
+    /// is the version the channel pointed at before this move (`None` when the
+    /// channel is newly created), recorded for audit evidence.
+    Moved { prior_version: Option<String> },
+    /// The requested version was absent or yanked at commit time, so no channel
+    /// row was written. The caller must report the move as rejected.
+    TargetNotResolvable,
+}
+
+/// Outcome of the atomic yank/unyank coordination mutation (issue #367). Yank
+/// (`yanked = true`) is fail-closed: it is rejected while a channel still
+/// references the version, preserving the invariant that no channel points at a
+/// yanked version. Unyank (`yanked = false`) only restores resolvability and can
+/// never strand a channel, so it never returns [`Self::ReferencedByChannel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionYankOutcome {
+    /// The yank/unyank flag was applied to every variant row of the version.
+    Applied { variants: usize },
+    /// No variant row exists for the version (404).
+    NotFound,
+    /// A yank was rejected because a channel still references the version. The
+    /// operator must move the channel off the version first (409).
+    ReferencedByChannel,
+}
+
+/// Outcome of the atomic variant-delete coordination mutation (issue #367). A
+/// delete is rejected when it would remove the last resolvable variant of a
+/// version a channel still references, so a live channel can never be stranded
+/// on an absent version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantDeleteOutcome {
+    /// The variant row was deleted.
+    Deleted,
+    /// No variant row matched the id (404).
+    NotFound,
+    /// The delete would have removed the last resolvable variant of a
+    /// channel-referenced version, so nothing was deleted (409).
+    BlockedByChannel,
 }
 
 /// SHA-256 content hash, hex-encoded. Computed by the caller when an asset
@@ -13343,6 +13813,88 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Atomically move a channel pointer only when its target version is durably
+    /// resolvable (issue #367). The Postgres backend takes a `FOR UPDATE` row
+    /// lock on the version's `stored_assets` rows before the guarded upsert; the
+    /// memory backend performs the equivalent check-and-write under one lock. A
+    /// concurrent yank/delete can therefore never leave the channel on a
+    /// non-resolvable version.
+    pub async fn move_asset_channel_if_resolvable(
+        &self,
+        channel: StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.move_asset_channel_if_resolvable(channel))
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .move_asset_channel_if_resolvable(&channel)
+                    .await
+            }
+        }
+    }
+
+    /// Atomically set/clear the yank flag on every variant of a version (issue
+    /// #367). Yank is rejected while a channel references the version so the
+    /// lifecycle invariant holds as one atomic step; unyank never coordinates.
+    /// Postgres locks the version's rows `FOR UPDATE`; memory runs under one lock.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_asset_version_yank(
+        &self,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.set_asset_version_yank(
+                        tenant_id, asset_type, name, version, yanked, now_unix,
+                    )
+                })
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .set_asset_version_yank(tenant_id, asset_type, name, version, yanked, now_unix)
+                    .await
+            }
+        }
+    }
+
+    /// Atomically delete one variant row unless it would strand a channel on an
+    /// absent version (issue #367). Postgres locks the version's rows
+    /// `FOR UPDATE`; memory runs under one lock.
+    pub async fn delete_asset_variant_if_unreferenced(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.delete_asset_variant_if_unreferenced(
+                        id, tenant_id, asset_type, name, version,
+                    )
+                })
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .delete_asset_variant_if_unreferenced(id, tenant_id, asset_type, name, version)
+                    .await
+            }
+        }
+    }
+
     // #263: asset lifecycle -- retention policies + whole-registry reconcile
     // scans the lifecycle sweeper drives.
 
@@ -15618,6 +16170,10 @@ mod control_plane_schema_test;
 #[cfg(test)]
 #[path = "asset_storage_usage_test.rs"]
 mod asset_storage_usage_test;
+
+#[cfg(test)]
+#[path = "asset_channel_lifecycle_test.rs"]
+mod asset_channel_lifecycle_test;
 
 #[cfg(test)]
 mod tests {

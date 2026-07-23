@@ -16,8 +16,8 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use ferrogate_storage::{
-    asset_channel_id, sha256_hex, stored_asset_id, stored_asset_variant_id, StoredAsset,
-    StoredAssetChannel,
+    asset_channel_id, sha256_hex, stored_asset_id, stored_asset_variant_id, ChannelMoveOutcome,
+    StoredAsset, StoredAssetChannel, VariantDeleteOutcome, VersionYankOutcome,
 };
 
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
@@ -767,24 +767,37 @@ impl FerroGateway {
         };
         let variant = query_param(query, "platform").unwrap_or_default();
         let id = stored_asset_variant_id(&tenant_id, asset_type, name, version, &variant);
-        // Bucket-backed storage (issue #176): best-effort delete the bucket
-        // object before the DB row -- an orphaned bucket object is a lesser
-        // problem than an undeletable `stored_assets` row.
-        if let Ok(Some(existing)) = state.get_asset(&id).await {
-            if let Some(storage_uri) = existing.storage_uri.as_deref() {
-                if let Some(bucket) = state.asset_bucket_client() {
-                    if let Err(error) = bucket.delete_object(storage_uri).await {
-                        tracing::warn!(
-                            asset_id = %id,
-                            error = %error,
-                            "failed to delete bucket object for asset; deleting the stored_assets row anyway"
-                        );
+        // Delete one variant row atomically (issue #367): reject a delete that
+        // would remove the last resolvable variant of a version a channel still
+        // references, so a live channel can never be stranded on an absent
+        // version. Multi-variant versions and unreferenced versions delete freely.
+        // The DB row is deleted FIRST; the bucket object is reaped only after a
+        // committed row delete, so a rejected delete never orphans the bucket
+        // object away from a still-live row.
+        let existing_storage_uri = match state.get_asset(&id).await {
+            Ok(existing) => existing.and_then(|asset| asset.storage_uri),
+            Err(_) => None,
+        };
+        match state
+            .delete_asset_variant_if_unreferenced(&id, &tenant_id, asset_type, name, version)
+            .await
+        {
+            Ok(VariantDeleteOutcome::Deleted) => {
+                // Best-effort reap of the bucket object now that the row is gone
+                // (issue #176): an orphaned bucket object is a lesser problem than
+                // a stored_assets row that outlives its bytes, and the #263 GC
+                // sweeper reclaims any object left behind by a failure here.
+                if let Some(storage_uri) = existing_storage_uri.as_deref() {
+                    if let Some(bucket) = state.asset_bucket_client() {
+                        if let Err(error) = bucket.delete_object(storage_uri).await {
+                            tracing::warn!(
+                                asset_id = %id,
+                                error = %error,
+                                "deleted stored_assets row but failed to delete its bucket object; GC will reclaim it"
+                            );
+                        }
                     }
                 }
-            }
-        }
-        match state.delete_asset(&id).await {
-            Ok(true) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -800,7 +813,7 @@ impl FerroGateway {
                 };
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
-            Ok(false) => {
+            Ok(VariantDeleteOutcome::NotFound) => {
                 write_json_error(
                     session,
                     StatusCode::NOT_FOUND,
@@ -808,6 +821,30 @@ impl FerroGateway {
                     format!(
                         "no asset at {asset_type}/{name}/{version}{}",
                         variant_suffix(&variant)
+                    ),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(VariantDeleteOutcome::BlockedByChannel) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.delete",
+                    &id,
+                    "rejected",
+                    format!(
+                        "asset {id} delete rejected: last resolvable variant of a \
+                         channel-referenced version"
+                    ),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "asset_version_referenced",
+                    format!(
+                        "{asset_type}/{name}/{version} is the last resolvable variant of a \
+                         channel-referenced version; move or delete the channel first"
                     ),
                     &ctx.request_id,
                 )
@@ -849,49 +886,78 @@ impl FerroGateway {
             return asset_hosting_disabled(session, ctx).await;
         }
 
-        let assets = match self
-            .asset_versions(&state, &tenant_id, asset_type, name)
+        // Yank/unyank the whole logical version atomically (issue #367). A yank
+        // is rejected while a channel still references the version, so the
+        // lifecycle invariant (no channel points at a yanked version) holds as
+        // one step instead of a read-then-write race with a concurrent move.
+        let now = now_unix_seconds();
+        let action = if yanked { "asset.yank" } else { "asset.unyank" };
+        let target = format!("{tenant_id}:{asset_type}:{name}:{version}");
+        match state
+            .set_asset_version_yank(&tenant_id, asset_type, name, version, yanked, now)
             .await
         {
-            Ok(assets) => assets,
-            Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
-        };
-        // Yank operates on every variant row of the logical version together.
-        let mut targets: Vec<StoredAsset> = assets
-            .into_iter()
-            .filter(|asset| asset.version == version)
-            .collect();
-        if targets.is_empty() {
-            return write_json_error(
-                session,
-                StatusCode::NOT_FOUND,
-                "asset_not_found",
-                format!("no asset at {asset_type}/{name}/{version}"),
-                &ctx.request_id,
-            )
-            .await;
-        }
-        let now = now_unix_seconds();
-        for target in &mut targets {
-            target.yanked = yanked;
-            target.updated_at_unix = now;
-            if let Err(error) = state.upsert_asset(target.clone()).await {
-                return storage_unavailable(session, ctx, error.to_string()).await;
+            Ok(VersionYankOutcome::Applied { .. }) => {}
+            Ok(VersionYankOutcome::NotFound) => {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "asset_not_found",
+                    format!("no asset at {asset_type}/{name}/{version}"),
+                    &ctx.request_id,
+                )
+                .await;
             }
+            Ok(VersionYankOutcome::ReferencedByChannel) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    action,
+                    target,
+                    "rejected",
+                    format!(
+                        "asset {asset_type}/{name}/{version} yank rejected: still referenced \
+                         by a channel; move the channel off this version first"
+                    ),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "asset_version_referenced",
+                    format!(
+                        "{asset_type}/{name}/{version} is still referenced by a channel; \
+                         move the channel off this version before yanking"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
         }
-        let action = if yanked { "asset.yank" } else { "asset.unyank" };
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
             &auth,
             action,
-            format!("{tenant_id}:{asset_type}:{name}:{version}"),
+            target,
             "committed",
             format!(
                 "asset {asset_type}/{name}/{version} {}",
                 if yanked { "yanked" } else { "unyanked" }
             ),
         ));
-        let summary: Vec<AssetSummary> = targets.iter().map(asset_summary).collect();
+        // Re-read the version's rows for the response body only (not to prove the
+        // mutation, which already committed durably above).
+        let summary: Vec<AssetSummary> = match self
+            .asset_versions(&state, &tenant_id, asset_type, name)
+            .await
+        {
+            Ok(assets) => assets
+                .into_iter()
+                .filter(|asset| asset.version == version)
+                .map(|asset| asset_summary(&asset))
+                .collect(),
+            Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
+        };
         write_json_response(
             session,
             StatusCode::OK,
@@ -1139,9 +1205,11 @@ impl FerroGateway {
             .collect())
     }
 
-    /// Upsert (create or move) a channel pointer after a best-effort target
-    /// preflight, then audit only the durable move. The target read and channel
-    /// write are not atomic; repository-level CAS is needed to close that race.
+    /// Atomically move a channel pointer, succeeding only when the target
+    /// version is durably resolvable under one serialization point (issue #367,
+    /// replacing the former read-then-upsert pair whose gap let a concurrent
+    /// yank/delete strand the channel). Audit evidence records the prior target,
+    /// the requested target, and the outcome for both commit and rejection.
     #[allow(clippy::too_many_arguments)]
     async fn move_channel(
         &self,
@@ -1153,16 +1221,7 @@ impl FerroGateway {
         channel: &str,
         version: &str,
     ) -> Result<StoredAssetChannel, ChannelMoveError> {
-        // Reject targets that are already missing or yanked. This read cannot
-        // prevent a concurrent change before the channel upsert below.
         let tenant_id = auth_tenant(auth);
-        let assets = self
-            .asset_versions(state, &tenant_id, asset_type, name)
-            .await
-            .map_err(|error| ChannelMoveError::Storage(error.to_string()))?;
-        if !channel_target_is_resolvable(&assets, version) {
-            return Err(ChannelMoveError::TargetNotFound);
-        }
         let channel_id = asset_channel_id(&tenant_id, asset_type, name, channel);
         let record = StoredAssetChannel {
             id: channel_id.clone(),
@@ -1173,19 +1232,38 @@ impl FerroGateway {
             version: version.to_string(),
             updated_at_unix: now_unix_seconds(),
         };
-        state
-            .upsert_asset_channel(record.clone())
+        match state
+            .move_asset_channel_if_resolvable(record.clone())
             .await
-            .map_err(|error| ChannelMoveError::Storage(error.to_string()))?;
-        state.record_admin_audit_event(admin_audit_event_draft_for_target(
-            ctx,
-            auth,
-            "asset.channel.move",
-            &channel_id,
-            "committed",
-            format!("channel {asset_type}/{name}/{channel} -> {version}"),
-        ));
-        Ok(record)
+            .map_err(|error| ChannelMoveError::Storage(error.to_string()))?
+        {
+            ChannelMoveOutcome::Moved { prior_version } => {
+                let prior = prior_version.as_deref().unwrap_or("none");
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    auth,
+                    "asset.channel.move",
+                    &channel_id,
+                    "committed",
+                    format!("channel {asset_type}/{name}/{channel} {prior} -> {version}"),
+                ));
+                Ok(record)
+            }
+            ChannelMoveOutcome::TargetNotResolvable => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    auth,
+                    "asset.channel.move",
+                    &channel_id,
+                    "rejected",
+                    format!(
+                        "channel {asset_type}/{name}/{channel} -> {version} rejected: \
+                         target version is absent or yanked"
+                    ),
+                ));
+                Err(ChannelMoveError::TargetNotFound)
+            }
+        }
     }
 
     /// Fetch content (bucket or inline), re-verify its hash, and serve it with
@@ -1373,6 +1451,12 @@ fn channel_summary(channel: &StoredAssetChannel) -> AssetChannelSummary {
     }
 }
 
+/// The canonical channel-target resolvability predicate (issue #367): a version
+/// is resolvable when it has at least one variant row and none of its variants
+/// is yanked. The atomic move/yank/delete coordination in `ferrogate-storage`
+/// enforces exactly this invariant under a serialization point; this pure
+/// mirror is retained as the test oracle both backends must agree with.
+#[cfg(test)]
 fn channel_target_is_resolvable(assets: &[StoredAsset], version: &str) -> bool {
     let mut found = false;
     for asset in assets.iter().filter(|asset| asset.version == version) {

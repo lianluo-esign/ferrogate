@@ -191,6 +191,24 @@ fn poisoned_memory_lock_fails_closed_for_every_asset_repository_method() {
         "artifact",
     )));
     assert_asset_repository_poisoned(block_on(repositories.delete_asset_channel("channel-a")));
+    assert_asset_repository_poisoned(block_on(
+        repositories.move_asset_channel_if_resolvable(channel("channel-a")),
+    ));
+    assert_asset_repository_poisoned(block_on(repositories.set_asset_version_yank(
+        "tenant-a",
+        "config_file",
+        "artifact",
+        "1.0.0",
+        true,
+        1,
+    )));
+    assert_asset_repository_poisoned(block_on(repositories.delete_asset_variant_if_unreferenced(
+        "asset-a",
+        "tenant-a",
+        "config_file",
+        "artifact",
+        "1.0.0",
+    )));
 }
 
 #[test]
