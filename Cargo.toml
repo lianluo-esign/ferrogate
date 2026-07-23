@@ -11,6 +11,7 @@ members = [
     "crates/ferrogate-auth",
     "crates/ferrogate-billing",
     "crates/ferrogate-cli",
+    "crates/ferrogate-cli-core",
     "crates/ferrogate-config",
     "crates/ferrogate-core",
     "crates/ferrogate-guardrails",

@@ -1227,6 +1227,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrogate-cli-core"
+version = "2026.7.9"
+dependencies = [
+ "clap",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ferrogate-config"
 version = "2026.7.9"
 dependencies = [

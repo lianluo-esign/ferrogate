@@ -30,6 +30,9 @@ jobs:
           - slice: cli_slices
             package: ferrogate-cli
             args: --all-features --test check_command --test workspace_skeleton
+          - slice: cli_core
+            package: ferrogate-cli-core
+            args: --all-features
           - slice: test_harness
             package: ferrogate-test
             args: --all-features
