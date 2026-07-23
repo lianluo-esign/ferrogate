@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
@@ -114,13 +114,23 @@ function seedList() {
   );
 }
 
-function renderPage(locale: Locale = "en") {
+// Surfaces the live location so URL-state assertions can read the query the
+// registry writes as the operator filters, searches, and opens a resource.
+let currentSearch = "";
+function LocationProbe() {
+  currentSearch = useLocation().search;
+  return null;
+}
+
+function renderPage(locale: Locale = "en", initialEntry = "/app/assets") {
+  currentSearch = "";
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <I18nProvider initialLocale={locale}>
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             <AssetsPage />
+            <LocationProbe />
           </QueryClientProvider>
         </AuthProvider>
       </I18nProvider>
@@ -201,6 +211,106 @@ describe("AssetsPage registry list", () => {
     expect(
       screen.getAllByText(zhCN["page.assets.col.versions"]).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("AssetsPage URL browse state", () => {
+  it("hydrates the type filter and search from the query on load", async () => {
+    seedList();
+
+    renderPage("en", "/app/assets?type=mcp_manifest&q=widget");
+
+    // Only the mcp_manifest resource matching the search survives; the cli_tool
+    // package is filtered out purely from the URL, with no user interaction.
+    expect(await screen.findByText("widget")).toBeInTheDocument();
+    expect(screen.queryByText("ferrogate")).not.toBeInTheDocument();
+  });
+
+  it("opens the detail panel from ?rtype=&rname= even when a filter hides the row", async () => {
+    seedList();
+    server.use(
+      http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
+        HttpResponse.json(ferrogateManifest),
+      ),
+    );
+
+    // The list is filtered to mcp_manifest (hiding ferrogate), yet the shared
+    // link still resolves ferrogate against the full registry and opens it.
+    renderPage(
+      "en",
+      "/app/assets?type=mcp_manifest&rtype=cli_tool&rname=ferrogate",
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("cli_tool/ferrogate")).toBeInTheDocument();
+    // The manifest loads async; its channel pointer confirms the panel resolved
+    // the resource from the URL rather than showing an empty shell.
+    expect(await within(dialog).findByText("stable")).toBeInTheDocument();
+    // The mcp_manifest filter is still in force behind the panel: the list
+    // shows widget, and ferrogate has no row of its own.
+    expect(screen.getByText("widget")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("cell", { name: "ferrogate" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("writes type, search, and the open resource back into the URL", async () => {
+    seedList();
+    server.use(
+      http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
+        HttpResponse.json(ferrogateManifest),
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    // A pristine registry keeps a clean URL (defaults encoded as absent params).
+    await screen.findByText("ferrogate");
+    expect(currentSearch).toBe("");
+
+    // Search is mirrored into ?q=.
+    await user.type(
+      screen.getByLabelText(en["page.withheldAssets.filter.search"]),
+      "ferro",
+    );
+    await waitFor(() =>
+      expect(new URLSearchParams(currentSearch).get("q")).toBe("ferro"),
+    );
+
+    // Type filter is mirrored into ?type=.
+    const filterType = () =>
+      screen.getAllByLabelText(en["page.assets.field.assetType"])[1];
+    await user.click(filterType());
+    await user.click(
+      await screen.findByRole("option", { name: en["page.assets.type.cliTool"] }),
+    );
+    await waitFor(() =>
+      expect(new URLSearchParams(currentSearch).get("type")).toBe("cli_tool"),
+    );
+
+    // Opening a resource records rtype+rname; closing clears them.
+    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    await user.click(
+      within(ferrogateRow).getByRole("button", {
+        name: en["resource.table.moreDetails"],
+      }),
+    );
+    await waitFor(() => {
+      const params = new URLSearchParams(currentSearch);
+      expect(params.get("rtype")).toBe("cli_tool");
+      expect(params.get("rname")).toBe("ferrogate");
+    });
+    // Filter + search survive selection (still shareable together).
+    expect(new URLSearchParams(currentSearch).get("q")).toBe("ferro");
+
+    await screen.findByRole("dialog");
+    // Escape closes the panel (the footer + built-in dismiss both read "Close");
+    // dismissing it must strip rtype/rname while leaving the filter/search.
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(new URLSearchParams(currentSearch).has("rtype")).toBe(false),
+    );
+    expect(new URLSearchParams(currentSearch).has("rname")).toBe(false);
   });
 });
 
