@@ -18,7 +18,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, type RenderResult } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider } from "@/i18n";
+import { I18nProvider, type Locale } from "@/i18n";
 import { saveStoredSession, type StoredSession } from "@/lib/session-storage";
 
 export const TEST_GATEWAY_API_KEY = "fg-test-gateway-key";
@@ -49,10 +49,16 @@ export function createTestQueryClient(): QueryClient {
   });
 }
 
-export function AllProviders({ children }: { children: ReactNode }) {
+export function AllProviders({
+  children,
+  locale,
+}: {
+  children: ReactNode;
+  locale?: Locale;
+}) {
   return (
     <MemoryRouter>
-      <I18nProvider>
+      <I18nProvider initialLocale={locale}>
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             {children}
@@ -63,6 +69,18 @@ export function AllProviders({ children }: { children: ReactNode }) {
   );
 }
 
-export function renderWithProviders(ui: ReactElement): RenderResult {
-  return render(ui, { wrapper: AllProviders });
+/**
+ * Render `ui` inside the console's provider stack. Pass `locale` to force a
+ * catalog for locale-specific assertions (defaults to the resolved locale,
+ * which is `en` under jsdom).
+ */
+export function renderWithProviders(
+  ui: ReactElement,
+  options: { locale?: Locale } = {},
+): RenderResult {
+  return render(ui, {
+    wrapper: ({ children }) => (
+      <AllProviders locale={options.locale}>{children}</AllProviders>
+    ),
+  });
 }

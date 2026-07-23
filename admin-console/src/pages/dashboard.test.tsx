@@ -2,6 +2,8 @@ import { screen, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import DashboardPage from "@/pages/dashboard";
+import { translate } from "@/i18n";
+import { formatCurrency, formatNumber } from "@/i18n/format";
 import { adminStatus, providerHealth } from "@/test/fixtures/ops";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
@@ -126,8 +128,10 @@ describe("DashboardPage", () => {
     expect(await within(posture).findByText("Ready")).toBeInTheDocument();
     expect(within(posture).getByText("1 / 2")).toBeInTheDocument();
     expect(within(posture).getByText("2")).toBeInTheDocument();
-    expect(screen.getByText("1 provider need attention.")).toBeInTheDocument();
-    expect(screen.getByText("1 tool approval waiting for review.")).toBeInTheDocument();
+    expect(screen.getByText("1 provider needs attention.")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 tool approval is waiting for review."),
+    ).toBeInTheDocument();
     expect(screen.getByText("req-failed-654321")).toBeInTheDocument();
     expect(screen.getAllByText("$12.3456")).toHaveLength(2);
     expect(screen.getByText("150,000")).toBeInTheDocument();
@@ -161,5 +165,38 @@ describe("DashboardPage", () => {
     expect(await screen.findByText("No retained requests yet.")).toBeInTheDocument();
     expect(screen.getByText("No usage report is available yet.")).toBeInTheDocument();
     expect(screen.getByText("No active gateway, provider, or approval alerts.")).toBeInTheDocument();
+  });
+
+  it("renders the overview in Simplified Chinese with locale-formatted values", async () => {
+    installDashboardMocks();
+    renderWithProviders(<DashboardPage />, { locale: "zh-CN" });
+
+    // Chrome + section copy resolve from the zh-CN catalog.
+    expect(
+      await screen.findByText(translate("zh-CN", "dashboard.title")),
+    ).toBeInTheDocument();
+    const posture = screen.getByRole("region", {
+      name: translate("zh-CN", "dashboard.posture.title"),
+    });
+    expect(
+      await within(posture).findByText(translate("zh-CN", "dashboard.state.ready")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        translate("zh-CN", "dashboard.alert.providersUnhealthy.one", { count: 1 }),
+      ),
+    ).toBeInTheDocument();
+
+    // Numbers/currency route through the shared Intl formatters for zh-CN.
+    expect(
+      screen.getAllByText(formatCurrency("zh-CN", 12.3456, "USD", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 4,
+      })),
+    ).toHaveLength(2);
+    expect(screen.getByText(formatNumber("zh-CN", 150_000))).toBeInTheDocument();
+
+    // Identifiers stay byte-for-byte unchanged across locales.
+    expect(screen.getByText("req-failed-654321")).toBeInTheDocument();
   });
 });

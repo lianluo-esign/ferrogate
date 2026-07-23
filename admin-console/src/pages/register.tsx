@@ -14,9 +14,11 @@ import { AsyncStatus } from "@/components/ui/async-status";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { ApiError } from "@/types/auth";
 
 export default function RegisterPage() {
+  const { t } = useI18n();
   const { register } = useAuth();
   const navigate = useNavigate();
   const [organizationName, setOrganizationName] = useState("");
@@ -44,7 +46,7 @@ export default function RegisterPage() {
       });
       navigate("/", { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Registration failed");
+      setError(err instanceof ApiError ? err.message : t("auth.register.error"));
     } finally {
       setSubmitting(false);
     }
@@ -60,15 +62,13 @@ export default function RegisterPage() {
         <div className="w-full max-w-sm">
         <Card>
           <CardHeader className="text-center">
-            <h1 className="text-xl font-semibold leading-none">Create your organization</h1>
-            <CardDescription>
-              Sets up a new tenant with you as the owner
-            </CardDescription>
+            <h1 className="text-xl font-semibold leading-none">{t("auth.register.title")}</h1>
+            <CardDescription>{t("auth.register.subtitle")}</CardDescription>
           </CardHeader>
           <form onSubmit={onSubmit} aria-describedby={error ? "register-error" : undefined}>
             <CardContent className="flex flex-col gap-4">
               <div className="grid gap-2">
-                <Label htmlFor="organization_name">Organization name</Label>
+                <Label htmlFor="organization_name">{t("auth.register.orgName")}</Label>
                 <Input
                   id="organization_name"
                   name="organization_name"
@@ -81,7 +81,7 @@ export default function RegisterPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="display_name">Your name (optional)</Label>
+                <Label htmlFor="display_name">{t("auth.register.displayName")}</Label>
                 <Input
                   id="display_name"
                   name="display_name"
@@ -92,7 +92,7 @@ export default function RegisterPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="email">Email</Label>
+                <Label htmlFor="email">{t("auth.field.email")}</Label>
                 <Input
                   id="email"
                   name="email"
@@ -107,7 +107,7 @@ export default function RegisterPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="password">Password</Label>
+                <Label htmlFor="password">{t("auth.field.password")}</Label>
                 <Input
                   id="password"
                   name="password"
@@ -127,12 +127,12 @@ export default function RegisterPage() {
             </CardContent>
             <CardFooter className="flex flex-col gap-4">
               <Button type="submit" className="w-full" disabled={submitting}>
-                {submitting ? "Creating…" : "Create organization"}
+                {submitting ? t("auth.register.submitting") : t("auth.register.submit")}
               </Button>
               <p className="text-center text-sm text-muted-foreground">
-                Already have an account?{" "}
+                {t("auth.register.loginPrompt")}{" "}
                 <Link to="/login" className="underline underline-offset-4">
-                  Sign in
+                  {t("auth.register.loginLink")}
                 </Link>
               </p>
             </CardFooter>

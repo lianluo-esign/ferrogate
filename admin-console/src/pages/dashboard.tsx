@@ -21,34 +21,28 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type ProviderHealthCheck = AdminSchema<"ProviderHealthCheck">;
 type RequestLog = AdminSchema<"RequestLog">;
 type UsageReport = AdminSchema<"AdminUsageReportRow">;
 
-const NUMBER_FORMAT = new Intl.NumberFormat();
-const COST_FORMAT = new Intl.NumberFormat(undefined, {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 4,
-});
-const TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+// Compact absolute timestamp used for "Updated …" chrome and the request table.
+const TIMESTAMP_OPTIONS: Intl.DateTimeFormatOptions = {
   month: "short",
   day: "numeric",
   hour: "2-digit",
   minute: "2-digit",
   second: "2-digit",
-});
+};
 
-function formatUpdatedAt(updatedAt: number): string {
-  return updatedAt > 0 ? `Updated ${TIME_FORMAT.format(updatedAt)}` : "Waiting for data";
-}
-
-function formatUnix(timestamp?: number | null): string {
-  return timestamp ? TIME_FORMAT.format(timestamp * 1000) : "-";
-}
+// USD cost is displayed with up to four fraction digits so sub-cent rollups
+// stay visible; localized via the shared currency formatter (#348).
+const COST_OPTIONS: Intl.NumberFormatOptions = {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 4,
+};
 
 function providerIsHealthy(provider: ProviderHealthCheck): boolean {
   return (
@@ -70,17 +64,19 @@ function QueryState({
   empty,
   loadingLabel,
   emptyLabel,
+  errorLabel,
 }: {
   error: unknown;
   isLoading: boolean;
   empty: boolean;
   loadingLabel: string;
   emptyLabel: string;
+  errorLabel: string;
 }) {
   if (error) {
     return (
       <p role="alert" className="text-sm text-destructive">
-        Unable to load: {(error as Error).message}
+        {errorLabel}
       </p>
     );
   }
@@ -125,13 +121,13 @@ function Metric({
 function SectionHeader({
   title,
   description,
-  updatedAt,
+  updatedLabel,
   href,
   linkLabel,
 }: {
   title: string;
   description: string;
-  updatedAt: number;
+  updatedLabel: string;
   href: string;
   linkLabel: string;
 }) {
@@ -142,7 +138,7 @@ function SectionHeader({
         <p className="text-xs text-muted-foreground">{description}</p>
       </div>
       <div className="flex items-center justify-between gap-4 sm:justify-end">
-        <span className="text-xs text-muted-foreground">{formatUpdatedAt(updatedAt)}</span>
+        <span className="text-xs text-muted-foreground">{updatedLabel}</span>
         <Link
           to={href}
           className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
@@ -156,8 +152,17 @@ function SectionHeader({
 }
 
 export default function DashboardPage() {
+  const { t, format } = useI18n();
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
+
+  const formatUnix = (timestamp?: number | null): string =>
+    timestamp ? format.date(timestamp * 1000, TIMESTAMP_OPTIONS) : "-";
+
+  const formatUpdatedAt = (updatedAt: number): string =>
+    updatedAt > 0
+      ? t("dashboard.updatedAt", { time: format.date(updatedAt, TIMESTAMP_OPTIONS) })
+      : t("dashboard.waitingForData");
 
   const statusQuery = useQuery({
     queryKey: ["dashboard", "status"],
@@ -208,39 +213,59 @@ export default function DashboardPage() {
     statusQuery.error
       ? {
           key: "status-error",
-          label: "Gateway readiness is unknown because the status check failed.",
+          label: t("dashboard.alert.statusError"),
           href: "/app/ops/status",
         }
       : status && !clusterReady
         ? {
             key: "cluster",
-            label: `Gateway is not ready: ${status.cluster.readiness_reason}.`,
+            label: t("dashboard.alert.clusterNotReady", {
+              reason: status.cluster.readiness_reason,
+            }),
             href: "/app/ops/status",
           }
         : null,
     providersQuery.error
       ? {
           key: "providers-error",
-          label: `Provider health is unavailable: ${(providersQuery.error as Error).message}.`,
+          label: t("dashboard.alert.providersError", {
+            message: (providersQuery.error as Error).message,
+          }),
           href: "/app/ops/provider-health",
         }
       : unhealthyProviders.length > 0
         ? {
             key: "providers",
-            label: `${unhealthyProviders.length} provider${unhealthyProviders.length === 1 ? "" : "s"} need attention.`,
+            label: format.plural(unhealthyProviders.length, {
+              one: t("dashboard.alert.providersUnhealthy.one", {
+                count: unhealthyProviders.length,
+              }),
+              other: t("dashboard.alert.providersUnhealthy.other", {
+                count: unhealthyProviders.length,
+              }),
+            }),
             href: "/app/ops/provider-health",
           }
         : null,
     approvalsQuery.error
       ? {
           key: "approvals-error",
-          label: `Pending approvals could not be checked: ${(approvalsQuery.error as Error).message}.`,
+          label: t("dashboard.alert.approvalsError", {
+            message: (approvalsQuery.error as Error).message,
+          }),
           href: "/app/tool-approvals",
         }
       : pendingApprovals.length > 0
         ? {
             key: "approvals",
-            label: `${pendingApprovals.length} tool approval${pendingApprovals.length === 1 ? "" : "s"} waiting for review.`,
+            label: format.plural(pendingApprovals.length, {
+              one: t("dashboard.alert.approvalsPending.one", {
+                count: pendingApprovals.length,
+              }),
+              other: t("dashboard.alert.approvalsPending.other", {
+                count: pendingApprovals.length,
+              }),
+            }),
             href: "/app/tool-approvals",
           }
         : null,
@@ -250,9 +275,9 @@ export default function DashboardPage() {
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-lg font-semibold">Operations overview</h1>
+          <h1 className="text-lg font-semibold">{t("dashboard.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            Live gateway posture and operator actions for {session?.tenant.name}.
+            {t("dashboard.subtitle", { name: session?.tenant.name ?? "" })}
           </p>
         </div>
         <Badge variant="outline" className="w-fit font-normal">
@@ -264,10 +289,10 @@ export default function DashboardPage() {
         <div className="flex items-center justify-between border-b pb-3">
           <div>
             <h2 id="gateway-posture-heading" className="text-sm font-semibold">
-              Gateway posture
+              {t("dashboard.posture.title")}
             </h2>
             <p className="text-xs text-muted-foreground">
-              Independent live checks; unknown data is never treated as healthy.
+              {t("dashboard.posture.description")}
             </p>
           </div>
           <span className="hidden text-xs text-muted-foreground sm:block">
@@ -277,37 +302,37 @@ export default function DashboardPage() {
         <dl className="grid grid-cols-2 gap-px border-b sm:grid-cols-3 lg:grid-cols-5 [&>*:last-child]:col-span-2 lg:[&>*:last-child]:col-span-1">
           <Metric
             icon={clusterReady ? <CheckCircle2 className="size-4" /> : <AlertTriangle className="size-4" />}
-            label="Gateway state"
-            value={statusQuery.isLoading ? "Checking" : statusQuery.error ? "Unknown" : clusterReady ? "Ready" : "Attention"}
-            detail={status ? `Snapshot ${status.snapshot}` : "Status endpoint"}
+            label={t("dashboard.metric.gatewayState")}
+            value={statusQuery.isLoading ? t("common.checking") : statusQuery.error ? t("common.unknown") : clusterReady ? t("dashboard.state.ready") : t("dashboard.state.attention")}
+            detail={status ? t("dashboard.metric.snapshot", { snapshot: status.snapshot }) : t("dashboard.metric.statusEndpoint")}
             tone={!statusQuery.isLoading && (!clusterReady || Boolean(statusQuery.error)) ? "danger" : "default"}
           />
           <Metric
             icon={<Server className="size-4" />}
-            label="Provider health"
-            value={providersQuery.isLoading ? "Checking" : providersQuery.error ? "Unknown" : `${enabledProviders.length - unhealthyProviders.length} / ${enabledProviders.length}`}
-            detail="healthy / enabled"
+            label={t("dashboard.metric.providerHealth")}
+            value={providersQuery.isLoading ? t("common.checking") : providersQuery.error ? t("common.unknown") : `${format.number(enabledProviders.length - unhealthyProviders.length)} / ${format.number(enabledProviders.length)}`}
+            detail={t("dashboard.metric.healthyEnabled")}
             tone={providersQuery.error || unhealthyProviders.length > 0 ? "danger" : "default"}
           />
           <Metric
             icon={<ShieldAlert className="size-4" />}
-            label="Pending approvals"
-            value={approvalsQuery.isLoading ? "Checking" : approvalsQuery.error ? "Unknown" : NUMBER_FORMAT.format(pendingApprovals.length)}
-            detail="human review required"
+            label={t("dashboard.metric.pendingApprovals")}
+            value={approvalsQuery.isLoading ? t("common.checking") : approvalsQuery.error ? t("common.unknown") : format.number(pendingApprovals.length)}
+            detail={t("dashboard.metric.humanReview")}
             tone={approvalsQuery.error || pendingApprovals.length > 0 ? "danger" : "default"}
           />
           <Metric
             icon={<Activity className="size-4" />}
-            label="Recent requests"
-            value={requestsQuery.isLoading ? "Checking" : requestsQuery.error ? "Unknown" : NUMBER_FORMAT.format(requestsQuery.data?.total ?? requests.length)}
-            detail={requestsQuery.error ? "Request logs unavailable" : `${failedRequests.length} failures in latest ${requests.length}`}
+            label={t("dashboard.metric.recentRequests")}
+            value={requestsQuery.isLoading ? t("common.checking") : requestsQuery.error ? t("common.unknown") : format.number(requestsQuery.data?.total ?? requests.length)}
+            detail={requestsQuery.error ? t("dashboard.metric.requestsUnavailable") : t("dashboard.metric.failuresInLatest", { failures: failedRequests.length, count: requests.length })}
             tone={requestsQuery.error || failedRequests.length > 0 ? "danger" : "default"}
           />
           <Metric
             icon={<DollarSign className="size-4" />}
-            label="Latest cost"
-            value={usageQuery.isLoading ? "Checking" : usageQuery.error ? "Unknown" : usage ? COST_FORMAT.format(usage.cost_usd) : "No data"}
-            detail={usage?.period_month ?? "Usage report"}
+            label={t("dashboard.metric.latestCost")}
+            value={usageQuery.isLoading ? t("common.checking") : usageQuery.error ? t("common.unknown") : usage ? format.currency(usage.cost_usd, "USD", COST_OPTIONS) : t("common.noData")}
+            detail={usage?.period_month ?? t("dashboard.metric.usageReport")}
             tone={usageQuery.error ? "danger" : "default"}
           />
         </dl>
@@ -316,17 +341,17 @@ export default function DashboardPage() {
       <section aria-labelledby="attention-heading">
         <div className="mb-3 flex items-center justify-between">
           <h2 id="attention-heading" className="text-sm font-semibold">
-            Needs attention
+            {t("dashboard.attention.title")}
           </h2>
           <span className="text-xs tabular-nums text-muted-foreground">
-            {attentionItems.length} active
+            {t("dashboard.attention.active", { count: format.number(attentionItems.length) })}
           </span>
         </div>
         <div className="divide-y rounded-md border">
           {attentionItems.length === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-sm">
               <CheckCircle2 className="size-4 text-emerald-600" aria-hidden="true" />
-              No active gateway, provider, or approval alerts.
+              {t("dashboard.attention.empty")}
             </div>
           ) : (
             attentionItems.map((item) => (
@@ -349,20 +374,20 @@ export default function DashboardPage() {
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(18rem,1fr)]">
         <section aria-labelledby="recent-requests-heading" className="min-w-0">
           <SectionHeader
-            title="Recent requests"
-            description="Latest retained gateway traffic and failures."
-            updatedAt={requestsQuery.dataUpdatedAt}
+            title={t("dashboard.requests.title")}
+            description={t("dashboard.requests.description")}
+            updatedLabel={formatUpdatedAt(requestsQuery.dataUpdatedAt)}
             href="/app/request-logs"
-            linkLabel="View logs"
+            linkLabel={t("dashboard.requests.viewLogs")}
           />
           <div className="mt-3 overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Request</TableHead>
-                  <TableHead>Provider / model</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Started</TableHead>
+                  <TableHead>{t("dashboard.requests.colRequest")}</TableHead>
+                  <TableHead>{t("dashboard.requests.colProviderModel")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
+                  <TableHead>{t("dashboard.requests.colStarted")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -373,8 +398,15 @@ export default function DashboardPage() {
                         error={requestsQuery.error}
                         isLoading={requestsQuery.isLoading}
                         empty={requests.length === 0}
-                        loadingLabel="Loading recent requests…"
-                        emptyLabel="No retained requests yet."
+                        loadingLabel={t("dashboard.requests.loading")}
+                        emptyLabel={t("dashboard.requests.empty")}
+                        errorLabel={
+                          requestsQuery.error
+                            ? t("common.unableToLoad", {
+                                message: (requestsQuery.error as Error).message,
+                              })
+                            : ""
+                        }
                       />
                     </TableCell>
                   </TableRow>
@@ -389,12 +421,12 @@ export default function DashboardPage() {
                       <TableCell>
                         <span className="block text-sm">{request.provider ?? "-"}</span>
                         <span className="block max-w-44 truncate text-xs text-muted-foreground" title={request.logical_model ?? undefined}>
-                          {request.logical_model ?? "unmapped model"}
+                          {request.logical_model ?? t("dashboard.requests.unmappedModel")}
                         </span>
                       </TableCell>
                       <TableCell>
                         <Badge variant={(request.status_code ?? 0) >= 400 ? "destructive" : "secondary"}>
-                          {request.status_code ?? "pending"}
+                          {request.status_code ?? t("common.pending")}
                         </Badge>
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -410,45 +442,52 @@ export default function DashboardPage() {
 
         <section aria-labelledby="usage-heading">
           <SectionHeader
-            title="Usage and cost"
-            description="Latest tenant-preferred usage rollup."
-            updatedAt={usageQuery.dataUpdatedAt}
+            title={t("dashboard.usage.title")}
+            description={t("dashboard.usage.description")}
+            updatedLabel={formatUpdatedAt(usageQuery.dataUpdatedAt)}
             href="/app/usage-reports"
-            linkLabel="View reports"
+            linkLabel={t("dashboard.usage.viewReports")}
           />
           <div className="mt-3">
             <QueryState
               error={usageQuery.error}
               isLoading={usageQuery.isLoading}
               empty={!usage}
-              loadingLabel="Loading usage report…"
-              emptyLabel="No usage report is available yet."
+              loadingLabel={t("dashboard.usage.loading")}
+              emptyLabel={t("dashboard.usage.empty")}
+              errorLabel={
+                usageQuery.error
+                  ? t("common.unableToLoad", {
+                      message: (usageQuery.error as Error).message,
+                    })
+                  : ""
+              }
             />
             {usage ? (
               <dl className="divide-y rounded-md border px-3">
                 <div className="flex items-center justify-between gap-4 py-3">
                   <dt className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <DollarSign className="size-4" aria-hidden="true" /> Cost
+                    <DollarSign className="size-4" aria-hidden="true" /> {t("dashboard.usage.cost")}
                   </dt>
-                  <dd className="font-semibold tabular-nums">{COST_FORMAT.format(usage.cost_usd)}</dd>
+                  <dd className="font-semibold tabular-nums">{format.currency(usage.cost_usd, "USD", COST_OPTIONS)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-3">
-                  <dt className="text-sm text-muted-foreground">Requests</dt>
-                  <dd className="tabular-nums">{NUMBER_FORMAT.format(usage.request_count)}</dd>
+                  <dt className="text-sm text-muted-foreground">{t("dashboard.usage.requests")}</dt>
+                  <dd className="tabular-nums">{format.number(usage.request_count)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-3">
-                  <dt className="text-sm text-muted-foreground">Tokens</dt>
-                  <dd className="tabular-nums">{NUMBER_FORMAT.format(usage.total_tokens)}</dd>
+                  <dt className="text-sm text-muted-foreground">{t("dashboard.usage.tokens")}</dt>
+                  <dd className="tabular-nums">{format.tokens(usage.total_tokens)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-3">
-                  <dt className="text-sm text-muted-foreground">Errors</dt>
-                  <dd className="tabular-nums">{NUMBER_FORMAT.format(usage.error_count)}</dd>
+                  <dt className="text-sm text-muted-foreground">{t("dashboard.usage.errors")}</dt>
+                  <dd className="tabular-nums">{format.number(usage.error_count)}</dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-3 text-xs text-muted-foreground">
                   <dt className="flex items-center gap-2">
-                    <Clock3 className="size-3.5" aria-hidden="true" /> Period
+                    <Clock3 className="size-3.5" aria-hidden="true" /> {t("dashboard.usage.period")}
                   </dt>
-                  <dd>{usage.period_month ?? "Latest"}</dd>
+                  <dd>{usage.period_month ?? t("dashboard.usage.latest")}</dd>
                 </div>
               </dl>
             ) : null}
