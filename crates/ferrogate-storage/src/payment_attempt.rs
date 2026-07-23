@@ -92,6 +92,18 @@ pub fn payment_attempt_state_is_terminal(state: &str) -> bool {
     )
 }
 
+/// The pre-submission states a TTL sweep may expire (release the hold), and
+/// exactly the states `X402SettlementLoop::expire_if_due` acts on (#354). A
+/// `submitted` attempt is deliberately excluded: after proof submission a
+/// timed-out attempt is ambiguous, its stablecoin may already have moved
+/// on-chain, so releasing its hold could spend without charging the wallet --
+/// that case is `outcome_unknown` (hold retained), never a sweep release. The
+/// terminal states hold no live money to reclaim. Keep in lockstep with the
+/// `release_payment_attempt` allowed-from set and the loop's `pre_submission`
+/// check.
+pub const PAYMENT_ATTEMPT_EXPIRABLE_STATES: &[&str] =
+    &[PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED];
+
 // ---------------------------------------------------------------------------
 // Record
 // ---------------------------------------------------------------------------
@@ -218,6 +230,21 @@ const PAYMENT_ATTEMPT_COLUMNS: &str =
      policy_revision, decision, reason_code, hold_id, state, generation, submitted_at_unix, \
      transaction_signature, settled_atomic_amount, settlement_response, failure_code, \
      created_at_unix, updated_at_unix";
+
+/// The shared [`PAYMENT_ATTEMPT_COLUMNS`] list, each column table-qualified
+/// with `alias`. Needed only where `payment_attempts` is JOINed against
+/// `wallet_reservations` (whose `id`/`tenant_id`/`created_at_unix`/
+/// `updated_at_unix` collide), so the positional [`payment_attempt_from_row`]
+/// indices still line up. The const is a single spaced line at compile time
+/// (the source `\` line-continuations swallow the newlines), so a plain
+/// comma-split + trim yields clean column names.
+fn qualified_payment_attempt_columns(alias: &str) -> String {
+    PAYMENT_ATTEMPT_COLUMNS
+        .split(',')
+        .map(|column| format!("{alias}.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn payment_attempt_from_row(row: &PostgresRow) -> StoredPaymentAttempt {
     StoredPaymentAttempt {
@@ -679,6 +706,51 @@ impl PostgresControlPlaneStore {
             settlement,
         }))
     }
+
+    /// TTL sweep read (#354): a bounded, indexed batch of attempts still in a
+    /// pre-submission [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`] state whose live
+    /// (`active`) wallet hold expired at or before `due_at_or_before_unix`.
+    /// Never scans the whole table: `LIMIT` caps the batch and the JOIN filters
+    /// to only holds that are still live and past due. A `submitted`/terminal
+    /// attempt, or one whose hold is already `settled`/`released`, is excluded
+    /// so the sweeper can never release a hold whose money may have moved.
+    /// Ordered oldest-due first for deterministic, drainable paging.
+    pub(super) async fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        let operation = self.payment_attempt_operation("list expirable due payment attempts");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let columns = qualified_payment_attempt_columns("pa");
+        let expirable: Vec<&str> = PAYMENT_ATTEMPT_EXPIRABLE_STATES.to_vec();
+        let rows = transaction
+            .query(
+                &format!(
+                    "SELECT {columns} FROM payment_attempts pa \
+                     JOIN wallet_reservations wr ON wr.id = pa.hold_id \
+                     WHERE pa.state = ANY($1) AND wr.status = 'active' \
+                       AND wr.expires_at_unix <= $2 \
+                     ORDER BY wr.expires_at_unix ASC, pa.id ASC \
+                     LIMIT $3"
+                ),
+                &[&expirable, &due_at_or_before_unix, &limit],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(payment_attempt_from_row).collect())
+    }
 }
 
 impl RuntimeControlPlaneState {
@@ -766,6 +838,34 @@ impl RuntimeControlPlaneState {
             reservation,
             settlement,
         })
+    }
+
+    /// Memory twin of the Postgres TTL sweep read (#354). Same predicate
+    /// (pre-submission state + live hold past due), same oldest-due-first order
+    /// and `limit` cap, so a bounded batch drains identically across backends.
+    pub fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Vec<StoredPaymentAttempt> {
+        let mut due: Vec<(i64, StoredPaymentAttempt)> = self
+            .payment_attempts
+            .list()
+            .into_iter()
+            .filter(|attempt| PAYMENT_ATTEMPT_EXPIRABLE_STATES.contains(&attempt.state.as_str()))
+            .filter_map(|attempt| {
+                let hold_id = attempt.hold_id.as_deref()?;
+                let reservation = self.wallet_reservations.get(hold_id)?;
+                (reservation.status == super::wallet::WALLET_RESERVATION_ACTIVE
+                    && reservation.expires_at_unix <= due_at_or_before_unix)
+                    .then_some((reservation.expires_at_unix, attempt))
+            })
+            .collect();
+        due.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        due.into_iter()
+            .take(limit)
+            .map(|(_, attempt)| attempt)
+            .collect()
     }
 }
 
@@ -939,6 +1039,30 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_payment_attempt_links(id, tenant_id).await
+            }
+        }
+    }
+
+    /// Bounded TTL sweep read (#354): up to `limit` attempts still in a
+    /// pre-submission expirable state whose live wallet hold expired at or
+    /// before `due_at_or_before_unix`, oldest-due first. The runtime sweeper
+    /// feeds each id back through `X402SettlementLoop::expire_if_due`, which
+    /// re-reads and re-checks under a fresh transaction, so a candidate that
+    /// raced into `submitted` between this read and the release is still safe.
+    pub async fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+                .list_expirable_due_payment_attempts(due_at_or_before_unix, limit)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_expirable_due_payment_attempts(due_at_or_before_unix, limit as i64)
+                    .await
             }
         }
     }

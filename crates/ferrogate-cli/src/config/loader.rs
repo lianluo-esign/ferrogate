@@ -239,6 +239,7 @@ impl Config {
             asset_bucket: crate::config::AssetBucketConfig::default(),
             scheduler: crate::config::SchedulerConfig::default(),
             asset_lifecycle: crate::config::AssetLifecycleConfig::default(),
+            x402_sweeper: crate::config::X402SweeperConfig::default(),
             asset_egress_price_per_gb: None,
         }
     }

@@ -6707,6 +6707,12 @@ mod state_x402_settlement;
 #[path = "state_x402_negotiation.rs"]
 mod state_x402_negotiation;
 
+// #354: background TTL sweeper that drives the settlement loop's `expire_if_due`
+// release edge on a schedule so an overdue pre-submission attempt's wallet hold
+// is reclaimed instead of stranded forever.
+#[path = "state_x402_sweeper.rs"]
+mod state_x402_sweeper;
+
 #[path = "state_quota_and_policy.rs"]
 mod state_quota_and_policy;
 

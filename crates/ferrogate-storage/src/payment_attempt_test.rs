@@ -19,9 +19,9 @@ use crate::{
     payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptEvidenceArgs,
     PaymentAttemptTransition, RuntimeStorageRepositories, StorageError, StorageProviderKind,
     StoredPaymentAttempt, StoredWallet, WalletReservationResult, PAYMENT_ATTEMPT_AUTHORIZED,
-    PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
-    PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED,
-    WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_SETTLED,
+    PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED, PAYMENT_ATTEMPT_FAILED,
+    PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED,
+    PAYMENT_ATTEMPT_SUBMITTED, WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_SETTLED,
 };
 
 fn memory_repositories() -> RuntimeStorageRepositories {
@@ -387,6 +387,89 @@ fn pre_submission_release_is_valid_but_post_submission_release_is_rejected() {
         block_on(repositories.submit_payment_attempt("nope", no_evidence(), 1)),
         Err(StorageError::NotFound(_))
     ));
+}
+
+#[test]
+fn list_expirable_due_returns_only_due_pre_submission_active_holds() {
+    // #354 TTL sweep read: only pre-submission (authorized/challenged) attempts
+    // whose live (`active`) hold expired at or before the cutoff, oldest-due
+    // first, bounded by the limit. A submitted attempt (money may have moved),
+    // a settled attempt (hold captured, not active), and a not-yet-due hold are
+    // all excluded -- the money-safety filter at the read layer.
+    let repositories = repositories_with_wallet("tenant-a", 100_000);
+    for (hold, expires_at) in [
+        ("h-due", 1_000),
+        ("h-ch", 500),
+        ("h-notdue", 5_000),
+        ("h-sub", 800),
+        ("h-settled", 900),
+    ] {
+        block_on(repositories.reserve_wallet_credits(hold, "tenant-a", 250, expires_at, 1))
+            .unwrap();
+    }
+
+    // authorized + past-due  -> due
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "due",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("h-due"),
+    )))
+    .unwrap();
+    // challenged + past-due  -> due (expirable includes challenged)
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "ch",
+        "tenant-a",
+        PAYMENT_ATTEMPT_CHALLENGED,
+        Some("h-ch"),
+    )))
+    .unwrap();
+    // authorized but hold not yet due -> excluded
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "notdue",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("h-notdue"),
+    )))
+    .unwrap();
+    // submitted (hold still active + past due) -> excluded by the state filter:
+    // its stablecoin may have moved on-chain, so its hold must never be swept.
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "sub",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("h-sub"),
+    )))
+    .unwrap();
+    block_on(repositories.submit_payment_attempt("sub", no_evidence(), 2)).unwrap();
+    // settled -> reservation captured (not active) -> excluded
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "settled",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("h-settled"),
+    )))
+    .unwrap();
+    block_on(repositories.submit_payment_attempt("settled", no_evidence(), 2)).unwrap();
+    block_on(repositories.settle_wallet_reservation("h-settled", 3)).unwrap();
+    block_on(repositories.settle_payment_attempt("settled", no_evidence(), 3)).unwrap();
+
+    // Cutoff 2000: h-ch(500), h-sub(800), h-settled(900), h-due(1000) elapsed;
+    // h-notdue(5000) has not. Only the pre-submission, active-hold rows survive,
+    // ordered oldest-due first.
+    let due = block_on(repositories.list_expirable_due_payment_attempts(2_000, 100)).unwrap();
+    let ids: Vec<&str> = due.iter().map(|attempt| attempt.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["ch", "due"],
+        "only due pre-submission active holds"
+    );
+
+    // Bounded: a limit of 1 yields only the single oldest-due candidate, so the
+    // sweeper pages instead of scanning the whole table.
+    let one = block_on(repositories.list_expirable_due_payment_attempts(2_000, 1)).unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].id, "ch");
 }
 
 #[test]

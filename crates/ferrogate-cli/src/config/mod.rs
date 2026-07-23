@@ -43,5 +43,5 @@ pub(crate) use self::types::{
     PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, SchedulerConfig,
     ShadowRoute, SkillPackage, SkillPackageCapability, SkillPackageCapabilityKind,
     SkillPackageCompatibility, SkillPackageResources, StorageConfig, StorageMigrationMode,
-    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream, X402SweeperConfig,
 };

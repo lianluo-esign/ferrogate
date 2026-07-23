@@ -94,6 +94,10 @@ pub(crate) struct Config {
     /// #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     #[serde(default)]
     pub(crate) asset_lifecycle: AssetLifecycleConfig,
+    /// #354: background TTL sweeper that releases the wallet hold of an overdue
+    /// pre-submission x402 payment attempt.
+    #[serde(default)]
+    pub(crate) x402_sweeper: X402SweeperConfig,
     /// #262: asset-egress (download bandwidth) rate in USD per GB used to
     /// settle per-download metering events. `None` (the default) leaves
     /// egress metered + audited but unpriced (cost_usd = None, no wallet
@@ -258,6 +262,61 @@ impl Default for AssetLifecycleConfig {
             default_audit_event_max_age_secs: None,
             default_response_body_max_age_secs: None,
             max_log_deletes_per_tick: default_asset_lifecycle_max_log_deletes(),
+        }
+    }
+}
+
+/// Background TTL sweeper for overdue x402 payment attempts (issue #354). Each
+/// managed paid-egress attempt reserves a wallet hold with a TTL (`hold_ttl_secs`
+/// at open time); `X402SettlementLoop::expire_if_due` already knows how to
+/// release a *pre-submission* hold once its TTL elapses, but nothing drove it on
+/// a schedule, so an attempt that was authorized/challenged but never finalized
+/// kept its hold forever. This sweeper fills that gap: on each tick it fetches a
+/// bounded batch of due, pre-submission attempts and drives `expire_if_due` for
+/// each. `enabled = false` (the default) is a complete no-op -- the tick loop is
+/// always spawned (like the billing outbox / scheduler / asset-lifecycle
+/// sweepers) and `sweep_x402_expired_attempts_once` re-reads `state.current()`,
+/// so enabling it via `/admin/v1/config/reload` needs no restart. It is
+/// money-safe by construction: it only ever touches pre-submission holds, and it
+/// re-drives the loop's idempotent release edge (never a bespoke transition), so
+/// a `submitted` attempt whose stablecoin may have moved on-chain is never
+/// released.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct X402SweeperConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Seconds between due-attempt scans. Default 30s -- holds are minute-scale,
+    /// and expiry is housekeeping, not a hot path.
+    #[serde(default = "default_x402_sweeper_tick_interval_secs")]
+    pub(crate) tick_interval_secs: u64,
+    /// Upper bound on attempts expired per tick, so one pass can never issue an
+    /// unbounded number of releases / table scan. Default 100.
+    #[serde(default = "default_x402_sweeper_max_expiries_per_tick")]
+    pub(crate) max_expiries_per_tick: usize,
+    /// Extra grace (seconds) added to a hold's TTL before the sweeper considers
+    /// it due: an attempt is swept only once `hold_expires_at + grace <= now`.
+    /// A defensive delay so the sweeper never races a hold that only just
+    /// elapsed while an in-flight finalize is still landing. Default 0 (expire
+    /// exactly at the hold's own TTL, matching `expire_if_due`).
+    #[serde(default)]
+    pub(crate) hold_ttl_grace_secs: i64,
+}
+
+fn default_x402_sweeper_tick_interval_secs() -> u64 {
+    30
+}
+
+fn default_x402_sweeper_max_expiries_per_tick() -> usize {
+    100
+}
+
+impl Default for X402SweeperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval_secs: default_x402_sweeper_tick_interval_secs(),
+            max_expiries_per_tick: default_x402_sweeper_max_expiries_per_tick(),
+            hold_ttl_grace_secs: 0,
         }
     }
 }
@@ -2457,6 +2516,7 @@ impl Default for Config {
             asset_bucket: AssetBucketConfig::default(),
             scheduler: SchedulerConfig::default(),
             asset_lifecycle: AssetLifecycleConfig::default(),
+            x402_sweeper: X402SweeperConfig::default(),
             asset_egress_price_per_gb: None,
         }
     }

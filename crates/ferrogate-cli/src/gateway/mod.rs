@@ -230,6 +230,8 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _agent_schedule_sweeper = start_agent_schedule_sweeper(&state);
     // #263: asset lifecycle sweeper (version retention + unreferenced-blob GC).
     let _asset_lifecycle_sweeper = start_asset_lifecycle_sweeper(&state);
+    // #354: TTL sweeper reclaiming overdue pre-submission x402 payment holds.
+    let _x402_ttl_sweeper = start_x402_ttl_sweeper(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -559,6 +561,63 @@ fn start_asset_lifecycle_sweeper(state: &SharedAppState) -> AssetLifecycleSweepe
         }
     });
     AssetLifecycleSweeperHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// Background loop that reclaims overdue pre-submission x402 payment holds by
+/// driving the settlement loop's `expire_if_due` release edge on a schedule
+/// (issue #354).
+struct X402TtlSweeperHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for X402TtlSweeperHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Always spawns the x402 TTL tick loop, unconditionally, exactly like the
+/// billing outbox / scheduler / asset-lifecycle sweepers (issue #144):
+/// `sweep_x402_expired_attempts_once` re-reads `state.current()` and no-ops when
+/// `x402_sweeper.enabled = false`, so enabling it later via the admin hot
+/// config-reload path starts reclaiming holds on the next tick with no restart.
+/// The tick interval is re-read each iteration so a reload of
+/// `x402_sweeper.tick_interval_secs` also takes effect live. The release edge is
+/// idempotent and only ever touches pre-submission holds, so this loop is
+/// money-safe to run on every gateway instance concurrently. Wall-clock time is
+/// supplied here (the sweep method takes an injected `now_unix` so tests can
+/// drive expiry deterministically without timing sleeps).
+fn start_x402_ttl_sweeper(state: &SharedAppState) -> X402TtlSweeperHandle {
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            let current = state.current();
+            let tick_secs = current
+                .config
+                .x402_sweeper
+                .tick_interval_secs
+                .clamp(1, 3_600);
+            thread::sleep(Duration::from_secs(tick_secs));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or_default();
+            block_on_sync_bridge(state.current().sweep_x402_expired_attempts_once(now_unix));
+        }
+    });
+    X402TtlSweeperHandle {
         stop,
         handle: Some(handle),
     }
