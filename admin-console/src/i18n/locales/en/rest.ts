@@ -658,6 +658,29 @@ export const enRest = {
   "page.staticSites.download.failed": "Failed to download {file}: {message}",
   "page.staticSites.serveUrl.open": "Open serve URL",
   "page.staticSites.serveUrl.newTabHint": "(opens in a new tab)",
+  // Version history + truthful channel-move rollback (gateway #397). The
+  // `serving` channel resolves what serve-mode returns, so a rollback re-points
+  // the served bytes rather than acking an inert write (#188).
+  "page.staticSites.history.title": "Version history",
+  "page.staticSites.history.description":
+    "Retained bundle versions. The version the serving channel points at is what visitors receive now; roll back to re-point it to a prior bundle.",
+  "page.staticSites.history.empty":
+    "No retained bundle versions yet. Republish this site to retain versioned bundles you can roll back to.",
+  "page.staticSites.history.unavailable": "Version history is unavailable.",
+  "page.staticSites.history.active": "Active",
+  "page.staticSites.history.yanked": "Yanked",
+  "page.staticSites.history.servedNow": "Served now",
+  "page.staticSites.rollback.action": "Roll back",
+  "page.staticSites.rollback.title": "Roll back to version {version}?",
+  "page.staticSites.rollback.body":
+    "Moves the serving channel of {site} to bundle version {version}. What {site} serves changes to that bundle immediately, and the current active version stops being served. Retained bundles are not deleted, so you can roll forward again.",
+  "page.staticSites.rollback.confirm": "Roll back",
+  "page.staticSites.rollback.success": "Rolled back {site} to version {version}",
+  "page.staticSites.rollback.notFound":
+    "Version {version} no longer exists, so nothing was changed.",
+  "page.staticSites.rollback.unresolvable":
+    "Version {version} could not be resolved (it may have been yanked or removed); the served bundle is unchanged.",
+  "page.staticSites.rollback.failed": "Roll back failed: {message}",
   // Unpublish — name-typed destructive removal, distinct from a republish.
   "page.staticSites.unpublish.action": "Unpublish",
   "page.staticSites.unpublish.title": "Unpublish {site}?",

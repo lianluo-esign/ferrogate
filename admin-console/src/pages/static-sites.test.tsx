@@ -92,6 +92,17 @@ function mockBase(options: {
     http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
       HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
     ),
+    // Default asset registry manifest read (the drawer's version history reads
+    // it on open); version-history tests override with a populated manifest.
+    http.get(gatewayUrl("/v1/assets/static_site/:site/manifest"), ({ params }) =>
+      HttpResponse.json({
+        object: "asset_manifest",
+        asset_type: "static_site",
+        name: params.site as string,
+        channels: [],
+        versions: [],
+      }),
+    ),
   );
 }
 
@@ -101,6 +112,47 @@ function mockManifest(site: string, body: SiteManifestBody) {
       HttpResponse.json(body),
     ),
   );
+}
+
+interface RegistryChannel {
+  channel: string;
+  version: string;
+  updated_at_unix: number;
+}
+interface RegistryVersion {
+  version: string;
+  yanked: boolean;
+  variants: never[];
+}
+
+/** Mocks the asset registry manifest (channels + versions) the drawer reads for
+ * version history. `channels`/`versions` mirror gateway #397's keying. */
+function mockRegistry(
+  site: string,
+  channels: RegistryChannel[],
+  versions: RegistryVersion[],
+) {
+  server.use(
+    http.get(gatewayUrl(`/v1/assets/static_site/${site}/manifest`), () =>
+      HttpResponse.json({
+        object: "asset_manifest",
+        asset_type: "static_site",
+        name: site,
+        channels,
+        versions,
+      }),
+    ),
+  );
+}
+
+/** A retained #397 bundle version: the bare `{version}` manifest row plus a
+ * companion `__site_file__:{version}:index.html` file row (the structural mark
+ * that distinguishes a real bundle version from a legacy path-keyed file row). */
+function bundleVersions(...versions: { version: string; yanked?: boolean }[]): RegistryVersion[] {
+  return versions.flatMap(({ version, yanked = false }) => [
+    { version, yanked, variants: [] },
+    { version: `__site_file__:${version}:index.html`, yanked: false, variants: [] },
+  ]);
 }
 
 beforeEach(() => {
@@ -608,6 +660,258 @@ describe("StaticSitesPage upload progress", () => {
       await waitFor(() => expect(screen.getByLabelText("Site")).toHaveValue(""));
     } finally {
       vi.stubGlobal("XMLHttpRequest", original);
+    }
+  });
+});
+
+/** Two retained bundle version rows for `marketing`, dated so the newest (the
+ * served one) sorts first, plus the reserved manifest marker row the listing
+ * also carries. */
+function marketingAssets(): AssetSummary[] {
+  return [
+    { ...siteAsset("marketing", "2.1.0"), created_at_unix: 1_700_000_200 },
+    { ...siteAsset("marketing", "2.0.0"), created_at_unix: 1_700_000_100 },
+    { ...siteAsset("marketing", "__site_manifest__"), created_at_unix: 1_700_000_200 },
+  ];
+}
+
+async function openHistoryDrawer(
+  user: ReturnType<typeof userEvent.setup>,
+  moreDetails: string,
+) {
+  const row = await screen.findByTestId("static-site-marketing");
+  await within(row).findByText("2.1.0");
+  await user.click(within(row).getByRole("button", { name: moreDetails }));
+  return screen.findByRole("dialog");
+}
+
+describe("StaticSitesPage version history", () => {
+  it("lists retained bundle versions, marking the served (active) one + publish times", async () => {
+    mockBase({ assets: marketingAssets(), domains: [] });
+    mockManifest("marketing", manifest());
+    // The `serving` channel points at 2.1.0; 2.0.0 is a retained prior bundle.
+    mockRegistry(
+      "marketing",
+      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
+      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
+
+    expect(
+      within(drawer).getByText(en["page.staticSites.history.title"]),
+    ).toBeInTheDocument();
+
+    // Both retained bundle versions render as history rows.
+    const activeRow = within(drawer).getByTestId("static-site-version-2.1.0");
+    const priorRow = within(drawer).getByTestId("static-site-version-2.0.0");
+    // The served version carries the Active badge; the prior version does not.
+    expect(
+      within(activeRow).getByText(en["page.staticSites.history.active"]),
+    ).toBeInTheDocument();
+    expect(
+      within(priorRow).queryByText(en["page.staticSites.history.active"]),
+    ).toBeNull();
+    // Only the non-active version offers a rollback button.
+    expect(
+      within(priorRow).getByRole("button", {
+        name: en["page.staticSites.rollback.action"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(activeRow).queryByRole("button", {
+        name: en["page.staticSites.rollback.action"],
+      }),
+    ).toBeNull();
+  });
+
+  it("excludes reserved + legacy-only versions from the bundle history", async () => {
+    mockBase({ assets: marketingAssets(), domains: [] });
+    mockManifest("marketing", manifest());
+    // Registry with: one real #397 bundle (2.1.0, has __site_file__ companion),
+    // the reserved manifest marker, and a LEGACY bare file row `index.html`
+    // (no companion) — only 2.1.0 is a real rollback target.
+    mockRegistry(
+      "marketing",
+      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
+      [
+        ...bundleVersions({ version: "2.1.0" }),
+        { version: "__site_manifest__", yanked: false, variants: [] },
+        { version: "index.html", yanked: false, variants: [] },
+      ],
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
+
+    expect(
+      within(drawer).getByTestId("static-site-version-2.1.0"),
+    ).toBeInTheDocument();
+    // Neither the reserved marker nor the legacy bare file path is a bundle row.
+    expect(
+      within(drawer).queryByTestId("static-site-version-__site_manifest__"),
+    ).toBeNull();
+    expect(
+      within(drawer).queryByTestId("static-site-version-index.html"),
+    ).toBeNull();
+  });
+
+  it("renders version history in Simplified Chinese", async () => {
+    mockBase({ assets: marketingAssets(), domains: [] });
+    mockManifest("marketing", manifest());
+    mockRegistry(
+      "marketing",
+      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
+      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
+    const drawer = await openHistoryDrawer(user, zhCN["resource.table.moreDetails"]);
+
+    expect(
+      within(drawer).getByText(zhCN["page.staticSites.history.title"]),
+    ).toBeInTheDocument();
+    const activeRow = within(drawer).getByTestId("static-site-version-2.1.0");
+    expect(
+      within(activeRow).getByText(zhCN["page.staticSites.history.active"]),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("StaticSitesPage rollback", () => {
+  it("moves the serving channel to the selected version behind a confirm, then refreshes", async () => {
+    mockBase({ assets: marketingAssets(), domains: [] });
+    mockManifest("marketing", manifest());
+    let registryReads = 0;
+    let channelUrl: string | null = null;
+    let channelMethod: string | null = null;
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/manifest"), () => {
+        registryReads += 1;
+        return HttpResponse.json({
+          object: "asset_manifest",
+          asset_type: "static_site",
+          name: "marketing",
+          channels: [
+            { channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 },
+          ],
+          versions: bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
+        });
+      }),
+      http.put(
+        gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
+        ({ request }) => {
+          channelUrl = request.url;
+          channelMethod = request.method;
+          return HttpResponse.json({
+            object: "asset_channel",
+            asset_type: "static_site",
+            name: "marketing",
+            channel: { channel: "serving", version: "2.0.0", updated_at_unix: 3000 },
+          });
+        },
+      ),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
+
+      await waitFor(() => expect(registryReads).toBeGreaterThanOrEqual(1));
+      const readsBefore = registryReads;
+
+      // Arm rollback on the prior version.
+      const priorRow = within(drawer).getByTestId("static-site-version-2.0.0");
+      await user.click(
+        within(priorRow).getByRole("button", {
+          name: en["page.staticSites.rollback.action"],
+        }),
+      );
+
+      // The confirm dialog names the exact target version + consequence.
+      const confirmDialog = (
+        await screen.findByText(
+          en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"),
+        )
+      ).closest("[role='dialog']") as HTMLElement;
+      await user.click(
+        within(confirmDialog).getByRole("button", {
+          name: en["page.staticSites.rollback.confirm"],
+        }),
+      );
+
+      // A PUT moved the `serving` channel to 2.0.0 via the version= query.
+      await waitFor(() => expect(channelUrl).not.toBeNull());
+      expect(channelMethod).toBe("PUT");
+      const url = new URL(channelUrl!);
+      expect(url.pathname).toBe("/v1/assets/static_site/marketing/channels/serving");
+      expect(url.searchParams.get("version")).toBe("2.0.0");
+      // Success toast + a re-read of the registry (the served version changed).
+      await waitFor(() => expect(successToast).toHaveBeenCalled());
+      await waitFor(() => expect(registryReads).toBeGreaterThan(readsBefore));
+    } finally {
+      successToast.mockRestore();
+    }
+  });
+
+  it("maps a 409 unresolvable target to a localized message, leaving serving unchanged", async () => {
+    mockBase({ assets: marketingAssets(), domains: [] });
+    mockManifest("marketing", manifest());
+    mockRegistry(
+      "marketing",
+      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
+      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
+    );
+    server.use(
+      http.put(
+        gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                type: "ferrogate_error",
+                code: "asset_channel_unresolvable",
+                message: "target version could not be resolved",
+                request_id: "req-9",
+              },
+            },
+            { status: 409 },
+          ),
+      ),
+    );
+    const errorToast = vi.spyOn(toast, "error");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
+
+      const priorRow = within(drawer).getByTestId("static-site-version-2.0.0");
+      await user.click(
+        within(priorRow).getByRole("button", {
+          name: en["page.staticSites.rollback.action"],
+        }),
+      );
+      const confirmDialog = (
+        await screen.findByText(
+          en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"),
+        )
+      ).closest("[role='dialog']") as HTMLElement;
+      await user.click(
+        within(confirmDialog).getByRole("button", {
+          name: en["page.staticSites.rollback.confirm"],
+        }),
+      );
+
+      // The 409 maps to the localized unresolvable message naming the version.
+      await waitFor(() => expect(errorToast).toHaveBeenCalled());
+      const message = errorToast.mock.calls[0][0] as string;
+      expect(message).toBe(
+        en["page.staticSites.rollback.unresolvable"].replace("{version}", "2.0.0"),
+      );
+    } finally {
+      errorToast.mockRestore();
     }
   });
 });

@@ -28,21 +28,26 @@
 // publish time; it is the authoritative source for a site's serving policy and
 // its file tree.
 //
-// This slice (#345) adds the remaining deferred affordances that the runtime
+// This slice (#345) adds the remaining static-site affordances the runtime now
 // actually backs: (a) per-file DOWNLOAD of any published file (a plain asset GET
-// of that file's path-keyed object), and (b) an outbound OPEN-SERVE-URL link.
+// of that file's path-keyed object), (b) an outbound OPEN-SERVE-URL link, and
+// (c) per-bundle version HISTORY + a truthful channel-move ROLLBACK.
 //
-// NOTE — per-bundle version HISTORY + channel-move ROLLBACK were also requested
-// but are intentionally NOT built here, because the static-site runtime does not
-// back them (verified against gateway `sites.rs`, not assumed from the generic
-// asset model): publishing a bundle overwrites each file object in place under a
-// PATH-keyed `version` and rewrites the single `__site_manifest__` row, so NO
-// prior bundle is retained to roll back to; and serve-mode resolves purely
-// through that manifest — it never consults an asset CHANNEL. A channel-move on
-// a static_site would therefore return 200 yet change nothing that is served
-// (the #188 "write succeeds, runtime ignores it" failure mode). Real history/
-// rollback needs gateway support (retain prior bundles + make serve resolve
-// through a pointer); tracked as a follow-up rather than faked in the UI.
+// History/rollback are real (not inert) as of gateway #397: a publish now
+// RETAINS each bundle under its immutable `{bundle_version}` and serve-mode
+// resolves the ACTIVE bundle through the well-known `serving` asset channel
+// (SITE_SERVE_CHANNEL) — the same channel a publish moves via the
+// `move_asset_channel_if_resolvable` CAS. So moving `serving` to a prior
+// retained version genuinely re-points what `/sites/{tenant}/{site}/…` serves
+// (write-path == read-path, the #188 guard). The drawer lists retained bundle
+// versions from the asset registry manifest, marks the one the `serving`
+// channel currently points at (the served version), and rolls back by PUT-ing
+// that channel to a selected prior version behind a consequence-named confirm.
+// Under #397 each bundle's files are keyed `__site_file__:{version}:{path}` and
+// the bundle manifest at the bare `{version}`, so a bare version is a real
+// rollback target only when it has companion `__site_file__:{version}:…` rows —
+// that structural check keeps legacy path-keyed file rows (pre-#397, whose
+// `version` IS a bare file path) out of the history list.
 import { useMemo, useRef, useState } from "react";
 import {
   useMutation,
@@ -99,16 +104,73 @@ import {
   type AdminSchema,
   gatewayGet,
   gatewayGetBinary,
+  gatewayPut,
 } from "@/lib/gateway-client";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
+type AssetSummary = AdminSchema<"AssetSummary">;
+type AssetManifest = AdminSchema<"AssetManifest">;
+type AssetChannelMutationResponse = AdminSchema<"AssetChannelMutationResponse">;
 
 /** Reserved manifest `version` the gateway writes per site (mirrors
  * SITE_MANIFEST_VERSION in the gateway's sites.rs). A real bundle file path
  * never collides with it. */
 const SITE_MANIFEST_VERSION = "__site_manifest__";
 const STATIC_SITE_TYPE = "static_site";
+
+/** `version`-key prefix under which gateway #397 stores each per-file object of
+ * a RETAINED bundle: `__site_file__:{bundle_version}:{path}`. A bare version is
+ * a genuine rollback target only when it has companion rows under this prefix,
+ * which is how we tell a real bundle version from a legacy path-keyed file row.
+ * Mirrors SITE_FILE_VERSION_PREFIX in the gateway's sites.rs. */
+const SITE_FILE_VERSION_PREFIX = "__site_file__";
+
+/** Well-known asset channel whose target is the ACTIVE (served) bundle version
+ * (gateway #397 `SITE_SERVE_CHANNEL`). Serve-mode resolves the bundle through
+ * this channel, so PUT-ing it to a prior retained version genuinely re-points
+ * what is served — the truthful rollback (write-path == read-path, #188). */
+const SITE_SERVE_CHANNEL = "serving";
+
+/** True for the reserved `version` keys the gateway writes for a static site
+ * (the mutable manifest marker and the per-file bundle objects), so history
+ * lists only real bundle versions. */
+function isReservedSiteVersion(version: string): boolean {
+  return (
+    version === SITE_MANIFEST_VERSION ||
+    version.startsWith(`${SITE_FILE_VERSION_PREFIX}:`)
+  );
+}
+
+/** The set of bundle versions that have retained per-file objects, extracted
+ * from the registry's `__site_file__:{version}:{path}` rows. Only these bare
+ * versions are real #397 rollback targets; a legacy pre-#397 file row (whose
+ * `version` IS a bare file path like `index.html`) has no such companion and is
+ * therefore excluded. */
+function retainedBundleVersions(manifest: AssetManifest): Set<string> {
+  const bundles = new Set<string>();
+  const prefix = `${SITE_FILE_VERSION_PREFIX}:`;
+  for (const entry of manifest.versions) {
+    if (!entry.version.startsWith(prefix)) continue;
+    // `__site_file__:{version}:{path}` — the version ends at the first colon
+    // after the prefix (bundle versions carry no colon, same as the gateway).
+    const rest = entry.version.slice(prefix.length);
+    const boundary = rest.indexOf(":");
+    if (boundary > 0) bundles.add(rest.slice(0, boundary));
+  }
+  return bundles;
+}
+
+/** One retained bundle version, joined for the history table. */
+interface BundleVersionRow {
+  version: string;
+  yanked: boolean;
+  /** Publish time (unix seconds) of the bundle manifest row, when the asset
+   * listing carries it; `undefined` if the row has not loaded yet. */
+  publishedAtUnix: number | undefined;
+  /** True when the `serving` channel currently points at this version. */
+  active: boolean;
+}
 
 /** Client-side fast-feedback ceiling on the compressed upload. The gateway's
  * MAX_ASSET_BYTES (and the 64 MiB unpacked zip-bomb guard) remain the real,
@@ -158,6 +220,9 @@ interface SiteRow {
   manifestError: Error | undefined;
   domains: SiteDomain[];
   serveUrl: string;
+  /** Every `static_site` asset row for this site from the tenant listing, used
+   * to date each retained bundle version in the history table. */
+  assetVersions: AssetSummary[];
 }
 
 const ASSETS_QUERY_KEY = ["assets"] as const;
@@ -190,6 +255,36 @@ function shortHash(hash: string): string {
  * publish/unpublish addressing in this module. */
 function siteFilePath(site: string, filePath: string): string {
   return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/${encodeURIComponent(filePath)}`;
+}
+
+/** PUT target that moves the `serving` channel of `site` to `version`. Kept as a
+ * manually-encoded string (not the typed `params` client) so it lines up with
+ * the asset-object addressing the rest of this module uses, and mirrors the
+ * channel-move URL the Assets page issues (`.../channels/{channel}?version=`).
+ * Moving this channel is the truthful rollback: serve-mode resolves the active
+ * bundle through it, so the served bytes actually change (#397 / #188). */
+function serveChannelPath(site: string, version: string): string {
+  return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/channels/${encodeURIComponent(SITE_SERVE_CHANNEL)}?version=${encodeURIComponent(version)}`;
+}
+
+/** Maps a rollback (channel-move) failure to a clear localized message. The
+ * gateway rejects an unresolvable target — a version that was yanked or removed
+ * out from under the move — with 404 (gone) or 409/400 (the CAS could not
+ * resolve it); those get specific, version-named copy so the operator knows the
+ * served bundle is unchanged. Anything else is surfaced verbatim. */
+function rollbackErrorMessage(
+  t: ReturnType<typeof useI18n>["t"],
+  error: unknown,
+  version: string,
+): string {
+  if (error instanceof ApiError) {
+    if (error.status === 404)
+      return t("page.staticSites.rollback.notFound", { version });
+    if (error.status === 409 || error.status === 400)
+      return t("page.staticSites.rollback.unresolvable", { version });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return t("page.staticSites.rollback.failed", { message });
 }
 
 /** Absolute, browser-openable serve URL for a site's stored relative serve path
@@ -270,9 +365,12 @@ function putBundleWithProgress<T>(
 
 /**
  * Per-site detail drawer: the published bundle's file tree straight from the
- * manifest (path, content type, content hash, size), plus the destructive
- * Unpublish trigger. The manifest is already loaded by the list's parallel
- * reads, so opening the drawer is a pure render — no extra round trip.
+ * manifest (path, content type, content hash, size), the retained bundle
+ * VERSION HISTORY (with a truthful channel-move rollback), plus the destructive
+ * Unpublish trigger. The site manifest is already loaded by the list's parallel
+ * reads; the version history additionally reads the asset REGISTRY manifest
+ * (channels + versions) on open, so it knows which version the `serving`
+ * channel points at and which retained bundles exist to roll back to.
  */
 function SiteDetailSheet({
   row,
@@ -286,6 +384,7 @@ function SiteDetailSheet({
   onUnpublish: () => void;
 }) {
   const { t, format } = useI18n();
+  const queryClient = useQueryClient();
   const manifest = row?.manifest;
   const files = useMemo(
     () =>
@@ -298,6 +397,96 @@ function SiteDetailSheet({
   // Which file's asset GET is in flight, so exactly that row's button shows a
   // busy state (concurrent downloads of different files stay independent).
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  // The prior version the operator has selected to roll back to, awaiting its
+  // consequence-named confirmation; null when no rollback is armed.
+  const [rollbackVersion, setRollbackVersion] = useState<string | null>(null);
+
+  // Asset REGISTRY manifest (channels + versions) for this site — the
+  // authoritative source for which version the `serving` channel serves and
+  // which retained bundles exist. Read only while the drawer is open.
+  const registryQueryKey = ["static-site-registry", row?.name] as const;
+  const {
+    data: registry,
+    isLoading: registryLoading,
+    error: registryError,
+  } = useQuery({
+    queryKey: registryQueryKey,
+    enabled: row !== null,
+    queryFn: () =>
+      adminGet(apiKey, "/v1/assets/{asset_type}/{name}/manifest", {
+        params: { asset_type: STATIC_SITE_TYPE, name: row!.name },
+      }),
+  });
+
+  // Publish time per bundle version, from the tenant asset listing rows.
+  const publishedAtByVersion = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const asset of row?.assetVersions ?? []) {
+      map.set(asset.version, asset.created_at_unix);
+    }
+    return map;
+  }, [row?.assetVersions]);
+
+  // Which version the `serving` channel resolves to right now (the served
+  // bundle). Undefined for a legacy site that has no `serving` channel yet.
+  const servingVersion = useMemo(
+    () =>
+      registry?.channels.find((channel) => channel.channel === SITE_SERVE_CHANNEL)
+        ?.version,
+    [registry],
+  );
+
+  // Retained bundle versions, newest first, each marked active/yanked/dated.
+  const bundleRows = useMemo<BundleVersionRow[]>(() => {
+    if (!registry) return [];
+    const retained = retainedBundleVersions(registry);
+    return registry.versions
+      .filter(
+        (entry) =>
+          !isReservedSiteVersion(entry.version) && retained.has(entry.version),
+      )
+      .map((entry) => ({
+        version: entry.version,
+        yanked: entry.yanked,
+        publishedAtUnix: publishedAtByVersion.get(entry.version),
+        active: entry.version === servingVersion,
+      }))
+      .sort((a, b) => {
+        // Newest publish first; fall back to a stable version comparison when a
+        // listing row has not dated a version yet.
+        if (a.publishedAtUnix !== undefined && b.publishedAtUnix !== undefined)
+          return b.publishedAtUnix - a.publishedAtUnix;
+        if (a.publishedAtUnix !== undefined) return -1;
+        if (b.publishedAtUnix !== undefined) return 1;
+        return b.version.localeCompare(a.version);
+      });
+  }, [registry, publishedAtByVersion, servingVersion]);
+
+  const rollbackMutation = useMutation({
+    // Rollback IS a channel move: PUT the `serving` channel to the chosen prior
+    // version. Serve-mode resolves the active bundle through that channel, so
+    // this genuinely re-points the served bytes (#397 / #188), not an inert ack.
+    mutationFn: (version: string) =>
+      gatewayPut<AssetChannelMutationResponse>(
+        apiKey,
+        serveChannelPath(row!.name, version),
+      ),
+    onSuccess: (_result, version) => {
+      toast.success(
+        t("page.staticSites.rollback.success", { site: row!.name, version }),
+      );
+      setRollbackVersion(null);
+      // The served version changed: refresh the registry (channel pointer) and
+      // the tenant asset listing so the drawer and list re-derive.
+      queryClient.invalidateQueries({ queryKey: registryQueryKey });
+      queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
+      queryClient.invalidateQueries({
+        queryKey: ["static-site-manifest", row!.name],
+      });
+    },
+    onError: (error: unknown, version) =>
+      toast.error(rollbackErrorMessage(t, error, version)),
+  });
 
   async function handleFileDownload(entry: SiteFileEntry) {
     if (!row) return;
@@ -437,6 +626,102 @@ function SiteDetailSheet({
               </section>
             )}
 
+            {/* Version history + truthful channel-move rollback. The `serving`
+              channel resolves what serve-mode returns, so rolling it back to a
+              retained prior version actually changes the served bytes (#397). */}
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-semibold">
+                {t("page.staticSites.history.title")}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                {t("page.staticSites.history.description")}
+              </p>
+              {registryError ? (
+                <p
+                  role="alert"
+                  className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                >
+                  {t("page.staticSites.history.unavailable")}
+                </p>
+              ) : registryLoading || !registry ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("resource.table.loading")}
+                </p>
+              ) : bundleRows.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("page.staticSites.history.empty")}
+                </p>
+              ) : (
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("page.assets.col.version")}</TableHead>
+                        <TableHead>{t("page.staticSites.col.published")}</TableHead>
+                        <TableHead>{t("page.staticSites.col.access")}</TableHead>
+                        <TableHead className="w-32">
+                          {t("resource.table.actionsColumn")}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {bundleRows.map((bundle) => (
+                        <TableRow
+                          key={bundle.version}
+                          data-testid={`static-site-version-${bundle.version}`}
+                        >
+                          <TableCell className="font-mono text-xs break-all">
+                            {bundle.version}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {bundle.publishedAtUnix !== undefined
+                              ? format.date(bundle.publishedAtUnix * 1000, {
+                                  dateStyle: "medium",
+                                  timeStyle: "short",
+                                })
+                              : "—"}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {bundle.active ? (
+                                <Badge variant="default">
+                                  {t("page.staticSites.history.active")}
+                                </Badge>
+                              ) : null}
+                              {bundle.yanked ? (
+                                <Badge variant="destructive">
+                                  {t("page.staticSites.history.yanked")}
+                                </Badge>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {bundle.active ? (
+                              <span className="text-xs text-muted-foreground">
+                                {t("page.staticSites.history.servedNow")}
+                              </span>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                // A yanked target is unresolvable, so the gateway
+                                // would reject the move; disarm it up front.
+                                disabled={bundle.yanked || rollbackMutation.isPending}
+                                onClick={() => setRollbackVersion(bundle.version)}
+                              >
+                                {t("page.staticSites.rollback.action")}
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </section>
+
             <SheetFooter className="mt-auto">
               <Button
                 type="button"
@@ -450,6 +735,52 @@ function SiteDetailSheet({
                 {t("common.close")}
               </Button>
             </SheetFooter>
+
+            {/* Rollback confirmation — names the exact target version and spells
+              out the consequence (the served bundle changes at once) before it
+              moves the `serving` channel. */}
+            <Dialog
+              open={rollbackVersion !== null}
+              onOpenChange={(next) => {
+                if (!next) setRollbackVersion(null);
+              }}
+            >
+              <DialogContent className="sm:max-w-lg">
+                {rollbackVersion !== null ? (
+                  <>
+                    <DialogHeader>
+                      <DialogTitle>
+                        {t("page.staticSites.rollback.title", {
+                          version: rollbackVersion,
+                        })}
+                      </DialogTitle>
+                      <DialogDescription>
+                        {t("page.staticSites.rollback.body", {
+                          site: row.name,
+                          version: rollbackVersion,
+                        })}
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setRollbackVersion(null)}
+                      >
+                        {t("common.cancel")}
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={() => rollbackMutation.mutate(rollbackVersion)}
+                        disabled={rollbackMutation.isPending}
+                      >
+                        {t("page.staticSites.rollback.confirm")}
+                      </Button>
+                    </DialogFooter>
+                  </>
+                ) : null}
+              </DialogContent>
+            </Dialog>
           </>
         ) : null}
       </SheetContent>
@@ -502,15 +833,26 @@ export default function StaticSitesPage() {
     queryFn: () => adminGet(apiKey, "/admin/v1/site-domains"),
   });
 
-  // Distinct site slugs = distinct `name` of the tenant's static_site assets.
-  const siteNames = useMemo(() => {
-    const rows = assetData?.data ?? [];
-    const names = new Set<string>();
-    for (const row of rows) {
-      if (row.asset_type === STATIC_SITE_TYPE) names.add(row.name);
+  // The tenant's static_site asset rows grouped by site slug. The keys are the
+  // distinct site names; the values date each retained bundle version for the
+  // detail drawer's version history (the flat listing carries created_at, which
+  // the registry manifest does not).
+  const assetVersionsBySite = useMemo(() => {
+    const map = new Map<string, AssetSummary[]>();
+    for (const row of assetData?.data ?? []) {
+      if (row.asset_type !== STATIC_SITE_TYPE) continue;
+      const bucket = map.get(row.name);
+      if (bucket) bucket.push(row);
+      else map.set(row.name, [row]);
     }
-    return [...names].sort((a, b) => a.localeCompare(b));
+    return map;
   }, [assetData]);
+
+  // Distinct site slugs = distinct `name` of the tenant's static_site assets.
+  const siteNames = useMemo(
+    () => [...assetVersionsBySite.keys()].sort((a, b) => a.localeCompare(b)),
+    [assetVersionsBySite],
+  );
 
   // One parallel manifest read per site (no waterfall): each carries the
   // authoritative serving policy the flat asset listing cannot express.
@@ -532,6 +874,10 @@ export default function StaticSitesPage() {
     return map;
   }, [domainData]);
 
+  // manifestQueries identity changes each render; depend on a derived status
+  // signature so rows only rebuild when a manifest read actually transitions.
+  const manifestStatusSignature = manifestQueries.map((q) => q.status).join(",");
+
   const rows = useMemo<SiteRow[]>(
     () =>
       siteNames.map((name, index) => {
@@ -548,12 +894,17 @@ export default function StaticSitesPage() {
           manifestError: query.error as Error | undefined,
           domains,
           serveUrl,
+          assetVersions: assetVersionsBySite.get(name) ?? [],
         };
       }),
-    // manifestQueries identity changes each render; depend on its data/status
-    // via a derived signature to avoid needless row rebuilds.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [siteNames, domainsBySite, tenantId, manifestQueries.map((q) => q.status).join(",")],
+    [
+      siteNames,
+      domainsBySite,
+      assetVersionsBySite,
+      tenantId,
+      manifestStatusSignature,
+    ],
   );
 
   const detailRow = detailSite

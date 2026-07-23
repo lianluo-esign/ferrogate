@@ -720,6 +720,27 @@ export const zhCN = {
   "page.staticSites.download.failed": "下载 {file} 失败：{message}",
   "page.staticSites.serveUrl.open": "打开服务 URL",
   "page.staticSites.serveUrl.newTabHint": "（在新标签页中打开）",
+  // 版本历史 + 真实的通道切换回滚（网关 #397）。serving 通道决定服务模式返回哪个
+  // 包，因此回滚会真正改变对外提供的字节，而非确认一次不生效的写入（#188）。
+  "page.staticSites.history.title": "版本历史",
+  "page.staticSites.history.description":
+    "已保留的包版本。serving 通道指向的版本就是访客当前获取的版本；回滚可将其重新指向先前的包。",
+  "page.staticSites.history.empty":
+    "尚无已保留的包版本。重新发布本站点以保留可回滚的带版本包。",
+  "page.staticSites.history.unavailable": "版本历史不可用。",
+  "page.staticSites.history.active": "当前生效",
+  "page.staticSites.history.yanked": "已撤回",
+  "page.staticSites.history.servedNow": "正在服务",
+  "page.staticSites.rollback.action": "回滚",
+  "page.staticSites.rollback.title": "回滚到版本 {version}？",
+  "page.staticSites.rollback.body":
+    "将 {site} 的 serving 通道移动到包版本 {version}。{site} 对外提供的内容会立即切换到该包，当前生效的版本将停止服务。已保留的包不会被删除，因此可以再次向前回滚。",
+  "page.staticSites.rollback.confirm": "回滚",
+  "page.staticSites.rollback.success": "已将 {site} 回滚到版本 {version}",
+  "page.staticSites.rollback.notFound": "版本 {version} 已不存在，未做任何更改。",
+  "page.staticSites.rollback.unresolvable":
+    "无法解析版本 {version}（可能已被撤回或删除）；对外服务的包未发生变化。",
+  "page.staticSites.rollback.failed": "回滚失败：{message}",
   // 取消发布——按名称输入确认的破坏性删除，区别于重新发布。
   "page.staticSites.unpublish.action": "取消发布",
   "page.staticSites.unpublish.title": "取消发布 {site}？",
