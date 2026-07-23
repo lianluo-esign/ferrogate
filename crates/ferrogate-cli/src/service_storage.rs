@@ -22,8 +22,55 @@ use ferrogate_storage::{
 pub(crate) struct SupabaseConnection<'a> {
     pub(crate) dsn: &'a str,
     pub(crate) tls_mode: &'a str,
+    /// Optional CA certificate path for TLS validation. Supabase's pooler chain
+    /// terminates in the self-signed Supabase Root 2021 CA, not a system root,
+    /// so `verify_ca`/`verify_full` can only complete the handshake when this
+    /// CA is supplied — mirroring the gateway's `postgres_tls_ca_cert_path`
+    /// (#382). `None`/empty leaves validation to the system trust store.
+    pub(crate) tls_ca_cert_path: Option<&'a str>,
     pub(crate) schema: Option<&'a str>,
     pub(crate) init_schema: bool,
+}
+
+/// Translate a [`SupabaseConnection`] into the durable [`PostgresStorageConfig`]
+/// the side services open. Split out from [`build_supabase_repositories`] so the
+/// arg/env → `SupabaseConnection` → `PostgresStorageConfig.tls_ca_cert_path`
+/// threading is unit-testable without a live Supabase pool (#382).
+pub(crate) fn build_supabase_storage_config(
+    connection: &SupabaseConnection<'_>,
+) -> anyhow::Result<PostgresStorageConfig> {
+    let dsn = connection.dsn.trim();
+    if dsn.is_empty() {
+        anyhow::bail!("supabase DSN must not be empty");
+    }
+    Ok(PostgresStorageConfig {
+        dsn: dsn.to_string(),
+        pool_size: 4,
+        // The first acquisition includes the full TCP/TLS handshake to a
+        // (often remote) Supabase pooler, which regularly exceeds 1s — a 1s
+        // deadline flaked auth/billing schema init against real Supabase
+        // before the first query ran (#255; same failure #250 fixed for the
+        // migration tool). Generous is correct here; statement_timeout_millis
+        // below still bounds each individual operation.
+        pool_acquire_timeout_millis: 30_000,
+        tls_mode: parse_postgres_tls_mode(connection.tls_mode)?,
+        // Thread the operator-supplied CA through, matching the gateway path
+        // (`storage.rs`/`state.rs`): trim and drop empties so a blank flag/env
+        // value is treated as absent rather than a bogus zero-length path.
+        tls_ca_cert_path: connection
+            .tls_ca_cert_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned),
+        connect_timeout_secs: 10,
+        statement_timeout_millis: 30_000,
+        schema: connection
+            .schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(ToOwned::to_owned),
+        search_path: Vec::new(),
+    })
 }
 
 /// Build a durable, Supabase-backed [`RuntimeStorageRepositories`] for a side
@@ -32,32 +79,8 @@ pub(crate) struct SupabaseConnection<'a> {
 pub(crate) fn build_supabase_repositories(
     connection: SupabaseConnection<'_>,
 ) -> anyhow::Result<RuntimeStorageRepositories> {
-    let dsn = connection.dsn.trim();
-    if dsn.is_empty() {
-        anyhow::bail!("supabase DSN must not be empty");
-    }
     RuntimeStorageRepositories::supabase(
-        PostgresStorageConfig {
-            dsn: dsn.to_string(),
-            pool_size: 4,
-            // The first acquisition includes the full TCP/TLS handshake to a
-            // (often remote) Supabase pooler, which regularly exceeds 1s — a 1s
-            // deadline flaked auth/billing schema init against real Supabase
-            // before the first query ran (#255; same failure #250 fixed for the
-            // migration tool). Generous is correct here; statement_timeout_millis
-            // below still bounds each individual operation.
-            pool_acquire_timeout_millis: 30_000,
-            tls_mode: parse_postgres_tls_mode(connection.tls_mode)?,
-            tls_ca_cert_path: None,
-            connect_timeout_secs: 10,
-            statement_timeout_millis: 30_000,
-            schema: connection
-                .schema
-                .map(str::trim)
-                .filter(|schema| !schema.is_empty())
-                .map(ToOwned::to_owned),
-            search_path: Vec::new(),
-        },
+        build_supabase_storage_config(&connection)?,
         RuntimeStorageOptions {
             provider_order: vec![StorageProviderKind::Supabase],
             required: true,
@@ -114,3 +137,7 @@ fn parse_postgres_tls_mode(value: &str) -> anyhow::Result<PostgresTlsMode> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "service_storage_test.rs"]
+mod tests;

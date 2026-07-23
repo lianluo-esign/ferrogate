@@ -72,6 +72,7 @@ fn main() -> AnyResult<()> {
                         Some(Arc::new(build_supabase_repositories(SupabaseConnection {
                             dsn,
                             tls_mode: &args.supabase_tls_mode,
+                            tls_ca_cert_path: args.supabase_tls_ca_cert_path.as_deref(),
                             schema: args.supabase_schema.as_deref(),
                             init_schema: args.supabase_init_schema,
                         })?))

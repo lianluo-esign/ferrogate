@@ -161,6 +161,14 @@ pub(crate) struct AuthServeArgs {
         default_value = "require"
     )]
     pub(crate) supabase_tls_mode: String,
+    /// Optional CA certificate path for Supabase/PostgreSQL TLS validation.
+    /// Required when `--supabase-tls-mode` is `verify_ca`/`verify_full` against
+    /// Supabase's pooler, whose chain terminates in the self-signed Supabase
+    /// Root 2021 CA rather than a system root (#382). Mirrors the gateway's
+    /// `storage.postgres_tls_ca_cert_path`; unset defers to the system trust
+    /// store.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_TLS_CA_CERT_PATH")]
+    pub(crate) supabase_tls_ca_cert_path: Option<String>,
     /// PostgreSQL schema holding the auth service's own tenant/RBAC tables.
     /// Dedicated by default so this service never shares a namespace with the
     /// gateway's own `ferrogate_control` schema or the billing service's
@@ -242,6 +250,14 @@ pub(crate) struct BillingServeArgs {
         default_value = "require"
     )]
     pub(crate) supabase_tls_mode: String,
+    /// Optional CA certificate path for Supabase/PostgreSQL TLS validation.
+    /// Required when `--supabase-tls-mode` is `verify_ca`/`verify_full` against
+    /// Supabase's pooler, whose chain terminates in the self-signed Supabase
+    /// Root 2021 CA rather than a system root (#382). Mirrors the gateway's
+    /// `storage.postgres_tls_ca_cert_path`; unset defers to the system trust
+    /// store.
+    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_TLS_CA_CERT_PATH")]
+    pub(crate) supabase_tls_ca_cert_path: Option<String>,
     /// PostgreSQL schema holding the billing service's own ledger/outbox
     /// tables. Dedicated by default so this service never shares a namespace
     /// with the gateway's own `ferrogate_control` schema or the auth
