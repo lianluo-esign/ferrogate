@@ -6701,6 +6701,12 @@ mod state_wallets;
 #[path = "state_x402_settlement.rs"]
 mod state_x402_settlement;
 
+// #381: 402-negotiation + single paid replay that activates the #354 settlement
+// loop from the paid-egress consumer path (challenge parse -> #351 policy ->
+// open/submit/finalize -> single replay).
+#[path = "state_x402_negotiation.rs"]
+mod state_x402_negotiation;
+
 #[path = "state_quota_and_policy.rs"]
 mod state_quota_and_policy;
 

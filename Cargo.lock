@@ -1196,6 +1196,7 @@ dependencies = [
  "ferrogate-guardrails",
  "ferrogate-mcp",
  "ferrogate-observability",
+ "ferrogate-payments",
  "ferrogate-policy",
  "ferrogate-providers",
  "ferrogate-routing",

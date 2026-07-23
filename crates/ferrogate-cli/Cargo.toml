@@ -40,6 +40,7 @@ ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }
 ferrogate-mcp = { path = "../ferrogate-mcp" }
 ferrogate-observability = { path = "../ferrogate-observability" }
+ferrogate-payments = { path = "../ferrogate-payments" }
 ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-routing = { path = "../ferrogate-routing" }
