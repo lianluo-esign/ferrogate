@@ -1428,6 +1428,29 @@ pub(crate) struct AssetSummary {
     pub(crate) updated_at_unix: i64,
 }
 
+/// One WITHHELD asset row for the operator-only inspection surface (issue #379,
+/// follow-up to #366). Carries the ordinary [`AssetSummary`] metadata plus the
+/// two things an operator needs to triage an asset consumers can never see: the
+/// durable `visibility` state (`pending_scan` = deferred async scan not yet run;
+/// `quarantined` = the scanner flagged it or a fail-closed-unavailable policy
+/// withheld it), and the `screening_evidence` recorded at push/commit time --
+/// the scan/signature/approval verdict + verification manifest from #366's push
+/// screening. `screening_evidence` is `None` when the originating push audit
+/// event is no longer retained (best-effort correlation, never fabricated).
+#[derive(Debug, Serialize)]
+pub(crate) struct WithheldAssetSummary {
+    #[serde(flatten)]
+    pub(crate) asset: AssetSummary,
+    /// The durable trust-screening state on the asset row: `pending_scan` or
+    /// `quarantined`. A `visible` asset is never listed here.
+    pub(crate) visibility: &'static str,
+    /// The screening evidence detail (scan outcome, signature status,
+    /// cross-tenant approval state, verification manifest) captured on the
+    /// asset's push/commit audit event. `None` when that audit row is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) screening_evidence: Option<String>,
+}
+
 /// Authoritative tenant-level asset storage usage and the effective upload
 /// limits applied by the gateway. Usage comes from the configured repository,
 /// not from summing a client-side page of asset summaries.

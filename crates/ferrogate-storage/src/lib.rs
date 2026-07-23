@@ -4094,6 +4094,61 @@ impl PostgresControlPlaneStore {
         Ok(rows.iter().map(asset_from_row).collect())
     }
 
+    /// The withheld-asset inverse of [`Self::list_assets`] (issue #379). Filters
+    /// server-side to the non-`visible` (`pending_scan`/`quarantined`) rows so
+    /// the still-unproven bytes an operator needs to inspect are the only thing
+    /// shipped over the wire, and orders identically to the ordinary listing so
+    /// the caller's offset/limit pagination is stable across both surfaces.
+    async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        let operation = self.asset_operation("list withheld assets");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239) so this
+        // control-plane query resolves its table in the configured schema, not
+        // the connection default (`public` on stock Supabase roles).
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = match asset_type {
+            Some(asset_type) => transaction
+                .query(
+                    "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                         content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                         storage_uri, variant, yanked, visibility \
+                         FROM stored_assets \
+                         WHERE tenant_id = $1 AND asset_type = $2 AND visibility <> 'visible' \
+                         ORDER BY name ASC, version ASC, variant ASC",
+                    &[&tenant_id, &asset_type],
+                )
+                .await
+                .map_err(postgres_error)?,
+            None => transaction
+                .query(
+                    "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                         content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                         storage_uri, variant, yanked, visibility \
+                         FROM stored_assets \
+                         WHERE tenant_id = $1 AND visibility <> 'visible' \
+                         ORDER BY asset_type ASC, name ASC, version ASC, variant ASC",
+                    &[&tenant_id],
+                )
+                .await
+                .map_err(postgres_error)?,
+        };
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(asset_from_row).collect())
+    }
+
     /// Keep tenant storage accounting on a metadata-only projection. Loading
     /// `content` here would deserialize every inline BYTEA merely to add its
     /// already-recorded size, turning quota checks and operator summaries into
@@ -10604,6 +10659,42 @@ impl RuntimeControlPlaneState {
             .collect()
     }
 
+    /// The operator-only inverse of [`Self::list_assets`] (issue #379, follow-up
+    /// to #366): return exactly the rows the ordinary list/manifest/resolution
+    /// path WITHHOLDS -- every non-`Visible` (`pending_scan`/`quarantined`) asset
+    /// for the tenant -- so an operator can inspect and act on assets that
+    /// consumers can never see. Ordering is deterministic (asset_type, name,
+    /// version) so the caller's offset/limit pagination is stable, mirroring the
+    /// Postgres `ORDER BY` on the same columns.
+    pub fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Vec<StoredAsset> {
+        let mut rows: Vec<StoredAsset> = self
+            .assets
+            .list()
+            .into_iter()
+            .filter(|asset| asset.tenant_id == tenant_id)
+            .filter(|asset| match asset_type {
+                Some(wanted) => asset.asset_type == wanted,
+                None => true,
+            })
+            // #366/#379: only the withheld states. `is_downloadable()` is the
+            // exact predicate the read path uses to hide these, so this inverse
+            // view can never disagree with what consumers are denied.
+            .filter(|asset| !asset.is_downloadable())
+            .collect();
+        rows.sort_by(|left, right| {
+            left.asset_type
+                .cmp(&right.asset_type)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.version.cmp(&right.version))
+                .then_with(|| left.variant.cmp(&right.variant))
+        });
+        rows
+    }
+
     pub fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> u64 {
         self.assets
             .records
@@ -13994,6 +14085,30 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Operator-only listing of WITHHELD assets (issue #379): every non-`visible`
+    /// (`pending_scan`/`quarantined`) row for the tenant, ordered deterministically
+    /// so offset/limit pagination is stable. This is the inverse of the consumer
+    /// [`Self::list_assets`], which hides exactly these rows (#366). Both backends
+    /// filter on the same `is_downloadable()`/`visibility <> 'visible'` predicate
+    /// so the operator view can never disagree with what the read path withholds.
+    pub async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_withheld_assets(tenant_id, asset_type))
+                .map_err(|_| poisoned_asset_repository_lock()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane
+                    .list_withheld_assets(tenant_id, asset_type)
+                    .await
+            }
+        }
+    }
+
     /// Authoritative tenant storage usage without loading stored object bytes.
     pub async fn tenant_asset_storage_bytes_used(
         &self,
@@ -16471,6 +16586,10 @@ mod asset_visibility_test;
 #[cfg(test)]
 #[path = "asset_visibility_promotion_test.rs"]
 mod asset_visibility_promotion_test;
+
+#[cfg(test)]
+#[path = "asset_withheld_listing_test.rs"]
+mod asset_withheld_listing_test;
 
 #[cfg(test)]
 #[path = "payment_attempt_test.rs"]

@@ -9386,6 +9386,103 @@
         }
       }
     },
+    "/v1/assets/withheld": {
+      "get": {
+        "operationId": "listWithheldAssets",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "List withheld (pending_scan/quarantined) assets for operators.",
+        "description": "Operator-only inverse of GET /v1/assets: returns the assets the ordinary list/manifest/resolution paths hide from consumers (issue #366), each row carrying its durable visibility state and the screening evidence (scan/signature/approval + verification manifest) recorded at push/commit time. Read-only; use POST /v1/assets/{asset_type}/{name}/{version}/visibility to promote or quarantine. Tenant-scoped and paginated.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.read"
+          },
+          "rbac_action": null
+        },
+        "parameters": [
+          {
+            "name": "asset_type",
+            "in": "query",
+            "required": false,
+            "description": "Optional asset family filter (cli_tool, mcp_manifest, skill_bundle, static_site, config_file, or a custom family).",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive match against asset id, name, version, asset_type, or visibility.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List withheld (pending_scan/quarantined) assets for operators.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "const": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WithheldAssetSummary"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "object",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/v1/assets/{asset_type}": {
       "get": {
         "operationId": "listAssetsByType",
@@ -24010,6 +24107,76 @@
           "storage_backed",
           "created_at_unix",
           "updated_at_unix"
+        ]
+      },
+      "WithheldAssetSummary": {
+        "type": "object",
+        "description": "One withheld (pending_scan/quarantined) asset for the operator-only inspection surface (issue #379). Carries the ordinary AssetSummary metadata plus the durable visibility state and the screening evidence recorded at push/commit time (#366).",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Lowercase SHA-256 digest of the exact stored bytes.",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Authoritative stored byte count."
+          },
+          "storage_backed": {
+            "type": "boolean",
+            "description": "True for private bucket storage. Internal storage_uri, bucket endpoint, and credentials are not serialized."
+          },
+          "created_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "pending_scan",
+              "quarantined"
+            ],
+            "description": "Durable trust-screening state on the asset row. A visible asset is never listed here."
+          },
+          "screening_evidence": {
+            "type": "string",
+            "description": "Screening evidence detail (scan outcome, signature status, cross-tenant approval state, verification manifest) captured on the asset's push/commit audit event. Omitted when that audit row is no longer retained."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "asset_type",
+          "name",
+          "version",
+          "content_type",
+          "content_hash",
+          "size_bytes",
+          "storage_backed",
+          "created_at_unix",
+          "updated_at_unix",
+          "visibility"
         ]
       },
       "AssetMutationResponse": {

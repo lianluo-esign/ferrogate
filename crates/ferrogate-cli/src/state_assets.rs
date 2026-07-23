@@ -89,6 +89,22 @@ impl AppState {
         Ok(self.repositories.list_assets(tenant_id, asset_type).await?)
     }
 
+    /// Operator-only listing of the tenant's WITHHELD (`pending_scan`/
+    /// `quarantined`) assets (issue #379). The consumer [`Self::list_assets`]
+    /// path deliberately hides these (#366); this is the inverse view the
+    /// operator surface reads. Filtering happens in storage so only the withheld
+    /// rows are loaded.
+    pub(crate) async fn list_withheld_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> anyhow::Result<Vec<StoredAsset>> {
+        Ok(self
+            .repositories
+            .list_withheld_assets(tenant_id, asset_type)
+            .await?)
+    }
+
     /// Unconditionally upsert a channel pointer, bypassing the #367 resolvability
     /// guard. Test-only: fixtures use it to pin a version (including deliberately
     /// dangling states) that production code can only reach through the atomic

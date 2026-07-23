@@ -21,6 +21,7 @@ use ferrogate_storage::{
     VariantDeleteOutcome, VersionYankOutcome,
 };
 
+use super::admin_list_query::{list_response, matches_search, query_value};
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -34,7 +35,7 @@ use crate::{
         AssetChannelMutationResponse, AssetChannelSummary, AssetManifest, AssetManifestVariant,
         AssetManifestVersion, AssetMutationResponse, AssetPresignedUploadConstraints,
         AssetStorageSummary, AssetSummary, AssetVisibilityPromotionRequest,
-        AssetVisibilityPromotionResponse,
+        AssetVisibilityPromotionResponse, WithheldAssetSummary,
     },
 };
 
@@ -124,6 +125,18 @@ impl FerroGateway {
                     method_not_allowed(session, ctx, "/v1/assets/storage/summary supports GET")
                         .await
                 }
+            },
+            // Operator-only inverse listing (#379): the WITHHELD (pending_scan/
+            // quarantined) assets the ordinary list/manifest/resolution paths
+            // hide (#366). Matched as a reserved literal BEFORE the generic
+            // `[asset_type]` arm so `withheld` can never be treated as an asset
+            // family, mirroring how `storage/summary` is reserved above.
+            ["withheld"] => match *method {
+                Method::GET => {
+                    self.handle_withheld_asset_list(session, ctx, headers, query)
+                        .await
+                }
+                _ => method_not_allowed(session, ctx, "/v1/assets/withheld supports GET").await,
             },
             [asset_type] => match *method {
                 Method::GET => {
@@ -304,6 +317,121 @@ impl FerroGateway {
             }
             Err(error) => storage_unavailable(session, ctx, error.to_string()).await,
         }
+    }
+
+    /// Operator-only inverse of [`Self::handle_asset_list`] (issue #379,
+    /// follow-up to #366): list the WITHHELD (`pending_scan`/`quarantined`)
+    /// assets that the ordinary list/manifest/resolution paths deliberately hide
+    /// from consumers, each row carrying its durable `visibility` state and the
+    /// screening evidence (scan/signature/approval + verification manifest)
+    /// recorded on its push/commit audit event at #366 push time. Read-only --
+    /// the promote/quarantine ACTION is the separate #378 endpoint. Tenant-scoped
+    /// and paginated (search/offset/limit) via the shared admin-list helpers, and
+    /// gated on the same `assets.read` scope as the other admin asset reads.
+    async fn handle_withheld_asset_list(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let Some(tenant_id) = auth.organization_id.clone() else {
+            return tenant_required(session, ctx).await;
+        };
+
+        // Optional `?asset_type=` narrows the operator's view to one family; the
+        // storage read filters to non-`visible` rows server-side either way.
+        let asset_type_filter = query_value(query, "asset_type");
+        let withheld = match state
+            .list_withheld_assets(&tenant_id, asset_type_filter.as_deref())
+            .await
+        {
+            Ok(withheld) => withheld,
+            Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
+        };
+
+        // Correlate each withheld row with the screening evidence recorded on its
+        // push/commit audit event (#366): action `asset.push`, outcome
+        // `committed`, target = asset id, same tenant. The audit `message` is the
+        // durable scan/signature/approval verdict + verification manifest. This
+        // is a best-effort correlation -- `None` when that audit row is no longer
+        // retained -- never a fabricated verdict; the authoritative withholding
+        // reason is the durable `visibility` on the row itself.
+        let evidence_by_asset = self.withheld_screening_evidence(&state, &tenant_id);
+
+        let search = query_value(query, "search");
+        let rows: Vec<WithheldAssetSummary> = withheld
+            .into_iter()
+            .filter(|asset| {
+                matches_search(
+                    search.as_deref(),
+                    &[
+                        &asset.id,
+                        &asset.name,
+                        &asset.version,
+                        &asset.asset_type,
+                        asset.visibility.as_str(),
+                    ],
+                )
+            })
+            .map(|asset| WithheldAssetSummary {
+                visibility: asset.visibility.as_str(),
+                screening_evidence: evidence_by_asset.get(&asset.id).cloned(),
+                asset: asset_summary(&asset),
+            })
+            .collect();
+
+        let body = list_response(rows, query, state.admin_pagination(query));
+        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+    }
+
+    /// Build the `asset_id -> screening evidence` map for the withheld listing
+    /// (#379). Scans the tenant's push/commit audit events (`asset.push` /
+    /// `committed`) and keeps the latest evidence `message` per asset id, so the
+    /// operator sees the scan/signature/approval verdict captured at push time
+    /// (#366) alongside the withheld row. Tenant-scoped: only this tenant's audit
+    /// rows are consulted, so one tenant's evidence can never leak into another's
+    /// listing.
+    fn withheld_screening_evidence(
+        &self,
+        state: &crate::state::AppState,
+        tenant_id: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut latest: std::collections::HashMap<String, (u64, String)> =
+            std::collections::HashMap::new();
+        for event in state.audit_events() {
+            if event.action != "asset.push" || event.outcome != "committed" {
+                continue;
+            }
+            if event.tenant.organization_id.as_deref() != Some(tenant_id) {
+                continue;
+            }
+            let occurred_at = event.occurred_at_unix.unwrap_or(0);
+            match latest.get(&event.target) {
+                Some((seen_at, _)) if *seen_at >= occurred_at => {}
+                _ => {
+                    latest.insert(event.target.clone(), (occurred_at, event.message.clone()));
+                }
+            }
+        }
+        latest
+            .into_iter()
+            .map(|(target, (_, message))| (target, message))
+            .collect()
     }
 
     async fn handle_asset_storage_summary(

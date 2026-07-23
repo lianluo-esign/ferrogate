@@ -2675,6 +2675,17 @@
       "rbac_action": null
     },
     {
+      "path": "/v1/assets/withheld",
+      "method": "get",
+      "operation_id": "listWithheldAssets",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.read"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/assets/{asset_type}",
       "method": "get",
       "operation_id": "listAssetsByType",
