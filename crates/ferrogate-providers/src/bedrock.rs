@@ -467,6 +467,7 @@ mod tests {
                 region: "us-east-1".into(),
             }),
             gcp_credentials: None,
+            cloudflare_ai_gateway: None,
         }
     }
 

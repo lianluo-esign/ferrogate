@@ -419,6 +419,7 @@ mod tests {
             openrouter_x_title: None,
             aws_credentials: None,
             gcp_credentials: None,
+            cloudflare_ai_gateway: None,
         }
     }
 

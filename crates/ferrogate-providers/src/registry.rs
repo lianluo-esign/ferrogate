@@ -8,12 +8,43 @@ use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 use serde_json::Value;
 
 use crate::{
-    canonical_provider_adapter_family, AdapterError, AnthropicAdapter, AzureOpenAiAdapter,
-    BedrockAdapter, ChatCompletionPlan, EmbeddingsPlan, GeminiAdapter, GrokAdapter, ImagesPlan,
-    OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderAdapterFamily,
-    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
+    apply_cloudflare_ai_gateway_routing, canonical_provider_adapter_family, AdapterError,
+    AnthropicAdapter, AzureOpenAiAdapter, BedrockAdapter, ChatCompletionPlan,
+    CloudflareAiGatewayRouting, CloudflareAiGatewaySurface, EmbeddingsPlan, GeminiAdapter,
+    GrokAdapter, ImagesPlan, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter,
+    ProviderAdapterFamily, ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig,
+    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
 };
+
+/// Captures the per-provider Cloudflare AI Gateway routing and resolved family
+/// *before* the [`ProviderConfig`] is moved into the adapter, so the registry
+/// can rewrite the adapter's [`ProviderHttpRequest`] onto the gateway after the
+/// fact (issue #406). A no-op when the provider did not opt into Cloudflare
+/// routing or resolves to no known family.
+struct CloudflareRouting {
+    routing: Option<CloudflareAiGatewayRouting>,
+    family: Option<ProviderAdapterFamily>,
+}
+
+impl CloudflareRouting {
+    fn capture(provider: &ProviderConfig) -> Self {
+        Self {
+            routing: provider.cloudflare_ai_gateway.clone(),
+            family: canonical_provider_adapter_family(&provider.kind),
+        }
+    }
+
+    fn apply(
+        self,
+        request: &mut ProviderHttpRequest,
+        surface: impl FnOnce(ProviderAdapterFamily) -> CloudflareAiGatewaySurface,
+    ) -> Result<(), AdapterError> {
+        let (Some(routing), Some(family)) = (self.routing, self.family) else {
+            return Ok(());
+        };
+        apply_cloudflare_ai_gateway_routing(&routing, family, surface(family), request)
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ProviderAdapterRegistry {
@@ -49,8 +80,20 @@ impl ProviderAdapterRegistry {
         provider: ProviderConfig,
         request: ChatCompletionPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
-        self.adapter_for(&provider.kind)?
-            .prepare_chat_completions(provider, request)
+        let cloudflare = CloudflareRouting::capture(&provider);
+        let mut prepared = self
+            .adapter_for(&provider.kind)?
+            .prepare_chat_completions(provider, request)?;
+        // An Anthropic provider dispatches chat completions as `messages`; every
+        // other family uses the `chat/completions` surface.
+        cloudflare.apply(&mut prepared, |family| {
+            if family == ProviderAdapterFamily::Anthropic {
+                CloudflareAiGatewaySurface::Messages
+            } else {
+                CloudflareAiGatewaySurface::ChatCompletions
+            }
+        })?;
+        Ok(prepared)
     }
 
     pub fn prepare_responses(
@@ -58,8 +101,20 @@ impl ProviderAdapterRegistry {
         provider: ProviderConfig,
         request: ResponsesPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
-        self.adapter_for(&provider.kind)?
-            .prepare_responses(provider, request)
+        let cloudflare = CloudflareRouting::capture(&provider);
+        let mut prepared = self
+            .adapter_for(&provider.kind)?
+            .prepare_responses(provider, request)?;
+        // The Anthropic adapter translates a Responses plan into a `messages`
+        // request, so it routes through the `messages` surface too.
+        cloudflare.apply(&mut prepared, |family| {
+            if family == ProviderAdapterFamily::Anthropic {
+                CloudflareAiGatewaySurface::Messages
+            } else {
+                CloudflareAiGatewaySurface::Responses
+            }
+        })?;
+        Ok(prepared)
     }
 
     pub fn prepare_embeddings(
@@ -67,8 +122,12 @@ impl ProviderAdapterRegistry {
         provider: ProviderConfig,
         request: EmbeddingsPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
-        self.adapter_for(&provider.kind)?
-            .prepare_embeddings(provider, request)
+        let cloudflare = CloudflareRouting::capture(&provider);
+        let mut prepared = self
+            .adapter_for(&provider.kind)?
+            .prepare_embeddings(provider, request)?;
+        cloudflare.apply(&mut prepared, |_| CloudflareAiGatewaySurface::Embeddings)?;
+        Ok(prepared)
     }
 
     pub fn translate_embeddings_response(
@@ -553,6 +612,7 @@ mod tests {
             openrouter_x_title: None,
             aws_credentials: None,
             gcp_credentials: None,
+            cloudflare_ai_gateway: None,
         }
     }
 }

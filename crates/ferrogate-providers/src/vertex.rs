@@ -285,6 +285,7 @@ mod tests {
                 project_id: "my-gcp-project".into(),
                 location: "us-central1".into(),
             }),
+            cloudflare_ai_gateway: None,
         }
     }
 

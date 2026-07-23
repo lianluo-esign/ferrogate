@@ -140,6 +140,7 @@ mod tests {
             openrouter_x_title: Some("FerroGate".into()),
             aws_credentials: None,
             gcp_credentials: None,
+            cloudflare_ai_gateway: None,
         }
     }
 

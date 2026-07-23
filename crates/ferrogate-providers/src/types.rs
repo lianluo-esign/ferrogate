@@ -27,6 +27,13 @@ pub struct ProviderConfig {
     /// adapter fails closed the same way a missing `aws_credentials` does
     /// for Bedrock.
     pub gcp_credentials: Option<GcpProviderCredentials>,
+    /// Cloudflare AI Gateway routing (issue #406). `None` (the default) means
+    /// the provider dispatches directly, exactly as before. When `Some`, the
+    /// registry rewrites the prepared request onto the tenant's Cloudflare AI
+    /// Gateway (caching / rate-limiting / retries / cost limits / observability)
+    /// while preserving the OpenAI/Anthropic request shape and the per-request
+    /// BYOK auth header. See [`crate::CloudflareAiGatewayRouting`].
+    pub cloudflare_ai_gateway: Option<crate::CloudflareAiGatewayRouting>,
 }
 
 /// AWS access-key credentials plus the region a Bedrock provider targets

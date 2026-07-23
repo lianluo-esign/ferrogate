@@ -134,6 +134,10 @@ impl AppState {
             openrouter_x_title: provider.openrouter_x_title.clone(),
             aws_credentials: aws_provider_credentials(provider),
             gcp_credentials: gcp_provider_credentials(provider),
+            // Issue #406: Cloudflare AI Gateway routing is wired at the
+            // provider-config parsing + `[cloudflare]`/secret-resolution layer
+            // (separate change); direct dispatch is unchanged until then.
+            cloudflare_ai_gateway: None,
         }
     }
 

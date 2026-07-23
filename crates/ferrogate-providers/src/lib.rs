@@ -11,6 +11,7 @@ pub mod anthropic_messages;
 mod azure;
 mod bedrock;
 mod canonical;
+mod cloudflare;
 mod gemini;
 mod grok;
 mod models;
@@ -24,6 +25,10 @@ mod vertex;
 pub use anthropic::AnthropicAdapter;
 pub use azure::AzureOpenAiAdapter;
 pub use bedrock::BedrockAdapter;
+pub use cloudflare::{
+    apply_cloudflare_ai_gateway_routing, CloudflareAiGatewayMode, CloudflareAiGatewayRouting,
+    CloudflareAiGatewaySurface,
+};
 pub use gemini::GeminiAdapter;
 pub use grok::GrokAdapter;
 pub use models::{
