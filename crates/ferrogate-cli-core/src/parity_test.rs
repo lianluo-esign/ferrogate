@@ -167,7 +167,10 @@ fn data_plane_marker_overrides_public_visibility() {
         report.extra.contains("runtimeInfer"),
         "a verb bound to a data-plane op must surface as extra, not covered"
     );
-    assert!(!report.is_clean(), "binding a data-plane op must fail the gate");
+    assert!(
+        !report.is_clean(),
+        "binding a data-plane op must fail the gate"
+    );
 }
 
 // ---------------------------------------------------------------------------
