@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Admin-console gate (#314, #331): lint + Vitest + production build + browser
-# contract for admin-console/.
+# Admin-console gate (#314, #331): lint + Vitest + api-types drift + production
+# build + browser contract for admin-console/.
 # Runs standalone for dev use and from scripts/release-local.sh (no GitHub
 # Actions per the release directive). Node 22+ per admin-console/Dockerfile.
 #
@@ -9,8 +9,11 @@
 #
 # `npm ci` runs only when node_modules is missing; delete node_modules (or run
 # `npm ci` yourself) to force a clean install. The typed OpenAPI client types
-# (src/lib/api-types.generated.ts) are checked in; contract drift surfaces as
-# a type error in the build step. Regenerate with `npm run generate:api`.
+# (src/lib/api-types.generated.ts) are checked in and are regenerated from
+# docs/openapi/admin-api.openapi.json with `npm run generate:api`. The
+# `check:api-types` step below FAILS the gate when they are stale vs the spec
+# (#392): stale-but-compilable types would otherwise slip past the build's
+# `tsc` step, which is exactly how the client drifted before #379.
 set -euo pipefail
 
 if [ "${SKIP_ADMIN_CONSOLE_CHECK:-}" = "1" ]; then
@@ -34,6 +37,9 @@ npm run lint
 
 echo "-- test (vitest --run)"
 npm run test -- --run
+
+echo "-- api-types drift (generated client vs OpenAPI spec)"
+npm run check:api-types
 
 echo "-- build (tsc -b && vite build)"
 npm run build

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "check:api-types": "node scripts/check-api-types-drift.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "vitest",

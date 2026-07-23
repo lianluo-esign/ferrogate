@@ -36,6 +36,28 @@ browser is allowed to call `/admin/v1/*` cross-origin.
 npm run build   # tsc -b && vite build, output in dist/
 ```
 
+## OpenAPI client types (drift guard, #392)
+
+`src/lib/api-types.generated.ts` is the typed client, generated from the
+committed contract `docs/openapi/admin-api.openapi.json`:
+
+```bash
+npm run generate:api      # openapi-typescript + stamp banner -> api-types.generated.ts
+```
+
+Stale-but-still-compilable types slip past `tsc`, so a spec change that lands
+without regenerating silently drifts the client (the regression #379 had to
+clean up). `npm run check:api-types` guards against that: it replays
+`generate:api` into an OS temp file (never touching the committed file) and
+fails when the result differs from the checked-in `api-types.generated.ts`:
+
+```bash
+npm run check:api-types   # exit 1 + "run `npm run generate:api` and commit" on drift
+```
+
+It runs as a step in `scripts/check-admin-console.sh` (the local/release gate),
+so any contract change must regenerate the client types to pass.
+
 ## Lint
 
 ```bash

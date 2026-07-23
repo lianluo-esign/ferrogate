@@ -5995,6 +5995,8 @@ export interface components {
             seconds_since_last_seen: number;
             running_ttl_seconds: number;
             within_running_window: boolean;
+            /** @description Whether the durable observed-agent presence store contributed the recency used for the running decision (its last-seen was at least as fresh as the request-log evidence). */
+            durable_presence_backed: boolean;
             prompt_tokens?: number;
             completion_tokens?: number;
             total_tokens?: number;
