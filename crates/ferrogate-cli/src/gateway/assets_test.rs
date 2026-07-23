@@ -193,3 +193,92 @@ fn channel_target_requires_an_existing_non_yanked_logical_version() {
     ];
     assert!(!channel_target_is_resolvable(&partially_yanked, "1.0.0"));
 }
+
+// #398: the per-file static-site addressing encodes a file path into the
+// `{version}` segment of `/v1/assets/{asset_type}/{name}/{version}`. These
+// tests pin the two halves of the round-trip: (1) an encoded slash survives the
+// router's raw-`/` split as a SINGLE segment (so a deeply-nested path still
+// matches the 3-segment `[asset_type, name, reference]` arm), and (2) the
+// segment is then percent-decoded back to the slashed object key the
+// publish/unpack path stored -- so a nested per-file download/unpublish resolves
+// exactly as a top-level file does.
+
+/// Mirrors the split in `handle_assets`: strip the `/v1/assets` prefix and split
+/// on RAW `/`, so `%2F` (an encoded slash) is never treated as a separator.
+fn asset_path_segments(path: &str) -> Vec<&str> {
+    let rest = path.strip_prefix("/v1/assets").unwrap();
+    rest.split('/').filter(|part| !part.is_empty()).collect()
+}
+
+#[test]
+fn deeply_nested_encoded_version_stays_a_single_routing_segment() {
+    // The console builds `/v1/assets/static_site/{site}/{encodeURIComponent(path)}`,
+    // so a nested file path arrives with its slashes as `%2F`.
+    let path = "/v1/assets/static_site/mysite/img%2Fdeep%2Fvery%2Fnested%2Flogo.png";
+    let segments = asset_path_segments(path);
+
+    // Exactly three segments: the encoded slashes did NOT split the file path
+    // into extra segments, so this matches the 3-segment asset arm rather than
+    // falling through to the catch-all NOT_FOUND.
+    assert_eq!(
+        segments,
+        vec![
+            "static_site",
+            "mysite",
+            "img%2Fdeep%2Fvery%2Fnested%2Flogo.png",
+        ]
+    );
+}
+
+#[test]
+fn encoded_version_segment_decodes_to_the_slashed_object_key() {
+    // The reference the 3-segment arm decodes before it becomes an object key.
+    let reference = "img%2Fdeep%2Fvery%2Fnested%2Flogo.png";
+    let decoded = percent_decode_segment(reference);
+    assert_eq!(decoded, "img/deep/very/nested/logo.png");
+
+    // Round-trip: the decoded reference reconstructs the SAME stored id the
+    // publish path wrote for that nested file (legacy bare-path keying), so a
+    // nested per-file GET/DELETE resolves to the intended object.
+    let stored = stored_asset_id("tenant-a", "static_site", "mysite", &decoded);
+    let published = stored_asset_id(
+        "tenant-a",
+        "static_site",
+        "mysite",
+        "img/deep/very/nested/logo.png",
+    );
+    assert_eq!(stored, published);
+    // Without the decode the raw `%2F` reference would key a DIFFERENT object
+    // and 404 -- proving the decode is load-bearing for nested paths.
+    assert_ne!(
+        stored,
+        stored_asset_id("tenant-a", "static_site", "mysite", reference)
+    );
+}
+
+#[test]
+fn url_safe_references_pass_through_percent_decode_unchanged() {
+    // Every pre-#398 reference is URL-safe (no `%`), so the decode is a no-op:
+    // exact semver, a semver range, a channel name, and the reserved static-site
+    // version keys all resolve byte-for-byte as before.
+    for reference in [
+        "1.0.0",
+        "^1.2.0",
+        "latest",
+        "__site_manifest__",
+        "__site_file__:1.0.0:index.html",
+    ] {
+        assert_eq!(percent_decode_segment(reference), reference);
+    }
+}
+
+#[test]
+fn malformed_percent_escapes_are_left_literal() {
+    // A `%` not followed by two hex digits must not truncate or corrupt the
+    // reference; it stays literal so resolution still sees the intended string.
+    assert_eq!(percent_decode_segment("50%off"), "50%off");
+    assert_eq!(percent_decode_segment("trailing%"), "trailing%");
+    assert_eq!(percent_decode_segment("half%2"), "half%2");
+    // A valid escape adjacent to a literal `%` still decodes only the valid one.
+    assert_eq!(percent_decode_segment("a%2Fb%zz"), "a/b%zz");
+}

@@ -234,34 +234,46 @@ impl FerroGateway {
                     .await
                 }
             },
-            [asset_type, name, reference] => match *method {
-                Method::PUT => {
-                    self.handle_asset_push(
-                        session, ctx, headers, asset_type, name, reference, query,
-                    )
-                    .await
+            [asset_type, name, reference] => {
+                // #398: this `{version}` segment carries the per-file static-site
+                // address, which encodes a (possibly deeply-nested) file path --
+                // its slashes arrive as `%2F`. Decode the segment back to the
+                // slashed object key the publish/unpack path stored so a nested
+                // per-file download/unpublish resolves; URL-safe references
+                // (semver, channels, the reserved `__site_*__` keys) contain no
+                // `%` and pass through unchanged. Decoding here, AFTER the raw-`/`
+                // split above, is why an encoded slash survives routing as one
+                // segment instead of being mis-split.
+                let reference = percent_decode_segment(reference);
+                match *method {
+                    Method::PUT => {
+                        self.handle_asset_push(
+                            session, ctx, headers, asset_type, name, &reference, query,
+                        )
+                        .await
+                    }
+                    Method::GET => {
+                        self.handle_asset_pull(
+                            session, ctx, headers, asset_type, name, &reference, query,
+                        )
+                        .await
+                    }
+                    Method::DELETE => {
+                        self.handle_asset_delete(
+                            session, ctx, headers, asset_type, name, &reference, query,
+                        )
+                        .await
+                    }
+                    _ => {
+                        method_not_allowed(
+                            session,
+                            ctx,
+                            "/v1/assets/{asset_type}/{name}/{version} supports GET, PUT, DELETE",
+                        )
+                        .await
+                    }
                 }
-                Method::GET => {
-                    self.handle_asset_pull(
-                        session, ctx, headers, asset_type, name, reference, query,
-                    )
-                    .await
-                }
-                Method::DELETE => {
-                    self.handle_asset_delete(
-                        session, ctx, headers, asset_type, name, reference, query,
-                    )
-                    .await
-                }
-                _ => {
-                    method_not_allowed(
-                        session,
-                        ctx,
-                        "/v1/assets/{asset_type}/{name}/{version} supports GET, PUT, DELETE",
-                    )
-                    .await
-                }
-            },
+            }
             _ => {
                 write_json_error(
                     session,
@@ -2014,6 +2026,45 @@ fn build_manifest(
         channels,
         versions,
     }
+}
+
+/// Percent-decodes a single URL path segment (`%XX` -> byte). Used only for the
+/// `{version}` segment of `/v1/assets/{asset_type}/{name}/{version}` (#398): the
+/// per-file static-site addressing encodes a possibly deeply-nested file path
+/// into that segment, so its slashes arrive as `%2F` (and any other reserved
+/// byte as `%XX`). Decoding reconstitutes the slashed object key the
+/// publish/unpack path stored, so a nested per-file download/unpublish resolves
+/// exactly as a top-level one does.
+///
+/// This is guarded and unambiguous for every pre-#398 reference: URL-safe
+/// versions (semver like `1.0.0`/`^1.2.0`, channel names, the reserved
+/// `__site_manifest__` / `__site_file__:` keys) contain no `%`, so they pass
+/// through byte-for-byte -- the decode is a no-op for them. A `%` not followed
+/// by two hex digits is left literal, so a stray `%` in a reference can never
+/// truncate or corrupt it. Decoding happens AFTER the router split on raw `/`,
+/// so an encoded slash stays a single segment through routing and is only turned
+/// back into `/` here, at the point the segment becomes an object-key lookup.
+fn percent_decode_segment(segment: &str) -> String {
+    if !segment.contains('%') {
+        return segment.to_string();
+    }
+    let bytes = segment.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Minimal `key=value&...` query lookup. Values in this surface (platform
