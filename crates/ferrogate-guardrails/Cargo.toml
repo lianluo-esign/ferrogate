@@ -23,6 +23,7 @@ conformance = []
 
 [dependencies]
 async-trait.workspace = true
+ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 hmac.workspace = true
 jsonschema.workspace = true
 reqwest.workspace = true

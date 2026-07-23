@@ -35,8 +35,13 @@ use std::{
 
 pub mod llm_guard;
 pub mod presidio;
+pub mod workers_ai_llama_guard;
 pub use llm_guard::{LlmGuardPromptInjectionConfig, LlmGuardPromptInjectionDetector};
 pub use presidio::{PresidioDetector, PresidioDetectorConfig};
+pub use workers_ai_llama_guard::{
+    WorkersAiLlamaGuardConfig, WorkersAiLlamaGuardDetector,
+    DEFAULT_MODEL as WORKERS_AI_LLAMA_GUARD_DEFAULT_MODEL,
+};
 
 /// Recorded-fixture transport for deterministic, network-free adapter tests.
 /// Never part of a production build.
