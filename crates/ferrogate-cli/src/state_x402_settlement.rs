@@ -96,7 +96,17 @@ pub(crate) enum SettlementEvidence<'a> {
     /// settlement evidence, or a contradictory merchant response. Retains the
     /// hold and parks the attempt in `outcome_unknown` for bounded
     /// reconciliation. NEVER releases and NEVER claims success.
-    Unknown { response: Option<&'a str> },
+    ///
+    /// `transaction_signature`, when present, is persisted to the attempt row at
+    /// the park CAS (#399): the earliest edge a signature is known that is NOT a
+    /// settle. A merchant header carrying a signature, or a signature the
+    /// reconciler already recovered on a prior tick, is captured into the durable
+    /// column so subsequent reconcile passes can query the chain from storage
+    /// alone. `None` leaves the column untouched (`COALESCE`).
+    Unknown {
+        response: Option<&'a str>,
+        transaction_signature: Option<&'a str>,
+    },
 }
 
 /// Immutable inputs for opening a paid-egress attempt: the frozen #350 wire
@@ -331,15 +341,23 @@ impl X402SettlementLoop {
     // -- SUBMIT ----------------------------------------------------------
 
     /// `authorized -> submitted`: the signed proof went on-chain. After this a
-    /// timeout is `outcome_unknown`, never a release.
+    /// timeout is `outcome_unknown`, never a release. `transaction_signature` is
+    /// persisted into the attempt row coupled to this same CAS when it is already
+    /// known at submit time (#399), so a `submitted`/`outcome_unknown` attempt the
+    /// reconciler (#354) later picks up already carries a recoverable signature
+    /// instead of depending on a merchant settlement header that may never arrive.
+    /// `None` leaves the column untouched (`COALESCE`), for the common flow where
+    /// the on-chain signature is only reported later by the facilitator.
     pub(crate) async fn submit(
         &self,
         attempt_id: &str,
+        transaction_signature: Option<&str>,
         submitted_at_unix: i64,
         now_unix: i64,
     ) -> Result<StoredPaymentAttempt, StorageError> {
         let evidence = PaymentAttemptEvidenceArgs {
             submitted_at_unix: Some(submitted_at_unix),
+            transaction_signature,
             ..Default::default()
         };
         let transition = self
@@ -395,8 +413,12 @@ impl X402SettlementLoop {
                 self.fail_edge(attempt_id, &hold_id, failure_code, *response, now_unix)
                     .await
             }
-            SettlementEvidence::Unknown { response } => {
-                self.mark_unknown(attempt_id, *response, now_unix).await
+            SettlementEvidence::Unknown {
+                response,
+                transaction_signature,
+            } => {
+                self.mark_unknown(attempt_id, *response, *transaction_signature, now_unix)
+                    .await
             }
         }
     }
@@ -434,7 +456,12 @@ impl X402SettlementLoop {
                     error = %error,
                     "x402 settle capture unresolved; retaining hold, parking outcome_unknown"
                 );
-                return self.mark_unknown(attempt_id, response, now_unix).await;
+                // The on-chain signature was known here (the settle carried it);
+                // persist it at the park CAS so the reconciler can query the chain
+                // from storage even though the capture is deferred (#399).
+                return self
+                    .mark_unknown(attempt_id, response, Some(transaction_signature), now_unix)
+                    .await;
             }
             Err(error) => return Err(error),
         }
@@ -539,15 +566,20 @@ impl X402SettlementLoop {
     }
 
     /// UNKNOWN edge: `submitted -> outcome_unknown`, HOLD RETAINED. Idempotent
-    /// when the attempt is already `outcome_unknown`.
+    /// when the attempt is already `outcome_unknown`. `transaction_signature`, when
+    /// present, is persisted coupled to this park CAS (#399) so a parked attempt
+    /// durably carries the signature the reconciler needs; `None` leaves the
+    /// column untouched (`COALESCE`, write-once).
     async fn mark_unknown(
         &self,
         attempt_id: &str,
         response: Option<&str>,
+        transaction_signature: Option<&str>,
         now_unix: i64,
     ) -> Result<EdgeOutcome, StorageError> {
         let evidence = PaymentAttemptEvidenceArgs {
             settlement_response: response,
+            transaction_signature,
             ..Default::default()
         };
         let transition = self

@@ -14,7 +14,8 @@ use std::sync::Arc;
 use ferrogate_storage::{
     StoredWallet, PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_FAILED,
     PAYMENT_ATTEMPT_OUTCOME_UNKNOWN, PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED,
-    WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_RELEASED, WALLET_RESERVATION_SETTLED,
+    PAYMENT_ATTEMPT_SUBMITTED, WALLET_RESERVATION_ACTIVE, WALLET_RESERVATION_RELEASED,
+    WALLET_RESERVATION_SETTLED,
 };
 use proptest::prelude::*;
 
@@ -175,7 +176,7 @@ fn settle_edge_captures_hold_and_settles_attempt() {
     let state = seed_state(10_000);
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request("s1", 500), 100)).expect("open");
-    block_on(loop_.submit("s1", 200, 200)).expect("submit");
+    block_on(loop_.submit("s1", None, 200, 200)).expect("submit");
     let outcome = block_on(loop_.finalize("s1", &settled_evidence(), 300)).expect("finalize");
     assert!(
         matches!(outcome, EdgeOutcome::Settled { .. }),
@@ -198,7 +199,7 @@ fn settle_edge_is_idempotent_on_reentry() {
     let state = seed_state(10_000);
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request("s2", 500), 100)).expect("open");
-    block_on(loop_.submit("s2", 200, 200)).expect("submit");
+    block_on(loop_.submit("s2", None, 200, 200)).expect("submit");
     block_on(loop_.finalize("s2", &settled_evidence(), 300)).expect("first finalize");
     let second = block_on(loop_.finalize("s2", &settled_evidence(), 400)).expect("replay finalize");
     assert!(matches!(second, EdgeOutcome::Settled { .. }), "{second:?}");
@@ -219,7 +220,7 @@ fn fail_edge_releases_hold_and_fails_attempt() {
     let state = seed_state(10_000);
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request("f1", 500), 100)).expect("open");
-    block_on(loop_.submit("f1", 200, 200)).expect("submit");
+    block_on(loop_.submit("f1", None, 200, 200)).expect("submit");
     let outcome = block_on(loop_.finalize(
         "f1",
         &SettlementEvidence::Failed {
@@ -315,11 +316,12 @@ fn finalize_unknown_evidence_parks_outcome_unknown_and_retains_hold() {
     let state = seed_state(10_000);
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request("u1", 500), 100)).expect("open");
-    block_on(loop_.submit("u1", 200, 200)).expect("submit");
+    block_on(loop_.submit("u1", None, 200, 200)).expect("submit");
     let outcome = block_on(loop_.finalize(
         "u1",
         &SettlementEvidence::Unknown {
             response: Some("timeout"),
+            transaction_signature: None,
         },
         300,
     ))
@@ -338,6 +340,103 @@ fn finalize_unknown_evidence_parks_outcome_unknown_and_retains_hold() {
         Some(WALLET_RESERVATION_ACTIVE)
     );
     assert_eq!(block_on(wallet_balance(&state)), 10_000);
+}
+
+// --------------------------------------------------------------------------
+// #399: the reconciler-facing signature is durable at submit and park time
+// --------------------------------------------------------------------------
+
+async fn attempt_signature(state: &AppState, attempt_id: &str) -> Option<String> {
+    state
+        .repositories_arc()
+        .get_payment_attempt(attempt_id)
+        .await
+        .expect("get attempt")
+        .expect("attempt exists")
+        .transaction_signature
+}
+
+#[test]
+fn submit_persists_signature_and_park_retains_it_for_the_reconciler() {
+    // #399: persist the on-chain signature the reconciler needs the moment it is
+    // known -- at submit, coupled to the authorized->submitted CAS -- and keep it
+    // when parking outcome_unknown, without changing any state transition.
+    let state = seed_state(10_000);
+    let loop_ = state.x402_settlement_loop();
+    let sig = "5".repeat(88);
+    block_on(loop_.open(&open_request("g1", 500), 100)).expect("open");
+
+    block_on(loop_.submit("g1", Some(&sig), 200, 200)).expect("submit");
+    assert_eq!(
+        block_on(attempt_state(&state, "g1")),
+        PAYMENT_ATTEMPT_SUBMITTED,
+        "submit still lands in `submitted` -- state semantics unchanged"
+    );
+    assert_eq!(
+        block_on(attempt_signature(&state, "g1")).as_deref(),
+        Some(sig.as_str()),
+        "the submitted attempt carries the signature the reconciler queries"
+    );
+
+    // Park outcome_unknown WITHOUT re-supplying a signature: it is retained.
+    let outcome = block_on(loop_.finalize(
+        "g1",
+        &SettlementEvidence::Unknown {
+            response: Some("timeout"),
+            transaction_signature: None,
+        },
+        300,
+    ))
+    .expect("park");
+    assert!(matches!(
+        outcome,
+        EdgeOutcome::OutcomeUnknown { parked: true, .. }
+    ));
+    assert_eq!(
+        block_on(attempt_signature(&state, "g1")).as_deref(),
+        Some(sig.as_str()),
+        "a parked outcome_unknown attempt retains the signature"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "g1")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE)
+    );
+}
+
+#[test]
+fn park_persists_a_later_known_signature_when_submit_had_none() {
+    // First-park persistence: the signature is unknown at submit (the SVM
+    // facilitator flow) and only supplied when the loop parks outcome_unknown.
+    let state = seed_state(10_000);
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(&open_request("g2", 500), 100)).expect("open");
+    block_on(loop_.submit("g2", None, 200, 200)).expect("submit");
+    assert_eq!(block_on(attempt_signature(&state, "g2")), None);
+
+    let sig = "7".repeat(88);
+    block_on(loop_.finalize(
+        "g2",
+        &SettlementEvidence::Unknown {
+            response: None,
+            transaction_signature: Some(&sig),
+        },
+        300,
+    ))
+    .expect("park with signature");
+    assert_eq!(
+        block_on(attempt_state(&state, "g2")),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+    assert_eq!(
+        block_on(attempt_signature(&state, "g2")).as_deref(),
+        Some(sig.as_str()),
+        "the park CAS persisted the later-known signature"
+    );
+    // Hold RETAINED: persisting a signature never touches the money edges.
+    assert_eq!(
+        block_on(reservation_status(&state, "g2")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE)
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -376,7 +475,7 @@ fn async_timeout_before_capture_yields_outcome_unknown_and_retains_hold() {
             .open(&open_request("t1", 500), 100),
     )
     .expect("open");
-    block_on(state.x402_settlement_loop().submit("t1", 200, 200)).expect("submit");
+    block_on(state.x402_settlement_loop().submit("t1", None, 200, 200)).expect("submit");
 
     // The wallet-capture primitive's commit outcome becomes unknown BEFORE it
     // ran. The loop must retain the hold and park outcome_unknown -- never a
@@ -430,7 +529,7 @@ fn async_timeout_after_attempt_transition_never_releases_and_converges() {
             .open(&open_request("t2", 500), 100),
     )
     .expect("open");
-    block_on(state.x402_settlement_loop().submit("t2", 200, 200)).expect("submit");
+    block_on(state.x402_settlement_loop().submit("t2", None, 200, 200)).expect("submit");
 
     // Capture succeeds; the attempt-transition primitive commits but its outcome
     // is reported unknown. The loop must NOT release; re-entry converges.
@@ -481,7 +580,7 @@ fn concurrent_finalize_captures_hold_exactly_once() {
             .open(&open_request("c1", 500), 100),
     )
     .expect("open");
-    block_on(state.x402_settlement_loop().submit("c1", 200, 200)).expect("submit");
+    block_on(state.x402_settlement_loop().submit("c1", None, 200, 200)).expect("submit");
 
     block_on(async {
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -553,7 +652,7 @@ proptest! {
 
                 match action {
                     Action::Settle => {
-                        loop_.submit(&id, 200, 200).await.expect("submit");
+                        loop_.submit(&id, None, 200, 200).await.expect("submit");
                         // Duplicate finalizes must not double-capture.
                         for _ in 0..*dup {
                             loop_

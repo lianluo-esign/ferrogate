@@ -280,6 +280,160 @@ fn settle_replay_is_idempotent_but_conflicting_signature_fails_closed() {
 }
 
 #[test]
+fn submit_persists_transaction_signature_and_park_retains_it() {
+    // #399: the reconciler (#354) needs a queryable on-chain signature on a
+    // submitted/outcome_unknown attempt. The submit CAS persists it the moment it
+    // is known -- coupled to the existing state transition, one statement, the
+    // generation bumped exactly once -- and a later park (mark_outcome_unknown)
+    // retains it via write-once COALESCE. State semantics are unchanged.
+    let repositories = repositories_with_wallet("tenant-a", 1_000);
+    block_on(repositories.reserve_wallet_credits("hold-1", "tenant-a", 250, 10_000, 1)).unwrap();
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "att-1",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("hold-1"),
+    )))
+    .unwrap();
+
+    let sig = "5".repeat(88);
+    let submitted = block_on(repositories.submit_payment_attempt(
+        "att-1",
+        PaymentAttemptEvidenceArgs {
+            submitted_at_unix: Some(200),
+            transaction_signature: Some(&sig),
+            ..Default::default()
+        },
+        200,
+    ))
+    .unwrap();
+    let PaymentAttemptTransition::Applied(row) = submitted else {
+        panic!("expected applied submit");
+    };
+    assert_eq!(
+        row.state, PAYMENT_ATTEMPT_SUBMITTED,
+        "state semantics unchanged"
+    );
+    assert_eq!(row.submitted_at_unix, Some(200));
+    assert_eq!(
+        row.transaction_signature.as_deref(),
+        Some(sig.as_str()),
+        "submit persists the signature the reconciler needs"
+    );
+    assert_eq!(
+        row.generation, 1,
+        "one applied transition bumps generation once"
+    );
+
+    // Write-once on the submit edge: a submit REPLAY (state already `submitted`)
+    // carrying a DIFFERENT signature fails closed via the idempotent-replay
+    // evidence-conflict guard -- the CAS never silently rewrites the recorded
+    // signature under a stale generation.
+    assert!(matches!(
+        block_on(repositories.submit_payment_attempt(
+            "att-1",
+            PaymentAttemptEvidenceArgs {
+                submitted_at_unix: Some(200),
+                transaction_signature: Some(&"6".repeat(88)),
+                ..Default::default()
+            },
+            250,
+        )),
+        Err(StorageError::Conflict(_))
+    ));
+
+    // Parking outcome_unknown retains the signature (write-once COALESCE); a park
+    // that supplies no signature must not erase the one submit stored.
+    let parked =
+        block_on(repositories.mark_payment_attempt_outcome_unknown("att-1", no_evidence(), 300))
+            .unwrap();
+    let PaymentAttemptTransition::Applied(row) = parked else {
+        panic!("expected applied park");
+    };
+    assert_eq!(row.state, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN);
+    assert_eq!(
+        row.transaction_signature.as_deref(),
+        Some(sig.as_str()),
+        "a parked outcome_unknown attempt retains the submitted signature"
+    );
+    assert_eq!(row.generation, 2, "the park is a second applied transition");
+
+    // A durable reread confirms persistence (not just the in-memory return value).
+    let fetched = block_on(repositories.get_payment_attempt("att-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.transaction_signature.as_deref(), Some(sig.as_str()));
+}
+
+#[test]
+fn park_supplies_signature_when_submit_had_none() {
+    // #399 first-park persistence: when the signature is only known later (the
+    // merchant reports it after submit), the park CAS persists it. The hold is
+    // retained and the state is still outcome_unknown -- no semantics change.
+    let repositories = repositories_with_wallet("tenant-a", 1_000);
+    block_on(repositories.reserve_wallet_credits("hold-1", "tenant-a", 250, 10_000, 1)).unwrap();
+    block_on(repositories.create_payment_attempt(sample_attempt(
+        "att-1",
+        "tenant-a",
+        PAYMENT_ATTEMPT_AUTHORIZED,
+        Some("hold-1"),
+    )))
+    .unwrap();
+    // Submit without a signature (unknown at submit in the SVM facilitator flow).
+    block_on(repositories.submit_payment_attempt(
+        "att-1",
+        PaymentAttemptEvidenceArgs {
+            submitted_at_unix: Some(200),
+            ..Default::default()
+        },
+        200,
+    ))
+    .unwrap();
+    let fetched = block_on(repositories.get_payment_attempt("att-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.transaction_signature, None, "none known at submit");
+
+    let sig = "8".repeat(88);
+    block_on(repositories.mark_payment_attempt_outcome_unknown(
+        "att-1",
+        PaymentAttemptEvidenceArgs {
+            transaction_signature: Some(&sig),
+            ..Default::default()
+        },
+        300,
+    ))
+    .unwrap();
+    let fetched = block_on(repositories.get_payment_attempt("att-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fetched.transaction_signature.as_deref(),
+        Some(sig.as_str()),
+        "the park CAS persists the later-known signature"
+    );
+    assert_eq!(fetched.state, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN);
+
+    // Re-parking the outcome_unknown self-edge with the SAME signature is a stable
+    // applied transition (the reconciler re-parks every pending tick with the
+    // signature it recovered); it stays outcome_unknown and keeps the signature.
+    block_on(repositories.mark_payment_attempt_outcome_unknown(
+        "att-1",
+        PaymentAttemptEvidenceArgs {
+            transaction_signature: Some(&sig),
+            ..Default::default()
+        },
+        400,
+    ))
+    .unwrap();
+    let fetched = block_on(repositories.get_payment_attempt("att-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.transaction_signature.as_deref(), Some(sig.as_str()));
+    assert_eq!(fetched.state, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN);
+}
+
+#[test]
 fn timeout_after_submission_is_outcome_unknown_and_retains_the_hold() {
     // #352 truth table: after submission a timeout/RPC ambiguity is
     // outcome_unknown; the hold MUST stay active, never released.

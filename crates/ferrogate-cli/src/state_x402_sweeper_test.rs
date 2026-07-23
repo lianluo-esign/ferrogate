@@ -204,7 +204,7 @@ fn sweep_never_touches_settled_terminal_attempt() {
     let state = seed_state(10_000, sweeper_config(true, 100, 0));
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request("t1", 500), OPEN_AT)).expect("open");
-    block_on(loop_.submit("t1", 200, 200)).expect("submit");
+    block_on(loop_.submit("t1", None, 200, 200)).expect("submit");
     block_on(loop_.finalize(
         "t1",
         &SettlementEvidence::Settled {
@@ -245,7 +245,7 @@ fn sweep_never_releases_submitted_attempt_hold_retained() {
     block_on(loop_.open(&open_request("s1", 500), OPEN_AT)).expect("open");
     // Proof went on-chain: after submission, a timed-out attempt is ambiguous
     // and its stablecoin may have moved. It must NEVER be released by the sweeper.
-    block_on(loop_.submit("s1", 200, 200)).expect("submit");
+    block_on(loop_.submit("s1", None, 200, 200)).expect("submit");
 
     // Money-safety at the read layer: a submitted attempt is excluded from the
     // due-query even though its hold is active and past TTL.

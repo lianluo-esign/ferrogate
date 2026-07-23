@@ -425,8 +425,17 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
     };
 
     // 6. Mark the attempt submitted (proof is going on-chain). After this a
-    //    non-settlement outcome is `outcome_unknown`, never a release.
-    loop_.submit(&attempt_id, now_unix, now_unix).await?;
+    //    non-settlement outcome is `outcome_unknown`, never a release. The submit
+    //    CAS also persists the on-chain transaction signature when it is already
+    //    known here (#399). In the SVM `exact` facilitator flow the base64
+    //    `PAYMENT-SIGNATURE` proof built above is NOT the base58 on-chain
+    //    transaction signature (the facilitator co-signs as fee payer and reports
+    //    the settled signature only in the `PAYMENT-RESPONSE` header), so there is
+    //    no chain-queryable signature to persist yet -- pass `None` and let the
+    //    finalize/park edge below persist it the moment the merchant reports one.
+    //    Storing the proof here would poison the reconciler's chain lookup, so it
+    //    is deliberately not done.
+    loop_.submit(&attempt_id, None, now_unix, now_unix).await?;
 
     // 7. The SINGLE paid replay. There is no loop here: at most one paid attempt.
     let paid = match transport.dispatch(Some(&payment_signature)).await {
@@ -609,8 +618,17 @@ async fn finalize_settlement(
                 response: payment_response,
             }
         }
+        // Ambiguous: park `outcome_unknown` (hold retained). If the merchant
+        // header nonetheless carried a transaction signature, persist it into the
+        // durable column at this park CAS (#399) so the on-chain reconciler can
+        // resolve the attempt from storage instead of re-parsing the untrusted
+        // header every tick -- the earliest edge a signature is known that is not
+        // a settle.
         _ => SettlementEvidence::Unknown {
             response: payment_response,
+            transaction_signature: parsed
+                .as_ref()
+                .and_then(|evidence| evidence.transaction_signature.as_deref()),
         },
     };
     loop_.finalize(attempt_id, &evidence, now_unix).await

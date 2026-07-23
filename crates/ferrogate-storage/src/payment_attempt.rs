@@ -1012,10 +1012,19 @@ payment_attempt_transitions! {
         a => { TransitionEvidence::default() };
 
     /// `authorized -> submitted`: the signed proof went on-chain. After this a
-    /// timeout is `outcome_unknown`, never a release.
+    /// timeout is `outcome_unknown`, never a release. Persists the transaction
+    /// signature the reconciler (#354) needs the moment it is known at submit,
+    /// coupled to this same CAS (#399): a `submitted`/`outcome_unknown` attempt
+    /// then carries a recoverable signature without waiting for a settle. The
+    /// column is write-once (`COALESCE`); a differing signature on an idempotent
+    /// replay fails closed via [`evidence_conflict`].
     submit_payment_attempt, "submit payment attempt",
         [PAYMENT_ATTEMPT_AUTHORIZED], PAYMENT_ATTEMPT_SUBMITTED,
-        a => { TransitionEvidence { submitted_at_unix: a.submitted_at_unix, ..Default::default() } };
+        a => { TransitionEvidence {
+            submitted_at_unix: a.submitted_at_unix,
+            transaction_signature: a.transaction_signature,
+            ..Default::default()
+        } };
 
     /// `submitted | outcome_unknown -> settled`: durable on-chain evidence.
     /// Records the transaction signature; a second, differing signature for an
@@ -1044,6 +1053,7 @@ payment_attempt_transitions! {
         [PAYMENT_ATTEMPT_SUBMITTED, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN],
         PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
         a => { TransitionEvidence {
+            transaction_signature: a.transaction_signature,
             settlement_response: a.settlement_response,
             ..Default::default()
         } };

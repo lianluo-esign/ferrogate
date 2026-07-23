@@ -464,7 +464,10 @@ impl AppState {
             return match loop_
                 .finalize(
                     &attempt.id,
-                    &SettlementEvidence::Unknown { response: None },
+                    &SettlementEvidence::Unknown {
+                        response: None,
+                        transaction_signature: None,
+                    },
                     now_unix,
                 )
                 .await
@@ -543,11 +546,16 @@ impl AppState {
             }
             ReconcileDecision::Pending => {
                 // Retain the hold; re-park to advance the backoff cursor. `None`
-                // response leaves the stored merchant header untouched.
+                // response leaves the stored merchant header untouched. Persist the
+                // recovered signature into the durable column (#399) so the next
+                // tick reads it from storage rather than re-parsing the header.
                 match loop_
                     .finalize(
                         &attempt.id,
-                        &SettlementEvidence::Unknown { response: None },
+                        &SettlementEvidence::Unknown {
+                            response: None,
+                            transaction_signature: Some(&signature),
+                        },
                         now_unix,
                     )
                     .await
@@ -569,7 +577,10 @@ impl AppState {
                 let outcome = match loop_
                     .finalize(
                         &attempt.id,
-                        &SettlementEvidence::Unknown { response: None },
+                        &SettlementEvidence::Unknown {
+                            response: None,
+                            transaction_signature: Some(&signature),
+                        },
                         now_unix,
                     )
                     .await

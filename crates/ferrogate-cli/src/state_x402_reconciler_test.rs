@@ -229,12 +229,13 @@ fn open_request(attempt_id: &str, credits_amount: i64) -> PaidEgressOpen {
 fn seed_outcome_unknown(state: &AppState, attempt_id: &str, credits: i64, signature: &str) {
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request(attempt_id, credits), OPEN_AT)).expect("open");
-    block_on(loop_.submit(attempt_id, SUBMIT_AT, SUBMIT_AT)).expect("submit");
+    block_on(loop_.submit(attempt_id, None, SUBMIT_AT, SUBMIT_AT)).expect("submit");
     let header = merchant_success_header(signature, OWED_ATOMIC);
     block_on(loop_.finalize(
         attempt_id,
         &SettlementEvidence::Unknown {
             response: Some(&header),
+            transaction_signature: None,
         },
         PARK_AT,
     ))
@@ -246,7 +247,23 @@ fn seed_outcome_unknown(state: &AppState, attempt_id: &str, credits: i64, signat
 fn seed_submitted_no_header(state: &AppState, attempt_id: &str, credits: i64) {
     let loop_ = state.x402_settlement_loop();
     block_on(loop_.open(&open_request(attempt_id, credits), OPEN_AT)).expect("open");
-    block_on(loop_.submit(attempt_id, SUBMIT_AT, SUBMIT_AT)).expect("submit");
+    block_on(loop_.submit(attempt_id, None, SUBMIT_AT, SUBMIT_AT)).expect("submit");
+}
+
+/// Opens + submits an attempt with the on-chain signature persisted into the
+/// durable `transaction_signature` column AT SUBMIT (#399) and NO merchant
+/// PAYMENT-RESPONSE header ever stored. The reconciler must recover the
+/// signature from storage alone, proving the column -- not the merchant header --
+/// is a sufficient source.
+fn seed_submitted_with_column_signature(
+    state: &AppState,
+    attempt_id: &str,
+    credits: i64,
+    signature: &str,
+) {
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(&open_request(attempt_id, credits), OPEN_AT)).expect("open");
+    block_on(loop_.submit(attempt_id, Some(signature), SUBMIT_AT, SUBMIT_AT)).expect("submit");
 }
 
 async fn reservation_status(state: &AppState, attempt_id: &str) -> Option<String> {
@@ -600,6 +617,101 @@ fn reconcile_signatureless_attempt_is_reparked_not_failed() {
         "hold RETAINED"
     );
     assert_eq!(block_on(wallet_balance(&state)), 10_000);
+}
+
+// --------------------------------------------------------------------------
+// #399: the reconciler resolves from the persisted column signature alone
+// --------------------------------------------------------------------------
+
+#[test]
+fn reconcile_recovers_persisted_column_signature_without_merchant_header() {
+    // A submitted attempt whose signature was persisted at submit (#399) but which
+    // carries NO merchant PAYMENT-RESPONSE header. The reconciler must recover the
+    // signature from the durable column (the header fallback has nothing to
+    // parse), verify it on-chain, and settle -- exactly the production case the
+    // issue targets, where the merchant header is absent but the attempt still
+    // needs to reconcile.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let sig = signature(40);
+    seed_submitted_with_column_signature(&state, "col1", 500, &sig);
+
+    // Prove the ONLY signature source is the column: no merchant header was stored.
+    let stored = block_on(state.repositories_arc().get_payment_attempt("col1"))
+        .expect("get attempt")
+        .expect("attempt exists");
+    assert_eq!(
+        stored.transaction_signature.as_deref(),
+        Some(sig.as_str()),
+        "the signature is durable in the column"
+    );
+    assert_eq!(
+        stored.settlement_response, None,
+        "no merchant header -- the reconciler cannot fall back to parsing one"
+    );
+
+    let rpc = FakeOnChainRpc::default().with(
+        &sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: OWED_ATOMIC.into(),
+        },
+    );
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(
+        report.settled, 1,
+        "the reconciler recovered the column signature and settled"
+    );
+    assert_eq!(
+        block_on(attempt_state(&state, "col1")),
+        PAYMENT_ATTEMPT_SETTLED
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "col1")).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED),
+        "the hold is captured on the reconciler-driven settle"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 9_500);
+}
+
+#[test]
+fn reconcile_pending_persists_recovered_signature_into_the_column() {
+    // On a pending re-park the reconciler persists the signature it recovered from
+    // the merchant header into the durable column (#399), so a later tick reads it
+    // from storage directly rather than re-parsing the untrusted header. The hold
+    // stays retained and the state stays outcome_unknown.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let sig = signature(41);
+    seed_outcome_unknown(&state, "col2", 500, &sig);
+    // Seeded via a merchant header only; the column starts empty.
+    assert_eq!(
+        block_on(state.repositories_arc().get_payment_attempt("col2"))
+            .expect("get")
+            .expect("exists")
+            .transaction_signature,
+        None,
+        "column empty until the reconciler persists it"
+    );
+
+    let rpc = FakeOnChainRpc::default().with(&sig, OnChainSettlementStatus::Pending);
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(report.pending, 1);
+    assert_eq!(
+        block_on(state.repositories_arc().get_payment_attempt("col2"))
+            .expect("get")
+            .expect("exists")
+            .transaction_signature
+            .as_deref(),
+        Some(sig.as_str()),
+        "the recovered signature is now durable in the column"
+    );
+    assert_eq!(
+        block_on(attempt_state(&state, "col2")),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "col2")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "hold retained while pending"
+    );
 }
 
 // --------------------------------------------------------------------------
