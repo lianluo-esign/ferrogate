@@ -6780,6 +6780,7 @@ mod tests {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }
     }
@@ -7125,6 +7126,7 @@ mod tests {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             }],
             ..Config::default()

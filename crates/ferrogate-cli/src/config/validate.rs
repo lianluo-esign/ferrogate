@@ -130,6 +130,7 @@ impl Config {
         self.validate_x402_reconciler()?;
         self.validate_cloudflare()?;
         self.validate_asset_bucket_r2()?;
+        self.validate_cloudflare_ai_gateway_providers()?;
         Ok(())
     }
 
@@ -179,6 +180,49 @@ impl Config {
                  {other:?}); R2 ignores geographic regions and signs the credential scope with \
                  `auto`"
             ),
+        }
+        Ok(())
+    }
+
+    /// Validate per-provider Cloudflare AI Gateway blocks (issue #406).
+    ///
+    /// A provider that opts into `cloudflare_ai_gateway` depends on the
+    /// top-level `[cloudflare]` block (issue #405) for the account id and base
+    /// URLs, so we require: `[cloudflare]` present with a non-empty
+    /// `account_id`, a non-empty per-provider `gateway_id`, and -- when set --
+    /// a well-formed `aig_token_secret_ref`. Providers without the block are
+    /// unaffected (fully opt-in). Runs after `validate_cloudflare`, so a
+    /// malformed `[cloudflare]` block is already rejected before we get here.
+    fn validate_cloudflare_ai_gateway_providers(&self) -> AnyResult<()> {
+        for (index, provider) in self.providers.iter().enumerate() {
+            let Some(routing) = &provider.cloudflare_ai_gateway else {
+                continue;
+            };
+            let Some(cloudflare) = &self.cloudflare else {
+                bail!(
+                    "field providers[{index}].cloudflare_ai_gateway: requires a top-level [cloudflare] block (issue #405) for the account id and base URLs"
+                );
+            };
+            if cloudflare.account_id.trim().is_empty() {
+                bail!(
+                    "field providers[{index}].cloudflare_ai_gateway: [cloudflare].account_id cannot be empty"
+                );
+            }
+            if routing.gateway_id.trim().is_empty() {
+                bail!("field providers[{index}].cloudflare_ai_gateway.gateway_id: cannot be empty");
+            }
+            if let Some(reference) = routing.aig_token_secret_ref.as_deref() {
+                if reference.trim().is_empty() {
+                    bail!(
+                        "field providers[{index}].cloudflare_ai_gateway.aig_token_secret_ref: cannot be empty"
+                    );
+                }
+                ferrogate_secrets::SecretRef::parse(reference).map_err(|error| {
+                    anyhow::anyhow!(
+                        "field providers[{index}].cloudflare_ai_gateway.aig_token_secret_ref: {error}"
+                    )
+                })?;
+            }
         }
         Ok(())
     }

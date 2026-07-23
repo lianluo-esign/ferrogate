@@ -99,6 +99,7 @@ fn test_provider() -> Provider {
         secret_ref: None,
         openrouter_http_referer: None,
         openrouter_x_title: None,
+        cloudflare_ai_gateway: None,
         enabled: true,
     }
 }
@@ -835,6 +836,7 @@ fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {
@@ -924,6 +926,7 @@ fn ignores_disabled_guardrails() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {
@@ -1001,6 +1004,7 @@ fn matches_response_guardrail_with_redact_effect() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {
@@ -1635,6 +1639,7 @@ fn matches_regex_and_redacts_with_compiled_pattern() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {
@@ -1816,6 +1821,7 @@ fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {

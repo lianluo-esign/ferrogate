@@ -36,6 +36,7 @@ fn test_provider() -> Provider {
         secret_ref: None,
         openrouter_http_referer: None,
         openrouter_x_title: None,
+        cloudflare_ai_gateway: None,
         enabled: true,
     }
 }
@@ -161,6 +162,7 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -177,6 +179,7 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -193,6 +196,7 @@ fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
         ],
@@ -276,6 +280,7 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -292,6 +297,7 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -308,6 +314,7 @@ fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
         ],
@@ -430,6 +437,7 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -446,6 +454,7 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
             Provider {
@@ -462,6 +471,7 @@ fn orders_lowest_cost_routes_by_estimated_price() {
                 secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
+                cloudflare_ai_gateway: None,
                 enabled: true,
             },
         ],
@@ -633,6 +643,7 @@ fn provider_circuit_opens_after_configured_failures_and_resets_on_success() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         ..Config::default()
@@ -665,6 +676,7 @@ fn provider_circuit_is_disabled_without_reliability_config() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         ..Config::default()
@@ -745,6 +757,7 @@ fn provider_health_reports_disabled_provider_without_probe() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: false,
         }],
         ..Config::default()
@@ -886,6 +899,7 @@ fn provider_config(name: &str, base_url: &str) -> Provider {
         secret_ref: None,
         openrouter_http_referer: None,
         openrouter_x_title: None,
+        cloudflare_ai_gateway: None,
         enabled: true,
     }
 }
@@ -1140,4 +1154,124 @@ effect = "redact"
 
     assert_eq!(scope(&baseline), scope(&baseline_again));
     assert_ne!(scope(&baseline), scope(&tightened));
+}
+
+// --- issue #406: Cloudflare AI Gateway activation wiring -----------------
+
+/// A `[cloudflare]` block with non-default base URLs, so tests can prove the
+/// account id + base URLs flow through from `[cloudflare]` (not the per-provider
+/// block).
+fn cloudflare_test_config() -> crate::config::CloudflareConfig {
+    let mut cloudflare = crate::config::CloudflareConfig::new("acct-406", "env://CF_API_TOKEN");
+    cloudflare.ai_gateway_base_url = "https://gateway.example.test".into();
+    cloudflare.api_base_url = "https://api.example.test/client/v4".into();
+    cloudflare
+}
+
+#[test]
+fn provider_config_populates_cloudflare_ai_gateway_when_provider_and_block_present() {
+    // Resolve the AI Gateway token through the same env:// secret path as a
+    // provider key.
+    std::env::set_var("FERROGATE_TEST_AIG_TOKEN_406", "aig-token-value");
+    let mut provider = test_provider();
+    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+        gateway_id: "prod-gateway".into(),
+        aig_token_secret_ref: Some("env://FERROGATE_TEST_AIG_TOKEN_406".into()),
+        mode: crate::config::ProviderCloudflareAiGatewayMode::Unified,
+        provider_slug: Some("openai".into()),
+    });
+    let config = Config {
+        cloudflare: Some(cloudflare_test_config()),
+        ..Config::default()
+    };
+    let state = AppState::new(config);
+
+    let routing = state
+        .provider_config(&provider)
+        .cloudflare_ai_gateway
+        .expect("cloudflare_ai_gateway should be populated when the provider opts in");
+
+    // account_id + base URLs come from [cloudflare], not the per-provider block.
+    assert_eq!(routing.account_id, "acct-406");
+    assert_eq!(routing.gateway_base_url, "https://gateway.example.test");
+    assert_eq!(routing.api_base_url, "https://api.example.test/client/v4");
+    // gateway_id / mode / slug come from the per-provider block.
+    assert_eq!(routing.gateway_id, "prod-gateway");
+    assert_eq!(
+        routing.mode,
+        ferrogate_providers::CloudflareAiGatewayMode::Unified
+    );
+    assert_eq!(routing.provider_slug.as_deref(), Some("openai"));
+    // The token is resolved via the shared secret path.
+    assert_eq!(
+        routing
+            .aig_token
+            .as_ref()
+            .map(|token| token.expose_secret()),
+        Some("aig-token-value")
+    );
+
+    std::env::remove_var("FERROGATE_TEST_AIG_TOKEN_406");
+}
+
+#[test]
+fn provider_config_defaults_cloudflare_mode_to_compat_and_allows_unauthenticated_gateway() {
+    let mut provider = test_provider();
+    // Default mode (compat), no token ref -> unauthenticated gateway, no slug.
+    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+        gateway_id: "open-gateway".into(),
+        aig_token_secret_ref: None,
+        mode: crate::config::ProviderCloudflareAiGatewayMode::default(),
+        provider_slug: None,
+    });
+    let config = Config {
+        cloudflare: Some(cloudflare_test_config()),
+        ..Config::default()
+    };
+    let state = AppState::new(config);
+
+    let routing = state
+        .provider_config(&provider)
+        .cloudflare_ai_gateway
+        .expect("cloudflare_ai_gateway should be populated");
+    assert_eq!(
+        routing.mode,
+        ferrogate_providers::CloudflareAiGatewayMode::Compat
+    );
+    assert!(routing.aig_token.is_none());
+    assert!(routing.provider_slug.is_none());
+}
+
+#[test]
+fn provider_config_leaves_cloudflare_ai_gateway_dormant_without_provider_block() {
+    // [cloudflare] configured but the provider does not opt in -> None.
+    let provider = test_provider();
+    let config = Config {
+        cloudflare: Some(cloudflare_test_config()),
+        ..Config::default()
+    };
+    let state = AppState::new(config);
+    assert!(state
+        .provider_config(&provider)
+        .cloudflare_ai_gateway
+        .is_none());
+}
+
+#[test]
+fn provider_config_leaves_cloudflare_ai_gateway_none_when_cloudflare_block_absent() {
+    // Provider opts in but there is no [cloudflare] block -> None (dormant).
+    // (Validation rejects this combination at load time; provider_config stays
+    // fail-safe rather than panicking.)
+    let mut provider = test_provider();
+    provider.cloudflare_ai_gateway = Some(crate::config::ProviderCloudflareAiGatewayConfig {
+        gateway_id: "prod-gateway".into(),
+        aig_token_secret_ref: None,
+        mode: crate::config::ProviderCloudflareAiGatewayMode::Compat,
+        provider_slug: None,
+    });
+    let state = AppState::new(Config::default());
+    assert!(state
+        .provider_config(&provider)
+        .cloudflare_ai_gateway
+        .is_none());
 }

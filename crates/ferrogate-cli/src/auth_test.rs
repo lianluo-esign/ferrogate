@@ -693,6 +693,7 @@ fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {
@@ -808,6 +809,7 @@ fn tenant_scoped_monthly_budget_is_shared_across_two_keys_under_the_tenant() {
             secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            cloudflare_ai_gateway: None,
             enabled: true,
         }],
         models: vec![Model {

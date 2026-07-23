@@ -981,6 +981,61 @@ pub(crate) struct Provider {
     /// print-access-token` cron, or an ADC-aware sidecar).
     #[serde(default)]
     pub(crate) gcp_access_token_env: Option<String>,
+    /// Per-provider Cloudflare AI Gateway routing (issue #406). When set (and
+    /// a top-level `[cloudflare]` block is configured, issue #405), the
+    /// provider's already-prepared upstream request is rewritten onto the
+    /// tenant's Cloudflare AI Gateway (see
+    /// `ferrogate_providers::CloudflareAiGatewayRouting`). Absent (the
+    /// `#[serde(default)]` case) = direct dispatch, unchanged and non-breaking.
+    /// `account_id` and the gateway/api base URLs come from `[cloudflare]`, so
+    /// they are never repeated here.
+    #[serde(default)]
+    pub(crate) cloudflare_ai_gateway: Option<ProviderCloudflareAiGatewayConfig>,
+}
+
+/// Per-provider Cloudflare AI Gateway routing block (issue #406).
+///
+/// Opt-in: absent means the provider dispatches directly, exactly as before.
+/// `account_id` and the gateway/api base URLs are taken from the top-level
+/// `[cloudflare]` block (issue #405), never repeated here; only the
+/// per-provider gateway id, the optional AI-Gateway auth-token reference, the
+/// surface mode, and an optional Cloudflare provider-slug override live here.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ProviderCloudflareAiGatewayConfig {
+    /// AI Gateway id (the `{gateway_id}` path segment / `cf-aig-gateway-id`
+    /// header). Required.
+    pub(crate) gateway_id: String,
+    /// Optional secret reference (`env://…`, `vault://…`, or `cf://…`) for the
+    /// AI Gateway auth token, resolved through the same secret path as a
+    /// provider key. Absent/empty = an unauthenticated gateway (no
+    /// `cf-aig-authorization` header injected).
+    #[serde(default)]
+    pub(crate) aig_token_secret_ref: Option<String>,
+    /// Which Cloudflare surface to route through. Defaults to `compat`.
+    #[serde(default)]
+    pub(crate) mode: ProviderCloudflareAiGatewayMode,
+    /// Explicit Cloudflare provider-slug override (the path segment in compat
+    /// mode / the `author` prefix in unified mode). Absent = derived from the
+    /// provider family (`openai`/`anthropic`).
+    #[serde(default)]
+    pub(crate) provider_slug: Option<String>,
+}
+
+/// The Cloudflare AI Gateway surface a provider routes through -- the
+/// serde-aware file-config mirror of
+/// `ferrogate_providers::CloudflareAiGatewayMode` (which is not
+/// `Deserialize`/`Serialize`). Converted to the runtime enum in
+/// `state_routing.rs`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderCloudflareAiGatewayMode {
+    /// Per-provider passthrough surface. Default -- forwards the provider
+    /// request shape verbatim.
+    #[default]
+    Compat,
+    /// Unified REST API surface (`author/model` body form, gateway selected via
+    /// header).
+    Unified,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

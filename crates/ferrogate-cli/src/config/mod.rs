@@ -41,8 +41,9 @@ pub(crate) use self::types::{
     ObservabilityProvider, PluginCompatibility, PluginConfig, PluginManifest, PolicyRule,
     PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
-    ReliabilityConfig, RouteRule, SchedulerConfig, ShadowRoute, SkillPackage,
-    SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility,
-    SkillPackageResources, StorageConfig, StorageMigrationMode, TelemetryConfig, TlsAcmeConfig,
-    TlsConfig, Upstream, X402ReconcilerConfig, X402SweeperConfig,
+    ProviderCloudflareAiGatewayConfig, ProviderCloudflareAiGatewayMode, ReliabilityConfig,
+    RouteRule, SchedulerConfig, ShadowRoute, SkillPackage, SkillPackageCapability,
+    SkillPackageCapabilityKind, SkillPackageCompatibility, SkillPackageResources, StorageConfig,
+    StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    X402ReconcilerConfig, X402SweeperConfig,
 };

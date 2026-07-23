@@ -134,11 +134,73 @@ impl AppState {
             openrouter_x_title: provider.openrouter_x_title.clone(),
             aws_credentials: aws_provider_credentials(provider),
             gcp_credentials: gcp_provider_credentials(provider),
-            // Issue #406: Cloudflare AI Gateway routing is wired at the
-            // provider-config parsing + `[cloudflare]`/secret-resolution layer
-            // (separate change); direct dispatch is unchanged until then.
-            cloudflare_ai_gateway: None,
+            // Issue #406: activate the Cloudflare AI Gateway request-rewrite by
+            // building the routing block from the provider's file config plus
+            // the top-level `[cloudflare]` block. `None` (the common case)
+            // leaves direct dispatch unchanged.
+            cloudflare_ai_gateway: self.cloudflare_ai_gateway_routing(provider),
         }
+    }
+
+    /// Build the Cloudflare AI Gateway routing block for a provider (issue
+    /// #406), activating the upstream request-rewrite in `ferrogate-providers`.
+    ///
+    /// Returns `None` (direct dispatch, unchanged) unless the provider carries a
+    /// `cloudflare_ai_gateway` file-config block *and* a top-level
+    /// `[cloudflare]` block (issue #405) is configured -- both are required so
+    /// the account id and base URLs are available. `account_id` and the
+    /// gateway/api base URLs come from `[cloudflare]`, falling back to the
+    /// Cloudflare default hosts if a base URL is blank. The AI-Gateway auth
+    /// token is resolved from `aig_token_secret_ref` through the same
+    /// `SecretResolverRegistry` seam used for provider API keys; an
+    /// absent/empty ref or a resolution miss yields `None` (an *unauthenticated*
+    /// gateway) rather than failing the dispatch.
+    fn cloudflare_ai_gateway_routing(
+        &self,
+        provider: &Provider,
+    ) -> Option<ferrogate_providers::CloudflareAiGatewayRouting> {
+        let routing = provider.cloudflare_ai_gateway.as_ref()?;
+        let cloudflare = self.config.cloudflare.as_ref()?;
+
+        let gateway_base_url = non_empty_or(
+            &cloudflare.ai_gateway_base_url,
+            ferrogate_cloudflare::default_ai_gateway_base_url,
+        );
+        let api_base_url = non_empty_or(
+            &cloudflare.api_base_url,
+            ferrogate_cloudflare::default_api_base_url,
+        );
+
+        let aig_token = routing
+            .aig_token_secret_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|reference| !reference.is_empty())
+            .and_then(|reference| resolve_cloudflare_aig_token(&provider.name, reference));
+
+        let mode = match routing.mode {
+            crate::config::ProviderCloudflareAiGatewayMode::Compat => {
+                ferrogate_providers::CloudflareAiGatewayMode::Compat
+            }
+            crate::config::ProviderCloudflareAiGatewayMode::Unified => {
+                ferrogate_providers::CloudflareAiGatewayMode::Unified
+            }
+        };
+
+        Some(ferrogate_providers::CloudflareAiGatewayRouting {
+            account_id: cloudflare.account_id.clone(),
+            gateway_id: routing.gateway_id.clone(),
+            gateway_base_url,
+            api_base_url,
+            aig_token,
+            mode,
+            provider_slug: routing
+                .provider_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|slug| !slug.is_empty())
+                .map(str::to_string),
+        })
     }
 
     pub(crate) fn prepare_model_catalog(
@@ -798,6 +860,44 @@ impl AppState {
         endpoints
             .get(next as usize % endpoints.len())
             .map(|url| (*url).to_string())
+    }
+}
+
+/// Return `value` when non-blank, else the Cloudflare default host (issue
+/// #406). The `[cloudflare]` base URLs already default via serde, but this
+/// guards a hand-written/blank override so the rewrite never produces a
+/// schema-less URL.
+fn non_empty_or(value: &str, default: impl FnOnce() -> String) -> String {
+    if value.trim().is_empty() {
+        default()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Resolve a Cloudflare AI Gateway auth-token reference through the same
+/// `SecretResolverRegistry` seam used for provider API keys (issue #406). A
+/// resolution miss (`Ok(None)`) or resolver error logs and yields `None` -- an
+/// *unauthenticated* gateway -- rather than failing the dispatch, mirroring the
+/// fall-back-and-warn shape of `resolve_provider_secret_refs`.
+fn resolve_cloudflare_aig_token(provider_name: &str, reference: &str) -> Option<SecretValue> {
+    match ferrogate_secrets::SecretResolverRegistry::from_env().resolve(reference) {
+        Ok(Some(value)) => Some(SecretValue::new(value)),
+        Ok(None) => {
+            warn!(
+                provider = %provider_name,
+                "cloudflare aig_token_secret_ref resolved to no value; routing through an unauthenticated gateway"
+            );
+            None
+        }
+        Err(error) => {
+            warn!(
+                provider = %provider_name,
+                error = %error,
+                "failed to resolve cloudflare aig_token_secret_ref; routing through an unauthenticated gateway"
+            );
+            None
+        }
     }
 }
 

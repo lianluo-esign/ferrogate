@@ -612,7 +612,7 @@ fn rejects_provider_secret_ref_with_unsupported_scheme() {
 
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("field providers[0].secret_ref"));
-    assert!(error.contains("env:// or vault://"));
+    assert!(error.contains("env://, vault://, or cf://"));
 }
 
 #[test]
@@ -1925,7 +1925,7 @@ fn rejects_invalid_custom_http_guardrail_secret_reference() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("provider_secret_ref"));
-    assert!(error.contains("env:// or vault://"));
+    assert!(error.contains("env://, vault://, or cf://"));
 }
 
 #[test]
@@ -3670,6 +3670,7 @@ fn provider() -> Provider {
         secret_ref: None,
         openrouter_http_referer: None,
         openrouter_x_title: None,
+        cloudflare_ai_gateway: None,
         enabled: true,
     }
 }
@@ -4094,6 +4095,81 @@ fn rejects_cloudflare_with_malformed_base_url() {
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(
         error.contains("field cloudflare.api_base_url"),
+        "was: {error}"
+    );
+}
+
+/// A provider carrying a `cloudflare_ai_gateway` block (issue #406).
+fn cloudflare_ai_gateway_provider(
+    gateway_id: &str,
+    aig_token_secret_ref: Option<&str>,
+) -> Provider {
+    let mut provider = provider();
+    provider.cloudflare_ai_gateway = Some(ProviderCloudflareAiGatewayConfig {
+        gateway_id: gateway_id.into(),
+        aig_token_secret_ref: aig_token_secret_ref.map(str::to_string),
+        mode: ProviderCloudflareAiGatewayMode::Compat,
+        provider_slug: None,
+    });
+    provider
+}
+
+#[test]
+fn accepts_cloudflare_ai_gateway_provider_with_cloudflare_block() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),
+        providers: vec![cloudflare_ai_gateway_provider(
+            "prod-gateway",
+            Some("env://AIG_TOKEN"),
+        )],
+        ..Config::default()
+    };
+    config
+        .validate()
+        .expect("a CF-enabled provider with a [cloudflare] block must validate");
+}
+
+#[test]
+fn rejects_cloudflare_ai_gateway_provider_without_cloudflare_block() {
+    let config = Config {
+        cloudflare: None,
+        providers: vec![cloudflare_ai_gateway_provider("prod-gateway", None)],
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("providers[0].cloudflare_ai_gateway") && error.contains("[cloudflare]"),
+        "was: {error}"
+    );
+}
+
+#[test]
+fn rejects_cloudflare_ai_gateway_provider_with_empty_gateway_id() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),
+        providers: vec![cloudflare_ai_gateway_provider("   ", None)],
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("providers[0].cloudflare_ai_gateway.gateway_id"),
+        "was: {error}"
+    );
+}
+
+#[test]
+fn rejects_cloudflare_ai_gateway_provider_with_malformed_aig_token_ref() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),
+        providers: vec![cloudflare_ai_gateway_provider(
+            "prod-gateway",
+            Some("not-a-scheme"),
+        )],
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("providers[0].cloudflare_ai_gateway.aig_token_secret_ref"),
         "was: {error}"
     );
 }

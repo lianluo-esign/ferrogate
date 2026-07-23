@@ -115,6 +115,7 @@ impl Config {
                     openrouter_http_referer: provider.openrouter_http_referer,
                     openrouter_x_title: provider.openrouter_x_title,
                     enabled: true,
+                    cloudflare_ai_gateway: None,
                 })
                 .collect(),
             models: config
