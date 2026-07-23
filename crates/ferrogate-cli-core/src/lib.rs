@@ -64,6 +64,7 @@ pub mod command;
 pub mod context;
 pub mod error;
 pub mod evidence;
+pub mod guardrail;
 pub mod iam;
 pub mod mcp;
 pub mod ops;
@@ -72,6 +73,7 @@ pub mod output;
 pub mod parity;
 pub mod registry_helpers;
 pub mod resource;
+pub mod tool_approval;
 pub mod transport;
 pub mod version;
 pub mod worker;
@@ -82,15 +84,17 @@ pub use error::{ApiError, CliError, CliResult, ExitClass};
 /// Register every resource command family this crate provides onto a fresh
 /// [`Registry`]. The composing `ferrogate` binary (epic #358) calls this to get
 /// the full client command surface; #361 contributes the organization and IAM
-/// families, #362 the agent / worker / MCP lifecycle families, #363 the asset
-/// families, and #364 the billing/usage, evidence, and operator-action families
-/// (including gateway config profiles).
+/// families, #362 the agent / worker / MCP / tool-approval / guardrail lifecycle
+/// families, #363 the asset families, and #364 the billing/usage, evidence, and
+/// operator-action families (including gateway config profiles).
 pub fn register_resource_families(registry: &mut Registry) -> CliResult<()> {
     organization::register(registry)?;
     iam::register(registry)?;
     agent::register(registry)?;
     worker::register(registry)?;
     mcp::register(registry)?;
+    tool_approval::register(registry)?;
+    guardrail::register(registry)?;
     asset::register(registry)?;
     billing::register(registry)?;
     evidence::register(registry)?;
