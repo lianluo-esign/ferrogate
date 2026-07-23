@@ -35,6 +35,7 @@ flate2 = "1"
 ed25519-dalek.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
+ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-guardrails = { path = "../ferrogate-guardrails" }

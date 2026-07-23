@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(crate) use ferrogate_cloudflare::CloudflareConfig;
 pub(crate) use ferrogate_core::ApprovalPolicy;
 use ferrogate_guardrails::{all_content_sources, ContentSource};
 pub(crate) use ferrogate_mcp::{
@@ -111,6 +112,12 @@ pub(crate) struct Config {
     /// egress billing. Mirrors `PriceBook.egress_price_per_gb`.
     #[serde(default)]
     pub(crate) asset_egress_price_per_gb: Option<f64>,
+    /// #405: shared Cloudflare API client credentials/config. Absent = every
+    /// Cloudflare integration is disabled; present = validated for account
+    /// id/token presence and base-URL well-formedness. Non-breaking (serde
+    /// default `None`).
+    #[serde(default)]
+    pub(crate) cloudflare: Option<CloudflareConfig>,
 }
 
 /// Time-based agent schedule triggers (#246). The scheduler is a control-plane
@@ -2632,6 +2639,7 @@ impl Default for Config {
             x402_sweeper: X402SweeperConfig::default(),
             x402_reconciler: X402ReconcilerConfig::default(),
             asset_egress_price_per_gb: None,
+            cloudflare: None,
         }
     }
 }

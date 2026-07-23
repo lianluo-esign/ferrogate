@@ -242,6 +242,9 @@ impl Config {
             x402_sweeper: crate::config::X402SweeperConfig::default(),
             x402_reconciler: crate::config::X402ReconcilerConfig::default(),
             asset_egress_price_per_gb: None,
+            // #405: the Caddyfile bridge has no Cloudflare surface; it stays
+            // disabled here and is only configurable via the native config.
+            cloudflare: None,
         }
     }
 

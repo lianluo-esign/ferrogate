@@ -128,6 +128,48 @@ impl Config {
         self.validate_routes(&upstream_names)?;
         self.validate_asset_bucket()?;
         self.validate_x402_reconciler()?;
+        self.validate_cloudflare()?;
+        Ok(())
+    }
+
+    /// Validate the optional `[cloudflare]` block (issue #405).
+    ///
+    /// Absent = Cloudflare disabled, always valid. When present we check only
+    /// the static invariants a config load can prove: a non-empty account id,
+    /// a non-empty API-token reference, non-empty per-tenant token references,
+    /// and well-formed (`http(s)://`) base URLs. Live token/scope verification
+    /// is a runtime concern handled by the client's `preflight()`.
+    fn validate_cloudflare(&self) -> AnyResult<()> {
+        let Some(cloudflare) = &self.cloudflare else {
+            return Ok(());
+        };
+        if cloudflare.account_id.trim().is_empty() {
+            bail!("field cloudflare.account_id: cannot be empty");
+        }
+        if cloudflare.api_token.trim().is_empty() {
+            bail!("field cloudflare.api_token: cannot be empty (an env:// reference or token)");
+        }
+        for (tenant, reference) in &cloudflare.tenant_tokens {
+            if reference.trim().is_empty() {
+                bail!("field cloudflare.tenant_tokens.{tenant}: token reference cannot be empty");
+            }
+        }
+        for (field, url) in [
+            ("api_base_url", &cloudflare.api_base_url),
+            ("ai_gateway_base_url", &cloudflare.ai_gateway_base_url),
+        ] {
+            if url.trim().is_empty() {
+                bail!("field cloudflare.{field}: cannot be empty");
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                bail!("field cloudflare.{field}: must start with http:// or https://");
+            }
+        }
+        if let Some(endpoint) = &cloudflare.r2_s3_endpoint {
+            if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                bail!("field cloudflare.r2_s3_endpoint: must start with http:// or https://");
+            }
+        }
         Ok(())
     }
 

@@ -1191,6 +1191,7 @@ dependencies = [
  "ed25519-dalek",
  "ferrogate-auth",
  "ferrogate-billing",
+ "ferrogate-cloudflare",
  "ferrogate-config",
  "ferrogate-core",
  "ferrogate-guardrails",
@@ -1243,6 +1244,19 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ferrogate-cloudflare"
+version = "2026.7.9"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

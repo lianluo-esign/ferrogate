@@ -3963,3 +3963,62 @@ fn default_config_passes_x402_hold_ttl_invariant() {
         .validate()
         .expect("default config must validate the x402 hold-TTL invariant");
 }
+
+#[test]
+fn absent_cloudflare_block_is_valid() {
+    // #405: no [cloudflare] block = Cloudflare disabled; must always validate.
+    let config = Config::default();
+    assert!(config.cloudflare.is_none());
+    config
+        .validate()
+        .expect("a config without a [cloudflare] block must validate");
+}
+
+#[test]
+fn valid_cloudflare_block_passes() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),
+        ..Config::default()
+    };
+    config
+        .validate()
+        .expect("a well-formed [cloudflare] block must validate");
+}
+
+#[test]
+fn rejects_cloudflare_with_empty_account_id() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("   ", "env://CF_API_TOKEN")),
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field cloudflare.account_id"),
+        "was: {error}"
+    );
+}
+
+#[test]
+fn rejects_cloudflare_with_empty_token() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "")),
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field cloudflare.api_token"), "was: {error}");
+}
+
+#[test]
+fn rejects_cloudflare_with_malformed_base_url() {
+    let mut cf = CloudflareConfig::new("acct-123", "env://CF_API_TOKEN");
+    cf.api_base_url = "ftp://api.cloudflare.com".to_string();
+    let config = Config {
+        cloudflare: Some(cf),
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field cloudflare.api_base_url"),
+        "was: {error}"
+    );
+}
