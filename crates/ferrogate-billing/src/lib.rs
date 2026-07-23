@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 pub mod ledger;
 pub mod pricing;
 pub mod service;
+pub mod x402_inbound;
 
 pub use ledger::{
     charge, same_provider_attempt_settlement, CostSource, InMemoryLedgerSink, LedgerEntry,
@@ -32,6 +33,12 @@ pub use ledger::{
 };
 pub use pricing::{PriceBook, PriceEntry, DEFAULT_CREDITS_PER_USD};
 pub use service::{billing_error_http_status, serve, BillingServiceConfig};
+pub use x402_inbound::{
+    settle_inbound_payment, InMemoryRevenueSink, InboundX402CallContext, InboundX402Challenge,
+    InboundX402ConfigError, InboundX402Endpoint, InboundX402RevenueRecord,
+    InboundX402SettlementError, RevenueSink, RevenueSource, RevenueTotals,
+    ValidatedInboundX402Endpoint, PAYMENT_REQUIRED_STATUS,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {

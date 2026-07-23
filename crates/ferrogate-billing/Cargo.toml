@@ -17,6 +17,8 @@ authors.workspace = true
 
 [dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-payments = { path = "../ferrogate-payments" }
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

@@ -1167,7 +1167,9 @@ name = "ferrogate-billing"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "base64",
  "ferrogate-core",
+ "ferrogate-payments",
  "proptest",
  "serde",
  "serde_json",
