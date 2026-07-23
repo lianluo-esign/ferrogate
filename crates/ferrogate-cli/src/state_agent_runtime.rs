@@ -30,6 +30,20 @@ impl AppState {
         self.metering_events.list()
     }
 
+    /// Issue #330 note: this reads through the sync `request_logs()` /
+    /// `audit_events()` bridges. It is reached on the AI-proxy hot path from
+    /// the sync free fn `enforce_ai_workflow_policy` (chat.rs), which performs
+    /// several *other* bridged workflow-gate reads in the same gate
+    /// (`workflow_edge_transition_error` ->
+    /// `workflow_run_last_successful_node_id`, also `request_logs`/
+    /// `audit_events`-backed). De-bridging only this one while the sibling
+    /// gate reads stay bridged in the same synchronous function would be
+    /// incoherent; a correct fix converts the whole agent-workflow gate
+    /// (both the chat and `agent_runs` entry points and their shared helpers)
+    /// to async at once. That is a larger, self-contained restructuring than
+    /// this slice and is tracked as follow-up work, so it is kept bridged
+    /// under the acceptance carve-out for reads that need a sync-only caller
+    /// restructured.
     pub(crate) fn workflow_run_started_at(
         &self,
         workflow_id: &str,

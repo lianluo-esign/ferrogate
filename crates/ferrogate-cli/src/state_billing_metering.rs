@@ -1239,7 +1239,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].usage_source, BillingUsageSource::GatewayEstimate);
         assert_eq!(events[0].usage.total_tokens, 8);
-        assert_eq!(state.api_key_total_tokens_used("key_dev"), 8);
+        assert_eq!(block_on(state.api_key_total_tokens_used("key_dev")), 8);
     }
 
     #[test]

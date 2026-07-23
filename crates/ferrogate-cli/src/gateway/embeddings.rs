@@ -345,11 +345,14 @@ impl FerroGateway {
                 if let (Some(api_key_id), Some(budget)) =
                     (auth.api_key_id.as_deref(), auth.monthly_token_budget)
                 {
-                    match state.try_reserve_api_key_tokens(
-                        api_key_id,
-                        budget,
-                        estimated_usage.total_tokens,
-                    ) {
+                    match state
+                        .try_reserve_api_key_tokens(
+                            api_key_id,
+                            budget,
+                            estimated_usage.total_tokens,
+                        )
+                        .await
+                    {
                         Ok(Some(reservation)) => {
                             token_reservation = Some(reservation);
                         }

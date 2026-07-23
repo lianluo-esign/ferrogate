@@ -7837,6 +7837,41 @@ impl PostgresControlPlaneStore {
         transaction.commit().await.map_err(postgres_error)?;
         Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
     }
+
+    /// Sum of `total_tokens` across every usage-aggregate rollup attributed to
+    /// a single `api_key_id`, pushed down to SQL (`WHERE t.api_key_id = $1`)
+    /// so the per-request token-budget gate no longer streams the whole
+    /// `usage_aggregate_rollups` table into process memory just to filter it
+    /// (issue #330; the read counterpart of the #231 full-scan class). The
+    /// `SUM(...)::bigint` cast keeps the result an `i64` rather than the
+    /// `numeric` Postgres returns for a `SUM` over `bigint`, and `COALESCE`
+    /// makes the "no rows for this key" case a definite `0` instead of `NULL`.
+    async fn sum_api_key_committed_tokens(&self, api_key_id: &str) -> Result<u64, StorageError> {
+        let operation = self.observability_operation("sum api key committed tokens");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let row = transaction
+            .query_one(
+                "SELECT COALESCE(SUM(a.total_tokens), 0)::bigint \
+                 FROM usage_aggregate_rollups a \
+                 JOIN tenant_contexts t ON t.id = a.tenant_context_id \
+                 WHERE t.api_key_id = $1",
+                &[&api_key_id],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(row.get::<_, i64>(0).max(0) as u64)
+    }
 }
 
 fn build_postgres_tls_connector(
@@ -14241,6 +14276,35 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    /// Total committed `total_tokens` for one `api_key_id` (issue #330). On
+    /// the durable path the filter + sum run in SQL so the per-request token
+    /// budget gate never materializes the whole `usage_aggregate_rollups`
+    /// table; the in-memory backend keeps the equivalent filter-and-sum over
+    /// its aggregate map. Errors collapse to `0` to preserve the exact
+    /// pre-existing gate semantics (`usage_aggregates().unwrap_or_default()`
+    /// already treated a storage error as "no committed usage").
+    pub async fn sum_api_key_committed_tokens(&self, api_key_id: &str) -> u64 {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .sum_api_key_committed_tokens(api_key_id)
+                .await
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .usage_aggregates
+                .lock()
+                .map(|aggregates| {
+                    aggregates
+                        .list()
+                        .into_iter()
+                        .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
+                        .fold(0_u64, |total, aggregate| {
+                            total.saturating_add(aggregate.usage.total_tokens)
+                        })
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     pub async fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => {
@@ -15498,6 +15562,10 @@ impl<T> StoragePage<T> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "usage_aggregate_sum_test.rs"]
+mod usage_aggregate_sum_test;
 
 #[cfg(test)]
 #[path = "schema_validation_test.rs"]

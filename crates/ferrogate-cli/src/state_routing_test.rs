@@ -6,10 +6,19 @@
 
 use super::*;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
 fn api_key_tokens_committed_or_reserved(state: &AppState, api_key_id: &str) -> anyhow::Result<u64> {
-    state
-        .cluster_counters
-        .committed_or_reserved(api_key_id, state.api_key_total_tokens_used(api_key_id))
+    state.cluster_counters.committed_or_reserved(
+        api_key_id,
+        block_on(state.api_key_total_tokens_used(api_key_id)),
+    )
 }
 
 fn test_provider() -> Provider {
@@ -786,8 +795,7 @@ fn api_key_request_window_rejects_after_configured_limit() {
 fn api_key_token_reservation_counts_against_budget_until_released() {
     let state = AppState::new(Config::default());
 
-    let reservation = state
-        .try_reserve_api_key_tokens("key_dev", 10, 7)
+    let reservation = block_on(state.try_reserve_api_key_tokens("key_dev", 10, 7))
         .unwrap()
         .expect("first reservation should fit");
 
@@ -795,8 +803,7 @@ fn api_key_token_reservation_counts_against_budget_until_released() {
         api_key_tokens_committed_or_reserved(&state, "key_dev").unwrap(),
         7
     );
-    assert!(state
-        .try_reserve_api_key_tokens("key_dev", 10, 4)
+    assert!(block_on(state.try_reserve_api_key_tokens("key_dev", 10, 4))
         .unwrap()
         .is_none());
 
@@ -806,8 +813,7 @@ fn api_key_token_reservation_counts_against_budget_until_released() {
         api_key_tokens_committed_or_reserved(&state, "key_dev").unwrap(),
         0
     );
-    assert!(state
-        .try_reserve_api_key_tokens("key_dev", 10, 4)
+    assert!(block_on(state.try_reserve_api_key_tokens("key_dev", 10, 4))
         .unwrap()
         .is_some());
 }

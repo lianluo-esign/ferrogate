@@ -149,6 +149,15 @@ impl AppState {
     /// for issue #221's storage migration. Bridges via the same
     /// `block_on_sync_bridge` helper already used for the RBAC permission
     /// check in `gateway/mod.rs` rather than duplicating that pattern.
+    ///
+    /// Issue #330 re-audited this and keeps it bridged deliberately: its only
+    /// caller is sync `finalize_auth`, and the read is a single `get_wallet`
+    /// point lookup (not a full-table scan). The hot request-path wallet gate
+    /// is the already-async `try_reserve_wallet_credits`; this pre-dispatch
+    /// balance check is the sync-only counterpart. De-bridging needs the
+    /// `authenticate`/`finalize_auth` chain to go async (out of scope here),
+    /// so it falls under the acceptance carve-out for a read behind a
+    /// sync-only caller.
     pub(crate) fn wallet_balance_exhausted(
         &self,
         tenant: &ferrogate_core::TenantContext,

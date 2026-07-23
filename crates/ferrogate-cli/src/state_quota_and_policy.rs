@@ -219,6 +219,15 @@ impl AppState {
     /// fns -- converting the whole `authenticate` chain to async is out of
     /// scope for this migration slice. Bridges via the same
     /// `block_on_sync_bridge` helper already used for `wallet_balance_exhausted`.
+    ///
+    /// Issue #330 re-audited this and keeps it bridged deliberately: the reads
+    /// are point lookups (`get_quota_policy` per non-empty scope plus one
+    /// `resolve_tenant_plan`), not a full-table scan, and the only hot-path
+    /// caller is sync `finalize_auth`. The lone async caller
+    /// (`virtual_keys.rs`'s admin quota-preview) is a cold operator path. This
+    /// falls under the acceptance carve-out for a read that "must stay bridged
+    /// behind a sync-only caller"; de-bridging needs `authenticate`/
+    /// `finalize_auth` to go async, a separate large refactor.
     pub(crate) fn resolve_effective_quota(
         &self,
         tenant: &ferrogate_core::TenantContext,
@@ -260,21 +269,28 @@ impl AppState {
         })
     }
 
-    pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
-        crate::gateway::block_on_sync_bridge(self.repositories.usage_aggregates())
-            .into_iter()
-            .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
-            .map(|aggregate| aggregate.usage.total_tokens)
-            .sum()
+    /// Committed monthly token spend for one api key (issue #330). The filter
+    /// and sum are pushed into storage (`WHERE api_key_id = $1` in SQL on the
+    /// durable path) instead of loading the entire `usage_aggregate_rollups`
+    /// table into process memory and filtering it per request, which was both
+    /// a full-table scan (#231-class) and a `block_in_place` bridge parking a
+    /// Pingora worker. Now `async` and awaited directly by the AI-proxy
+    /// handlers, so no sync bridge remains on this hot path. Storage errors
+    /// collapse to `0`, preserving the pre-#330 fail-open gate semantics
+    /// exactly (`usage_aggregates().unwrap_or_default()` already did so).
+    pub(crate) async fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
+        self.repositories
+            .sum_api_key_committed_tokens(api_key_id)
+            .await
     }
 
-    pub(crate) fn try_reserve_api_key_tokens(
+    pub(crate) async fn try_reserve_api_key_tokens(
         &self,
         api_key_id: &str,
         budget: u64,
         estimated_tokens: u64,
     ) -> anyhow::Result<Option<ApiKeyTokenReservation>> {
-        let committed = self.api_key_total_tokens_used(api_key_id);
+        let committed = self.api_key_total_tokens_used(api_key_id).await;
         self.cluster_counters
             .try_reserve_tokens(api_key_id, committed, budget, estimated_tokens)
     }
