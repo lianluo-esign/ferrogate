@@ -1301,6 +1301,8 @@ name = "ferrogate-mcp"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "ferrogate-cloudflare",
  "ferrogate-core",
  "http",
  "rcgen",

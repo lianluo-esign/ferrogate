@@ -1828,6 +1828,10 @@ pub fn cloudflare_managed_bearer_config(
     }
 }
 
+/// Deploy / lifecycle pipeline for a FerroGate-hosted MCP server Worker on
+/// Cloudflare (issue #409). See [`mcp_worker_deploy`] for the module docs.
+pub mod mcp_worker_deploy;
+
 #[cfg(test)]
 #[path = "lib_test.rs"]
 mod tests;
