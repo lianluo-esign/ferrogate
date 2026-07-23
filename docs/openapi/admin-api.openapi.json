@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "FerroGate Admin API",
-    "summary": "Control-plane API for inspecting and mutating process-local FerroGate gateway state.",
+    "title": "FerroGate Control Plane API",
+    "summary": "Supported, externally consumable REST control plane for inspecting and mutating FerroGate gateway state. Formerly published as the FerroGate Admin API.",
     "version": "2026.6.22",
     "license": {
       "name": "Apache-2.0",
@@ -14,7 +14,37 @@
       "author_x": "https://x.com/JamesDuanL",
       "created": "2026-06-11",
       "attribution": "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
-    }
+    },
+    "description": "The FerroGate Control Plane API is the supported external REST surface for managing FerroGate resources. \"Public\" means supported and externally consumable; it does not mean unauthenticated: every operation still requires authentication, admin.read/admin.write scope enforcement, tenant isolation, and audit evidence.\n\nThis artifact was previously titled \"FerroGate Admin API\". The admin-api name (the `ferrogate admin-api serve` command, the `[admin_api]` config section, and the `FERROGATE_ADMIN_*` environment names) is retained as a documented, deprecated compatibility alias for the migration window. The stable `/admin/v1` paths are unchanged, so existing admin clients keep working.\n\nOperations promoted into the versioned public-stable surface carry `x-ferrogate-stability: \"stable\"` and are covered by the backward-compatibility baseline gate; see the top-level `x-ferrogate-control-plane` block."
+  },
+  "x-ferrogate-control-plane": {
+    "name": "FerroGate Control Plane API",
+    "deprecated_alias": "admin-api",
+    "public_major": "v1",
+    "stable_path_prefix": "/admin/v1",
+    "public_meaning": "Supported and externally consumable, not unauthenticated. Auth, admin.read/admin.write scopes, tenant isolation, and audit evidence remain mandatory.",
+    "stability_contract": "Operations marked x-ferrogate-stability=stable are the versioned public surface. Their path, method, operationId, auth scope, and request/response schema may only change in backward-compatible ways and are enforced by docs/openapi/admin-api.compatibility-baseline.json via scripts/check-openapi.py.",
+    "promoted_resources": [
+      "guardrail-policies"
+    ],
+    "promoted_operations": [
+      "listGuardrailPolicyRevisions",
+      "createGuardrailPolicyRevision",
+      "listGuardrailPolicyRevisionsByPolicy",
+      "activateGuardrailPolicyRevision",
+      "rollbackGuardrailPolicyRevision",
+      "dryRunGuardrailPolicyRevision",
+      "listGuardrailPolicyRevisionHistory",
+      "createNextGuardrailPolicyRevision",
+      "getGuardrailPolicyRevision",
+      "archiveGuardrailPolicyRevision"
+    ],
+    "deferred": [
+      "ferrogate control-api serve canonical command (admin-api serve remains the entrypoint this slice)",
+      "admin_api -> control-plane config/environment migration with conflict rejection",
+      "second URI namespace alias (e.g. /control/v1) generated from one route contract with parity tests",
+      "promotion of the remaining admin resource families"
+    ]
   },
   "servers": [
     {
@@ -5578,7 +5608,8 @@
             "scope": "admin.read"
           },
           "rbac_action": "guardrails.policy.read"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       },
       "post": {
         "operationId": "createGuardrailPolicyRevision",
@@ -5631,7 +5662,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.create_revision"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}": {
@@ -5675,7 +5707,8 @@
             "scope": "admin.read"
           },
           "rbac_action": "guardrails.policy.read"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}/revisions": {
@@ -5719,7 +5752,8 @@
             "scope": "admin.read"
           },
           "rbac_action": "guardrails.policy.read"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       },
       "post": {
         "operationId": "createNextGuardrailPolicyRevision",
@@ -5777,7 +5811,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.create_revision"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}/revisions/{revision}": {
@@ -5824,7 +5859,8 @@
             "scope": "admin.read"
           },
           "rbac_action": "guardrails.policy.read"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       },
       "delete": {
         "operationId": "archiveGuardrailPolicyRevision",
@@ -5868,7 +5904,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.archive"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}/activate": {
@@ -5928,7 +5965,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.activate"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}/rollback": {
@@ -5988,7 +6026,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.rollback"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/guardrail-policies/{policy_id}/dry-run": {
@@ -6048,7 +6087,8 @@
             "scope": "admin.write"
           },
           "rbac_action": "guardrails.policy.dry_run"
-        }
+        },
+        "x-ferrogate-stability": "stable"
       }
     },
     "/admin/v1/self-hosted-workers/{id}/rotate": {

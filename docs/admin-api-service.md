@@ -1,5 +1,46 @@
 # Standalone admin-console API service (`ferrogate admin-api serve`)
 
+> **Naming — FerroGate Control Plane API (issue #359).** This service is the
+> **FerroGate Control Plane API**: the supported, externally consumable REST
+> surface for managing FerroGate resources. *Public* means supported and
+> externally consumable — **not** unauthenticated: authentication,
+> `admin.read`/`admin.write` scope enforcement, tenant isolation, CSRF rules
+> where browser sessions apply, rate limits, request IDs, and audit evidence
+> remain mandatory. OpenAPI (`docs/openapi/admin-api.openapi.json`) is the
+> machine-readable contract for the service; it is not the service's product
+> name.
+>
+> The `admin-api` name — the `ferrogate admin-api serve` command, the
+> `[admin_api]` config section, the `FERROGATE_ADMIN_*` environment names, and
+> the `/admin/v1` path prefix — is retained as a **documented, deprecated
+> compatibility alias** for the migration window. The stable `/admin/v1` paths
+> are unchanged, so existing admin clients keep working byte-for-byte.
+>
+> **Stability contract.** Operations promoted into the versioned public-stable
+> surface carry `x-ferrogate-stability: "stable"` in the OpenAPI document and
+> are enumerated in the top-level `x-ferrogate-control-plane` block. The typed
+> source of truth is `ferrogate_admin::control_plane` (crate
+> `crates/ferrogate-admin`), pinned against the OpenAPI document by
+> `crates/ferrogate-admin/src/control_plane_test.rs`. A promoted operation's
+> path, method, `operationId`, auth scope, and request/response schema may only
+> change in backward-compatible ways; the compatibility baseline gate
+> (`scripts/check-openapi.py` against
+> `docs/openapi/admin-api.compatibility-baseline.json`) enforces this.
+>
+> **Promoted this slice:** the full `guardrail-policies` lifecycle (list, read,
+> revision history, create-revision, activate, rollback, dry-run, archive — 10
+> operations). Promotion is *additive*: these keep their `/admin/v1` paths and
+> their `admin` runtime visibility / admin-scope enforcement; the stability
+> marker is an external supportability promise, not a relaxation of auth.
+>
+> **Deferred to later slices of #359** (tracked on the open issue): the
+> canonical `ferrogate control-api serve` command with a deprecation notice on
+> `admin-api serve`; the non-breaking `admin_api` → control-plane config /
+> environment migration that rejects ambiguous old+new configuration; a second
+> URI namespace alias (only allowed once both paths are generated from one route
+> contract with tested behavior parity); and promotion of the remaining admin
+> resource families.
+
 Issue #315. The admin console used to call the gateway's `/admin/v1/*`
 surface directly, which meant admin control-plane traffic rode the same
 process, listener, and route table as the AI data plane. `ferrogate

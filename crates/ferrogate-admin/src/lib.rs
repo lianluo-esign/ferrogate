@@ -5,6 +5,12 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 //! Admin API boundary.
+//!
+//! Home of the [`control_plane`] contract that promotes this admin surface into
+//! the supported, versioned public **FerroGate Control Plane API** (issue #359)
+//! without breaking existing admin clients.
+
+pub mod control_plane;
 
 use serde::{Deserialize, Serialize};
 

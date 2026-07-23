@@ -1,5 +1,21 @@
 # API Contract And Compatibility
 
+This document is the machine-readable contract for the **FerroGate Control
+Plane API** (issue #359) — the supported, externally consumable REST surface.
+*Public* means supported and externally consumable, not unauthenticated. The
+`admin-api` command/config/`/admin/v1` names are a documented, deprecated
+compatibility alias for the migration window; the OpenAPI `info.title` is
+"FerroGate Control Plane API" while the artifact file name stays
+`admin-api.openapi.json` for path compatibility.
+
+Operations promoted into the versioned public-stable surface carry
+`x-ferrogate-stability: "stable"` and are enumerated in the document's
+top-level `x-ferrogate-control-plane` block. Their typed source of truth lives
+in the `ferrogate_admin::control_plane` module and is pinned against this
+document by `crates/ferrogate-admin/src/control_plane_test.rs`. Stable
+operations may only change in backward-compatible ways, enforced by the
+compatibility baseline below.
+
 FerroGate's fixed HTTP API has three checked-in contract surfaces:
 
 - `runtime-api-contract.json` is embedded into `ferrogate-cli`. It owns fixed
