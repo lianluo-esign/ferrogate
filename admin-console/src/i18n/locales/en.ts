@@ -1665,6 +1665,41 @@ export const en = {
   "page.assets.storage.bucket": "Bucket",
   "page.assets.storage.inline": "Inline",
   "page.assets.action.download": "Download",
+  // Registry (list + detail + lifecycle) — src/pages/assets.tsx (#344).
+  "page.assets.col.versions": "Versions",
+  "page.assets.col.latest": "Latest",
+  "page.assets.col.channel": "Channel",
+  "page.assets.col.updated": "Updated",
+  "page.assets.col.state": "State",
+  "page.assets.col.variant": "Variant",
+  "page.assets.variant.default": "default",
+  "page.assets.state.yanked": "Yanked",
+  "page.assets.state.active": "Active",
+  "page.assets.action.yank": "Yank",
+  "page.assets.action.unyank": "Unyank",
+  "page.assets.action.setChannel": "Set channel",
+  "page.assets.action.error": "Action failed: {message}",
+  "page.assets.detail.description": "Registry manifest — created {created}, updated {updated}.",
+  "page.assets.detail.error": "Failed to load the manifest: {message}",
+  "page.assets.detail.channels": "Channels",
+  "page.assets.detail.versions": "Versions",
+  "page.assets.yank.title": "Yank {asset}?",
+  "page.assets.yank.body":
+    "Marks every variant of {asset} as yanked. Pinned downloads keep working with a warning header, but channels can no longer point to it. Yank is reversible with unyank.",
+  "page.assets.yank.success": "Version yanked",
+  "page.assets.unyank.title": "Unyank {asset}?",
+  "page.assets.unyank.body":
+    "Clears the yanked state on every variant of {asset} so it resolves normally again.",
+  "page.assets.unyank.success": "Version unyanked",
+  "page.assets.channel.title": "Set a channel pointer",
+  "page.assets.channel.body":
+    "Point a channel at an existing, non-yanked version of {name}. Moving a channel changes what consumers resolve.",
+  "page.assets.channel.placeholder": "stable",
+  "page.assets.channel.success": "Channel pointer saved",
+  "page.assets.channel.deleteTitle": "Delete channel {channel}?",
+  "page.assets.channel.deleteBody":
+    "Deletes only the {channel} pointer for {name}; concrete versions remain. Consumers resolving {channel} will fail until it is recreated.",
+  "page.assets.channel.deleteSuccess": "Channel deleted",
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "Withheld assets",

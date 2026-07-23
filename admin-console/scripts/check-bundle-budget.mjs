@@ -13,7 +13,17 @@ import { fileURLToPath } from "node:url";
 // the completed catalog with a small (~1.8%) headroom. The migration is now
 // copy-complete, so this ceiling should hold; a large jump past it again would
 // signal an unintended heavy dependency (e.g. i18next) reaching the entry.
-const MAX_ENTRY_BYTES = 312_000;
+//
+// Bumped 312_000 -> 316_000 (#344): the Assets route was rebuilt from a thin
+// push/list screen into a static-resource REGISTRY (list + manifest/versions/
+// variants/channels detail + yank/unyank/channel lifecycle). The PAGE code is a
+// lazy route (its own chunk, outside the entry), but the ~30 new typed catalog
+// keys — including the load-bearing "explain the consequence" copy the
+// destructive confirmations require — are eagerly imported by src/i18n/catalog.ts
+// and so land in the entry chunk. Measured cost: +~3.6 KiB min / +~0.9 KiB gzip
+// of copy across EN + zh-CN, not a new runtime dependency. Headroom stays tight
+// (<1 KiB) so this remains a guard, not a blank cheque.
+const MAX_ENTRY_BYTES = 316_000;
 const MAX_CHUNK_BYTES = 500_000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");
