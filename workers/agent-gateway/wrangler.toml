@@ -1,0 +1,45 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-23
+# description: Wrangler config for the FerroGate agent-gateway Worker (issue #413):
+#   Durable Object agent class binding + SQLite-backed DO migration.
+
+name = "ferrogate-agent-gateway"
+main = "src/index.ts"
+
+# Pin the compatibility date; the Agents SDK + DO RPC require a recent runtime.
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Durable Object binding -------------------------------------------------
+# The gateway hosts one agent Durable Object class. `getAgentByName(env.AGENT_GATEWAY, name)`
+# and `routeAgentRequest` resolve instances through this binding.
+[[durable_objects.bindings]]
+name = "AGENT_GATEWAY"
+class_name = "AgentGateway"
+
+# --- Durable Object migration ----------------------------------------------
+# The Agents SDK stores agent state in a per-instance embedded SQLite database,
+# so the class MUST be registered with `new_sqlite_classes` (NOT `new_classes`).
+#
+# SDK CAVEAT (verify against the pinned `agents` version at deploy time):
+#   * Recent wrangler (4.x) accepts this `[[migrations]]` array form with
+#     `new_sqlite_classes`.
+#   * Some Agents SDK templates instead surface DO classes through the newer
+#     top-level `exports`/`[migrations]` mechanism. If `wrangler deploy` reports
+#     an unknown-migration-key or a "class not exported" error, switch this block
+#     to the form the pinned SDK documents (see README "SDK migration caveat").
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentGateway"]
+
+# --- Observability ----------------------------------------------------------
+[observability]
+enabled = true
+
+# --- Secrets (NOT stored here) ----------------------------------------------
+# GATEWAY_CONTROL_TOKEN is the DIY bearer credential the Worker checks in
+# onBeforeRequest / onRequest / the control routes. Seed it out-of-band:
+#   wrangler secret put GATEWAY_CONTROL_TOKEN
+# FerroGate's Rust deploy pipeline seeds it from the #405/#417 secret seam.

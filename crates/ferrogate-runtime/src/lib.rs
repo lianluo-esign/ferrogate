@@ -9,6 +9,8 @@
 mod action_identity;
 mod agent;
 mod capability_boundary;
+mod cloudflare_gateway_control;
+mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
 mod framework_adapter;
 mod function_egress;
@@ -40,6 +42,13 @@ pub use capability_boundary::{
     CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence,
     CapabilityAuthorizationOutcome, CapabilityAuthorizer, CapabilityBoundaryError,
     CapabilityPolicy, CapabilityTargetGrant, ManagedCapabilityRequest, SimpleCapabilityAuthorizer,
+};
+pub use cloudflare_gateway_control::{
+    BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface,
+};
+pub use cloudflare_gateway_deploy::{
+    GatewayDeployOutcome, GatewayWorkerDeployer, GatewayWorkerSpec, DEFAULT_AGENT_DO_BINDING,
+    DEFAULT_AGENT_DO_CLASS, DEFAULT_GATEWAY_SCRIPT_NAME, GATEWAY_MULTIPART_BOUNDARY,
 };
 pub use cloudflare_worker::{
     cloudflare_backend_descriptor, cloudflare_backend_descriptor_default,

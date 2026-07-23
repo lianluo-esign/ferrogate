@@ -1,0 +1,22 @@
+{
+  "name": "ferrogate-agent-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FerroGate agent-gateway Worker: the required front for all Cloudflare agent operations (issue #413).",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "teardown": "wrangler delete"
+  },
+  "dependencies": {
+    "agents": "0.0.109"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20250620.0",
+    "typescript": "5.5.4",
+    "wrangler": "4.20.5"
+  }
+}

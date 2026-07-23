@@ -16,10 +16,15 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 blake2.workspace = true
 chacha20poly1305.workspace = true
 ferrogate-core = { path = "../ferrogate-core" }
+# Cloudflare agent-gateway Worker deploy/teardown pipeline + control transport
+# (issue #413). Reuses the #405 shared client's injectable `HttpTransport` and
+# `TokenResolver` seams so every Cloudflare call is mockable with no network.
+ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
@@ -40,6 +45,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
+# The Cloudflare gateway control transport bridges the synchronous
+# `CloudflareControlSurface` seam onto the async `HttpTransport` via a dedicated
+# runtime's `block_on` (issue #413). `net`/`rt-multi-thread`/`time` come from the
+# workspace feature set already required by the async CF client.
+tokio.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
