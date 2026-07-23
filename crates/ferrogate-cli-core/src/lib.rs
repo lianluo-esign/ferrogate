@@ -57,6 +57,7 @@
 
 pub mod agent;
 pub mod args;
+pub mod asset;
 pub mod auth;
 pub mod command;
 pub mod context;
@@ -85,5 +86,6 @@ pub fn register_resource_families(registry: &mut Registry) -> CliResult<()> {
     agent::register(registry)?;
     worker::register(registry)?;
     mcp::register(registry)?;
+    asset::register(registry)?;
     Ok(())
 }
