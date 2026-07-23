@@ -69,6 +69,7 @@ pub mod mcp;
 pub mod ops;
 pub mod organization;
 pub mod output;
+pub mod parity;
 pub mod registry_helpers;
 pub mod resource;
 pub mod transport;
