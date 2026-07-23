@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { NavMain } from "@/components/layout/nav-main";
 import { NavUser } from "@/components/layout/nav-user";
 import { NAV_DASHBOARD, NAV_GROUPS } from "@/components/layout/nav-config";
+import { useI18n } from "@/i18n";
 import {
   Sidebar,
   SidebarContent,
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/sidebar";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const { t } = useI18n();
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -26,8 +28,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <ShieldCheck className="size-4" />
                 </div>
                 <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">FerroGate</span>
-                  <span className="truncate text-xs">Admin Console</span>
+                  <span className="truncate font-medium">{t("shell.brand.name")}</span>
+                  <span className="truncate text-xs">{t("shell.brand.tagline")}</span>
                 </div>
               </Link>
             </SidebarMenuButton>

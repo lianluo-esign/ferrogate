@@ -16,6 +16,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 
 function initialsFor(name: string): string {
   return name
@@ -29,6 +30,7 @@ function initialsFor(name: string): string {
 export function NavUser() {
   const { session, logout } = useAuth();
   const { isMobile } = useSidebar();
+  const { t } = useI18n();
   const navigate = useNavigate();
 
   if (!session) return null;
@@ -77,7 +79,7 @@ export function NavUser() {
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={handleLogout}>
               <LogOut />
-              Log out
+              {t("shell.logout")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

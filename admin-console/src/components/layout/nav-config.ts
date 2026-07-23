@@ -10,9 +10,15 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { APP_ROUTES } from "@/lib/app-routes";
+import type { TranslationKey } from "@/i18n";
 
 export interface NavLeaf {
-  title: string;
+  /**
+   * Typed catalog key (#348). Consumers resolve it with `t(item.titleKey)` at
+   * render time so the label follows the active locale; keeping the key here
+   * (not resolved text) preserves this module's zero-React, pure-data shape.
+   */
+  titleKey: TranslationKey;
   url: string;
 }
 
@@ -21,108 +27,108 @@ export interface NavRoot extends NavLeaf {
 }
 
 export interface NavGroup {
-  title: string;
+  titleKey: TranslationKey;
   icon: LucideIcon;
   items: NavLeaf[];
 }
 
 export const NAV_DASHBOARD: NavRoot = {
-  title: "Dashboard",
+  titleKey: "nav.dashboard",
   url: APP_ROUTES.dashboard,
   icon: LayoutDashboard,
 };
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    title: "Organization",
+    titleKey: "nav.group.organization",
     icon: Building2,
     items: [
-      { title: "Tenant Accounts", url: "/app/tenants" },
-      { title: "Projects", url: "/app/projects" },
-      { title: "Workspaces", url: "/app/workspaces" },
-      { title: "Plans", url: "/app/plans" },
-      { title: "Quota Policies", url: "/app/quota-policies" },
-      { title: "Resolved Defaults", url: APP_ROUTES.tenantResolvedDefaults },
+      { titleKey: "nav.item.tenantAccounts", url: "/app/tenants" },
+      { titleKey: "nav.item.projects", url: "/app/projects" },
+      { titleKey: "nav.item.workspaces", url: "/app/workspaces" },
+      { titleKey: "nav.item.plans", url: "/app/plans" },
+      { titleKey: "nav.item.quotaPolicies", url: "/app/quota-policies" },
+      { titleKey: "nav.item.resolvedDefaults", url: APP_ROUTES.tenantResolvedDefaults },
     ],
   },
   {
-    title: "Access & Policy",
+    titleKey: "nav.group.accessPolicy",
     icon: ShieldCheck,
     items: [
-      { title: "Virtual Keys", url: APP_ROUTES.virtualKeys },
-      { title: "Gateway API Keys", url: "/app/api-keys-native" },
-      { title: "Roles", url: "/app/roles" },
-      { title: "Permissions", url: "/app/permissions" },
-      { title: "Access Policies", url: "/app/policies" },
-      { title: "Tenant Role Bindings", url: APP_ROUTES.tenantRoles },
-      { title: "MCP Identities", url: APP_ROUTES.mcpIdentities },
+      { titleKey: "nav.item.virtualKeys", url: APP_ROUTES.virtualKeys },
+      { titleKey: "nav.item.gatewayApiKeys", url: "/app/api-keys-native" },
+      { titleKey: "nav.item.roles", url: "/app/roles" },
+      { titleKey: "nav.item.permissions", url: "/app/permissions" },
+      { titleKey: "nav.item.accessPolicies", url: "/app/policies" },
+      { titleKey: "nav.item.tenantRoleBindings", url: APP_ROUTES.tenantRoles },
+      { titleKey: "nav.item.mcpIdentities", url: APP_ROUTES.mcpIdentities },
     ],
   },
   {
-    title: "Gateway Setup",
+    titleKey: "nav.group.gatewaySetup",
     icon: Network,
     items: [
-      { title: "Providers", url: "/app/providers" },
-      { title: "Models", url: "/app/models" },
-      { title: "Agent Upstreams", url: "/app/agent-upstreams" },
-      { title: "Agent Workflows", url: "/app/agent-workflows" },
-      { title: "Skill Packages", url: "/app/skill-packages" },
-      { title: "Prompt Templates", url: "/app/prompt-templates" },
-      { title: "Plugins", url: "/app/plugins" },
-      { title: "MCP Servers", url: "/app/mcp-servers" },
+      { titleKey: "nav.item.providers", url: "/app/providers" },
+      { titleKey: "nav.item.models", url: "/app/models" },
+      { titleKey: "nav.item.agentUpstreams", url: "/app/agent-upstreams" },
+      { titleKey: "nav.item.agentWorkflows", url: "/app/agent-workflows" },
+      { titleKey: "nav.item.skillPackages", url: "/app/skill-packages" },
+      { titleKey: "nav.item.promptTemplates", url: "/app/prompt-templates" },
+      { titleKey: "nav.item.plugins", url: "/app/plugins" },
+      { titleKey: "nav.item.mcpServers", url: "/app/mcp-servers" },
     ],
   },
   {
-    title: "Agents & Tools",
+    titleKey: "nav.group.agentsTools",
     icon: Bot,
     items: [
-      { title: "Agent Runs", url: APP_ROUTES.agentRuns },
-      { title: "Agent Schedules", url: APP_ROUTES.agentSchedules },
-      { title: "Assets", url: APP_ROUTES.assets },
-      { title: "Worker Registrations", url: "/app/self-hosted-workers" },
-      { title: "Managed Worker Pools", url: "/app/managed-workers" },
-      { title: "Self-hosted Lifecycle", url: APP_ROUTES.selfHostedWorkerOperations },
-      { title: "Self-hosted Runs", url: APP_ROUTES.selfHostedRuns },
-      { title: "Managed Sessions", url: APP_ROUTES.managedWorkerSessions },
-      { title: "Tools Catalog", url: APP_ROUTES.tools },
-      { title: "Tool Sessions", url: APP_ROUTES.toolSessions },
+      { titleKey: "nav.item.agentRuns", url: APP_ROUTES.agentRuns },
+      { titleKey: "nav.item.agentSchedules", url: APP_ROUTES.agentSchedules },
+      { titleKey: "nav.item.assets", url: APP_ROUTES.assets },
+      { titleKey: "nav.item.workerRegistrations", url: "/app/self-hosted-workers" },
+      { titleKey: "nav.item.managedWorkerPools", url: "/app/managed-workers" },
+      { titleKey: "nav.item.selfHostedLifecycle", url: APP_ROUTES.selfHostedWorkerOperations },
+      { titleKey: "nav.item.selfHostedRuns", url: APP_ROUTES.selfHostedRuns },
+      { titleKey: "nav.item.managedSessions", url: APP_ROUTES.managedWorkerSessions },
+      { titleKey: "nav.item.toolsCatalog", url: APP_ROUTES.tools },
+      { titleKey: "nav.item.toolSessions", url: APP_ROUTES.toolSessions },
     ],
   },
   {
-    title: "Safety & Evidence",
+    titleKey: "nav.group.safetyEvidence",
     icon: ShieldAlert,
     items: [
-      { title: "Tool Approvals", url: APP_ROUTES.toolApprovals },
-      { title: "Guardrail Policies", url: APP_ROUTES.guardrailPolicies },
-      { title: "Guardrail Evaluations", url: APP_ROUTES.guardrailEvaluations },
-      { title: "Investigations", url: APP_ROUTES.investigations },
-      { title: "Request Logs", url: "/app/request-logs" },
-      { title: "Audit Events", url: "/app/audit-events" },
+      { titleKey: "nav.item.toolApprovals", url: APP_ROUTES.toolApprovals },
+      { titleKey: "nav.item.guardrailPolicies", url: APP_ROUTES.guardrailPolicies },
+      { titleKey: "nav.item.guardrailEvaluations", url: APP_ROUTES.guardrailEvaluations },
+      { titleKey: "nav.item.investigations", url: APP_ROUTES.investigations },
+      { titleKey: "nav.item.requestLogs", url: "/app/request-logs" },
+      { titleKey: "nav.item.auditEvents", url: "/app/audit-events" },
     ],
   },
   {
-    title: "Billing",
+    titleKey: "nav.group.billing",
     icon: CreditCard,
     items: [
-      { title: "Usage Reports", url: "/app/usage-reports" },
-      { title: "Billing Events", url: "/app/billing-events" },
-      { title: "Wallets", url: APP_ROUTES.wallets },
-      { title: "Payment Methods", url: APP_ROUTES.paymentMethods },
-      { title: "Billing Dead Letters", url: APP_ROUTES.billingDeadLetters },
-      { title: "Metering & Usage", url: APP_ROUTES.metering },
+      { titleKey: "nav.item.usageReports", url: "/app/usage-reports" },
+      { titleKey: "nav.item.billingEvents", url: "/app/billing-events" },
+      { titleKey: "nav.item.wallets", url: APP_ROUTES.wallets },
+      { titleKey: "nav.item.paymentMethods", url: APP_ROUTES.paymentMethods },
+      { titleKey: "nav.item.billingDeadLetters", url: APP_ROUTES.billingDeadLetters },
+      { titleKey: "nav.item.meteringUsage", url: APP_ROUTES.metering },
     ],
   },
   {
-    title: "Operations",
+    titleKey: "nav.group.operations",
     icon: TerminalSquare,
     items: [
-      { title: "System Status", url: APP_ROUTES.operationsStatus },
-      { title: "Config Reload", url: APP_ROUTES.operationsConfig },
-      { title: "Graceful Drain", url: APP_ROUTES.operationsDrain },
-      { title: "Gateway Config Profiles", url: APP_ROUTES.operationsGatewayConfigs },
-      { title: "Provider Health", url: APP_ROUTES.operationsProviderHealth },
-      { title: "Telemetry Exports", url: APP_ROUTES.operationsObservability },
-      { title: "Site Domains", url: APP_ROUTES.siteDomains },
+      { titleKey: "nav.item.systemStatus", url: APP_ROUTES.operationsStatus },
+      { titleKey: "nav.item.configReload", url: APP_ROUTES.operationsConfig },
+      { titleKey: "nav.item.gracefulDrain", url: APP_ROUTES.operationsDrain },
+      { titleKey: "nav.item.gatewayConfigProfiles", url: APP_ROUTES.operationsGatewayConfigs },
+      { titleKey: "nav.item.providerHealth", url: APP_ROUTES.operationsProviderHealth },
+      { titleKey: "nav.item.telemetryExports", url: APP_ROUTES.operationsObservability },
+      { titleKey: "nav.item.siteDomains", url: APP_ROUTES.siteDomains },
     ],
   },
 ];

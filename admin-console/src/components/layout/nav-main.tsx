@@ -22,6 +22,7 @@ import {
   NAV_DASHBOARD,
   type NavGroup,
 } from "@/components/layout/nav-config";
+import { useI18n } from "@/i18n";
 
 const FOCUS_MAIN_HEADING_STATE = { focusMainHeading: true } as const;
 
@@ -44,8 +45,10 @@ function GroupNavigation({
   pathname: string;
   onNavigate: (event: MouseEvent<HTMLAnchorElement>) => void;
 }) {
+  const { t } = useI18n();
   const isActive = group.items.some((item) => isPathActive(pathname, item.url));
   const [open, setOpen] = useState(isActive);
+  const groupTitle = t(group.titleKey);
 
   useEffect(() => {
     if (isActive) setOpen(true);
@@ -60,9 +63,9 @@ function GroupNavigation({
     >
       <SidebarMenuItem>
         <CollapsibleTrigger asChild>
-          <SidebarMenuButton tooltip={group.title} isActive={isActive}>
+          <SidebarMenuButton tooltip={groupTitle} isActive={isActive}>
             <group.icon />
-            <span>{group.title}</span>
+            <span>{groupTitle}</span>
             <ChevronRight className="ml-auto transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
           </SidebarMenuButton>
         </CollapsibleTrigger>
@@ -79,7 +82,7 @@ function GroupNavigation({
                     state={FOCUS_MAIN_HEADING_STATE}
                     onClick={onNavigate}
                   >
-                    <span>{item.title}</span>
+                    <span>{t(item.titleKey)}</span>
                   </Link>
                 </SidebarMenuSubButton>
               </SidebarMenuSubItem>
@@ -94,6 +97,8 @@ function GroupNavigation({
 export function NavMain({ groups }: { groups: NavGroup[] }) {
   const location = useLocation();
   const { isMobile, setOpenMobile } = useSidebar();
+  const { t } = useI18n();
+  const dashboardTitle = t(NAV_DASHBOARD.titleKey);
 
   function handleNavigation(event: MouseEvent<HTMLAnchorElement>) {
     if (isMobile && shouldHandleNavigation(event)) setOpenMobile(false);
@@ -101,12 +106,12 @@ export function NavMain({ groups }: { groups: NavGroup[] }) {
 
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>Control Plane</SidebarGroupLabel>
+      <SidebarGroupLabel>{t("nav.controlPlane")}</SidebarGroupLabel>
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
             asChild
-            tooltip={NAV_DASHBOARD.title}
+            tooltip={dashboardTitle}
             isActive={isPathActive(location.pathname, NAV_DASHBOARD.url)}
           >
             <Link
@@ -115,13 +120,13 @@ export function NavMain({ groups }: { groups: NavGroup[] }) {
               onClick={handleNavigation}
             >
               <NAV_DASHBOARD.icon />
-              <span>{NAV_DASHBOARD.title}</span>
+              <span>{dashboardTitle}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
         {groups.map((group) => (
           <GroupNavigation
-            key={group.title}
+            key={group.titleKey}
             group={group}
             pathname={location.pathname}
             onNavigate={handleNavigation}

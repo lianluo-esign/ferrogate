@@ -7,8 +7,15 @@ import {
 } from "@/components/layout/nav-config";
 import { APP_DETAIL_ROUTE_PARENTS, APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTES } from "@/resources";
+import { translate } from "@/i18n";
 
 const navItems = [NAV_DASHBOARD, ...NAV_GROUPS.flatMap((group) => group.items)];
+
+/** Resolve a leaf's typed catalog key to its English label for assertions. */
+const enTitle = (pathname: string) => {
+  const leaf = findNavigationLeaf(pathname);
+  return leaf ? translate("en", leaf.titleKey) : undefined;
+};
 
 describe("admin navigation registry", () => {
   it("maps every protected route to exactly one navigation destination or detail parent", () => {
@@ -36,17 +43,24 @@ describe("admin navigation registry", () => {
   });
 
   it("resolves detail routes to their longest matching navigation parent", () => {
-    expect(findNavigationLeaf("/app/agent-runs/run-1")?.title).toBe("Agent Runs");
-    expect(findNavigationLeaf("/app/plugins/plugin-1/tools")?.title).toBe("Plugins");
-    expect(findNavigationLeaf("/app/workers/self-hosted-runs")?.title).toBe(
-      "Self-hosted Runs",
-    );
+    expect(enTitle("/app/agent-runs/run-1")).toBe("Agent Runs");
+    expect(enTitle("/app/plugins/plugin-1/tools")).toBe("Plugins");
+    expect(enTitle("/app/workers/self-hosted-runs")).toBe("Self-hosted Runs");
   });
 
   it("keeps virtual keys and native gateway API keys distinct", () => {
-    expect(findNavigationLeaf("/app/api-keys")?.title).toBe("Virtual Keys");
-    expect(findNavigationLeaf("/app/api-keys-native")?.title).toBe(
-      "Gateway API Keys",
-    );
+    expect(enTitle("/app/api-keys")).toBe("Virtual Keys");
+    expect(enTitle("/app/api-keys-native")).toBe("Gateway API Keys");
+  });
+
+  it("labels every navigation destination with a resolvable catalog key", () => {
+    for (const item of navItems) {
+      expect(translate("en", item.titleKey), `${item.url} en label`).not.toBe(
+        item.titleKey,
+      );
+      expect(translate("zh-CN", item.titleKey), `${item.url} zh-CN label`).not.toBe(
+        item.titleKey,
+      );
+    }
   });
 });

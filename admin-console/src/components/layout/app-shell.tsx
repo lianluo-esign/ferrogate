@@ -2,7 +2,8 @@ import { Fragment, useEffect, useRef } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { LanguageSwitcher } from "@/i18n";
+import { LanguageSwitcher, useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -19,8 +20,8 @@ import {
 } from "@/components/ui/sidebar";
 import { findNavigationLeaf } from "@/components/layout/nav-config";
 
-function currentPageTitle(pathname: string): string {
-  return findNavigationLeaf(pathname)?.title ?? "Dashboard";
+function currentPageTitleKey(pathname: string): TranslationKey {
+  return findNavigationLeaf(pathname)?.titleKey ?? "nav.dashboard";
 }
 
 function prepareMainHeading(container: HTMLElement | null) {
@@ -34,7 +35,8 @@ function prepareMainHeading(container: HTMLElement | null) {
 
 export function AppShell() {
   const location = useLocation();
-  const title = currentPageTitle(location.pathname);
+  const { t } = useI18n();
+  const title = t(currentPageTitleKey(location.pathname));
   const pageContentRef = useRef<HTMLDivElement>(null);
   const shouldFocusMainHeading = Boolean(
     (location.state as { focusMainHeading?: boolean } | null)?.focusMainHeading,
@@ -71,7 +73,7 @@ export function AppShell() {
           window.history.replaceState(null, "", "#main-content");
         }}
       >
-        Skip to main content
+        {t("shell.skipToContent")}
       </a>
       <AppSidebar />
       <SidebarInset>
@@ -83,7 +85,7 @@ export function AppShell() {
               <BreadcrumbList>
                 <BreadcrumbItem className="hidden md:block">
                   <BreadcrumbLink asChild>
-                    <Link to="/app">FerroGate Admin</Link>
+                    <Link to="/app">{t("shell.breadcrumb.root")}</Link>
                   </BreadcrumbLink>
                 </BreadcrumbItem>
                 <Fragment>
