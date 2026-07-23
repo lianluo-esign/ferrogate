@@ -624,9 +624,20 @@ impl PostgresControlPlaneStore {
         Ok(reservation)
     }
 
-    /// Sweeper (billing-outbox pattern): marks every active hold past its TTL
+    /// Sweeper (billing-outbox pattern): marks active holds past their TTL
     /// `released` and returns the swept ids. Available balance already ignores
     /// expired holds; this reclaims their rows and surfaces expiry metrics.
+    ///
+    /// Money-safety (#396): a hold bound (via `payment_attempts.hold_id`) to an
+    /// x402 attempt that is NOT in a pre-submission
+    /// [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`](crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES)
+    /// state is NEVER released here. A `submitted`/`outcome_unknown` attempt's
+    /// stablecoin transfer may already be on-chain, so releasing its hold would
+    /// double-charge or lose the hold; that case stays retained for the #354
+    /// reconciler, exactly the invariant the #354 TTL sweeper respects. Holds
+    /// with no bound attempt (non-x402 reservations) and holds bound to an
+    /// `authorized`/`challenged` attempt remain sweepable. The `NOT EXISTS`
+    /// probe is served by the existing partial `idx_payment_attempts_hold`.
     pub(super) async fn sweep_expired_wallet_reservations(
         &self,
         now_unix: i64,
@@ -643,11 +654,18 @@ impl PostgresControlPlaneStore {
                 .await
                 .map_err(postgres_error)?;
         }
+        let expirable: Vec<&str> = crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES.to_vec();
         let rows = transaction
             .query(
                 "UPDATE wallet_reservations SET status = 'released', updated_at_unix = $1 \
-                 WHERE status = 'active' AND expires_at_unix <= $1 RETURNING id",
-                &[&now_unix],
+                 WHERE status = 'active' AND expires_at_unix <= $1 \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM payment_attempts pa \
+                     WHERE pa.hold_id = wallet_reservations.id \
+                       AND pa.state <> ALL($2) \
+                   ) \
+                 RETURNING id",
+                &[&now_unix, &expirable],
             )
             .await
             .map_err(postgres_error)?;
@@ -1225,12 +1243,33 @@ impl RuntimeControlPlaneState {
     /// In-memory analogue of
     /// [`PostgresControlPlaneStore::sweep_expired_wallet_reservations`]
     /// (issue #281). Returns the swept ids sorted for deterministic tests.
+    ///
+    /// Money-safety (#396): mirrors the Postgres `NOT EXISTS` guard -- a hold
+    /// bound to an x402 attempt outside the pre-submission
+    /// [`PAYMENT_ATTEMPT_EXPIRABLE_STATES`](crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES)
+    /// set (e.g. `submitted`/`outcome_unknown`, whose stablecoin may be on-chain)
+    /// is never released; it stays retained for the #354 reconciler. Non-x402
+    /// holds and holds bound to an `authorized`/`challenged` attempt stay
+    /// sweepable.
     pub fn sweep_expired_wallet_reservations(&mut self, now_unix: i64) -> Vec<String> {
+        let protected: std::collections::HashSet<String> = self
+            .payment_attempts
+            .list()
+            .into_iter()
+            .filter(|attempt| {
+                !crate::PAYMENT_ATTEMPT_EXPIRABLE_STATES.contains(&attempt.state.as_str())
+            })
+            .filter_map(|attempt| attempt.hold_id)
+            .collect();
         let expired: Vec<StoredWalletReservation> = self
             .wallet_reservations
             .list()
             .into_iter()
-            .filter(|r| r.status == WALLET_RESERVATION_ACTIVE && r.expires_at_unix <= now_unix)
+            .filter(|r| {
+                r.status == WALLET_RESERVATION_ACTIVE
+                    && r.expires_at_unix <= now_unix
+                    && !protected.contains(&r.id)
+            })
             .collect();
         let mut ids = Vec::with_capacity(expired.len());
         for mut reservation in expired {
@@ -1467,7 +1506,10 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    /// Releases every hold past its TTL and returns the swept ids (issue #281).
+    /// Releases holds past their TTL and returns the swept ids (issue #281).
+    /// Money-safe (#396): skips a hold bound to a `submitted`/terminal-or-unknown
+    /// x402 attempt (see the backend impls); only pre-submission/non-x402 holds
+    /// are released.
     pub async fn sweep_expired_wallet_reservations(
         &self,
         now_unix: i64,

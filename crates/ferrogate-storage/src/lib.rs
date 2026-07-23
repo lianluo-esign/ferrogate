@@ -17067,6 +17067,10 @@ mod payment_attempt_test;
 mod billing_outbox_replay_test;
 
 #[cfg(test)]
+#[path = "wallet_reservation_sweep_x402_test.rs"]
+mod wallet_reservation_sweep_x402_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
