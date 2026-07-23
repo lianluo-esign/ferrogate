@@ -1,10 +1,17 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
+import { useSearchParams } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import AgentRunsPage, { type AgentRunSummary } from "@/pages/agent-runs";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+
+/** Surfaces the live URL query string so URL-state assertions can read it. */
+function SearchProbe() {
+  const [params] = useSearchParams();
+  return <span data-testid="search">{params.toString()}</span>;
+}
 
 function run(overrides: Partial<AgentRunSummary> = {}): AgentRunSummary {
   return {
@@ -97,6 +104,40 @@ describe("AgentRunsPage", () => {
 
     expect(await screen.findByText("run-2")).toBeInTheDocument();
     expect(screen.queryByText("run-1")).not.toBeInTheDocument();
+  });
+
+  it("writes the status and tenant filters to the URL query state", async () => {
+    const user = userEvent.setup();
+    mockRuns([run(), run({ id: "run-2", status: "blocked" })]);
+
+    renderWithProviders(
+      <>
+        <AgentRunsPage />
+        <SearchProbe />
+      </>,
+    );
+    await screen.findByText("run-1");
+
+    // Selecting a status writes the contract token to the URL while the select
+    // keeps DISPLAYING the localized human label.
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "Blocked" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("search")).toHaveTextContent("status=blocked"),
+    );
+
+    // The free-text tenant correlation filter also persists to the URL.
+    await user.type(screen.getByLabelText("Tenant"), "proj-beta");
+    await waitFor(() =>
+      expect(screen.getByTestId("search")).toHaveTextContent("tenant=proj-beta"),
+    );
+
+    // Returning to the default status prunes the param (clean canonical URL).
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "All statuses" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("search")).not.toHaveTextContent("status="),
+    );
   });
 
   it("links each run to its timeline detail page", async () => {

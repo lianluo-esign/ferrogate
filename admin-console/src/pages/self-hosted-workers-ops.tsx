@@ -12,6 +12,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -292,11 +293,31 @@ export default function SelfHostedWorkersOpsPage() {
               <Label htmlFor="workspace-id">
                 {t("page.selfHostedWorkersOps.field.workspaceId")}
               </Label>
-              <Input
+              {/* #342: the worker's workspace scope is entity-backed — pick a
+                  known workspace by name from the shared registry instead of
+                  pasting its id. The workspace `id` is submitted unchanged. It is
+                  an independent picker (not scoped to project/org) because the
+                  registration's project is optional and the org id here is a
+                  free-form scope token, not a modelled tenant row (see below). */}
+              <EntityReferencePicker
                 id="workspace-id"
+                label={t("page.selfHostedWorkersOps.field.workspaceId")}
+                reference={{
+                  target: "workspaces",
+                  valueKey: "id",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["slug", "project_id"],
+                }}
                 value={form.workspaceId}
-                onChange={(e) => setForm({ ...form, workspaceId: e.target.value })}
+                dependencyValues={{}}
+                required
                 placeholder={t("page.selfHostedWorkersOps.placeholder.workspaceId")}
+                onChange={(value) =>
+                  setForm({
+                    ...form,
+                    workspaceId: typeof value === "string" ? value : "",
+                  })
+                }
               />
             </div>
             <div className="grid gap-1.5">
@@ -319,6 +340,12 @@ export default function SelfHostedWorkersOpsPage() {
                 <Label htmlFor="organization-id">
                   {t("page.selfHostedWorkersOps.field.organizationId")}
                 </Label>
+                {/* #342 (justified, no silent exclusion): organization_id is a
+                    free-form TenantContext scope token presented by the caller at
+                    request time, NOT a modelled admin-console entity — there is no
+                    organizations collection to pick from (mirrors the
+                    agent-workflows.organization_ids decision). It stays a raw text
+                    input. */}
                 <Input
                   id="organization-id"
                   value={form.organizationId}
@@ -334,11 +361,28 @@ export default function SelfHostedWorkersOpsPage() {
                 <Label htmlFor="project-id">
                   {t("page.selfHostedWorkersOps.field.projectId")}
                 </Label>
-                <Input
+                {/* #342: the worker's project scope is entity-backed — pick a
+                    known project by name. Optional, so it is an independent picker
+                    (no forced dependency). The project `id` is submitted
+                    unchanged. */}
+                <EntityReferencePicker
                   id="project-id"
+                  label={t("page.selfHostedWorkersOps.field.projectId")}
+                  reference={{
+                    target: "projects",
+                    valueKey: "id",
+                    primaryLabelKey: "name",
+                    secondaryLabelKeys: ["slug", "tenant_id"],
+                  }}
                   value={form.projectId}
-                  onChange={(e) => setForm({ ...form, projectId: e.target.value })}
+                  dependencyValues={{}}
                   placeholder={t("page.selfHostedWorkersOps.placeholder.projectId")}
+                  onChange={(value) =>
+                    setForm({
+                      ...form,
+                      projectId: typeof value === "string" ? value : "",
+                    })
+                  }
                 />
               </div>
             </div>

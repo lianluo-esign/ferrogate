@@ -204,10 +204,30 @@ export interface ReferenceListFieldConfig extends FieldConfigBase {
   options?: never;
 }
 
+/**
+ * Structured reference panel for an agent-workflow `nodes` array (#342). Each
+ * node is `{ id, kind, model?, providers?, tool?, max_iterations?, token_budget? }`
+ * (the `AgentWorkflowNode` contract, which is `deny_unknown_fields`, so the node
+ * has a fixed, fully-modelled shape and no free-form extension). The editor
+ * surfaces the per-node ENTITY REFERENCES — the model (models catalog), its
+ * providers (providers catalog) and, for tool nodes, the tool (tools catalog) —
+ * through the shared #337 picker so operators pick known entities by name
+ * instead of hand-writing ids, while the non-reference node fields (id, the
+ * numeric limits) round-trip unchanged. The workflow EDGES / topology stay a raw
+ * JSON field: rewiring the graph is the explicit "visual DAG editor" non-goal,
+ * so only the node reference arrays are structured here.
+ */
+export interface WorkflowNodesFieldConfig extends FieldConfigBase {
+  type: "workflow-nodes";
+  reference?: never;
+  options?: never;
+}
+
 export type FieldConfig =
   | ScalarFieldConfig
   | EntityReferenceFieldConfig
-  | ReferenceListFieldConfig;
+  | ReferenceListFieldConfig
+  | WorkflowNodesFieldConfig;
 
 export interface ColumnConfig<T> {
   key: string;
@@ -348,6 +368,7 @@ export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknow
         break;
       case "entities":
       case "reference-list":
+      case "workflow-nodes":
         values[field.name] = [];
         break;
       default:

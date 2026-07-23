@@ -125,6 +125,15 @@ describe("SelfHostedWorkersOpsPage", () => {
 
     let captured: unknown = null;
     server.use(
+      http.get(gatewayUrl("/admin/v1/workspaces"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [{ id: "ws-1", name: "Edge WS", slug: "edge", project_id: "proj-1" }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
       http.post(gatewayUrl("/admin/v1/self-hosted-workers"), async ({ request }) => {
         captured = await request.json();
         return HttpResponse.json(
@@ -142,7 +151,10 @@ describe("SelfHostedWorkersOpsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Register worker" }));
     await user.type(screen.getByLabelText("Worker name"), "edge-runner-01");
-    await user.type(screen.getByLabelText("Workspace id"), "ws-1");
+    // Workspace is now an entity picker: choose the known workspace by name; its
+    // canonical id (ws-1) is what gets submitted.
+    await user.click(screen.getByRole("combobox", { name: "Workspace id" }));
+    await user.click(await screen.findByRole("option", { name: /Edge WS/ }));
     await user.type(
       screen.getByLabelText("Identity fingerprint"),
       "sha256:supplied-fp",

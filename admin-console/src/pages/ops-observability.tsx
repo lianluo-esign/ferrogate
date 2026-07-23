@@ -6,9 +6,11 @@
 // not the Admin API's JSON list envelope, so it can't go through the typed
 // `adminGet` (whose success body is JSON). It's fetched directly with the
 // gateway API key here, then previewed and offered as a file download.
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,12 +49,7 @@ interface ExportFilters {
   limit: string;
 }
 
-const EMPTY_FILTERS: ExportFilters = {
-  model: "",
-  provider: "",
-  status: "",
-  limit: "100",
-};
+const DEFAULT_LIMIT = "100";
 
 interface ExportPreview {
   recordCount: number;
@@ -81,7 +78,31 @@ export default function OpsObservabilityPage() {
   });
   const exporters = data?.data ?? [];
 
-  const [filters, setFilters] = useState<ExportFilters>(EMPTY_FILTERS);
+  // #342: the export filters live in the URL query so a configured export is
+  // shareable and survives a reload (?model=&provider=&status=&limit=). The
+  // model/provider filters target the known models/providers catalogs, so they
+  // WRITE the canonical name to the query while the picker DISPLAYS the human
+  // label; `allowRawValue` still lets an operator export logs for a historical
+  // model/provider no longer in the catalog (no silent exclusion). Defaults
+  // (empty model/provider/status, limit 100) are encoded as ABSENT params.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters: ExportFilters = {
+    model: searchParams.get("model") ?? "",
+    provider: searchParams.get("provider") ?? "",
+    status: searchParams.get("status") ?? "",
+    limit: searchParams.get("limit") ?? DEFAULT_LIMIT,
+  };
+
+  const setFilterParam = useCallback(
+    (key: keyof ExportFilters, value: string, defaultValue: string) => {
+      const next = new URLSearchParams(searchParams);
+      if (value === defaultValue || value === "") next.delete(key);
+      else next.set(key, value);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   const [preview, setPreview] = useState<ExportPreview | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -213,21 +234,44 @@ export default function OpsObservabilityPage() {
           <div className="grid gap-3 sm:grid-cols-4">
             <div className="grid gap-2">
               <Label htmlFor="exp-model">{t("page.opsObservability.filter.model")}</Label>
-              <Input
+              {/* #342: the model filter targets the known models catalog — pick
+                  by name (human label) instead of typing a raw string; the
+                  canonical model name is written to the query. `allowRawValue`
+                  keeps historical models exportable. */}
+              <EntityReferencePicker
                 id="exp-model"
+                label={t("page.opsObservability.filter.model")}
+                reference={{
+                  target: "models",
+                  valueKey: "name",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["provider", "provider_model"],
+                  allowRawValue: true,
+                }}
                 value={filters.model}
-                onChange={(event) =>
-                  setFilters((prev) => ({ ...prev, model: event.target.value }))
+                dependencyValues={{}}
+                onChange={(value) =>
+                  setFilterParam("model", typeof value === "string" ? value : "", "")
                 }
               />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="exp-provider">{t("page.opsObservability.filter.provider")}</Label>
-              <Input
+              {/* #342: the provider filter targets the known providers catalog. */}
+              <EntityReferencePicker
                 id="exp-provider"
+                label={t("page.opsObservability.filter.provider")}
+                reference={{
+                  target: "providers",
+                  valueKey: "name",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["kind"],
+                  allowRawValue: true,
+                }}
                 value={filters.provider}
-                onChange={(event) =>
-                  setFilters((prev) => ({ ...prev, provider: event.target.value }))
+                dependencyValues={{}}
+                onChange={(value) =>
+                  setFilterParam("provider", typeof value === "string" ? value : "", "")
                 }
               />
             </div>
@@ -237,9 +281,7 @@ export default function OpsObservabilityPage() {
                 id="exp-status"
                 type="number"
                 value={filters.status}
-                onChange={(event) =>
-                  setFilters((prev) => ({ ...prev, status: event.target.value }))
-                }
+                onChange={(event) => setFilterParam("status", event.target.value, "")}
               />
             </div>
             <div className="grid gap-2">
@@ -250,9 +292,7 @@ export default function OpsObservabilityPage() {
                 min={1}
                 max={1000}
                 value={filters.limit}
-                onChange={(event) =>
-                  setFilters((prev) => ({ ...prev, limit: event.target.value }))
-                }
+                onChange={(event) => setFilterParam("limit", event.target.value, DEFAULT_LIMIT)}
               />
             </div>
           </div>

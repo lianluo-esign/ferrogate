@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { ReferenceListEditor } from "@/components/resource/reference-list-editor";
+import {
+  serializeWorkflowNodes,
+  WorkflowNodeEditor,
+} from "@/components/resource/workflow-node-editor";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,7 +46,9 @@ function normalizeInitialValues(
     if (field.type === "json" && raw !== undefined && typeof raw !== "string") {
       normalized[field.name] = JSON.stringify(raw, null, 2);
     } else if (
-      (field.type === "entities" || field.type === "reference-list") &&
+      (field.type === "entities" ||
+        field.type === "reference-list" ||
+        field.type === "workflow-nodes") &&
       !Array.isArray(raw)
     ) {
       normalized[field.name] = [];
@@ -142,6 +148,13 @@ export function ResourceForm({
                 String(row[field.discriminantKey] ?? "") !== "" &&
                 String(row[field.valueKey] ?? "") !== "",
             );
+        } else if (field.type === "workflow-nodes") {
+          // Emit the structured `AgentWorkflowNode` array (#342): clean each
+          // node down to its contract-known keys, drop references irrelevant to
+          // the chosen kind, and validate the structural invariants (unique id;
+          // model/tool present for their kind) so an incomplete reference is
+          // rejected before submit rather than silently written.
+          payload[field.name] = serializeWorkflowNodes(raw, t);
         } else if (field.type === "csv") {
           payload[field.name] = String(raw ?? "")
             .split(",")
@@ -257,6 +270,13 @@ export function ResourceForm({
               field={field}
               value={values[field.name]}
               onChange={(rows) => setField(field.name, rows)}
+            />
+          ) : field.type === "workflow-nodes" ? (
+            <WorkflowNodeEditor
+              id={field.name}
+              label={fieldLabel}
+              value={values[field.name]}
+              onChange={(nodes) => setField(field.name, nodes)}
             />
           ) : field.type === "textarea" || field.type === "json" ? (
             <Textarea

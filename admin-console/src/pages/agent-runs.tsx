@@ -2,9 +2,9 @@
 // GET /admin/v1/agent-runs. The contract only paginates (offset/limit — see
 // listAdminAgentRuns in api-types.generated.ts), so the status and tenant
 // filters below narrow the fetched page client-side.
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,8 +54,29 @@ export default function AgentRunsPage() {
   const apiKey = session!.gatewayApiKey;
 
   const [offset, setOffset] = useState(0);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [tenantFilter, setTenantFilter] = useState("");
+  // #342: the operational filters live in the URL query so a filtered view is
+  // shareable and survives a reload (?status=&tenant=). Defaults (all statuses /
+  // empty tenant) are encoded as ABSENT params so the pristine URL stays clean.
+  // `status` writes a known contract token and DISPLAYS a localized human label
+  // via the select. `tenant` stays a free-text substring (no silent exclusion):
+  // an AgentRunSummary's tenant is a polymorphic TenantContext — any of
+  // organization/team/project/user/key scope ids — with no single entity kind to
+  // build a picker over (same rationale as the guardrail scope_id filter), so it
+  // is a correlation box, not an entity reference.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const statusFilter = searchParams.get("status") ?? "all";
+  const tenantFilter = searchParams.get("tenant") ?? "";
+
+  const setFilterParam = useCallback(
+    (key: string, value: string, defaultValue: string) => {
+      const next = new URLSearchParams(searchParams);
+      if (value === defaultValue || value === "") next.delete(key);
+      else next.set(key, value);
+      setSearchParams(next, { replace: true });
+      setOffset(0);
+    },
+    [searchParams, setSearchParams],
+  );
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["agent-runs", offset],
@@ -89,7 +110,10 @@ export default function AgentRunsPage() {
       <div className="flex flex-wrap items-end gap-4">
         <div className="grid gap-2">
           <Label htmlFor="run-status-filter">{t("common.status")}</Label>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <Select
+            value={statusFilter}
+            onValueChange={(value) => setFilterParam("status", value, "all")}
+          >
             <SelectTrigger id="run-status-filter" className="w-44">
               <SelectValue />
             </SelectTrigger>
@@ -109,7 +133,7 @@ export default function AgentRunsPage() {
             className="w-64"
             placeholder={t("page.agentRuns.filter.tenantPlaceholder")}
             value={tenantFilter}
-            onChange={(event) => setTenantFilter(event.target.value)}
+            onChange={(event) => setFilterParam("tenant", event.target.value, "")}
           />
         </div>
       </div>

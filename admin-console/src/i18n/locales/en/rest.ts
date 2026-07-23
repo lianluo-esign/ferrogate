@@ -147,6 +147,31 @@ export const enRest = {
   "resource.referenceList.rowLabel": "{label} entry {index}",
   "resource.referenceList.empty": "No {label} yet.",
 
+  // Structured workflow-node reference panel (#342): per-node entity references
+  // (model / providers / tool) picked from the catalogs; edges/topology stay a
+  // raw JSON field (the DAG-editor non-goal).
+  "resource.workflowNodes.empty": "No nodes yet.",
+  "resource.workflowNodes.nodeLabel": "Node {index}",
+  "resource.workflowNodes.nodeId": "Node ID",
+  "resource.workflowNodes.kind": "Kind",
+  "resource.workflowNodes.kind.model": "Model",
+  "resource.workflowNodes.kind.tool": "Tool",
+  "resource.workflowNodes.kind.router": "Router",
+  "resource.workflowNodes.kind.human": "Human",
+  "resource.workflowNodes.kind.checkpoint": "Checkpoint",
+  "resource.workflowNodes.remove": "Remove node {index}",
+  "resource.workflowNodes.model": "Model",
+  "resource.workflowNodes.providers": "Providers",
+  "resource.workflowNodes.tool": "Tool",
+  "resource.workflowNodes.noReferences": "This node kind has no entity references.",
+  "resource.workflowNodes.maxIterations": "Max iterations",
+  "resource.workflowNodes.tokenBudget": "Token budget",
+  "resource.workflowNodes.add": "Add {label} node",
+  "resource.workflowNodes.validation.idRequired": "Every workflow node needs an ID.",
+  "resource.workflowNodes.validation.duplicateId": "Duplicate workflow node ID: {id}.",
+  "resource.workflowNodes.validation.modelRequired": "Model node {id} needs a model.",
+  "resource.workflowNodes.validation.toolRequired": "Tool node {id} needs a tool.",
+
   // Per-resource copy — routing/policy/quota group (#348). Titles, descriptions,
   // column headers, field labels/descriptions, and select-option labels for the
   // quota-policies, plugins, and policies resource configs. Resource IDs, field
@@ -447,7 +472,9 @@ export const enRest = {
   "resource.agentWorkflows.field.organizationIds": "Organization IDs (comma-separated)",
   "resource.agentWorkflows.field.projects": "Projects",
   "resource.agentWorkflows.field.apiKeyIds": "API key IDs (comma-separated)",
-  "resource.agentWorkflows.field.nodes": "Nodes (JSON array)",
+  "resource.agentWorkflows.field.nodes": "Nodes",
+  "resource.agentWorkflows.field.nodes.desc":
+    "Pick each node's model, providers, and tool from the catalogs. Node wiring (edges) stays in the edges JSON field below.",
   "resource.agentWorkflows.field.edges": "Edges (JSON array)",
   "resource.agentWorkflows.field.maxModelCalls": "Max model calls",
   "resource.agentWorkflows.field.maxToolCalls": "Max tool calls",

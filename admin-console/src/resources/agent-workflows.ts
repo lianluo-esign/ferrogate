@@ -80,17 +80,23 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
       },
     },
     { name: "api_key_ids", labelKey: "resource.agentWorkflows.field.apiKeyIds", type: "csv" },
-    // nodes/edges are a structured workflow document whose model/provider/MCP/
-    // tool/prompt references live inside per-node JSON. Converting those to inline
-    // pickers needs a structured reference panel (issue #342 acceptance) and is
-    // explicitly a non-goal for this slice ("not a full visual DAG editor"); they
-    // stay raw JSON so non-reference document fields round-trip unchanged.
+    // #342: `nodes` is the structured workflow-node array. Its per-node entity
+    // references — the model (models catalog), its providers (providers catalog),
+    // and, for tool nodes, the tool (tools catalog) — are edited through the
+    // shared #337 picker so operators pick known entities by name, while the
+    // non-reference node fields (id, numeric limits) round-trip unchanged. The
+    // node contract (`AgentWorkflowNode`) is `deny_unknown_fields`, so the shape
+    // is fully modelled with no free-form extension.
     {
       name: "nodes",
       labelKey: "resource.agentWorkflows.field.nodes",
-      type: "json",
-      placeholder: '[{"id":"n1","kind":"model","model":"gpt-4o","providers":["openai"]}]',
+      descriptionKey: "resource.agentWorkflows.field.nodes.desc",
+      type: "workflow-nodes",
     },
+    // `edges` stays raw JSON on purpose: it wires node ids into the workflow
+    // graph, and a topology editor over those edges is exactly the "visual DAG
+    // editor" NON-GOAL for #342. Keeping it a JSON field lets the reference
+    // arrays go structured (above) while the graph document round-trips verbatim.
     {
       name: "edges",
       labelKey: "resource.agentWorkflows.field.edges",

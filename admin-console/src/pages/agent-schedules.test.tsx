@@ -148,6 +148,55 @@ describe("AgentSchedulesPage", () => {
     );
   });
 
+  it("scopes the workspace target to the selected tenant and excludes others until one is chosen", async () => {
+    const user = userEvent.setup();
+    mockAdminList("/admin/v1/agent-schedules", []);
+    mockAdminList("/admin/v1/tenant-accounts", [
+      { id: "tenant-1", name: "Acme", slug: "acme" },
+    ]);
+    // The workspace list is captured so we can assert the dependent tenant_id
+    // filter is applied — only the selected tenant's workspaces are offered.
+    const captured: { workspaceQuery: URLSearchParams | null } = { workspaceQuery: null };
+    server.use(
+      http.get(gatewayUrl("/admin/v1/workspaces"), ({ request }) => {
+        captured.workspaceQuery = new URL(request.url).searchParams;
+        return HttpResponse.json({
+          object: "list",
+          data: [{ id: "ws-1", name: "Prod workspace", slug: "prod", project_id: "proj-1" }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        });
+      }),
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentSchedulesPage />);
+    await screen.findByText("No schedules yet.");
+    await user.click(screen.getByRole("button", { name: "New schedule" }));
+
+    // Before a tenant is chosen the workspace target selector is disabled and
+    // explains the missing dependency instead of silently listing every
+    // workspace across tenants.
+    const workspacePicker = await screen.findByRole("combobox", { name: "Workspace" });
+    expect(workspacePicker).toBeDisabled();
+    expect(workspacePicker).toHaveTextContent("Select Tenant first");
+
+    // Choosing the tenant enables the workspace picker; its list request carries
+    // the tenant_id scope so incompatible workspaces are excluded server-side.
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
+    expect(await screen.findByRole("combobox", { name: "Workspace" })).toBeEnabled();
+    await user.click(screen.getByRole("combobox", { name: "Workspace" }));
+    await screen.findByRole("option", { name: /Prod workspace/ });
+    expect(captured.workspaceQuery?.get("tenant_id")).toBe("tenant-1");
+  });
+
   it("fires run-now only after confirmation and surfaces the recorded fire", async () => {
     const user = userEvent.setup();
     mockAdminList("/admin/v1/agent-schedules", [schedule()]);

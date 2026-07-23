@@ -550,15 +550,27 @@ export default function AgentSchedulesPage() {
                 required
                 placeholder={t("page.agentSchedules.form.tenantPlaceholder")}
                 onChange={(value) =>
-                  setForm({ ...form, tenant_id: typeof value === "string" ? value : "" })
+                  // Changing the tenant invalidates any workspace picked under the
+                  // previous tenant, so clear it — the workspace picker below is
+                  // scoped to the selected tenant and a stale cross-tenant id must
+                  // not survive.
+                  setForm({
+                    ...form,
+                    tenant_id: typeof value === "string" ? value : "",
+                    workspace_id: "",
+                  })
                 }
               />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="schedule-workspace">{t("common.workspace")}</Label>
-              {/* #342: workspace rows are scoped by project, not tenant, and the
-                  workspaces list carries no tenant_id filter (see #340), so this
-                  is an independent picker submitting the workspace `id`. */}
+              {/* #342: the workspace list honours a `tenant_id` filter
+                  (listWorkspaces), so this picker DEPENDS on the selected tenant
+                  and only lists that tenant's workspaces — a workspace from
+                  another tenant is structurally excluded. Until a tenant is
+                  chosen the picker is disabled with a "select tenant first"
+                  explanation (the picker's missing-dependency affordance). The
+                  workspace `id` is submitted unchanged. */}
               <EntityReferencePicker
                 id="schedule-workspace"
                 label={t("common.workspace")}
@@ -567,9 +579,16 @@ export default function AgentSchedulesPage() {
                   valueKey: "id",
                   primaryLabelKey: "name",
                   secondaryLabelKeys: ["slug", "project_id"],
+                  dependencies: [
+                    {
+                      field: "tenant_id",
+                      queryKey: "tenant_id",
+                      label: t("common.tenant"),
+                    },
+                  ],
                 }}
                 value={form.workspace_id}
-                dependencyValues={{}}
+                dependencyValues={{ tenant_id: form.tenant_id }}
                 required
                 placeholder={t("page.agentSchedules.form.workspacePlaceholder")}
                 onChange={(value) =>
@@ -717,11 +736,16 @@ export default function AgentSchedulesPage() {
                 </SelectContent>
               </Select>
             </div>
-            {/* target is a kind-discriminated dispatch document (agent_run vs
-                self_hosted_dispatch) whose embedded entity references vary by
-                target_kind; a structured target-entity selector is deferred to
-                the follow-up structured-panel work (#342 remains open) and stays
-                raw JSON here so the free-form payload round-trips unchanged. */}
+            {/* #342 (justified, no silent exclusion): the schedule `target` is
+                typed `unknown` on read and `Record<string, never>` on the
+                mutation contract (AdminAgentScheduleMutation.target) — the OpenAPI
+                schema publishes NO field shape for it, so there is no discoverable
+                set of entity references to build a selector over. Inventing one
+                would mean guessing keys the contract does not define, so this
+                stays a raw JSON payload that round-trips verbatim. The entity
+                scoping that IS modelled (tenant + tenant-scoped workspace) is
+                already structured above. If the target schema later gains a
+                concrete shape, a structured selector can replace this textarea. */}
             <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="schedule-target">{t("page.agentSchedules.form.target")}</Label>
               <Textarea

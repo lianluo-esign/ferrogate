@@ -1,11 +1,18 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
+import { useSearchParams } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import OpsObservabilityPage from "@/pages/ops-observability";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
 import type { AdminSchema } from "@/lib/gateway-client";
+
+/** Surfaces the live URL query string so URL-state assertions can read it. */
+function SearchProbe() {
+  const [params] = useSearchParams();
+  return <span data-testid="search">{params.toString()}</span>;
+}
 
 function exporter(
   overrides: Partial<AdminSchema<"ObservabilityStatus">> = {},
@@ -68,5 +75,32 @@ describe("OpsObservabilityPage", () => {
         screen.getByRole("button", { name: "Download JSONL" }),
       ).toBeEnabled(),
     );
+  });
+
+  it("picks the model filter from the catalog (human label) and writes its id to the URL", async () => {
+    const user = userEvent.setup();
+    mockAdminList("/admin/v1/observability", []);
+    mockAdminList("/admin/v1/models", [
+      { name: "gpt-4o", provider: "openai", provider_model: "gpt-4o" },
+    ]);
+
+    renderWithProviders(
+      <>
+        <OpsObservabilityPage />
+        <SearchProbe />
+      </>,
+    );
+    await screen.findByText("No exporters configured.");
+
+    // The model filter is an entity picker over the known models catalog: pick
+    // by human name, and the canonical model name is written to the URL query.
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: /gpt-4o/ }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("search")).toHaveTextContent("model=gpt-4o"),
+    );
+    // The picker trigger displays the resolved human label, not a raw id box.
+    expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("gpt-4o");
   });
 });

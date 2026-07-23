@@ -262,3 +262,113 @@ describe("skill-package structured capability editor", () => {
     expect(await screen.findByText("Unresolved reference")).toBeInTheDocument();
   });
 });
+
+// #342: agent-workflow `nodes` is the structured reference panel. Its per-node
+// entity references (model / providers / tool) are picked from the catalogs,
+// every non-reference node field round-trips, and the incomplete references are
+// rejected before submit. The workflow edges/topology stay a raw JSON field
+// (the DAG-editor non-goal), so these tests also assert the edges document
+// round-trips untouched alongside the structured node edits.
+
+function installWorkflowCatalogs() {
+  mockAdminList("/admin/v1/models", [
+    { name: "gpt-4o", provider: "openai", provider_model: "gpt-4o" },
+  ]);
+  mockAdminList("/admin/v1/providers", [{ name: "openai", kind: "openai" }]);
+  mockAdminList("/admin/v1/tools", [{ name: "search", extension_id: "ext-1" }]);
+}
+
+function renderWorkflowForm(initialValues: Record<string, unknown>) {
+  return renderForm(agentWorkflowsConfig.fields, {
+    ...defaultFieldValues(agentWorkflowsConfig.fields),
+    ...initialValues,
+  });
+}
+
+describe("agent-workflow structured node reference panel", () => {
+  it("resolves node references, preserves non-reference node fields, and round-trips the edges JSON", async () => {
+    installWorkflowCatalogs();
+    const user = userEvent.setup();
+    const onSubmit = renderWorkflowForm({
+      id: "wf-1",
+      name: "Enrichment",
+      nodes: [
+        {
+          id: "n1",
+          kind: "model",
+          model: "gpt-4o",
+          providers: ["openai"],
+          max_iterations: 3,
+        },
+      ],
+      edges: [{ from: "n1", to: "n2" }],
+    });
+
+    // The model + provider references resolve to their human catalog labels
+    // (shown in the picker trigger / selected-value list), not raw ids.
+    expect(await screen.findAllByText("gpt-4o")).not.toHaveLength(0);
+    expect(await screen.findAllByText("openai")).not.toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "wf-1",
+          name: "Enrichment",
+          // The structured node round-trips with its non-reference fields intact.
+          nodes: [
+            {
+              id: "n1",
+              kind: "model",
+              model: "gpt-4o",
+              providers: ["openai"],
+              max_iterations: 3,
+            },
+          ],
+          // The unrelated edges/topology document round-trips unchanged.
+          edges: [{ from: "n1", to: "n2" }],
+        }),
+      ),
+    );
+  });
+
+  it("rejects a model node with no model selected before submit", async () => {
+    installWorkflowCatalogs();
+    const user = userEvent.setup();
+    const onSubmit = renderWorkflowForm({
+      id: "wf-2",
+      name: "Broken",
+      nodes: [{ id: "n1", kind: "model", model: "" }],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("Model node n1 needs a model.")).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("edits a tool node reference through the tools catalog picker", async () => {
+    installWorkflowCatalogs();
+    const user = userEvent.setup();
+    const onSubmit = renderWorkflowForm({
+      id: "wf-3",
+      name: "Tooling",
+      nodes: [{ id: "t1", kind: "tool", tool: "" }],
+    });
+
+    // Pick the tool by its catalog name; the node keeps only tool-kind refs.
+    await user.click(await screen.findByRole("combobox", { name: "Tool" }));
+    await user.click(await screen.findByRole("option", { name: /search/ }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "wf-3",
+          nodes: [{ id: "t1", kind: "tool", tool: "search" }],
+        }),
+      ),
+    );
+  });
+});
