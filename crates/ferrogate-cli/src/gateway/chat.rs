@@ -265,7 +265,9 @@ impl FerroGateway {
                 estimated_usage: &estimated_usage,
                 now_unix: request_started_at_unix,
             },
-        ) {
+        )
+        .await
+        {
             Ok(constraint) => constraint,
             Err(rejection) => {
                 self.record_ai_workflow_rejection(
@@ -3114,7 +3116,7 @@ struct AiWorkflowProviderConstraint {
     providers: Vec<String>,
 }
 
-fn enforce_ai_workflow_policy(
+async fn enforce_ai_workflow_policy(
     state: &AppState,
     request: AiWorkflowRequestContext<'_>,
 ) -> Result<Option<AiWorkflowProviderConstraint>, AiWorkflowRejection> {
@@ -3195,12 +3197,15 @@ fn enforce_ai_workflow_policy(
             ),
         });
     }
-    if let Some(message) = state.workflow_edge_transition_error(
-        workflow,
-        request.agent_run_id,
-        node_id,
-        request.auth.organization_id.as_deref(),
-    ) {
+    if let Some(message) = state
+        .workflow_edge_transition_error(
+            workflow,
+            request.agent_run_id,
+            node_id,
+            request.auth.organization_id.as_deref(),
+        )
+        .await
+    {
         return Err(AiWorkflowRejection {
             status: StatusCode::FORBIDDEN,
             code: "workflow_edge_not_allowed",
@@ -3236,12 +3241,15 @@ fn enforce_ai_workflow_policy(
         }
     }
     if let Some(timeout_millis) = workflow.timeout_millis {
-        if let Some(started_at_unix) = state.workflow_run_started_at(
-            &workflow.id,
-            workflow.version,
-            request.agent_run_id,
-            request.auth.organization_id.as_deref(),
-        ) {
+        if let Some(started_at_unix) = state
+            .workflow_run_started_at(
+                &workflow.id,
+                workflow.version,
+                request.agent_run_id,
+                request.auth.organization_id.as_deref(),
+            )
+            .await
+        {
             let elapsed_millis = request
                 .now_unix
                 .saturating_sub(started_at_unix)

@@ -580,12 +580,10 @@ async fn agent_workflow_use(
             }
         }
     }
-    if let Some(message) = state.workflow_edge_transition_error(
-        workflow,
-        run_id,
-        node_id,
-        auth.organization_id.as_deref(),
-    ) {
+    if let Some(message) = state
+        .workflow_edge_transition_error(workflow, run_id, node_id, auth.organization_id.as_deref())
+        .await
+    {
         return Err((StatusCode::FORBIDDEN, "workflow_edge_not_allowed", message));
     }
     if workflow.max_parallelism.is_some_and(|limit| {
@@ -631,12 +629,15 @@ async fn agent_workflow_use(
         ));
     }
     if let Some(timeout_millis) = workflow.timeout_millis {
-        if let Some(started_at_unix) = state.workflow_run_started_at(
-            &workflow.id,
-            workflow.version,
-            run_id,
-            auth.organization_id.as_deref(),
-        ) {
+        if let Some(started_at_unix) = state
+            .workflow_run_started_at(
+                &workflow.id,
+                workflow.version,
+                run_id,
+                auth.organization_id.as_deref(),
+            )
+            .await
+        {
             let elapsed_millis = now_unix_seconds()
                 .saturating_sub(started_at_unix)
                 .saturating_mul(1_000);

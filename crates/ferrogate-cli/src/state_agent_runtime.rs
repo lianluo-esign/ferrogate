@@ -30,21 +30,42 @@ impl AppState {
         self.metering_events.list()
     }
 
-    /// Issue #330 note: this reads through the sync `request_logs()` /
-    /// `audit_events()` bridges. It is reached on the AI-proxy hot path from
-    /// the sync free fn `enforce_ai_workflow_policy` (chat.rs), which performs
-    /// several *other* bridged workflow-gate reads in the same gate
-    /// (`workflow_edge_transition_error` ->
-    /// `workflow_run_last_successful_node_id`, also `request_logs`/
-    /// `audit_events`-backed). De-bridging only this one while the sibling
-    /// gate reads stay bridged in the same synchronous function would be
-    /// incoherent; a correct fix converts the whole agent-workflow gate
-    /// (both the chat and `agent_runs` entry points and their shared helpers)
-    /// to async at once. That is a larger, self-contained restructuring than
-    /// this slice and is tracked as follow-up work, so it is kept bridged
-    /// under the acceptance carve-out for reads that need a sync-only caller
-    /// restructured.
-    pub(crate) fn workflow_run_started_at(
+    /// Async counterpart of [`AppState::request_logs`] for the AI-proxy hot
+    /// path (issue #372). The sync wrapper parks a Pingora worker thread via
+    /// `block_on_sync_bridge`/`block_in_place` to drive the async storage read
+    /// to completion; the agent-workflow gate is itself async, so it awaits the
+    /// storage read directly here and no worker thread is parked. The deferred
+    /// evidence writer is still flushed first so the workflow gating readers
+    /// keep #309 read-your-writes over the background durable writes. The flush
+    /// is a bounded condvar wait (a no-op on the in-memory backend, where the
+    /// writer is never used) that predates and is orthogonal to the bridged DB
+    /// read this issue removes; it is the read-your-writes barrier, not the
+    /// hot-path storage read.
+    pub(crate) async fn request_logs_async(&self) -> Vec<StoredRequestLog> {
+        self.flush_evidence_writer();
+        self.repositories.request_logs().await
+    }
+
+    /// Async counterpart of [`AppState::audit_events`] for the AI-proxy hot
+    /// path (issue #372). See [`AppState::request_logs_async`] for why the
+    /// bridge is dropped and why the evidence-writer flush stays.
+    pub(crate) async fn audit_events_async(&self) -> Vec<StoredAuditEvent> {
+        self.flush_evidence_writer();
+        self.repositories.audit_events().await
+    }
+
+    /// Issue #372 (finishing #330's read-side): the agent-workflow run-gating
+    /// reader is now `async` and awaits the storage read directly through
+    /// [`AppState::request_logs_async`] / [`AppState::audit_events_async`]
+    /// instead of parking a Pingora worker via `block_on_sync_bridge`. The
+    /// whole agent-workflow gate (`enforce_ai_workflow_policy` in chat.rs and
+    /// `agent_workflow_use` in agent_runs.rs, plus the shared
+    /// `workflow_edge_transition_error` ->
+    /// `workflow_run_last_successful_node_id` helpers) was converted together,
+    /// as #330 flagged, so no sibling read stays bridged in the same gate. The
+    /// billing/metering read stays the in-memory `metering_events()` list (no
+    /// bridge to remove).
+    pub(crate) async fn workflow_run_started_at(
         &self,
         workflow_id: &str,
         workflow_version: u32,
@@ -57,7 +78,8 @@ impl AppState {
         // agent_run_id would compute its run-gating from the other tenant's
         // logs. `None` (platform operator) matches operator-owned records only.
         let request_timestamps = self
-            .request_logs()
+            .request_logs_async()
+            .await
             .into_iter()
             .filter(|log| {
                 log.workflow_id.as_deref() == Some(workflow_id)
@@ -67,7 +89,8 @@ impl AppState {
             })
             .flat_map(|log| [log.started_at_unix, log.completed_at_unix]);
         let audit_timestamps = self
-            .audit_events()
+            .audit_events_async()
+            .await
             .into_iter()
             .filter(|event| {
                 event.workflow_id.as_deref() == Some(workflow_id)
@@ -94,7 +117,7 @@ impl AppState {
             .min()
     }
 
-    pub(crate) fn workflow_run_last_successful_node_id(
+    pub(crate) async fn workflow_run_last_successful_node_id(
         &self,
         workflow_id: &str,
         workflow_version: u32,
@@ -104,8 +127,9 @@ impl AppState {
         // Tenant scope (#185/#228): match the caller's organization_id so a
         // client-supplied `agent_run_id` cannot pull another tenant's node
         // history into this tenant's edge-transition gate.
+        // Issue #372: awaits the storage reads directly (no `block_on_sync_bridge`).
         let mut latest: Option<(u64, String)> = None;
-        for log in self.request_logs() {
+        for log in self.request_logs_async().await {
             if log.workflow_id.as_deref() != Some(workflow_id)
                 || log.workflow_version != Some(workflow_version)
                 || log.agent_run_id.as_deref() != Some(agent_run_id)
@@ -119,7 +143,7 @@ impl AppState {
                 record_latest_workflow_node(&mut latest, timestamp, node_id);
             }
         }
-        for event in self.audit_events() {
+        for event in self.audit_events_async().await {
             if event.workflow_id.as_deref() != Some(workflow_id)
                 || event.workflow_version != Some(workflow_version)
                 || event.agent_run_id.as_deref() != Some(agent_run_id)
@@ -156,7 +180,7 @@ impl AppState {
         latest.map(|(_, node_id)| node_id)
     }
 
-    pub(crate) fn workflow_edge_transition_error(
+    pub(crate) async fn workflow_edge_transition_error(
         &self,
         workflow: &AgentWorkflowPolicy,
         agent_run_id: &str,
@@ -166,12 +190,15 @@ impl AppState {
         if workflow.edges.is_empty() {
             return None;
         }
-        if let Some(previous_node_id) = self.workflow_run_last_successful_node_id(
-            &workflow.id,
-            workflow.version,
-            agent_run_id,
-            organization_id,
-        ) {
+        if let Some(previous_node_id) = self
+            .workflow_run_last_successful_node_id(
+                &workflow.id,
+                workflow.version,
+                agent_run_id,
+                organization_id,
+            )
+            .await
+        {
             if previous_node_id == node_id
                 || workflow
                     .edges
@@ -2029,72 +2056,6 @@ mod tests {
     }
 
     #[test]
-    fn workflow_gating_readers_are_scoped_to_the_callers_tenant() {
-        // #228: agent_run_id is client-supplied and not tenant-namespaced. A
-        // request log recorded for tenant-a's run must NOT feed tenant-b's
-        // (or an operator's) run-gating just because tenant-b reuses the id.
-        let state = AppState::new(Config::default());
-        let log = |org: &str, node: &str, ts: u64| StoredRequestLog {
-            request_id: format!("req-{org}-{node}"),
-            trace_id: None,
-            agent_run_id: Some("shared-run-id".into()),
-            workflow_id: Some("wf".into()),
-            workflow_version: Some(1),
-            workflow_node_id: Some(node.into()),
-            cluster_id: None,
-            node_id: None,
-            tenant: ferrogate_core::TenantContext {
-                organization_id: Some(org.to_string()),
-                ..Default::default()
-            },
-            route: None,
-            provider: None,
-            logical_model: None,
-            provider_model: None,
-            gateway_config_id: None,
-            gateway_config_revision: None,
-            status_code: 200,
-            error_code: None,
-            prompt_recorded: false,
-            response_recorded: false,
-            prompt_body: None,
-            response_body: None,
-            cache_status: None,
-            started_at_unix: Some(ts),
-            completed_at_unix: Some(ts),
-            parent_action_fingerprint: None,
-        };
-        state.record_request_log(log("tenant-a", "start", 100));
-
-        // tenant-a sees its own run start; tenant-b (same agent_run_id) does not,
-        // and neither does a platform operator (org None).
-        assert_eq!(
-            state.workflow_run_started_at("wf", 1, "shared-run-id", Some("tenant-a")),
-            Some(100),
-        );
-        assert_eq!(
-            state.workflow_run_started_at("wf", 1, "shared-run-id", Some("tenant-b")),
-            None,
-            "tenant-b must not read tenant-a's run timestamps via a shared agent_run_id",
-        );
-        assert_eq!(
-            state.workflow_run_started_at("wf", 1, "shared-run-id", None),
-            None,
-            "an operator must not inherit a tenant's run start",
-        );
-
-        // Same isolation for the last-successful-node gate.
-        assert_eq!(
-            state.workflow_run_last_successful_node_id("wf", 1, "shared-run-id", Some("tenant-a")),
-            Some("start".into()),
-        );
-        assert_eq!(
-            state.workflow_run_last_successful_node_id("wf", 1, "shared-run-id", Some("tenant-b")),
-            None,
-        );
-    }
-
-    #[test]
     fn self_hosted_worker_cannot_overwrite_another_workers_checkpoint_or_artifact() {
         // #228 (round-11): checkpoint/artifact ids share a GLOBAL namespace, so a
         // worker reusing another worker's id must be rejected, not allowed to
@@ -3900,3 +3861,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "state_agent_runtime_workflow_gate_test.rs"]
+mod workflow_gate_test;
