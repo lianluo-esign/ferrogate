@@ -785,7 +785,7 @@ impl RuntimeControlPlaneState {
             .into_iter()
             .filter(|fire| fire.schedule_id == schedule_id)
             .collect();
-        fires.sort_by(|a, b| b.scheduled_fire_at_unix.cmp(&a.scheduled_fire_at_unix));
+        fires.sort_by_key(|fire| std::cmp::Reverse(fire.scheduled_fire_at_unix));
         fires.truncate(limit);
         fires
     }

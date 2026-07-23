@@ -953,7 +953,7 @@ fn mcp_statement_timeout_for_operation(
 }
 
 fn mcp_statement_timeout_millis(remaining: std::time::Duration) -> i32 {
-    let fractional_millis = u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+    let fractional_millis = u128::from(!remaining.subsec_nanos().is_multiple_of(1_000_000));
     let rounded_up = remaining.as_millis().saturating_add(fractional_millis);
     i32::try_from(rounded_up.clamp(1, i32::MAX as u128)).unwrap_or(i32::MAX)
 }

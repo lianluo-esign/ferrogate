@@ -10882,7 +10882,7 @@ impl RuntimeControlPlaneState {
             .into_iter()
             .filter(|entry| entry.dead_lettered_at_unix.is_some())
             .collect();
-        dead.sort_by(|a, b| b.dead_lettered_at_unix.cmp(&a.dead_lettered_at_unix));
+        dead.sort_by_key(|entry| std::cmp::Reverse(entry.dead_lettered_at_unix));
         dead.truncate(limit);
         dead
     }
@@ -14552,7 +14552,9 @@ impl RuntimeStorageRepositories {
     /// only when durable retention is enabled (`> 0`).
     fn durable_prune_due(&self, ticks: &AtomicU64) -> bool {
         self.durable_worker_retention_records > 0
-            && ticks.fetch_add(1, Ordering::Relaxed) % DURABLE_PRUNE_WRITE_INTERVAL == 0
+            && ticks
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(DURABLE_PRUNE_WRITE_INTERVAL)
     }
 
     pub fn set_retention_limits(
