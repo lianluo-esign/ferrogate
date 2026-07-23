@@ -129,6 +129,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { titleKey: "nav.item.gatewayConfigProfiles", url: APP_ROUTES.operationsGatewayConfigs },
       { titleKey: "nav.item.providerHealth", url: APP_ROUTES.operationsProviderHealth },
       { titleKey: "nav.item.telemetryExports", url: APP_ROUTES.operationsObservability },
+      { titleKey: "nav.item.staticSites", url: APP_ROUTES.staticSites },
       { titleKey: "nav.item.siteDomains", url: APP_ROUTES.siteDomains },
     ],
   },

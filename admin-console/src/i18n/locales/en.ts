@@ -204,6 +204,7 @@ export const en = {
   "nav.item.gatewayConfigProfiles": "Gateway Config Profiles",
   "nav.item.providerHealth": "Provider Health",
   "nav.item.telemetryExports": "Telemetry Exports",
+  "nav.item.staticSites": "Static Sites",
   "nav.item.siteDomains": "Site Domains",
 
   // Generated resource-CRUD framework chrome (#348). These localize the shared
@@ -746,6 +747,46 @@ export const en = {
   "page.siteDomains.acme.enabledNoReload": " ACME enabled; no listener reload was required.",
   "page.siteDomains.acme.disabled":
     " ACME issuance is disabled on this gateway; provision TLS out-of-band.",
+
+  // Static-site management + publish flow (src/pages/static-sites.tsx, #345).
+  "page.staticSites.title": "Static sites",
+  "page.staticSites.description":
+    "Publish and manage static-site bundles served under /sites/{tenant}/{site}/.",
+  "page.staticSites.publish.title": "Publish a site",
+  "page.staticSites.publish.description":
+    "Upload a ZIP bundle for a tenant and site. Republishing a version replaces the served files.",
+  "page.staticSites.publish.submit": "Publish",
+  "page.staticSites.publish.submitting": "Publishing…",
+  "page.staticSites.publish.uploading": "Uploading bundle…",
+  "page.staticSites.field.project": "Project",
+  "page.staticSites.field.project.select": "Select project",
+  "page.staticSites.field.cacheControl": "Cache-Control",
+  "page.staticSites.field.cacheControl.hint": "Optional override; default is public, max-age=300.",
+  "page.staticSites.field.bundle": "Bundle (ZIP)",
+  "page.staticSites.field.bundle.hint": "A .zip archive of the site's files.",
+  "page.staticSites.field.public": "Public access",
+  "page.staticSites.field.spa": "SPA fallback",
+  "page.staticSites.serveUrlPreview": "Serves at",
+  "page.staticSites.validation.notZip": "The bundle must be a .zip archive.",
+  "page.staticSites.validation.tooLarge": "The bundle exceeds the {max} upload limit.",
+  "page.staticSites.validation.versionRequired": "Version is required",
+  "page.staticSites.validation.bundleRequired": "Choose a ZIP bundle to publish",
+  "page.staticSites.toast.published": "Published {site} ({files} files, {bytes})",
+  "page.staticSites.loadError": "Failed to load static sites: {message}",
+  "page.staticSites.manifestError": "Manifest unavailable",
+  "page.staticSites.empty": "No published static sites.",
+  "page.staticSites.col.site": "Site",
+  "page.staticSites.col.access": "Access",
+  "page.staticSites.col.cache": "Cache",
+  "page.staticSites.col.files": "Files",
+  "page.staticSites.col.published": "Published",
+  "page.staticSites.col.serveUrl": "Serve URL",
+  "page.staticSites.col.domains": "Domains",
+  "page.staticSites.access.public": "Public",
+  "page.staticSites.access.private": "Private",
+  "page.staticSites.access.spa": "SPA",
+  "page.staticSites.cache.default": "default",
+  "page.staticSites.domains.bind": "Bind a domain",
 
   // Resolved tenant-defaults lookup (src/pages/tenant-resolved-defaults.tsx).
   "page.resolvedDefaults.title": "Resolved tenant defaults",

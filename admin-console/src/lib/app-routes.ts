@@ -27,6 +27,7 @@ export const APP_ROUTES = {
   operationsObservability: "/app/ops/observability",
   virtualKeys: "/app/api-keys",
   tenantRoles: "/app/tenant-roles",
+  staticSites: "/app/static-sites",
   siteDomains: "/app/site-domains",
   mcpIdentities: "/app/mcp-identities",
   tools: "/app/tools",

@@ -41,6 +41,7 @@ const OpsProviderHealthPage = lazy(() => import("@/pages/ops-provider-health"));
 const OpsObservabilityPage = lazy(() => import("@/pages/ops-observability"));
 const VirtualKeysPage = lazy(() => import("@/pages/virtual-keys"));
 const TenantRolesPage = lazy(() => import("@/pages/tenant-roles"));
+const StaticSitesPage = lazy(() => import("@/pages/static-sites"));
 const SiteDomainsPage = lazy(() => import("@/pages/site-domains"));
 const McpIdentitiesPage = lazy(() => import("@/pages/mcp-identities"));
 const ToolsCatalogPage = lazy(() => import("@/pages/tools-catalog"));
@@ -141,6 +142,7 @@ function App() {
                 />
                 <Route path={APP_ROUTES.virtualKeys} element={routeElement(VirtualKeysPage)} />
                 <Route path={APP_ROUTES.tenantRoles} element={routeElement(TenantRolesPage)} />
+                <Route path={APP_ROUTES.staticSites} element={routeElement(StaticSitesPage)} />
                 <Route path={APP_ROUTES.siteDomains} element={routeElement(SiteDomainsPage)} />
                 <Route path={APP_ROUTES.mcpIdentities} element={routeElement(McpIdentitiesPage)} />
                 <Route path={APP_ROUTES.tools} element={routeElement(ToolsCatalogPage)} />

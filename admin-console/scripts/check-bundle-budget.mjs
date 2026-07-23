@@ -23,7 +23,18 @@ import { fileURLToPath } from "node:url";
 // and so land in the entry chunk. Measured cost: +~3.6 KiB min / +~0.9 KiB gzip
 // of copy across EN + zh-CN, not a new runtime dependency. Headroom stays tight
 // (<1 KiB) so this remains a guard, not a blank cheque.
-const MAX_ENTRY_BYTES = 316_000;
+//
+// Bumped 316_000 -> 321_000 (#345): the Static Sites route (list of published
+// static_site bundles + a ZIP publish/republish flow with client-side archive
+// validation and verbatim gateway-error display) added ~37 typed catalog keys
+// across EN + zh-CN. The PAGE is a lazy route (its own chunk, outside the
+// entry), but those keys are eagerly imported by src/i18n/catalog.ts and so
+// land in the entry chunk (measured entry 312.22 KiB). This is the same eager-
+// catalog pressure #393 tracks fixing at the root via catalog code-splitting;
+// until then the ceiling grows by the copy's real cost (~3.6 KiB min) with a
+// small (~1.2 KiB) headroom, and stays a guard against an unintended heavy
+// runtime dependency reaching the entry.
+const MAX_ENTRY_BYTES = 321_000;
 const MAX_CHUNK_BYTES = 500_000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");

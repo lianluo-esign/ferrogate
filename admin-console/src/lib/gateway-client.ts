@@ -283,13 +283,24 @@ export async function gatewayPutBinary<T>(
   path: string,
   body: Blob,
   contentType: string,
+  // #345: static-site publishing rides the same raw-bytes PUT as any asset but
+  // carries its serving policy in `x-site-*` request headers (public opt-in,
+  // SPA fallback, Cache-Control override). Optional so every existing caller is
+  // unchanged; empty/undefined values are dropped so we never send blanks.
+  extraHeaders?: Record<string, string | undefined>,
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": contentType || "application/octet-stream",
+  };
+  if (extraHeaders) {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (value !== undefined && value !== "") headers[key] = value;
+    }
+  }
   const response = await fetch(buildUrl(path), {
     method: "PUT",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": contentType || "application/octet-stream",
-    },
+    headers,
     body,
   });
   const responseBody = await response.json().catch(() => null);
