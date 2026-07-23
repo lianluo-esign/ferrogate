@@ -47,6 +47,19 @@ export const en = {
   "common.tenant": "Tenant",
   "common.workspace": "Workspace",
 
+  // Shared action / a11y labels reused by the shared primitives and vendored
+  // shadcn/ui chrome (#348 final slice): copy/close/reveal buttons plus the
+  // sr-only accessibility labels a screen reader announces.
+  "common.copy": "Copy",
+  "common.done": "Done",
+  "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.more": "More",
+  "common.loading": "Loading…",
+  "common.copied": "{label} copied",
+  "common.breadcrumb": "Breadcrumb",
+  "common.toggleSidebar": "Toggle Sidebar",
+
   // Auth surfaces — login + register (#348).
   "auth.field.email": "Email",
   "auth.field.password": "Password",
@@ -1775,4 +1788,89 @@ export const en = {
   "page.selfHostedWorkerDetail.reveal.title": "Identity rotated",
   "page.selfHostedWorkerDetail.reveal.description":
     "Store the new identity fingerprint now. The previous credential no longer authenticates the worker.",
+
+  // Shared Worker-ops building blocks (src/components/worker-ops/
+  // worker-ops-primitives.tsx): the reported-trust badge + the
+  // credential-shown-once reveal dialog, used by both self-hosted worker pages.
+  "workerOps.trustBadge.reported": "reported by worker",
+  "workerOps.reveal.warning": "This value will not be shown again. Store it somewhere safe.",
+  "workerOps.reveal.copyFailed": "Could not copy {label}; it is shown above.",
+
+  // Self-hosted worker lifecycle ops page (src/pages/self-hosted-workers-ops.tsx).
+  "page.selfHostedWorkersOps.title": "Self-hosted worker lifecycle",
+  "page.selfHostedWorkersOps.subtitle.before":
+    "Register, inspect, and rotate customer-infrastructure agent workers. All worker telemetry is customer-reported evidence (",
+  "page.selfHostedWorkersOps.subtitle.after":
+    ") — not managed-worker enforcement proof.",
+  "page.selfHostedWorkersOps.register": "Register worker",
+  "page.selfHostedWorkersOps.error": "Failed to load self-hosted workers: {message}",
+  "page.selfHostedWorkersOps.col.worker": "Worker",
+  "page.selfHostedWorkersOps.workerIdLabel": "Worker id",
+  "page.selfHostedWorkersOps.badge.stale": "stale",
+  "page.selfHostedWorkersOps.col.orchestration": "Orchestration",
+  "page.selfHostedWorkersOps.col.activity": "Activity",
+  "page.selfHostedWorkersOps.activity":
+    "{events} events / {checkpoints} checkpoints / {artifacts} artifacts",
+  "page.selfHostedWorkersOps.activityCompact":
+    "{events} events · {checkpoints} checkpoints · {artifacts} artifacts",
+  "page.selfHostedWorkersOps.col.lastSeen": "Last seen",
+  "page.selfHostedWorkersOps.empty": "No self-hosted workers registered yet.",
+  "page.selfHostedWorkersOps.inspect": "Inspect",
+  "page.selfHostedWorkersOps.dialog.title": "Register self-hosted worker",
+  "page.selfHostedWorkersOps.dialog.description":
+    "Bind a customer-owned worker identity. The identity fingerprint is the durable mTLS credential and is shown once after registration.",
+  "page.selfHostedWorkersOps.field.workerName": "Worker name",
+  "page.selfHostedWorkersOps.field.workspaceId": "Workspace id",
+  "page.selfHostedWorkersOps.field.identityFingerprint": "Identity fingerprint",
+  "page.selfHostedWorkersOps.field.organizationId": "Organization id (optional)",
+  "page.selfHostedWorkersOps.field.projectId": "Project id (optional)",
+  "page.selfHostedWorkersOps.field.identityExpires":
+    "Identity expiry Unix seconds (optional)",
+  "page.selfHostedWorkersOps.field.orchestrationEnabled": "Orchestration enabled",
+  "page.selfHostedWorkersOps.placeholder.workerName": "edge-runner-01",
+  "page.selfHostedWorkersOps.placeholder.workspaceId": "ws-...",
+  "page.selfHostedWorkersOps.placeholder.identityFingerprint": "sha256:...",
+  "page.selfHostedWorkersOps.placeholder.organizationId": "org-...",
+  "page.selfHostedWorkersOps.placeholder.projectId": "proj-...",
+  "page.selfHostedWorkersOps.placeholder.identityExpires": "leave blank for no expiry",
+  "page.selfHostedWorkersOps.error.required":
+    "Worker name, workspace id, and identity fingerprint are required.",
+  "page.selfHostedWorkersOps.error.expiryInvalid":
+    "Identity expiry must be a Unix timestamp (seconds).",
+  "page.selfHostedWorkersOps.submit": "Register",
+  "page.selfHostedWorkersOps.submitting": "Registering…",
+  "page.selfHostedWorkersOps.toast.registered": "Worker {name} registered",
+  "page.selfHostedWorkersOps.reveal.title": "Worker identity registered",
+  "page.selfHostedWorkersOps.reveal.description":
+    "Store the identity fingerprint for {name} now. It binds the worker's mTLS transport identity.",
+  "page.selfHostedWorkersOps.reveal.fallbackName": "the worker",
+
+  // Shared plugin-tool listing (src/components/tools/tools-table.tsx).
+  "component.toolsTable.col.tool": "Tool",
+  "component.toolsTable.col.plugin": "Plugin",
+  "component.toolsTable.col.approval": "Approval",
+  "component.toolsTable.col.tenants": "Tenants",
+  "component.toolsTable.col.apiKeys": "API keys",
+  "component.toolsTable.col.routes": "Routes",
+  "component.toolsTable.empty": "No registered tools.",
+  "component.toolsTable.any": "any",
+
+  // Theme selector (src/components/theme-switcher.tsx).
+  "component.themeSwitcher.light": "Light",
+  "component.themeSwitcher.dark": "Dark",
+  "component.themeSwitcher.system": "System",
+  "component.themeSwitcher.trigger": "Theme: {theme}. Change theme",
+  "component.themeSwitcher.changeTheme": "Change theme",
+  "component.themeSwitcher.appearance": "Appearance",
+
+  // Lazy-route Suspense + error boundary (src/components/route-load-boundary.tsx).
+  "component.routeBoundary.loading": "Loading page…",
+  "component.routeBoundary.errorTitle": "Page failed to load",
+  "component.routeBoundary.errorBody":
+    "The page module could not be downloaded. Check the connection and reload.",
+  "component.routeBoundary.reload": "Reload page",
+
+  // Mobile sidebar sheet accessibility copy (src/components/ui/sidebar.tsx).
+  "component.sidebar.title": "Sidebar",
+  "component.sidebar.description": "Displays the mobile sidebar.",
 } as const;

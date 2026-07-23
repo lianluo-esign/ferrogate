@@ -5,7 +5,9 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider } from "@/i18n";
+import { I18nProvider, type Locale } from "@/i18n";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
@@ -54,10 +56,10 @@ function mockRecords(records: WorkerRecord[]): void {
   );
 }
 
-function renderPage() {
+function renderPage(locale?: Locale) {
   return render(
     <MemoryRouter initialEntries={["/app/workers/self-hosted"]}>
-      <I18nProvider>
+      <I18nProvider initialLocale={locale}>
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             <Routes>
@@ -182,6 +184,53 @@ describe("SelfHostedWorkersOpsPage", () => {
       await screen.findByText(
         "Worker name, workspace id, and identity fingerprint are required.",
       ),
+    ).toBeInTheDocument();
+  });
+});
+
+// #348 final slice: the shared ops page + its worker-ops primitives must render
+// their copy from the typed catalog in BOTH locales (runtime companion to the
+// `ferrogate/no-untranslated-literal` gate now enforced on these files).
+describe("SelfHostedWorkersOpsPage copy is localized", () => {
+  it("renders English title, reported-trust badge, register action, and empty state", async () => {
+    mockRecords([]);
+    renderPage("en");
+
+    expect(
+      await screen.findByRole("heading", {
+        name: en["page.selfHostedWorkersOps.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(en["workerOps.trustBadge.reported"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.selfHostedWorkersOps.register"] }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.selfHostedWorkersOps.empty"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, reported-trust badge, register action, and empty state", async () => {
+    mockRecords([]);
+    renderPage("zh-CN");
+
+    expect(
+      await screen.findByRole("heading", {
+        name: zhCN["page.selfHostedWorkersOps.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["workerOps.trustBadge.reported"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: zhCN["page.selfHostedWorkersOps.register"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.selfHostedWorkersOps.empty"]),
     ).toBeInTheDocument();
   });
 });

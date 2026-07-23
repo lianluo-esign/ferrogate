@@ -6,14 +6,17 @@ import {
   RouteLoadBoundary,
   RouteLoadErrorBoundary,
 } from "@/components/route-load-boundary";
+import { I18nProvider } from "@/i18n";
 
 describe("RouteLoadBoundary", () => {
   it("announces a stable loading state while a route module is pending", () => {
     const PendingRoute = lazy(() => new Promise<never>(() => {}));
     render(
-      <RouteLoadBoundary>
-        <PendingRoute />
-      </RouteLoadBoundary>,
+      <I18nProvider>
+        <RouteLoadBoundary>
+          <PendingRoute />
+        </RouteLoadBoundary>
+      </I18nProvider>,
     );
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading page…");
@@ -30,9 +33,11 @@ describe("RouteLoadBoundary", () => {
     }
 
     render(
-      <RouteLoadErrorBoundary onReload={onReload}>
-        <BrokenRoute />
-      </RouteLoadErrorBoundary>,
+      <I18nProvider>
+        <RouteLoadErrorBoundary onReload={onReload}>
+          <BrokenRoute />
+        </RouteLoadErrorBoundary>
+      </I18nProvider>,
     );
 
     expect(screen.getByRole("heading", { name: "Page failed to load" })).toBeInTheDocument();

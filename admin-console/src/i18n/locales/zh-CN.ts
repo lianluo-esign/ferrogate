@@ -36,6 +36,17 @@ export const zhCN: Messages = {
   "common.tenant": "租户",
   "common.workspace": "工作空间",
 
+  // 共享的操作 / 无障碍标签，供共享基础组件和 shadcn/ui 外壳复用（#348 收尾）。
+  "common.copy": "复制",
+  "common.done": "完成",
+  "common.cancel": "取消",
+  "common.close": "关闭",
+  "common.more": "更多",
+  "common.loading": "加载中…",
+  "common.copied": "已复制{label}",
+  "common.breadcrumb": "面包屑导航",
+  "common.toggleSidebar": "切换侧边栏",
+
   "auth.field.email": "邮箱",
   "auth.field.password": "密码",
   "auth.login.subtitle": "登录以管理你的工作空间",
@@ -1673,4 +1684,83 @@ export const zhCN: Messages = {
   "page.selfHostedWorkerDetail.reveal.title": "身份已轮换",
   "page.selfHostedWorkerDetail.reveal.description":
     "请立即保存新的身份指纹。上一个凭据将不再能对该 Worker 进行认证。",
+
+  // 共享的 Worker ops 基础组件（src/components/worker-ops/worker-ops-primitives.tsx）。
+  "workerOps.trustBadge.reported": "由 Worker 上报",
+  "workerOps.reveal.warning": "此值将不再显示。请妥善保存。",
+  "workerOps.reveal.copyFailed": "无法复制{label}；其值已显示在上方。",
+
+  // 自托管 Worker 生命周期运维页（src/pages/self-hosted-workers-ops.tsx）。
+  "page.selfHostedWorkersOps.title": "自托管 Worker 生命周期",
+  "page.selfHostedWorkersOps.subtitle.before":
+    "注册、检视并轮换客户基础设施上的 Agent Worker。所有 Worker 遥测均为客户上报的证据（",
+  "page.selfHostedWorkersOps.subtitle.after": "）——并非托管 Worker 的强制执行证明。",
+  "page.selfHostedWorkersOps.register": "注册 Worker",
+  "page.selfHostedWorkersOps.error": "加载自托管 Worker 失败：{message}",
+  "page.selfHostedWorkersOps.col.worker": "Worker",
+  "page.selfHostedWorkersOps.workerIdLabel": "Worker id",
+  "page.selfHostedWorkersOps.badge.stale": "过期",
+  "page.selfHostedWorkersOps.col.orchestration": "编排",
+  "page.selfHostedWorkersOps.col.activity": "活动",
+  "page.selfHostedWorkersOps.activity":
+    "{events} 个事件 / {checkpoints} 个检查点 / {artifacts} 个产物",
+  "page.selfHostedWorkersOps.activityCompact":
+    "{events} 个事件 · {checkpoints} 个检查点 · {artifacts} 个产物",
+  "page.selfHostedWorkersOps.col.lastSeen": "最近出现",
+  "page.selfHostedWorkersOps.empty": "尚未注册任何自托管 Worker。",
+  "page.selfHostedWorkersOps.inspect": "检视",
+  "page.selfHostedWorkersOps.dialog.title": "注册自托管 Worker",
+  "page.selfHostedWorkersOps.dialog.description":
+    "绑定客户自有的 Worker 身份。身份指纹是持久的 mTLS 凭据，注册后仅显示一次。",
+  "page.selfHostedWorkersOps.field.workerName": "Worker 名称",
+  "page.selfHostedWorkersOps.field.workspaceId": "工作空间 id",
+  "page.selfHostedWorkersOps.field.identityFingerprint": "身份指纹",
+  "page.selfHostedWorkersOps.field.organizationId": "组织 id（可选）",
+  "page.selfHostedWorkersOps.field.projectId": "项目 id（可选）",
+  "page.selfHostedWorkersOps.field.identityExpires": "身份过期 Unix 秒（可选）",
+  "page.selfHostedWorkersOps.field.orchestrationEnabled": "启用编排",
+  "page.selfHostedWorkersOps.placeholder.workerName": "edge-runner-01",
+  "page.selfHostedWorkersOps.placeholder.workspaceId": "ws-...",
+  "page.selfHostedWorkersOps.placeholder.identityFingerprint": "sha256:...",
+  "page.selfHostedWorkersOps.placeholder.organizationId": "org-...",
+  "page.selfHostedWorkersOps.placeholder.projectId": "proj-...",
+  "page.selfHostedWorkersOps.placeholder.identityExpires": "留空表示永不过期",
+  "page.selfHostedWorkersOps.error.required":
+    "Worker 名称、工作空间 id 和身份指纹为必填项。",
+  "page.selfHostedWorkersOps.error.expiryInvalid": "身份过期时间必须是 Unix 时间戳（秒）。",
+  "page.selfHostedWorkersOps.submit": "注册",
+  "page.selfHostedWorkersOps.submitting": "注册中…",
+  "page.selfHostedWorkersOps.toast.registered": "Worker {name} 已注册",
+  "page.selfHostedWorkersOps.reveal.title": "Worker 身份已注册",
+  "page.selfHostedWorkersOps.reveal.description":
+    "请立即保存 {name} 的身份指纹。它绑定该 Worker 的 mTLS 传输身份。",
+  "page.selfHostedWorkersOps.reveal.fallbackName": "该 Worker",
+
+  // 共享的插件工具列表（src/components/tools/tools-table.tsx）。
+  "component.toolsTable.col.tool": "工具",
+  "component.toolsTable.col.plugin": "插件",
+  "component.toolsTable.col.approval": "审批",
+  "component.toolsTable.col.tenants": "租户",
+  "component.toolsTable.col.apiKeys": "API 密钥",
+  "component.toolsTable.col.routes": "路由",
+  "component.toolsTable.empty": "尚无已注册的工具。",
+  "component.toolsTable.any": "任意",
+
+  // 主题选择器（src/components/theme-switcher.tsx）。
+  "component.themeSwitcher.light": "浅色",
+  "component.themeSwitcher.dark": "深色",
+  "component.themeSwitcher.system": "跟随系统",
+  "component.themeSwitcher.trigger": "主题：{theme}。切换主题",
+  "component.themeSwitcher.changeTheme": "切换主题",
+  "component.themeSwitcher.appearance": "外观",
+
+  // 懒加载路由的 Suspense + 错误边界（src/components/route-load-boundary.tsx）。
+  "component.routeBoundary.loading": "正在加载页面…",
+  "component.routeBoundary.errorTitle": "页面加载失败",
+  "component.routeBoundary.errorBody": "无法下载页面模块。请检查网络连接并重新加载。",
+  "component.routeBoundary.reload": "重新加载页面",
+
+  // 移动端侧边栏抽屉的无障碍文案（src/components/ui/sidebar.tsx）。
+  "component.sidebar.title": "侧边栏",
+  "component.sidebar.description": "显示移动端侧边栏。",
 };

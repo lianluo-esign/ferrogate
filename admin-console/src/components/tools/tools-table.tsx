@@ -12,12 +12,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useI18n } from "@/i18n";
 import type { AdminSchema } from "@/lib/gateway-client";
 
 type AdminTool = AdminSchema<"AdminTool">;
 
-function allowlistLabel(list: string[]): string {
-  return list.length === 0 ? "any" : list.join(", ");
+function allowlistLabel(list: string[], anyLabel: string): string {
+  return list.length === 0 ? anyLabel : list.join(", ");
 }
 
 export function ToolsTable({
@@ -30,30 +31,32 @@ export function ToolsTable({
   isLoading: boolean;
   linkExtension?: boolean;
 }) {
+  const { t } = useI18n();
+  const anyLabel = t("component.toolsTable.any");
   return (
     <div className="rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Tool</TableHead>
-            <TableHead>Plugin</TableHead>
-            <TableHead>Approval</TableHead>
-            <TableHead>Tenants</TableHead>
-            <TableHead>API keys</TableHead>
-            <TableHead>Routes</TableHead>
+            <TableHead>{t("component.toolsTable.col.tool")}</TableHead>
+            <TableHead>{t("component.toolsTable.col.plugin")}</TableHead>
+            <TableHead>{t("component.toolsTable.col.approval")}</TableHead>
+            <TableHead>{t("component.toolsTable.col.tenants")}</TableHead>
+            <TableHead>{t("component.toolsTable.col.apiKeys")}</TableHead>
+            <TableHead>{t("component.toolsTable.col.routes")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {isLoading ? (
             <TableRow>
               <TableCell colSpan={6} className="h-24 text-center">
-                Loading…
+                {t("common.loading")}
               </TableCell>
             </TableRow>
           ) : tools.length === 0 ? (
             <TableRow>
               <TableCell colSpan={6} className="h-24 text-center">
-                No registered tools.
+                {t("component.toolsTable.empty")}
               </TableCell>
             </TableRow>
           ) : (
@@ -82,9 +85,9 @@ export function ToolsTable({
                     {tool.approval_policy}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.tenant_allowlist)}</TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.api_key_allowlist)}</TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.route_allowlist)}</TableCell>
+                <TableCell className="text-xs">{allowlistLabel(tool.tenant_allowlist, anyLabel)}</TableCell>
+                <TableCell className="text-xs">{allowlistLabel(tool.api_key_allowlist, anyLabel)}</TableCell>
+                <TableCell className="text-xs">{allowlistLabel(tool.route_allowlist, anyLabel)}</TableCell>
               </TableRow>
             ))
           )}

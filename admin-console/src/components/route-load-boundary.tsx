@@ -1,8 +1,10 @@
 import { Component, Suspense, type ErrorInfo, type ReactNode } from "react";
 import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/i18n";
 
 export function RouteLoading() {
+  const { t } = useI18n();
   return (
     <div
       role="status"
@@ -10,7 +12,30 @@ export function RouteLoading() {
       aria-busy="true"
       className="flex min-h-48 items-center justify-center text-sm text-muted-foreground"
     >
-      Loading page…
+      {t("component.routeBoundary.loading")}
+    </div>
+  );
+}
+
+/**
+ * Localized error fallback. Extracted from the class boundary below so it can
+ * read the catalog through `useI18n()` — a class component cannot call hooks,
+ * and the provider always sits above the boundary (see `App.tsx`).
+ */
+function RouteLoadErrorFallback({ onReload }: { onReload: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="flex min-h-48 flex-col items-start justify-center gap-3">
+      <h1 className="text-lg font-semibold">
+        {t("component.routeBoundary.errorTitle")}
+      </h1>
+      <p role="alert" className="text-sm text-destructive">
+        {t("component.routeBoundary.errorBody")}
+      </p>
+      <Button type="button" onClick={onReload}>
+        <RotateCw className="size-4" aria-hidden="true" />
+        {t("component.routeBoundary.reload")}
+      </Button>
     </div>
   );
 }
@@ -42,19 +67,9 @@ export class RouteLoadErrorBoundary extends Component<
     if (!this.state.error) return this.props.children;
 
     return (
-      <div className="flex min-h-48 flex-col items-start justify-center gap-3">
-        <h1 className="text-lg font-semibold">Page failed to load</h1>
-        <p role="alert" className="text-sm text-destructive">
-          The page module could not be downloaded. Check the connection and reload.
-        </p>
-        <Button
-          type="button"
-          onClick={this.props.onReload ?? (() => window.location.reload())}
-        >
-          <RotateCw className="size-4" aria-hidden="true" />
-          Reload page
-        </Button>
-      </div>
+      <RouteLoadErrorFallback
+        onReload={this.props.onReload ?? (() => window.location.reload())}
+      />
     );
   }
 }

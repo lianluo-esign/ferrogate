@@ -34,6 +34,7 @@ import {
   workerStatusVariant,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import type { ColumnConfig } from "@/lib/resource-config";
 
@@ -79,6 +80,7 @@ function buildRegistrationBody(
 }
 
 export default function SelfHostedWorkersOpsPage() {
+  const { t } = useI18n();
   const { session } = useAuth();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
@@ -103,33 +105,40 @@ export default function SelfHostedWorkersOpsPage() {
   const workerColumns: ColumnConfig<SelfHostedWorkerRecord>[] = [
     {
       key: "worker_name",
-      header: "Worker",
+      header: t("page.selfHostedWorkersOps.col.worker"),
       priority: "primary",
       minWidth: 200,
       mobileVisibility: "always",
       render: (worker) => (
         <div>
           <div className="font-medium">{worker.worker_name}</div>
-          <TruncatedCopyable value={worker.id} label="Worker id" />
+          <TruncatedCopyable
+            value={worker.id}
+            label={t("page.selfHostedWorkersOps.workerIdLabel")}
+          />
         </div>
       ),
     },
     {
       key: "status",
-      header: "Status",
+      header: t("common.status"),
       priority: "secondary",
       minWidth: 130,
       mobileVisibility: "always",
       render: (worker) => (
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={workerStatusVariant(worker.status)}>{worker.status}</Badge>
-          {worker.stale ? <Badge variant="outline" className="text-destructive">stale</Badge> : null}
+          {worker.stale ? (
+            <Badge variant="outline" className="text-destructive">
+              {t("page.selfHostedWorkersOps.badge.stale")}
+            </Badge>
+          ) : null}
         </div>
       ),
     },
     {
       key: "identity_fingerprint",
-      header: "Identity fingerprint",
+      header: t("page.selfHostedWorkersOps.field.identityFingerprint"),
       priority: "detail",
       minWidth: 210,
       mobileVisibility: "details",
@@ -137,24 +146,35 @@ export default function SelfHostedWorkersOpsPage() {
     },
     {
       key: "orchestration_enabled",
-      header: "Orchestration",
+      header: t("page.selfHostedWorkersOps.col.orchestration"),
       priority: "secondary",
       minWidth: 130,
       mobileVisibility: "always",
-      render: (worker) => (worker.orchestration_enabled ? "Enabled" : "Disabled"),
+      render: (worker) =>
+        worker.orchestration_enabled ? t("common.enabled") : t("common.disabled"),
     },
     {
       key: "activity",
-      header: "Activity",
+      header: t("page.selfHostedWorkersOps.col.activity"),
       priority: "secondary",
       minWidth: 190,
       mobileVisibility: "always",
-      render: (worker) => `${worker.telemetry_event_count} events / ${worker.checkpoint_count} checkpoints / ${worker.artifact_count} artifacts`,
-      compactRender: (worker) => `${worker.telemetry_event_count} events · ${worker.checkpoint_count} checkpoints · ${worker.artifact_count} artifacts`,
+      render: (worker) =>
+        t("page.selfHostedWorkersOps.activity", {
+          events: worker.telemetry_event_count,
+          checkpoints: worker.checkpoint_count,
+          artifacts: worker.artifact_count,
+        }),
+      compactRender: (worker) =>
+        t("page.selfHostedWorkersOps.activityCompact", {
+          events: worker.telemetry_event_count,
+          checkpoints: worker.checkpoint_count,
+          artifacts: worker.artifact_count,
+        }),
     },
     {
       key: "last_seen_at_unix",
-      header: "Last seen",
+      header: t("page.selfHostedWorkersOps.col.lastSeen"),
       priority: "detail",
       minWidth: 170,
       mobileVisibility: "details",
@@ -166,7 +186,11 @@ export default function SelfHostedWorkersOpsPage() {
     mutationFn: (body: AdminSchema<"AdminSelfHostedWorkerRegistrationRequest">) =>
       adminPost(apiKey, "/admin/v1/self-hosted-workers", body),
     onSuccess: (response) => {
-      toast.success(`Worker ${response.worker.worker_name} registered`);
+      toast.success(
+        t("page.selfHostedWorkersOps.toast.registered", {
+          name: response.worker.worker_name,
+        }),
+      );
       setRegisterOpen(false);
       setForm(EMPTY_FORM);
       setFormError(null);
@@ -185,11 +209,11 @@ export default function SelfHostedWorkersOpsPage() {
   function submitRegister() {
     setFormError(null);
     if (!form.workerName.trim() || !form.workspaceId.trim() || !form.identityFingerprint.trim()) {
-      setFormError("Worker name, workspace id, and identity fingerprint are required.");
+      setFormError(t("page.selfHostedWorkersOps.error.required"));
       return;
     }
     if (form.identityExpiresAt.trim() && Number.isNaN(Number(form.identityExpiresAt.trim()))) {
-      setFormError("Identity expiry must be a Unix timestamp (seconds).");
+      setFormError(t("page.selfHostedWorkersOps.error.expiryInvalid"));
       return;
     }
     registerMutation.mutate(buildRegistrationBody(form));
@@ -199,19 +223,23 @@ export default function SelfHostedWorkersOpsPage() {
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold">Self-hosted worker lifecycle</h1>
+          <h1 className="text-lg font-semibold">
+            {t("page.selfHostedWorkersOps.title")}
+          </h1>
           <div className="text-sm text-muted-foreground">
-            Register, inspect, and rotate customer-infrastructure agent workers. All
-            worker telemetry is customer-reported evidence (
-            <ReportedTrustBadge />) — not managed-worker enforcement proof.
+            {t("page.selfHostedWorkersOps.subtitle.before")}
+            <ReportedTrustBadge />
+            {t("page.selfHostedWorkersOps.subtitle.after")}
           </div>
         </div>
-        <Button onClick={() => setRegisterOpen(true)}>Register worker</Button>
+        <Button onClick={() => setRegisterOpen(true)}>
+          {t("page.selfHostedWorkersOps.register")}
+        </Button>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load self-hosted workers: {error.message}
+          {t("page.selfHostedWorkersOps.error", { message: error.message })}
         </p>
       ) : null}
 
@@ -220,11 +248,13 @@ export default function SelfHostedWorkersOpsPage() {
         rows={workers}
         isLoading={isLoading}
         readOnly={false}
-        emptyLabel="No self-hosted workers registered yet."
+        emptyLabel={t("page.selfHostedWorkersOps.empty")}
         rowLabel={(worker) => worker.worker_name}
         renderActions={(worker) => (
           <Button asChild variant="outline" size="sm" className="min-h-11 lg:min-h-9">
-            <Link to={`/app/workers/self-hosted/${worker.id}`}>Inspect</Link>
+            <Link to={`/app/workers/self-hosted/${worker.id}`}>
+              {t("page.selfHostedWorkersOps.inspect")}
+            </Link>
           </Button>
         )}
       />
@@ -241,67 +271,80 @@ export default function SelfHostedWorkersOpsPage() {
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Register self-hosted worker</DialogTitle>
+            <DialogTitle>{t("page.selfHostedWorkersOps.dialog.title")}</DialogTitle>
             <DialogDescription>
-              Bind a customer-owned worker identity. The identity fingerprint is the
-              durable mTLS credential and is shown once after registration.
+              {t("page.selfHostedWorkersOps.dialog.description")}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1.5">
-              <Label htmlFor="worker-name">Worker name</Label>
+              <Label htmlFor="worker-name">
+                {t("page.selfHostedWorkersOps.field.workerName")}
+              </Label>
               <Input
                 id="worker-name"
                 value={form.workerName}
                 onChange={(e) => setForm({ ...form, workerName: e.target.value })}
-                placeholder="edge-runner-01"
+                placeholder={t("page.selfHostedWorkersOps.placeholder.workerName")}
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="workspace-id">Workspace id</Label>
+              <Label htmlFor="workspace-id">
+                {t("page.selfHostedWorkersOps.field.workspaceId")}
+              </Label>
               <Input
                 id="workspace-id"
                 value={form.workspaceId}
                 onChange={(e) => setForm({ ...form, workspaceId: e.target.value })}
-                placeholder="ws-..."
+                placeholder={t("page.selfHostedWorkersOps.placeholder.workspaceId")}
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="identity-fingerprint">Identity fingerprint</Label>
+              <Label htmlFor="identity-fingerprint">
+                {t("page.selfHostedWorkersOps.field.identityFingerprint")}
+              </Label>
               <Input
                 id="identity-fingerprint"
                 value={form.identityFingerprint}
                 onChange={(e) =>
                   setForm({ ...form, identityFingerprint: e.target.value })
                 }
-                placeholder="sha256:..."
+                placeholder={t(
+                  "page.selfHostedWorkersOps.placeholder.identityFingerprint",
+                )}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
-                <Label htmlFor="organization-id">Organization id (optional)</Label>
+                <Label htmlFor="organization-id">
+                  {t("page.selfHostedWorkersOps.field.organizationId")}
+                </Label>
                 <Input
                   id="organization-id"
                   value={form.organizationId}
                   onChange={(e) =>
                     setForm({ ...form, organizationId: e.target.value })
                   }
-                  placeholder="org-..."
+                  placeholder={t(
+                    "page.selfHostedWorkersOps.placeholder.organizationId",
+                  )}
                 />
               </div>
               <div className="grid gap-1.5">
-                <Label htmlFor="project-id">Project id (optional)</Label>
+                <Label htmlFor="project-id">
+                  {t("page.selfHostedWorkersOps.field.projectId")}
+                </Label>
                 <Input
                   id="project-id"
                   value={form.projectId}
                   onChange={(e) => setForm({ ...form, projectId: e.target.value })}
-                  placeholder="proj-..."
+                  placeholder={t("page.selfHostedWorkersOps.placeholder.projectId")}
                 />
               </div>
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="identity-expires">
-                Identity expiry Unix seconds (optional)
+                {t("page.selfHostedWorkersOps.field.identityExpires")}
               </Label>
               <Input
                 id="identity-expires"
@@ -309,12 +352,14 @@ export default function SelfHostedWorkersOpsPage() {
                 onChange={(e) =>
                   setForm({ ...form, identityExpiresAt: e.target.value })
                 }
-                placeholder="leave blank for no expiry"
+                placeholder={t(
+                  "page.selfHostedWorkersOps.placeholder.identityExpires",
+                )}
               />
             </div>
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <Label htmlFor="orchestration-enabled" className="cursor-pointer">
-                Orchestration enabled
+                {t("page.selfHostedWorkersOps.field.orchestrationEnabled")}
               </Label>
               <Switch
                 id="orchestration-enabled"
@@ -336,14 +381,16 @@ export default function SelfHostedWorkersOpsPage() {
               variant="outline"
               onClick={() => setRegisterOpen(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               type="button"
               disabled={registerMutation.isPending}
               onClick={submitRegister}
             >
-              {registerMutation.isPending ? "Registering…" : "Register"}
+              {registerMutation.isPending
+                ? t("page.selfHostedWorkersOps.submitting")
+                : t("page.selfHostedWorkersOps.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -352,9 +399,12 @@ export default function SelfHostedWorkersOpsPage() {
       <CredentialRevealDialog
         open={revealed !== null}
         onClose={() => setRevealed(null)}
-        title="Worker identity registered"
-        description={`Store the identity fingerprint for ${revealed?.name ?? "the worker"} now. It binds the worker's mTLS transport identity.`}
-        credentialLabel="Identity fingerprint"
+        title={t("page.selfHostedWorkersOps.reveal.title")}
+        description={t("page.selfHostedWorkersOps.reveal.description", {
+          name:
+            revealed?.name ?? t("page.selfHostedWorkersOps.reveal.fallbackName"),
+        })}
+        credentialLabel={t("page.selfHostedWorkersOps.field.identityFingerprint")}
         credential={revealed?.fingerprint ?? null}
       />
     </div>

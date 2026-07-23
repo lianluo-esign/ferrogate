@@ -9,12 +9,17 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useI18n, type TranslationKey } from "@/i18n";
 
 const THEME_OPTIONS = [
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
-  { value: "system", label: "System", icon: Monitor },
-] as const;
+  { value: "light", labelKey: "component.themeSwitcher.light", icon: Sun },
+  { value: "dark", labelKey: "component.themeSwitcher.dark", icon: Moon },
+  { value: "system", labelKey: "component.themeSwitcher.system", icon: Monitor },
+] as const satisfies readonly {
+  value: string;
+  labelKey: TranslationKey;
+  icon: typeof Sun;
+}[];
 
 type ThemeName = (typeof THEME_OPTIONS)[number]["value"];
 
@@ -23,6 +28,7 @@ function isThemeName(value: string | undefined): value is ThemeName {
 }
 
 export function ThemeSwitcher() {
+  const { t } = useI18n();
   const { theme, setTheme } = useTheme();
   const selectedTheme = isThemeName(theme) ? theme : "system";
   const selectedOption = THEME_OPTIONS.find((option) => option.value === selectedTheme)!;
@@ -35,14 +41,16 @@ export function ThemeSwitcher() {
           type="button"
           variant="ghost"
           size="icon"
-          aria-label={`Theme: ${selectedOption.label}. Change theme`}
-          title="Change theme"
+          aria-label={t("component.themeSwitcher.trigger", {
+            theme: t(selectedOption.labelKey),
+          })}
+          title={t("component.themeSwitcher.changeTheme")}
         >
           <SelectedIcon aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-40">
-        <DropdownMenuLabel>Appearance</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("component.themeSwitcher.appearance")}</DropdownMenuLabel>
         <DropdownMenuRadioGroup
           value={selectedTheme}
           onValueChange={(value) => {
@@ -52,7 +60,7 @@ export function ThemeSwitcher() {
           {THEME_OPTIONS.map((option) => (
             <DropdownMenuRadioItem key={option.value} value={option.value}>
               <option.icon aria-hidden="true" />
-              <span>{option.label}</span>
+              <span>{t(option.labelKey)}</span>
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

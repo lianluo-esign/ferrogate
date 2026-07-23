@@ -3,7 +3,17 @@ import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAX_ENTRY_BYTES = 300_000;
+// Entry-chunk ceiling. The console's i18n runtime is hand-rolled precisely to
+// keep the localized catalogs OUT of a heavyweight i18next dependency (see
+// src/i18n/catalog.ts), but the EN + zh-CN catalogs are still eagerly imported
+// into the entry chunk by design. #348 migrates ALL operator copy into those
+// typed catalogs; its final copy slice (shared primitives + the last shared
+// ops page + vendored shadcn a11y labels) lands the remaining page's strings,
+// so the eager catalog legitimately grows. Bumped 300_000 -> 312_000 to seat
+// the completed catalog with a small (~1.8%) headroom. The migration is now
+// copy-complete, so this ceiling should hold; a large jump past it again would
+// signal an unintended heavy dependency (e.g. i18next) reaching the entry.
+const MAX_ENTRY_BYTES = 312_000;
 const MAX_CHUNK_BYTES = 500_000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");

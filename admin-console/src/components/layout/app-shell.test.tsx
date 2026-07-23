@@ -38,7 +38,9 @@ describe("AppShell chrome", () => {
       screen.getByRole("link", { name: translate("en", "shell.skipToContent") }),
     ).toBeInTheDocument();
 
-    const breadcrumb = screen.getByRole("navigation", { name: "breadcrumb" });
+    const breadcrumb = screen.getByRole("navigation", {
+      name: translate("en", "common.breadcrumb"),
+    });
     expect(
       within(breadcrumb).getByRole("link", {
         name: translate("en", "shell.breadcrumb.root"),
@@ -61,7 +63,9 @@ describe("AppShell chrome", () => {
   it("falls back to the dashboard label for routes outside the nav registry", () => {
     renderShell("/app/mystery");
 
-    const breadcrumb = screen.getByRole("navigation", { name: "breadcrumb" });
+    const breadcrumb = screen.getByRole("navigation", {
+      name: translate("en", "common.breadcrumb"),
+    });
     expect(
       within(breadcrumb).getByRole("link", { current: "page" }),
     ).toHaveTextContent(translate("en", "nav.dashboard"));
@@ -74,7 +78,9 @@ describe("AppShell chrome", () => {
       screen.getByRole("link", { name: translate("zh-CN", "shell.skipToContent") }),
     ).toBeInTheDocument();
 
-    const breadcrumb = screen.getByRole("navigation", { name: "breadcrumb" });
+    const breadcrumb = screen.getByRole("navigation", {
+      name: translate("zh-CN", "common.breadcrumb"),
+    });
     expect(
       within(breadcrumb).getByRole("link", {
         name: translate("zh-CN", "shell.breadcrumb.root"),

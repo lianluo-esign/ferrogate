@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppThemeProvider, THEME_STORAGE_KEY } from "@/components/theme-provider";
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { I18nProvider, translate, type Locale } from "@/i18n";
 
 function installColorScheme(dark: boolean) {
   let matches = dark;
@@ -55,9 +56,11 @@ describe("ThemeSwitcher", () => {
     const user = userEvent.setup();
 
     render(
-      <AppThemeProvider>
-        <ThemeSwitcher />
-      </AppThemeProvider>,
+      <I18nProvider>
+        <AppThemeProvider>
+          <ThemeSwitcher />
+        </AppThemeProvider>
+      </I18nProvider>,
     );
 
     await waitFor(() => expect(document.documentElement).toHaveClass("dark"));
@@ -84,9 +87,11 @@ describe("ThemeSwitcher", () => {
     const user = userEvent.setup();
 
     render(
-      <AppThemeProvider>
-        <ThemeSwitcher />
-      </AppThemeProvider>,
+      <I18nProvider>
+        <AppThemeProvider>
+          <ThemeSwitcher />
+        </AppThemeProvider>
+      </I18nProvider>,
     );
 
     const trigger = await screen.findByRole("button", {
@@ -101,4 +106,34 @@ describe("ThemeSwitcher", () => {
       expect(screen.getByRole("button", { name: "Theme: Dark. Change theme" })).toHaveFocus();
     });
   });
+
+  it.each<Locale>(["en", "zh-CN"])(
+    "labels the trigger and appearance menu from the catalog (%s)",
+    async (locale) => {
+      installColorScheme(false);
+      const user = userEvent.setup();
+      const triggerLabel = translate(locale, "component.themeSwitcher.trigger", {
+        theme: translate(locale, "component.themeSwitcher.system"),
+      });
+
+      render(
+        <I18nProvider initialLocale={locale}>
+          <AppThemeProvider>
+            <ThemeSwitcher />
+          </AppThemeProvider>
+        </I18nProvider>,
+      );
+
+      const trigger = await screen.findByRole("button", { name: triggerLabel });
+      await user.click(trigger);
+      expect(
+        screen.getByText(translate(locale, "component.themeSwitcher.appearance")),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("menuitemradio", {
+          name: translate(locale, "component.themeSwitcher.dark"),
+        }),
+      ).toBeInTheDocument();
+    },
+  );
 });

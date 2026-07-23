@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/i18n";
 
 /** Customer-reported (#305/#307) correlation fields lifted out of event_json. */
 export interface ReportedCorrelation {
@@ -108,9 +109,10 @@ export function aggregateReportedCorrelation(
 
 /** Violet "reported by worker" trust badge, matching the self-hosted trust level. */
 export function ReportedTrustBadge() {
+  const { t } = useI18n();
   return (
     <Badge className="border-transparent bg-violet-100 text-violet-900 dark:bg-violet-950 dark:text-violet-200">
-      reported by worker
+      {t("workerOps.trustBadge.reported")}
     </Badge>
   );
 }
@@ -147,13 +149,14 @@ export function CredentialRevealDialog({
   credentialLabel: string;
   credential: string | null;
 }) {
+  const { t } = useI18n();
   async function copy() {
     if (!credential) return;
     try {
       await navigator.clipboard.writeText(credential);
-      toast.success(`${credentialLabel} copied`);
+      toast.success(t("common.copied", { label: credentialLabel }));
     } catch {
-      toast.error(`Could not copy ${credentialLabel.toLowerCase()}; it is shown above.`);
+      toast.error(t("workerOps.reveal.copyFailed", { label: credentialLabel }));
     }
   }
 
@@ -175,14 +178,14 @@ export function CredentialRevealDialog({
             {credential ?? "—"}
           </code>
           <p className="text-xs font-medium text-destructive">
-            This value will not be shown again. Store it somewhere safe.
+            {t("workerOps.reveal.warning")}
           </p>
         </div>
         <AlertDialogFooter>
           <Button type="button" variant="outline" onClick={() => void copy()}>
-            Copy
+            {t("common.copy")}
           </Button>
-          <AlertDialogAction onClick={onClose}>Done</AlertDialogAction>
+          <AlertDialogAction onClick={onClose}>{t("common.done")}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
