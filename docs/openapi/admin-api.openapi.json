@@ -176,6 +176,7 @@
     "/v1/mcp": {
       "post": {
         "operationId": "mcpJsonRpc",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -491,6 +492,7 @@
     "/v1/mcp/tool/execute": {
       "post": {
         "operationId": "executeMcpTool",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "admin-write"
         ],
@@ -6280,6 +6282,7 @@
     "/v1/models": {
       "get": {
         "operationId": "listModels",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6315,6 +6318,7 @@
     "/v1/chat/completions": {
       "post": {
         "operationId": "createChatCompletion",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6364,6 +6368,7 @@
     "/v1/responses": {
       "post": {
         "operationId": "createResponse",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6413,6 +6418,7 @@
     "/v1/embeddings": {
       "post": {
         "operationId": "createEmbedding",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6462,6 +6468,7 @@
     "/v1/messages": {
       "post": {
         "operationId": "createMessage",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6512,6 +6519,7 @@
     "/v1/images/generations": {
       "post": {
         "operationId": "createImage",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6573,6 +6581,7 @@
     "/v1/tools": {
       "get": {
         "operationId": "listTools",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6609,6 +6618,7 @@
     "/v1/tools/execute": {
       "post": {
         "operationId": "executeTool",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -6657,6 +6667,7 @@
     "/v1/functions/execute": {
       "post": {
         "operationId": "executeFunction",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],

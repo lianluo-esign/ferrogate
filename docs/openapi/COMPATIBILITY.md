@@ -41,6 +41,14 @@ FerroGate API.
 3. Classify the operation as `public`, `admin`, or `internal`; document the
    actual auth scope. `rbac_action` may contain a database permission action
    key, never a role name. Roles and tenant bindings remain database data.
+   Runtime **data-plane** operations (OpenAI-compatible inference, MCP/tool
+   execution) stay `public` — they are publicly reachable — but additionally
+   carry the operation-level `x-ferrogate-data-plane: true` marker. This is an
+   orthogonal axis to `visibility`: it moves the operation off the Control-Plane
+   CLI parity surface (they move AI traffic, not configuration), so the
+   OpenAPI-to-CLI parity gate does not require a management verb for them
+   (issue #390). The marker lives only in `admin-api.openapi.json`; it does not
+   change the runtime `visibility` recorded in `runtime-api-contract.json`.
 4. Run the Python contract tests and generated TypeScript client smoke.
 5. For an intentional breaking change, document migration impact in the issue
    and commit, then replace the compatibility baseline with the reviewed

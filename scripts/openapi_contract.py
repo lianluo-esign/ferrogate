@@ -137,6 +137,16 @@ def validate_openapi(path: Path, document: dict[str, Any]) -> list[str]:
             failures.append(
                 f"{path}: {method.upper()} {route} is missing x-ferrogate-contract"
             )
+        # Runtime data-plane classification (#390): the optional
+        # `x-ferrogate-data-plane` marker moves an operation off the
+        # Control-Plane CLI parity surface. It is an orthogonal axis to
+        # `visibility` (these routes stay publicly reachable), so when present it
+        # must be the boolean `true` — a typo'd/false value would silently leave
+        # the op on the parity surface.
+        if "x-ferrogate-data-plane" in operation and operation["x-ferrogate-data-plane"] is not True:
+            failures.append(
+                f"{path}: {method.upper()} {route} x-ferrogate-data-plane must be boolean true when present"
+            )
     for operation_id, count in Counter(operation_ids).items():
         if count > 1:
             failures.append(f"{path}: duplicate operationId {operation_id}")

@@ -103,6 +103,73 @@ fn internal_operations_are_not_coverable() {
     );
 }
 
+/// Runtime data-plane operations (OpenAI-compatible inference, MCP/tool
+/// execution) are AI-traffic, not Control-Plane management verbs, so they are
+/// classified out of the coverable surface via the `x-ferrogate-data-plane`
+/// marker — even though their HTTP visibility is legitimately `public` (#390).
+#[test]
+fn data_plane_operations_are_not_coverable() {
+    let surface = parse_openapi_surface(&openapi_document()).unwrap();
+    for op in [
+        "createChatCompletion",
+        "createEmbedding",
+        "createImage",
+        "createMessage",
+        "createResponse",
+        "executeFunction",
+        "executeMcpTool",
+        "executeTool",
+        "listModels",
+        "listTools",
+        "mcpJsonRpc",
+    ] {
+        assert!(
+            surface.data_plane.contains(op),
+            "{op} must be classified data-plane"
+        );
+        assert!(
+            !surface.coverable.contains(op),
+            "{op} is data-plane traffic and must not be in the coverable surface"
+        );
+    }
+    // The data-plane and coverable buckets never overlap.
+    assert!(
+        surface.data_plane.is_disjoint(&surface.coverable),
+        "an operation cannot be both data-plane and coverable"
+    );
+}
+
+/// The `x-ferrogate-data-plane` marker removes an operation from the coverable
+/// surface regardless of its (public) HTTP visibility, and a verb pointing at a
+/// data-plane op is therefore reported as `extra` rather than covered.
+#[test]
+fn data_plane_marker_overrides_public_visibility() {
+    let json = r#"{"paths":{"/v1/infer":{"post":{"operationId":"runtimeInfer",
+        "x-ferrogate-data-plane":true,
+        "x-ferrogate-contract":{"visibility":"public"}}},
+        "/admin/v1/thing":{"get":{"operationId":"listThing",
+        "x-ferrogate-contract":{"visibility":"admin"}}}}}"#;
+    let surface = parse_openapi_surface(json).unwrap();
+    assert!(surface.data_plane.contains("runtimeInfer"));
+    assert!(!surface.coverable.contains("runtimeInfer"));
+    assert!(surface.coverable.contains("listThing"));
+
+    let mut registry = Registry::new();
+    registry
+        .register(&FixtureGroup {
+            group: "runtime",
+            verb: "infer",
+            operation_id: "runtimeInfer",
+        })
+        .unwrap();
+    let report = build_report(&surface, &cli_mapping(&registry), &[]);
+    assert!(
+        report.extra.contains("runtimeInfer"),
+        "a verb bound to a data-plane op must surface as extra, not covered"
+    );
+    assert!(!report.is_clean(), "binding a data-plane op must fail the gate");
+}
+
 // ---------------------------------------------------------------------------
 // Exclusion-table hygiene.
 // ---------------------------------------------------------------------------

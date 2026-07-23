@@ -20,6 +20,19 @@
 //!    CLI verb for them would be wrong, not missing. This mirrors the
 //!    visibility taxonomy `scripts/check-openapi.py` /
 //!    `scripts/openapi_contract.py` enforce on the same document.
+//!
+//!    Runtime **data-plane** operations are excluded on a second axis. The
+//!    OpenAI-compatible inference and MCP/tool-execution endpoints
+//!    (`createChatCompletion`, `executeTool`, `mcpJsonRpc`, …) are publicly
+//!    reachable — their HTTP `visibility` is legitimately `public` — but they
+//!    *move AI traffic* rather than *manage Control-Plane configuration*. A
+//!    management CLI verb for live inference would be wrong, not missing, so
+//!    these ops carry the operation-level [`DATA_PLANE_MARKER`] extension and
+//!    are placed structurally outside the coverable surface (issue #390). The
+//!    marker is a parity-gate concern read only here: it does not overload the
+//!    runtime `visibility` enum (owned by the gateway contract parser and
+//!    pinned to the runtime contract by the drift gate), because `public`
+//!    remains the correct HTTP-reachability classification for these routes.
 //! 2. [`cli_mapping`] collects the `operationId` every registered CLI verb
 //!    claims, keyed so that a *duplicate* mapping (two verbs claiming one
 //!    operation) is visible rather than silently de-duplicated the way
@@ -56,6 +69,13 @@ const HTTP_METHODS: [&str; 8] = [
 /// `internal` operation is gateway-internal and intentionally has no operator
 /// command, so it is not part of the coverable surface.
 const COVERABLE_VISIBILITIES: [&str; 2] = ["public", "admin"];
+
+/// Operation-level OpenAPI extension flag marking a runtime data-plane
+/// operation. When `true`, the operation is AI-traffic (OpenAI-compatible
+/// inference, MCP/tool execution) rather than a Control-Plane management verb,
+/// so it is structurally outside the coverable CLI surface regardless of its
+/// (public) HTTP `visibility`. See issue #390.
+const DATA_PLANE_MARKER: &str = "x-ferrogate-data-plane";
 
 /// One intentionally-unmapped OpenAPI operation. An entry here is a reviewed,
 /// owned decision that the operation carries no CLI verb *yet* (or ever) — it
@@ -129,62 +149,14 @@ pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[
         reason: "agent runtime invoke/message operation; data-plane traffic, not a management verb; CLI binding deferred pending product decision (#362/#365)",
     },
 
-    // OpenAI-compatible inference and MCP/tool execution — data-plane runtime traffic, not management operations. A management CLI verb for live inference is likely wrong, not merely missing; kept excluded pending the explicit keep/drop decision in #365. Owner: data-plane track (#365).
-    ReviewedExclusion {
-        operation_id: "createChatCompletion",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "createEmbedding",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "createImage",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "createMessage",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "createResponse",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "executeFunction",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "executeMcpTool",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "executeTool",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "listModels",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "listTools",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "mcpJsonRpc",
-        owner: "data-plane surface (#365)",
-        reason: "data-plane inference/tool-execution operation; runtime traffic, not an admin management verb; CLI binding deferred pending explicit decision (#365)",
-    },
+    // OpenAI-compatible inference and MCP/tool execution (createChatCompletion,
+    // createEmbedding, createImage, createMessage, createResponse,
+    // executeFunction, executeMcpTool, executeTool, listModels, listTools,
+    // mcpJsonRpc) are NOT excluded here. As of #390 they carry the
+    // `x-ferrogate-data-plane` OpenAPI extension and so leave the coverable
+    // Control-Plane surface structurally (see `DATA_PLANE_MARKER` /
+    // `parse_openapi_surface`), not via this ad-hoc allowlist. Excluding them
+    // here as well would be a stale, redundant row.
 ];
 
 /// The coverable and non-coverable operation sets parsed from an OpenAPI
@@ -197,6 +169,11 @@ pub struct OperationSurface {
     /// `operationId`s of `internal` operations — recorded so an accidental CLI
     /// verb for one can be reported as `extra` rather than silently accepted.
     pub internal: BTreeSet<String>,
+    /// `operationId`s of runtime data-plane operations (carrying the
+    /// [`DATA_PLANE_MARKER`] extension) — AI-traffic endpoints that are not
+    /// Control-Plane management verbs and so are not part of the coverable
+    /// surface. Recorded so an accidental CLI verb for one surfaces as `extra`.
+    pub data_plane: BTreeSet<String>,
 }
 
 /// Parse the coverable public surface out of an OpenAPI document (as a JSON
@@ -230,6 +207,17 @@ pub fn parse_openapi_surface(json: &str) -> Result<OperationSurface, String> {
                 .ok_or_else(|| {
                     format!("{} {route} is missing operationId", method.to_uppercase())
                 })?;
+            // Runtime data-plane operations leave the coverable surface on a
+            // second axis, independent of their (public) HTTP visibility: they
+            // move AI traffic, not Control-Plane configuration (#390).
+            if operation
+                .get(DATA_PLANE_MARKER)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                surface.data_plane.insert(operation_id.to_string());
+                continue;
+            }
             let visibility = operation
                 .get("x-ferrogate-contract")
                 .and_then(Value::as_object)
