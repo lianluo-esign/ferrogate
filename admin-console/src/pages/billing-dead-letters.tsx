@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n, type BoundFormatters } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 import { tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 
@@ -56,8 +57,19 @@ function formatUnix(unix: number | null | undefined): string {
   return new Date(unix * 1000).toLocaleString();
 }
 
+// `cost_usd` is the API's exact USD amount; render it through the locale
+// currency formatter without any local recomputation or rounding.
+function formatCost(
+  format: BoundFormatters,
+  costUsd: number | null | undefined,
+): string {
+  if (costUsd === null || costUsd === undefined) return "—";
+  return format.currency(costUsd, "USD");
+}
+
 export default function BillingDeadLettersPage() {
   const { session } = useAuth();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [filter, setFilter] = useState("");
@@ -86,23 +98,25 @@ export default function BillingDeadLettersPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Billing dead-letters</h1>
+        <h1 className="text-lg font-semibold">
+          {t("page.billingDeadLetters.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Usage reports that permanently failed delivery to the billing service
-          after exhausting retries. Inspect the delivery context here and remediate
-          out of band.
+          {t("page.billingDeadLetters.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load dead-letters: {(error as Error).message}
+          {t("page.billingDeadLetters.loadError", {
+            message: (error as Error).message,
+          })}
         </p>
       ) : null}
 
       <Input
         className="w-80"
-        placeholder="Filter by id, request id, or tenant"
+        placeholder={t("page.billingDeadLetters.filterPlaceholder")}
         value={filter}
         onChange={(event) => setFilter(event.target.value)}
       />
@@ -111,11 +125,13 @@ export default function BillingDeadLettersPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Ledger id</TableHead>
-              <TableHead>Tenant</TableHead>
-              <TableHead>Model</TableHead>
-              <TableHead className="text-right">Attempts</TableHead>
-              <TableHead>Dead-lettered</TableHead>
+              <TableHead>{t("page.billingDeadLetters.col.ledgerId")}</TableHead>
+              <TableHead>{t("common.tenant")}</TableHead>
+              <TableHead>{t("page.billingDeadLetters.col.model")}</TableHead>
+              <TableHead className="text-right">
+                {t("page.billingDeadLetters.col.attempts")}
+              </TableHead>
+              <TableHead>{t("page.billingDeadLetters.col.deadLettered")}</TableHead>
               <TableHead className="w-24" />
             </TableRow>
           </TableHeader>
@@ -123,13 +139,13 @@ export default function BillingDeadLettersPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : entries.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  No dead-lettered billing reports.
+                  {t("page.billingDeadLetters.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -146,7 +162,7 @@ export default function BillingDeadLettersPage() {
                   </TableCell>
                   <TableCell>
                     <Button variant="outline" size="sm" onClick={() => setDetail(entry)}>
-                      Details
+                      {t("page.billingDeadLetters.details")}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -161,41 +177,58 @@ export default function BillingDeadLettersPage() {
           {detail ? (
             <>
               <DialogHeader>
-                <DialogTitle>Dead-letter {detail.id}</DialogTitle>
+                <DialogTitle>
+                  {t("page.billingDeadLetters.detail.title", { id: detail.id })}
+                </DialogTitle>
                 <DialogDescription>
-                  Delivery and error context for the failed usage report.
+                  {t("page.billingDeadLetters.detail.description")}
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-3 sm:grid-cols-2">
-                <Detail label="Request id" value={detail.event.request_id} />
-                <Detail label="Trace id" value={detail.event.trace_id ?? "—"} />
-                <Detail label="Tenant" value={tenantLabel(detail.event.tenant)} />
                 <Detail
-                  label="Model"
+                  label={t("page.billingDeadLetters.detail.requestId")}
+                  value={detail.event.request_id}
+                />
+                <Detail
+                  label={t("page.billingDeadLetters.detail.traceId")}
+                  value={detail.event.trace_id ?? "—"}
+                />
+                <Detail
+                  label={t("common.tenant")}
+                  value={tenantLabel(detail.event.tenant)}
+                />
+                <Detail
+                  label={t("page.billingDeadLetters.col.model")}
                   value={`${detail.event.logical_model} (${detail.event.provider}/${detail.event.provider_model})`}
                 />
-                <Detail label="Status code" value={String(detail.event.status_code)} />
                 <Detail
-                  label="Cost (USD)"
-                  value={detail.event.cost_usd != null ? `$${detail.event.cost_usd}` : "—"}
+                  label={t("page.billingDeadLetters.detail.statusCode")}
+                  value={String(detail.event.status_code)}
                 />
-                <Detail label="Delivery attempts" value={String(detail.attempts)} />
                 <Detail
-                  label="Next attempt"
+                  label={t("page.billingDeadLetters.detail.cost")}
+                  value={formatCost(format, detail.event.cost_usd)}
+                />
+                <Detail
+                  label={t("page.billingDeadLetters.detail.attempts")}
+                  value={String(detail.attempts)}
+                />
+                <Detail
+                  label={t("page.billingDeadLetters.detail.nextAttempt")}
                   value={formatUnix(detail.next_attempt_unix)}
                 />
                 <Detail
-                  label="Occurred at"
+                  label={t("page.billingDeadLetters.detail.occurredAt")}
                   value={formatUnix(detail.event.occurred_at_unix)}
                 />
                 <Detail
-                  label="Dead-lettered at"
+                  label={t("page.billingDeadLetters.detail.deadLetteredAt")}
                   value={formatUnix(detail.dead_lettered_at_unix)}
                 />
               </div>
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setDetail(null)}>
-                  Close
+                  {t("page.billingDeadLetters.detail.close")}
                 </Button>
               </DialogFooter>
             </>

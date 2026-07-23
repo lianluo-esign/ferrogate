@@ -5,6 +5,7 @@
 // `ferrogate/no-untranslated-literal` lint gate now enforced on these files.
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -20,6 +21,10 @@ import AgentSchedulesPage from "@/pages/agent-schedules";
 import GuardrailPoliciesPage from "@/pages/guardrail-policies";
 import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
 import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
+import BillingWalletsPage from "@/pages/billing-wallets";
+import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
+import BillingMeteringPage from "@/pages/billing-metering";
+import BillingDeadLettersPage from "@/pages/billing-dead-letters";
 import { policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import {
@@ -347,5 +352,239 @@ describe("guardrail-policy-detail page copy is localized", () => {
     expect(
       screen.getByText(zhCN["page.guardrailPolicyDetail.dryRun.title"]),
     ).toBeInTheDocument();
+  });
+});
+
+// --- Billing bespoke-page group (#348 billing slice) -------------------------
+// These prove the four billing pages render page-local copy from the typed
+// catalog in BOTH locales AND that money/usage values go through the locale
+// formatter (`format.currency` / `format.number`), never a hand-rolled string.
+
+/** The locale currency/number formatters the pages bind through `useI18n()`. */
+function localeUsd(locale: Locale, amount: number): string {
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD" }).format(
+    amount,
+  );
+}
+function localeNumber(locale: Locale, value: number): string {
+  return new Intl.NumberFormat(locale).format(value);
+}
+
+describe("billing-wallets page copy is localized", () => {
+  function seedWallet() {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/wallets"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            {
+              tenant_id: "org-acme",
+              balance_credits: 250_000,
+              auto_recharge_threshold_credits: null,
+              auto_recharge_amount_credits: null,
+              dunning: false,
+              created_at_unix: 1_700_000_000,
+              updated_at_unix: 1_700_000_500,
+            },
+          ],
+        }),
+      ),
+    );
+  }
+
+  it("renders English title, balance header, and locale-formatted balance", async () => {
+    seedWallet();
+    renderWithProviders(<BillingWalletsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.billingWallets.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.billingWallets.col.balance"])).toBeInTheDocument();
+    // Balance is the API's exact value rendered via the locale number formatter.
+    expect(await screen.findByText(localeNumber("en", 250_000))).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, balance header, and locale-formatted balance", async () => {
+    seedWallet();
+    renderWithProviders(<BillingWalletsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.billingWallets.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["page.billingWallets.col.balance"]),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(localeNumber("zh-CN", 250_000))).toBeInTheDocument();
+  });
+});
+
+describe("billing-payment-methods page copy is localized", () => {
+  it("renders English title and tenant prompt", async () => {
+    renderWithProviders(<BillingPaymentMethodsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", {
+        name: en["page.billingPaymentMethods.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.billingPaymentMethods.prompt"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.billingPaymentMethods.list"] }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title and tenant prompt", async () => {
+    renderWithProviders(<BillingPaymentMethodsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", {
+        name: zhCN["page.billingPaymentMethods.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.billingPaymentMethods.prompt"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.billingPaymentMethods.list"] }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("billing-metering page copy is localized", () => {
+  function seedEvents() {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/metering-events"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            {
+              request_id: "req-me-1",
+              tenant: { organization_id: "org-acme" },
+              logical_model: "gpt-4o",
+              provider: "openai",
+              provider_model: "gpt-4o-2024",
+              usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 1500 },
+              usage_source: "provider_usage",
+              status_code: 200,
+              occurred_at_unix: 1_700_000_000,
+            },
+          ],
+          total: 1,
+          offset: 0,
+          limit: 50,
+        }),
+      ),
+    );
+  }
+
+  it("renders English title, tabs, pagination range, and token totals", async () => {
+    seedEvents();
+    renderWithProviders(<BillingMeteringPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.billingMetering.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: en["page.billingMetering.tab.export"] }),
+    ).toBeInTheDocument();
+    // Token totals go through the locale number formatter.
+    expect(await screen.findByText(localeNumber("en", 1500))).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        en["page.billingMetering.events.range"]
+          .replace("{start}", "1")
+          .replace("{end}", "1")
+          .replace("{total}", "1"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, tabs, and pagination range", async () => {
+    seedEvents();
+    renderWithProviders(<BillingMeteringPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.billingMetering.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: zhCN["page.billingMetering.tab.aggregates"] }),
+    ).toBeInTheDocument();
+    // Wait for the query so the pagination range reflects the loaded total.
+    expect(await screen.findByText(localeNumber("zh-CN", 1500))).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        zhCN["page.billingMetering.events.range"]
+          .replace("{start}", "1")
+          .replace("{end}", "1")
+          .replace("{total}", "1"),
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("billing-dead-letters page copy is localized", () => {
+  function seedDeadLetter() {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/billing-outbox-dead-letters"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            {
+              id: "led-dead-1",
+              event: {
+                request_id: "req-dead-1",
+                trace_id: "trace-dead-1",
+                tenant: { organization_id: "org-acme" },
+                logical_model: "gpt-4o",
+                provider: "openai",
+                provider_model: "gpt-4o-2024",
+                status_code: 200,
+                cost_usd: 0.42,
+                occurred_at_unix: 1_700_000_000,
+              },
+              attempts: 7,
+              next_attempt_unix: 1_700_000_100,
+              dead_lettered_at_unix: 1_700_000_500,
+            },
+          ],
+        }),
+      ),
+    );
+  }
+
+  it("renders English title and formats the cost through the USD formatter", async () => {
+    const user = userEvent.setup();
+    seedDeadLetter();
+    renderWithProviders(<BillingDeadLettersPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.billingDeadLetters.title"] }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      await screen.findByRole("button", { name: en["page.billingDeadLetters.details"] }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(en["page.billingDeadLetters.detail.cost"]),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(localeUsd("en", 0.42))).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title and formats the cost through the USD formatter", async () => {
+    const user = userEvent.setup();
+    seedDeadLetter();
+    renderWithProviders(<BillingDeadLettersPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", {
+        name: zhCN["page.billingDeadLetters.title"],
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: zhCN["page.billingDeadLetters.details"],
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(zhCN["page.billingDeadLetters.detail.cost"]),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(localeUsd("zh-CN", 0.42))).toBeInTheDocument();
   });
 });

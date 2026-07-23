@@ -39,6 +39,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n, type BoundFormatters } from "@/i18n";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminWallet = AdminSchema<"AdminWallet">;
@@ -61,9 +62,15 @@ interface LedgerEntry {
 
 type WalletAction = "adjust" | "charge";
 
-function formatCredits(value: number | null | undefined): string {
+// Credits are integer counts, not currency: render through the locale number
+// formatter (grouping only). Values are the API's exact representation and are
+// never recomputed or rounded here.
+function formatCredits(
+  format: BoundFormatters,
+  value: number | null | undefined,
+): string {
   if (value === null || value === undefined) return "—";
-  return value.toLocaleString();
+  return format.number(value);
 }
 
 function formatUnix(unix: number | null | undefined): string {
@@ -87,6 +94,7 @@ function AdjustDialog({
   onClose: () => void;
 }) {
   const { session } = useAuth();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [delta, setDelta] = useState("");
@@ -95,11 +103,11 @@ function AdjustDialog({
   const parsed = parseIntStrict(delta);
   const validationError =
     delta.trim() === ""
-      ? "Enter a credit delta."
+      ? t("page.billingWallets.adjust.enterDelta")
       : parsed === null
-        ? "Delta must be a whole number of credits."
+        ? t("page.billingWallets.adjust.deltaWhole")
         : parsed === 0
-          ? "Delta must be non-zero."
+          ? t("page.billingWallets.adjust.deltaNonZero")
           : null;
 
   const mutation = useMutation({
@@ -108,7 +116,7 @@ function AdjustDialog({
         params: { tenant_id: wallet.tenant_id },
       }),
     onSuccess: () => {
-      toast.success("Wallet balance adjusted");
+      toast.success(t("page.billingWallets.adjust.toastSuccess"));
       queryClient.invalidateQueries({ queryKey: ["wallets"] });
       queryClient.invalidateQueries({ queryKey: ["wallet-ledger", wallet.tenant_id] });
       onClose();
@@ -123,21 +131,24 @@ function AdjustDialog({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Adjust wallet credits</DialogTitle>
+          <DialogTitle>{t("page.billingWallets.adjust.title")}</DialogTitle>
           <DialogDescription>
-            Atomically applies <code>balance_credits += delta</code> for tenant{" "}
-            <span className="font-mono">{wallet.tenant_id}</span>. A positive delta
-            grants credits, a negative delta claws them back. Platform-operator-only
-            (#229): a non-operator caller receives a 403.
+            {t("page.billingWallets.adjust.descriptionLead")}{" "}
+            <code>balance_credits += delta</code>{" "}
+            {t("page.billingWallets.adjust.descriptionTail", {
+              tenant: wallet.tenant_id,
+            })}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="adjust-delta">Delta (credits)</Label>
+            <Label htmlFor="adjust-delta">
+              {t("page.billingWallets.adjust.deltaLabel")}
+            </Label>
             <Input
               id="adjust-delta"
               inputMode="numeric"
-              placeholder="e.g. 100000 or -50000"
+              placeholder={t("page.billingWallets.adjust.deltaPlaceholder")}
               value={delta}
               onChange={(event) => {
                 setDelta(event.target.value);
@@ -145,9 +156,10 @@ function AdjustDialog({
               }}
             />
             <p className="text-xs text-muted-foreground">
-              Current balance {formatCredits(wallet.balance_credits)} →{" "}
+              {t("page.billingWallets.adjust.currentBalance")}{" "}
+              {formatCredits(format, wallet.balance_credits)} →{" "}
               {parsed !== null && validationError === null
-                ? formatCredits(wallet.balance_credits + parsed)
+                ? formatCredits(format, wallet.balance_credits + parsed)
                 : "…"}
             </p>
           </div>
@@ -159,14 +171,16 @@ function AdjustDialog({
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
-            Cancel
+            {t("resource.action.cancel")}
           </Button>
           <Button
             type="button"
             disabled={validationError !== null || mutation.isPending}
             onClick={() => parsed !== null && mutation.mutate(parsed)}
           >
-            {mutation.isPending ? "Adjusting…" : "Apply adjustment"}
+            {mutation.isPending
+              ? t("page.billingWallets.adjust.applying")
+              : t("page.billingWallets.adjust.submit")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -182,6 +196,7 @@ function ChargeDialog({
   onClose: () => void;
 }) {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [amount, setAmount] = useState("");
@@ -191,11 +206,11 @@ function ChargeDialog({
   const parsed = parseIntStrict(amount);
   const validationError =
     amount.trim() === ""
-      ? "Enter an amount in USD cents."
+      ? t("page.billingWallets.charge.enterAmount")
       : parsed === null
-        ? "Amount must be a whole number of USD cents."
+        ? t("page.billingWallets.charge.amountWhole")
         : parsed < 1
-          ? "Amount must be at least 1 cent."
+          ? t("page.billingWallets.charge.amountMin")
           : null;
 
   const mutation = useMutation({
@@ -212,12 +227,17 @@ function ChargeDialog({
       ),
     onSuccess: (result) => {
       if (result.succeeded) {
-        toast.success(`Charge captured (${result.provider_charge_id})`);
+        toast.success(
+          t("page.billingWallets.charge.toastCaptured", {
+            id: result.provider_charge_id,
+          }),
+        );
         queryClient.invalidateQueries({ queryKey: ["wallets"] });
         queryClient.invalidateQueries({ queryKey: ["wallet-ledger", wallet.tenant_id] });
         onClose();
       } else {
-        const reason = result.decline_reason ?? "charge declined";
+        const reason =
+          result.decline_reason ?? t("page.billingWallets.charge.declineDefault");
         setError(reason);
         toast.error(reason);
       }
@@ -232,21 +252,22 @@ function ChargeDialog({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Charge payment method</DialogTitle>
+          <DialogTitle>{t("page.billingWallets.charge.title")}</DialogTitle>
           <DialogDescription>
-            Captures a payment against tenant{" "}
-            <span className="font-mono">{wallet.tenant_id}</span> and credits the
-            wallet. Leave the payment method blank to use the tenant default.
-            Platform-operator-only (#229): a non-operator caller receives a 403.
+            {t("page.billingWallets.charge.description", {
+              tenant: wallet.tenant_id,
+            })}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="charge-amount">Amount (USD cents)</Label>
+            <Label htmlFor="charge-amount">
+              {t("page.billingWallets.charge.amountLabel")}
+            </Label>
             <Input
               id="charge-amount"
               inputMode="numeric"
-              placeholder="e.g. 5000 for $50.00"
+              placeholder={t("page.billingWallets.charge.amountPlaceholder")}
               value={amount}
               onChange={(event) => {
                 setAmount(event.target.value);
@@ -255,10 +276,12 @@ function ChargeDialog({
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="charge-pm">Payment method id (optional)</Label>
+            <Label htmlFor="charge-pm">
+              {t("page.billingWallets.charge.pmLabel")}
+            </Label>
             <Input
               id="charge-pm"
-              placeholder="tenant default when blank"
+              placeholder={t("page.billingWallets.charge.pmPlaceholder")}
               value={paymentMethodId}
               onChange={(event) => setPaymentMethodId(event.target.value)}
             />
@@ -271,14 +294,16 @@ function ChargeDialog({
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
-            Cancel
+            {t("resource.action.cancel")}
           </Button>
           <Button
             type="button"
             disabled={validationError !== null || mutation.isPending}
             onClick={() => parsed !== null && mutation.mutate(parsed)}
           >
-            {mutation.isPending ? "Charging…" : "Capture charge"}
+            {mutation.isPending
+              ? t("page.billingWallets.charge.charging")
+              : t("page.billingWallets.charge.submit")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -288,6 +313,7 @@ function ChargeDialog({
 
 function WalletLedger({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -307,32 +333,40 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>When</TableHead>
-            <TableHead>Model</TableHead>
-            <TableHead>Provider</TableHead>
-            <TableHead className="text-right">Credits</TableHead>
-            <TableHead className="text-right">Wallet Δ</TableHead>
-            <TableHead className="text-right">Balance after</TableHead>
-            <TableHead>Request</TableHead>
+            <TableHead>{t("page.billingWallets.ledger.col.when")}</TableHead>
+            <TableHead>{t("page.billingWallets.ledger.col.model")}</TableHead>
+            <TableHead>{t("page.billingWallets.ledger.col.provider")}</TableHead>
+            <TableHead className="text-right">
+              {t("page.billingWallets.ledger.col.credits")}
+            </TableHead>
+            <TableHead className="text-right">
+              {t("page.billingWallets.ledger.col.walletDelta")}
+            </TableHead>
+            <TableHead className="text-right">
+              {t("page.billingWallets.ledger.col.balanceAfter")}
+            </TableHead>
+            <TableHead>{t("page.billingWallets.ledger.col.request")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {isLoading ? (
             <TableRow>
               <TableCell colSpan={7} className="h-20 text-center">
-                Loading ledger…
+                {t("page.billingWallets.ledger.loading")}
               </TableCell>
             </TableRow>
           ) : error ? (
             <TableRow>
               <TableCell colSpan={7} className="h-20 text-center text-destructive">
-                Failed to load ledger: {(error as Error).message}
+                {t("page.billingWallets.ledger.loadError", {
+                  message: (error as Error).message,
+                })}
               </TableCell>
             </TableRow>
           ) : entries.length === 0 ? (
             <TableRow>
               <TableCell colSpan={7} className="h-20 text-center">
-                No ledger entries for this tenant.
+                {t("page.billingWallets.ledger.empty")}
               </TableCell>
             </TableRow>
           ) : (
@@ -348,13 +382,13 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
                   {entry.provider}/{entry.provider_model}
                 </TableCell>
                 <TableCell className="text-right text-xs">
-                  {entry.credits.toLocaleString()}
+                  {format.number(entry.credits)}
                 </TableCell>
                 <TableCell className="text-right text-xs">
-                  {formatCredits(entry.wallet_delta_credits)}
+                  {formatCredits(format, entry.wallet_delta_credits)}
                 </TableCell>
                 <TableCell className="text-right text-xs">
-                  {formatCredits(entry.wallet_balance_after_credits)}
+                  {formatCredits(format, entry.wallet_balance_after_credits)}
                 </TableCell>
                 <TableCell className="font-mono text-xs">{entry.request_id}</TableCell>
               </TableRow>
@@ -368,6 +402,7 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
 
 export default function BillingWalletsPage() {
   const { session } = useAuth();
+  const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [selectedTenant, setSelectedTenant] = useState<string | null>(null);
@@ -389,18 +424,15 @@ export default function BillingWalletsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Wallets</h1>
+        <h1 className="text-lg font-semibold">{t("page.billingWallets.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Prepaid-credit wallets per tenant. Balance only ever moves through the
-          atomic adjust action or a settled charge — never a blind overwrite.
-          Adjust and charge are platform-operator-only (#229/#232); a non-operator
-          caller sees a 403.
+          {t("page.billingWallets.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load wallets: {(error as Error).message}
+          {t("page.billingWallets.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
 
@@ -408,11 +440,13 @@ export default function BillingWalletsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Tenant</TableHead>
-              <TableHead className="text-right">Balance (credits)</TableHead>
-              <TableHead>Auto-recharge</TableHead>
-              <TableHead>Dunning</TableHead>
-              <TableHead>Updated</TableHead>
+              <TableHead>{t("common.tenant")}</TableHead>
+              <TableHead className="text-right">
+                {t("page.billingWallets.col.balance")}
+              </TableHead>
+              <TableHead>{t("page.billingWallets.col.autoRecharge")}</TableHead>
+              <TableHead>{t("page.billingWallets.col.dunning")}</TableHead>
+              <TableHead>{t("page.billingWallets.col.updated")}</TableHead>
               <TableHead className="w-64" />
             </TableRow>
           </TableHeader>
@@ -420,13 +454,13 @@ export default function BillingWalletsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : wallets.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  No wallets provisioned.
+                  {t("page.billingWallets.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -436,21 +470,29 @@ export default function BillingWalletsPage() {
                     {wallet.tenant_id}
                   </TableCell>
                   <TableCell className="text-right font-medium">
-                    {formatCredits(wallet.balance_credits)}
+                    {formatCredits(format, wallet.balance_credits)}
                   </TableCell>
                   <TableCell className="text-xs">
                     {wallet.auto_recharge_threshold_credits != null &&
                     wallet.auto_recharge_amount_credits != null
                       ? `≤ ${formatCredits(
+                          format,
                           wallet.auto_recharge_threshold_credits,
-                        )} → +${formatCredits(wallet.auto_recharge_amount_credits)}`
-                      : "off"}
+                        )} → +${formatCredits(
+                          format,
+                          wallet.auto_recharge_amount_credits,
+                        )}`
+                      : t("page.billingWallets.autoRechargeOff")}
                   </TableCell>
                   <TableCell>
                     {wallet.dunning ? (
-                      <Badge variant="destructive">dunning</Badge>
+                      <Badge variant="destructive">
+                        {t("page.billingWallets.badge.dunning")}
+                      </Badge>
                     ) : (
-                      <Badge variant="secondary">ok</Badge>
+                      <Badge variant="secondary">
+                        {t("page.billingWallets.badge.ok")}
+                      </Badge>
                     )}
                   </TableCell>
                   <TableCell className="text-xs">
@@ -467,20 +509,22 @@ export default function BillingWalletsPage() {
                           )
                         }
                       >
-                        {selectedTenant === wallet.tenant_id ? "Hide ledger" : "Ledger"}
+                        {selectedTenant === wallet.tenant_id
+                          ? t("page.billingWallets.action.hideLedger")
+                          : t("page.billingWallets.action.ledger")}
                       </Button>
                       <Button
                         size="sm"
                         onClick={() => setAction({ wallet, kind: "adjust" })}
                       >
-                        Adjust
+                        {t("page.billingWallets.action.adjust")}
                       </Button>
                       <Button
                         variant="secondary"
                         size="sm"
                         onClick={() => setAction({ wallet, kind: "charge" })}
                       >
-                        Charge
+                        {t("page.billingWallets.action.charge")}
                       </Button>
                     </div>
                   </TableCell>
@@ -495,12 +539,13 @@ export default function BillingWalletsPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
-              Ledger — <span className="font-mono">{selectedWallet.tenant_id}</span>
+              {t("page.billingWallets.ledger.cardTitle")} —{" "}
+              <span className="font-mono">{selectedWallet.tenant_id}</span>
             </CardTitle>
             <CardDescription>
-              Balance {formatCredits(selectedWallet.balance_credits)} credits. Every
-              settled request debits the wallet; the entries below mirror those
-              wallet deltas.
+              {t("page.billingWallets.ledger.description", {
+                balance: formatCredits(format, selectedWallet.balance_credits),
+              })}
             </CardDescription>
           </CardHeader>
           <CardContent>

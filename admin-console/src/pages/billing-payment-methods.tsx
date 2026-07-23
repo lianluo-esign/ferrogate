@@ -42,6 +42,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminPaymentMethod = AdminSchema<"AdminPaymentMethod">;
@@ -53,6 +54,7 @@ function formatUnix(unix: number | null | undefined): string {
 
 function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -75,7 +77,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
         is_default: isDefault,
       }),
     onSuccess: () => {
-      toast.success("Payment method registered");
+      toast.success(t("page.billingPaymentMethods.toastRegistered"));
       queryClient.invalidateQueries({ queryKey: ["payment-methods", tenantId] });
       setOpen(false);
       setProvider("");
@@ -93,40 +95,45 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm">Register payment method</Button>
+        <Button size="sm">{t("page.billingPaymentMethods.register")}</Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Register payment method</DialogTitle>
+          <DialogTitle>{t("page.billingPaymentMethods.register")}</DialogTitle>
           <DialogDescription>
-            Store a provider payment method for tenant{" "}
-            <span className="font-mono">{tenantId}</span>.
+            {t("page.billingPaymentMethods.dialogDescription", { tenant: tenantId })}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="pm-provider">Provider</Label>
+            <Label htmlFor="pm-provider">
+              {t("page.billingPaymentMethods.field.provider")}
+            </Label>
             <Input
               id="pm-provider"
-              placeholder="e.g. stripe"
+              placeholder={t("page.billingPaymentMethods.placeholder.provider")}
               value={provider}
               onChange={(event) => setProvider(event.target.value)}
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="pm-customer">Provider customer id</Label>
+            <Label htmlFor="pm-customer">
+              {t("page.billingPaymentMethods.field.customer")}
+            </Label>
             <Input
               id="pm-customer"
-              placeholder="e.g. cus_…"
+              placeholder={t("page.billingPaymentMethods.placeholder.customer")}
               value={customerId}
               onChange={(event) => setCustomerId(event.target.value)}
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="pm-method">Provider payment method id</Label>
+            <Label htmlFor="pm-method">
+              {t("page.billingPaymentMethods.field.method")}
+            </Label>
             <Input
               id="pm-method"
-              placeholder="e.g. pm_…"
+              placeholder={t("page.billingPaymentMethods.placeholder.method")}
               value={methodId}
               onChange={(event) => setMethodId(event.target.value)}
             />
@@ -137,7 +144,9 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
               checked={isDefault}
               onCheckedChange={(checked) => setIsDefault(checked === true)}
             />
-            <Label htmlFor="pm-default">Set as tenant default</Label>
+            <Label htmlFor="pm-default">
+              {t("page.billingPaymentMethods.field.default")}
+            </Label>
           </div>
           {error ? (
             <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -147,14 +156,16 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-            Cancel
+            {t("resource.action.cancel")}
           </Button>
           <Button
             type="button"
             disabled={invalid || mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? "Registering…" : "Register"}
+            {mutation.isPending
+              ? t("page.billingPaymentMethods.registering")
+              : t("page.billingPaymentMethods.registerSubmit")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -164,6 +175,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
 
 export default function BillingPaymentMethodsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -189,7 +201,7 @@ export default function BillingPaymentMethodsPage() {
         params: { payment_method_id: id },
       }),
     onSuccess: () => {
-      toast.success("Payment method deleted");
+      toast.success(t("page.billingPaymentMethods.toastDeleted"));
       queryClient.invalidateQueries({ queryKey: ["payment-methods", tenantId] });
       setPendingDelete(null);
     },
@@ -202,10 +214,11 @@ export default function BillingPaymentMethodsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Payment methods</h1>
+        <h1 className="text-lg font-semibold">
+          {t("page.billingPaymentMethods.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Stored provider payment methods per tenant. Enter a tenant id to list,
-          register, or remove its methods.
+          {t("page.billingPaymentMethods.description")}
         </p>
       </div>
 
@@ -217,42 +230,46 @@ export default function BillingPaymentMethodsPage() {
         }}
       >
         <div className="grid gap-2">
-          <Label htmlFor="pm-tenant">Tenant id</Label>
+          <Label htmlFor="pm-tenant">
+            {t("page.billingPaymentMethods.tenantIdLabel")}
+          </Label>
           <Input
             id="pm-tenant"
             className="w-72"
-            placeholder="organization id"
+            placeholder={t("page.billingPaymentMethods.tenantIdPlaceholder")}
             value={tenantInput}
             onChange={(event) => setTenantInput(event.target.value)}
           />
         </div>
         <Button type="submit" disabled={tenantInput.trim() === ""}>
-          List
+          {t("page.billingPaymentMethods.list")}
         </Button>
         {tenantId ? <CreatePaymentMethodDialog tenantId={tenantId} /> : null}
       </form>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load payment methods: {(error as Error).message}
+          {t("page.billingPaymentMethods.loadError", {
+            message: (error as Error).message,
+          })}
         </p>
       ) : null}
 
       {tenantId === null ? (
         <p className="text-sm text-muted-foreground">
-          Enter a tenant id above to load payment methods.
+          {t("page.billingPaymentMethods.prompt")}
         </p>
       ) : (
         <div className="rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Id</TableHead>
-                <TableHead>Provider</TableHead>
-                <TableHead>Customer</TableHead>
-                <TableHead>Method</TableHead>
-                <TableHead>Default</TableHead>
-                <TableHead>Created</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.id")}</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.provider")}</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.customer")}</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.method")}</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.default")}</TableHead>
+                <TableHead>{t("page.billingPaymentMethods.col.created")}</TableHead>
                 <TableHead className="w-24" />
               </TableRow>
             </TableHeader>
@@ -260,13 +277,13 @@ export default function BillingPaymentMethodsPage() {
               {isLoading ? (
                 <TableRow>
                   <TableCell colSpan={7} className="h-24 text-center">
-                    Loading…
+                    {t("resource.table.loading")}
                   </TableCell>
                 </TableRow>
               ) : methods.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={7} className="h-24 text-center">
-                    No payment methods for this tenant.
+                    {t("page.billingPaymentMethods.empty")}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -282,7 +299,9 @@ export default function BillingPaymentMethodsPage() {
                     </TableCell>
                     <TableCell>
                       {method.is_default ? (
-                        <Badge variant="secondary">default</Badge>
+                        <Badge variant="secondary">
+                          {t("page.billingPaymentMethods.badge.default")}
+                        </Badge>
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
@@ -296,7 +315,7 @@ export default function BillingPaymentMethodsPage() {
                         size="sm"
                         onClick={() => setPendingDelete(method)}
                       >
-                        Delete
+                        {t("resource.action.delete")}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -313,22 +332,26 @@ export default function BillingPaymentMethodsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete payment method?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("page.billingPaymentMethods.deleteTitle")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes payment method{" "}
-              <span className="font-mono">{pendingDelete?.id}</span>. Future charges
-              will need another method.
+              {t("page.billingPaymentMethods.deleteDescription", {
+                id: pendingDelete?.id ?? "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
                 if (pendingDelete) deleteMutation.mutate(pendingDelete.id);
               }}
             >
-              {deleteMutation.isPending ? "Deleting…" : "Delete"}
+              {deleteMutation.isPending
+                ? t("page.billingPaymentMethods.deleting")
+                : t("resource.action.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
