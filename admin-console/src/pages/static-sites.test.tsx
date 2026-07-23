@@ -1,7 +1,9 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 import type { AdminSchema } from "@/lib/gateway-client";
 import StaticSitesPage from "@/pages/static-sites";
 import { gatewayUrl, server } from "@/test/msw";
@@ -248,5 +250,189 @@ describe("StaticSitesPage", () => {
     // The exact gateway verdict is shown verbatim in an accessible alert.
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(gatewayMessage);
+  });
+});
+
+describe("StaticSitesPage detail drawer", () => {
+  async function openDrawer(user: ReturnType<typeof userEvent.setup>, moreDetails: string) {
+    const row = await screen.findByTestId("static-site-marketing");
+    // The action arms only once the manifest read lands.
+    await within(row).findByText("2.1.0");
+    await user.click(within(row).getByRole("button", { name: moreDetails }));
+    return screen.findByRole("dialog");
+  }
+
+  it("renders the bundle file tree from the manifest", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const drawer = await openDrawer(user, en["resource.table.moreDetails"]);
+
+    // Section heading + bundle summary (2 files, 6 KB) from the manifest.
+    expect(within(drawer).getByText(en["page.staticSites.detail.files"])).toBeInTheDocument();
+    expect(within(drawer).getByText(/2 files, 6 KB/)).toBeInTheDocument();
+    // Every file path, its content type, short hash, and size render.
+    expect(within(drawer).getByText("index.html")).toBeInTheDocument();
+    expect(within(drawer).getByText("app.js")).toBeInTheDocument();
+    expect(within(drawer).getByText("text/javascript")).toBeInTheDocument();
+    expect(within(drawer).getByText(`${"b".repeat(12)}…`)).toBeInTheDocument();
+    expect(within(drawer).getByText("2 KB")).toBeInTheDocument();
+    expect(within(drawer).getByText("4 KB")).toBeInTheDocument();
+  });
+
+  it("renders the file tree in Simplified Chinese", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
+
+    const drawer = await openDrawer(user, zhCN["resource.table.moreDetails"]);
+
+    expect(within(drawer).getByText(zhCN["page.staticSites.detail.files"])).toBeInTheDocument();
+    expect(within(drawer).getByText("index.html")).toBeInTheDocument();
+    expect(within(drawer).getByText("app.js")).toBeInTheDocument();
+  });
+});
+
+describe("StaticSitesPage unpublish flow", () => {
+  it("requires the exact typed site name before enabling, then deletes files + manifest", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    const deleted = new Set<string>();
+    server.use(
+      http.delete(
+        gatewayUrl("/v1/assets/static_site/marketing/:version"),
+        ({ params }) => {
+          deleted.add(params.version as string);
+          return HttpResponse.json({ object: "asset", deleted: true });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+    await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
+    const drawer = await screen.findByRole("dialog");
+    await user.click(within(drawer).getByRole("button", { name: en["page.staticSites.unpublish.action"] }));
+
+    // The confirm dialog names the site and stays disarmed until it is retyped.
+    const confirmDialog = (
+      await screen.findByText(
+        en["page.staticSites.unpublish.title"].replace("{site}", "marketing"),
+      )
+    ).closest("[role='dialog']") as HTMLElement;
+    const confirmButton = within(confirmDialog).getByRole("button", {
+      name: en["page.staticSites.unpublish.action"],
+    });
+    expect(confirmButton).toBeDisabled();
+
+    const input = within(confirmDialog).getByLabelText(
+      en["page.staticSites.unpublish.confirmLabel"].replace("{site}", "marketing"),
+    );
+    await user.type(input, "blog");
+    expect(confirmButton).toBeDisabled();
+
+    await user.clear(input);
+    await user.type(input, "marketing");
+    expect(confirmButton).toBeEnabled();
+
+    await user.click(confirmButton);
+
+    // Every file version PLUS the reserved manifest row is deleted.
+    await waitFor(() =>
+      expect(deleted).toEqual(
+        new Set(["index.html", "app.js", "__site_manifest__"]),
+      ),
+    );
+  });
+});
+
+/**
+ * Minimal controllable XHR double: drives `upload.onprogress` with real byte
+ * counts and completes on demand so the test can observe an intermediate
+ * `role="progressbar"` value before the publish resolves.
+ */
+class FakeXHR {
+  static instances: FakeXHR[] = [];
+  upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+    onprogress: null,
+  };
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  status = 0;
+  statusText = "OK";
+  responseText = "";
+  responseType = "";
+  open() {}
+  setRequestHeader() {}
+  send() {
+    FakeXHR.instances.push(this);
+  }
+  emitProgress(loaded: number, total: number) {
+    this.upload.onprogress?.({
+      lengthComputable: true,
+      loaded,
+      total,
+    } as ProgressEvent);
+  }
+  complete(status: number, body: unknown) {
+    this.status = status;
+    this.responseText = JSON.stringify(body);
+    this.onload?.();
+  }
+}
+
+describe("StaticSitesPage upload progress", () => {
+  it("surfaces real byte-level progress from the XHR upload", async () => {
+    mockBase();
+    FakeXHR.instances = [];
+    const original = globalThis.XMLHttpRequest;
+    vi.stubGlobal("XMLHttpRequest", FakeXHR as unknown as typeof XMLHttpRequest);
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      await screen.findByText("No published static sites.");
+
+      await user.type(screen.getByLabelText("Site"), "blog");
+      await user.type(screen.getByLabelText("Version"), "1.0.0");
+      const zip = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], "blog.zip", {
+        type: "application/zip",
+      });
+      uploadFile(screen.getByLabelText("Bundle (ZIP)"), zip);
+      await user.click(screen.getByRole("button", { name: "Publish" }));
+
+      await waitFor(() => expect(FakeXHR.instances).toHaveLength(1));
+      const xhr = FakeXHR.instances[0];
+
+      // Half the bytes uploaded → a determinate progressbar reads 50.
+      act(() => xhr.emitProgress(512, 1024));
+      const bar = await screen.findByRole("progressbar");
+      expect(bar).toHaveAttribute("aria-valuenow", "50");
+      expect(bar).toHaveAttribute("aria-valuetext", "50%");
+
+      // Full upload + gateway ack completes the publish and resets the form.
+      act(() => {
+        xhr.emitProgress(1024, 1024);
+        xhr.complete(200, {
+          object: "static_site",
+          tenant: "tenant-1",
+          site: "blog",
+          bundle_version: "1.0.0",
+          public: false,
+          spa_fallback: false,
+          file_count: 1,
+          size_bytes: 1024,
+          files: ["index.html"],
+        });
+      });
+
+      await waitFor(() => expect(screen.getByLabelText("Site")).toHaveValue(""));
+    } finally {
+      vi.stubGlobal("XMLHttpRequest", original);
+    }
   });
 });

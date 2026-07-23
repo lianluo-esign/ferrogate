@@ -787,6 +787,18 @@ export const en = {
   "page.staticSites.access.spa": "SPA",
   "page.staticSites.cache.default": "default",
   "page.staticSites.domains.bind": "Bind a domain",
+  "page.staticSites.col.path": "Path",
+  // Per-site detail drawer: the published bundle's file tree, from the manifest.
+  "page.staticSites.detail.description":
+    "Bundle {version} — {files} files, {bytes}.",
+  "page.staticSites.detail.files": "Bundle files",
+  // Unpublish — name-typed destructive removal, distinct from a republish.
+  "page.staticSites.unpublish.action": "Unpublish",
+  "page.staticSites.unpublish.title": "Unpublish {site}?",
+  "page.staticSites.unpublish.body":
+    "PERMANENTLY removes every published file of {site} and its manifest, so the site stops serving immediately and bound domains resolve to nothing. This is not a republish and cannot be undone; each deletion is recorded in the audit log. Type the exact site name below to confirm.",
+  "page.staticSites.unpublish.confirmLabel": "Type {site} to confirm",
+  "page.staticSites.unpublish.success": "Unpublished {site}",
 
   // Resolved tenant-defaults lookup (src/pages/tenant-resolved-defaults.tsx).
   "page.resolvedDefaults.title": "Resolved tenant defaults",

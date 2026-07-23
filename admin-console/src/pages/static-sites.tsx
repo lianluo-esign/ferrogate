@@ -9,16 +9,24 @@
 //   - a LIST of logical sites (bundle version, public/private, SPA fallback,
 //     cache policy, file count/bytes, publish time, serve URL, bound domains),
 //     joined from the tenant asset listing, each site's manifest, and the
-//     site-domains registry; and
+//     site-domains registry;
 //   - a PUBLISH/republish flow that uploads a ZIP bundle with explicit tenant/
 //     project/site selection, a bundle version, public/private + SPA-fallback
 //     toggles, and a Cache-Control override, validating the archive CLIENT-SIDE
 //     for fast feedback while the gateway stays authoritative — scan / zip-bomb
-//     / quota rejections are surfaced VERBATIM and accessibly.
+//     / quota rejections are surfaced VERBATIM and accessibly — and reporting
+//     REAL byte-level upload progress via XHR `upload.onprogress` (fetch has no
+//     upload-progress event) into a determinate `role="progressbar"`;
+//   - a per-site DETAIL drawer that inspects the published bundle's file tree
+//     (paths, content types, hashes, sizes) straight from the manifest; and
+//   - an UNPUBLISH flow that permanently removes a site (every per-file object
+//     plus the reserved manifest row) behind a name-typed destructive confirm,
+//     each underlying delete recorded in the gateway audit log.
 //
 // The manifest JSON (public/spa_fallback/cache_control/bundle_version/files) is
 // read back from the reserved `__site_manifest__` version the gateway writes at
-// publish time; it is the authoritative source for a site's serving policy.
+// publish time; it is the authoritative source for a site's serving policy and
+// its file tree.
 import { useMemo, useRef, useState } from "react";
 import {
   useMutation,
@@ -37,8 +45,24 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -52,12 +76,14 @@ import { EntityReferencePicker } from "@/components/resource/entity-reference-pi
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { APP_ROUTES } from "@/lib/app-routes";
+import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import {
+  adminDelete,
   adminGet,
   type AdminSchema,
   gatewayGet,
-  gatewayPutBinary,
 } from "@/lib/gateway-client";
+import { ApiError, type ApiErrorBody } from "@/types/auth";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
@@ -107,6 +133,16 @@ interface StaticSitePublishResponse {
   files: string[];
 }
 
+/** One published site's fully-joined row (list + manifest + bound domains). */
+interface SiteRow {
+  name: string;
+  manifest: SiteManifest | undefined;
+  manifestLoading: boolean;
+  manifestError: Error | undefined;
+  domains: SiteDomain[];
+  serveUrl: string;
+}
+
 const ASSETS_QUERY_KEY = ["assets"] as const;
 const SITE_DOMAINS_QUERY_KEY = ["site-domains"] as const;
 
@@ -125,6 +161,11 @@ function manifestBytes(manifest: SiteManifest): number {
   return manifest.files.reduce((sum, file) => sum + file.size_bytes, 0);
 }
 
+/** First 12 hex chars of a content hash, ellipsized (mirrors the Assets page). */
+function shortHash(hash: string): string {
+  return `${hash.slice(0, 12)}…`;
+}
+
 /** `.zip` by extension or a zip-ish MIME type. The gateway re-checks the ZIP
  * magic bytes on the raw upload, so this is fast feedback, not the gate. */
 function looksLikeZip(file: File): boolean {
@@ -133,6 +174,180 @@ function looksLikeZip(file: File): boolean {
     file.type === "application/zip" ||
     file.type === "application/x-zip-compressed" ||
     file.type === "application/x-zip"
+  );
+}
+
+/**
+ * PUTs the bundle bytes via XHR so the publish reports REAL byte-level upload
+ * progress: `fetch` exposes no upload-progress event, so this mirrors
+ * `gatewayPutBinary`'s auth + `x-site-*` headers and verbatim `ApiError`
+ * surfacing while streaming `xhr.upload.onprogress` byte counts to
+ * `onProgress`. Kept local to this lazy page so the entry chunk stays lean.
+ */
+function putBundleWithProgress<T>(
+  apiKey: string,
+  path: string,
+  body: Blob,
+  contentType: string,
+  extraHeaders: Record<string, string | undefined>,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", new URL(path, GATEWAY_ADMIN_BASE_URL).toString());
+    xhr.responseType = "text";
+    xhr.setRequestHeader("Authorization", `Bearer ${apiKey}`);
+    xhr.setRequestHeader("Content-Type", contentType || "application/octet-stream");
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (value !== undefined && value !== "") xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, event.total);
+    };
+    xhr.onload = () => {
+      let parsed: unknown = null;
+      try {
+        parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        parsed = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed as T);
+        return;
+      }
+      const errorBody = parsed as ApiErrorBody | null;
+      reject(
+        new ApiError(
+          xhr.status,
+          errorBody?.error?.code ?? "unknown_error",
+          errorBody?.error?.message ?? xhr.statusText,
+        ),
+      );
+    };
+    xhr.onerror = () =>
+      reject(new ApiError(0, "network_error", "network request failed"));
+    xhr.send(body);
+  });
+}
+
+/**
+ * Per-site detail drawer: the published bundle's file tree straight from the
+ * manifest (path, content type, content hash, size), plus the destructive
+ * Unpublish trigger. The manifest is already loaded by the list's parallel
+ * reads, so opening the drawer is a pure render — no extra round trip.
+ */
+function SiteDetailSheet({
+  row,
+  onClose,
+  onUnpublish,
+}: {
+  row: SiteRow | null;
+  onClose: () => void;
+  onUnpublish: () => void;
+}) {
+  const { t, format } = useI18n();
+  const manifest = row?.manifest;
+  const files = useMemo(
+    () =>
+      manifest
+        ? [...manifest.files].sort((a, b) => a.path.localeCompare(b.path))
+        : [],
+    [manifest],
+  );
+
+  return (
+    <Sheet open={row !== null} onOpenChange={(next) => !next && onClose()}>
+      <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-2xl">
+        {row ? (
+          <>
+            <SheetHeader>
+              <SheetTitle className="font-mono text-base">{row.name}</SheetTitle>
+              {manifest ? (
+                <SheetDescription>
+                  {t("page.staticSites.detail.description", {
+                    version: manifest.bundle_version,
+                    files: manifest.files.length,
+                    bytes: format.bytes(manifestBytes(manifest)),
+                  })}
+                </SheetDescription>
+              ) : null}
+            </SheetHeader>
+
+            {row.manifestError ? (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {t("page.staticSites.manifestError")}
+              </p>
+            ) : !manifest ? (
+              <p className="text-sm text-muted-foreground">
+                {t("resource.table.loading")}
+              </p>
+            ) : (
+              <section className="flex flex-col gap-2">
+                <h3 className="text-sm font-semibold">
+                  {t("page.staticSites.detail.files")}
+                </h3>
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("page.staticSites.col.path")}</TableHead>
+                        <TableHead>{t("page.assets.col.contentType")}</TableHead>
+                        <TableHead>{t("page.assets.col.contentHash")}</TableHead>
+                        <TableHead>{t("page.assets.col.size")}</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {files.length === 0 ? (
+                        <TableRow>
+                          <TableCell
+                            colSpan={4}
+                            className="h-16 text-center text-sm text-muted-foreground"
+                          >
+                            {t("resource.table.empty")}
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        files.map((entry) => (
+                          <TableRow key={entry.path}>
+                            <TableCell className="font-mono text-xs break-all">
+                              {entry.path}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {entry.content_type}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {shortHash(entry.content_hash)}
+                            </TableCell>
+                            <TableCell>{format.bytes(entry.size_bytes)}</TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </section>
+            )}
+
+            <SheetFooter className="mt-auto">
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={onUnpublish}
+                disabled={!manifest}
+              >
+                {t("page.staticSites.unpublish.action")}
+              </Button>
+              <Button type="button" variant="outline" onClick={onClose}>
+                {t("common.close")}
+              </Button>
+            </SheetFooter>
+          </>
+        ) : null}
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -154,7 +369,18 @@ export default function StaticSitesPage() {
   const [file, setFile] = useState<File | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
+  // Real byte-level upload progress, fed by xhr.upload.onprogress.
+  const [uploadProgress, setUploadProgress] = useState<{
+    loaded: number;
+    total: number;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Detail drawer + unpublish, both keyed by site slug so they survive row
+  // rebuilds (the joined rows re-derive on every manifest status change).
+  const [detailSite, setDetailSite] = useState<string | null>(null);
+  const [unpublishSite, setUnpublishSite] = useState<string | null>(null);
+  const [unpublishConfirm, setUnpublishConfirm] = useState("");
 
   const {
     data: assetData,
@@ -200,7 +426,7 @@ export default function StaticSitesPage() {
     return map;
   }, [domainData]);
 
-  const rows = useMemo(
+  const rows = useMemo<SiteRow[]>(
     () =>
       siteNames.map((name, index) => {
         const query = manifestQueries[index];
@@ -224,6 +450,13 @@ export default function StaticSitesPage() {
     [siteNames, domainsBySite, tenantId, manifestQueries.map((q) => q.status).join(",")],
   );
 
+  const detailRow = detailSite
+    ? (rows.find((row) => row.name === detailSite) ?? null)
+    : null;
+  const unpublishRow = unpublishSite
+    ? (rows.find((row) => row.name === unpublishSite) ?? null)
+    : null;
+
   function resetForm() {
     setSite("");
     setVersion("");
@@ -233,6 +466,7 @@ export default function StaticSitesPage() {
     setFile(null);
     setArchiveError(null);
     setPublishError(null);
+    setUploadProgress(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -262,7 +496,7 @@ export default function StaticSitesPage() {
     mutationFn: async () => {
       if (!file) throw new Error(t("page.staticSites.validation.bundleRequired"));
       const path = `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site.trim())}/${encodeURIComponent(version.trim())}`;
-      return gatewayPutBinary<StaticSitePublishResponse>(
+      return putBundleWithProgress<StaticSitePublishResponse>(
         apiKey,
         path,
         file,
@@ -273,7 +507,12 @@ export default function StaticSitesPage() {
           "x-site-cache-control": cacheControl.trim() || undefined,
           "x-asset-visibility": isPublic ? "public" : undefined,
         },
+        (loaded, total) => setUploadProgress({ loaded, total }),
       );
+    },
+    onMutate: () => {
+      setPublishError(null);
+      setUploadProgress({ loaded: 0, total: file?.size ?? 0 });
     },
     onSuccess: (response) => {
       toast.success(
@@ -290,9 +529,59 @@ export default function StaticSitesPage() {
     },
     // Surface the gateway verdict VERBATIM (scan / zip-bomb / quota / immutable).
     onError: (error: Error) => {
+      setUploadProgress(null);
       setPublishError(error.message);
       toast.error(error.message);
     },
+  });
+
+  // Unpublish = purge every per-file object PLUS the reserved manifest row.
+  // The gateway offers no single "delete site" endpoint, so this deletes each
+  // asset version (each file's `version` key IS its path) and finally the
+  // manifest; every DELETE is audit-logged by the assets registry.
+  const unpublishMutation = useMutation({
+    mutationFn: async ({
+      name,
+      manifest,
+    }: {
+      name: string;
+      manifest: SiteManifest;
+    }) => {
+      await Promise.all(
+        manifest.files.map((entry) =>
+          adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
+            params: {
+              asset_type: STATIC_SITE_TYPE,
+              name,
+              version: entry.path,
+            },
+          }),
+        ),
+      );
+      // Remove the manifest LAST so a partial file failure leaves the site
+      // describable rather than orphaning file objects behind a gone manifest.
+      await adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
+        params: {
+          asset_type: STATIC_SITE_TYPE,
+          name,
+          version: SITE_MANIFEST_VERSION,
+        },
+      });
+    },
+    onSuccess: (_result, variables) => {
+      toast.success(
+        t("page.staticSites.unpublish.success", { site: variables.name }),
+      );
+      queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
+      queryClient.invalidateQueries({
+        queryKey: ["static-site-manifest", variables.name],
+      });
+      setUnpublishSite(null);
+      setUnpublishConfirm("");
+      setDetailSite(null);
+    },
+    onError: (error: Error) => toast.error(error.message),
   });
 
   function submitPublish() {
@@ -318,6 +607,16 @@ export default function StaticSitesPage() {
 
   const serveUrlPreview = `/sites/${formTenant || tenantId}/${site.trim() || "{site}"}/`;
   const publishDisabled = publishMutation.isPending || archiveError !== null;
+
+  const progressFraction =
+    uploadProgress && uploadProgress.total > 0
+      ? uploadProgress.loaded / uploadProgress.total
+      : 0;
+  const progressPercent = Math.round(progressFraction * 100);
+
+  // Exact site slug the operator must retype to arm the destructive unpublish.
+  const unpublishArmed =
+    unpublishSite !== null && unpublishConfirm === unpublishSite;
 
   return (
     <div className="flex flex-col gap-4">
@@ -456,19 +755,30 @@ export default function StaticSitesPage() {
             ) : null}
 
             {publishMutation.isPending ? (
-              <p
-                role="status"
-                aria-live="polite"
-                className="sm:col-span-2 flex items-center gap-2 text-sm text-muted-foreground"
-              >
-                <span
-                  aria-hidden="true"
-                  className="h-2 w-24 overflow-hidden rounded-full bg-muted"
+              <div className="sm:col-span-2 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-sm text-muted-foreground">
+                  <span id="site-upload-label">
+                    {t("page.staticSites.publish.uploading")}
+                  </span>
+                  <span className="font-mono text-xs">
+                    {format.percent(progressFraction)}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-labelledby="site-upload-label"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progressPercent}
+                  aria-valuetext={format.percent(progressFraction)}
+                  className="h-2 w-full overflow-hidden rounded-full bg-secondary"
                 >
-                  <span className="block h-full w-1/3 animate-pulse rounded-full bg-primary" />
-                </span>
-                {t("page.staticSites.publish.uploading")}
-              </p>
+                  <div
+                    className="h-full bg-primary transition-all"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+              </div>
             ) : null}
 
             <div className="sm:col-span-2">
@@ -504,18 +814,19 @@ export default function StaticSitesPage() {
               <TableHead>{t("page.staticSites.col.published")}</TableHead>
               <TableHead>{t("page.staticSites.col.serveUrl")}</TableHead>
               <TableHead>{t("page.staticSites.col.domains")}</TableHead>
+              <TableHead className="w-24">{t("resource.table.actionsColumn")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {assetsLoading ? (
               <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center">
+                <TableCell colSpan={10} className="h-24 text-center">
                   {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center">
+                <TableCell colSpan={10} className="h-24 text-center">
                   {t("page.staticSites.empty")}
                 </TableCell>
               </TableRow>
@@ -581,12 +892,107 @@ export default function StaticSitesPage() {
                       </div>
                     )}
                   </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!row.manifest}
+                      onClick={() => setDetailSite(row.name)}
+                    >
+                      {t("resource.table.moreDetails")}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </div>
+
+      <SiteDetailSheet
+        row={detailRow}
+        onClose={() => setDetailSite(null)}
+        onUnpublish={() => {
+          if (!detailRow) return;
+          setUnpublishConfirm("");
+          setUnpublishSite(detailRow.name);
+        }}
+      />
+
+      {/*
+        Unpublish — a name-typed destructive confirmation. Unlike a republish
+        (which overwrites the bundle in place), this permanently removes every
+        file object and the manifest, so the site stops serving. The confirm
+        button stays disarmed until the operator retypes the exact site slug.
+      */}
+      <Dialog
+        open={unpublishSite !== null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setUnpublishSite(null);
+            setUnpublishConfirm("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          {unpublishSite ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (unpublishArmed && unpublishRow?.manifest)
+                  unpublishMutation.mutate({
+                    name: unpublishSite,
+                    manifest: unpublishRow.manifest,
+                  });
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>
+                  {t("page.staticSites.unpublish.title", { site: unpublishSite })}
+                </DialogTitle>
+                <DialogDescription>
+                  {t("page.staticSites.unpublish.body", { site: unpublishSite })}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-2 py-4">
+                <Label htmlFor="site-unpublish-confirm">
+                  {t("page.staticSites.unpublish.confirmLabel", {
+                    site: unpublishSite,
+                  })}
+                </Label>
+                <Input
+                  id="site-unpublish-confirm"
+                  value={unpublishConfirm}
+                  onChange={(event) => setUnpublishConfirm(event.target.value)}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  aria-invalid={unpublishConfirm !== "" && !unpublishArmed}
+                />
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setUnpublishSite(null);
+                    setUnpublishConfirm("");
+                  }}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  type="submit"
+                  variant="destructive"
+                  disabled={!unpublishArmed || unpublishMutation.isPending}
+                >
+                  {t("page.staticSites.unpublish.action")}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

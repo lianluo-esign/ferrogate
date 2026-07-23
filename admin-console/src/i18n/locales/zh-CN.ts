@@ -710,6 +710,17 @@ export const zhCN = {
   "page.staticSites.access.spa": "SPA",
   "page.staticSites.cache.default": "默认",
   "page.staticSites.domains.bind": "绑定域名",
+  "page.staticSites.col.path": "路径",
+  // 单站点详情抽屉：来自清单的已发布包文件树。
+  "page.staticSites.detail.description": "包 {version} — {files} 个文件，{bytes}。",
+  "page.staticSites.detail.files": "包文件",
+  // 取消发布——按名称输入确认的破坏性删除，区别于重新发布。
+  "page.staticSites.unpublish.action": "取消发布",
+  "page.staticSites.unpublish.title": "取消发布 {site}？",
+  "page.staticSites.unpublish.body":
+    "将永久删除 {site} 的每个已发布文件及其清单，站点会立即停止提供服务，已绑定域名将无法解析到任何内容。这不是重新发布，且无法撤销；每次删除都会记录到审计日志。请在下方输入准确的站点名称以确认。",
+  "page.staticSites.unpublish.confirmLabel": "输入 {site} 以确认",
+  "page.staticSites.unpublish.success": "已取消发布 {site}",
 
   // 解析后的租户默认值查询（src/pages/tenant-resolved-defaults.tsx）。
   "page.resolvedDefaults.title": "解析后的租户默认值",
