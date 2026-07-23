@@ -8,6 +8,7 @@
 
 mod quota;
 mod workflow_budget;
+mod x402_spend;
 
 use ferrogate_core::{RequestContext, TenantContext};
 pub use quota::{resolve_effective_quota, EffectiveQuota, QuotaScopeChain, QuotaScopeSelector};
@@ -16,6 +17,17 @@ pub use workflow_budget::{
     WorkflowBudgetCaps, WorkflowBudgetDenial, WorkflowNodeDispatchDenial,
     WorkflowNodeDispatchPolicy, WORKFLOW_NODE_MODEL_NOT_ALLOWED_CODE,
     WORKFLOW_NODE_PROVIDER_NOT_ALLOWED_CODE,
+};
+pub use x402_spend::{
+    authorize_x402_payment, AllowedAsset, ApprovalPolicy, AtomicAmount, ConversionRule,
+    ConversionSnapshot, Credits, PaymentAuthorization, PaymentAuthorizationRequest,
+    PaymentDecision, PolicyNetwork, ResourceRule, Rounding, SpendScope, SpendSnapshot,
+    ValidatedX402SpendPolicy, X402PolicyConfigError, X402SpendCaps, X402SpendPolicy,
+    REASON_ALLOWED, REASON_AMOUNT_BELOW_MIN, REASON_APPROVAL_REQUIRED, REASON_ATOMIC_CAP_EXCEEDED,
+    REASON_CONVERSION_UNAVAILABLE, REASON_DISABLED, REASON_MINT_NOT_ALLOWED,
+    REASON_NETWORK_NOT_ALLOWED, REASON_OVER_PER_PAYMENT_CAP, REASON_OVER_RUN_CAP,
+    REASON_OVER_WINDOW_CAP, REASON_RECIPIENT_NOT_ALLOWED, REASON_RESOURCE_MISMATCH,
+    REASON_RESOURCE_NOT_ALLOWED,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

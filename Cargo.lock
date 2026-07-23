@@ -1302,8 +1302,11 @@ name = "ferrogate-policy"
 version = "2026.7.9"
 dependencies = [
  "ferrogate-core",
+ "ferrogate-payments",
  "ferrogate-storage",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

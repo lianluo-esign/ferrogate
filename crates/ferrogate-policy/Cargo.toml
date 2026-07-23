@@ -17,10 +17,13 @@ authors.workspace = true
 
 [dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-payments = { path = "../ferrogate-payments" }
 ferrogate-storage = { path = "../ferrogate-storage" }
+serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true
 
 [features]
 default = []
