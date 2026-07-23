@@ -55,6 +55,8 @@ import {
 } from "@/components/agent-ops/agent-ops-primitives";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
+import type { InterpolationValues, TranslationKey } from "@/i18n";
 import {
   adminDelete,
   adminGet,
@@ -62,6 +64,9 @@ import {
   adminPut,
   type AdminSchema,
 } from "@/lib/gateway-client";
+
+/** Locale-bound translator threaded into module-scope helpers. */
+type Translate = (key: TranslationKey, values?: InterpolationValues) => string;
 
 export type AdminAgentSchedule = AdminSchema<"AdminAgentSchedule">;
 export type AdminAgentScheduleFire = AdminSchema<"AdminAgentScheduleFire">;
@@ -117,15 +122,19 @@ function formFromSchedule(schedule: AdminAgentSchedule): ScheduleFormState {
   };
 }
 
-function mutationFromForm(form: ScheduleFormState): ScheduleMutation {
+function mutationFromForm(form: ScheduleFormState, t: Translate): ScheduleMutation {
   let target: ScheduleMutation["target"];
   try {
     target = JSON.parse(form.target || "{}") as ScheduleMutation["target"];
   } catch {
-    throw new Error("Target must be valid JSON");
+    throw new Error(t("page.agentSchedules.validation.targetJson"));
   }
-  if (!form.tenant_id.trim()) throw new Error("Tenant is required");
-  if (!form.workspace_id.trim()) throw new Error("Workspace is required");
+  if (!form.tenant_id.trim()) {
+    throw new Error(t("page.agentSchedules.validation.tenantRequired"));
+  }
+  if (!form.workspace_id.trim()) {
+    throw new Error(t("page.agentSchedules.validation.workspaceRequired"));
+  }
   const body: ScheduleMutation = {
     name: form.name.trim(),
     tenant_id: form.tenant_id.trim(),
@@ -140,33 +149,46 @@ function mutationFromForm(form: ScheduleFormState): ScheduleMutation {
     jitter_secs: Number(form.jitter_secs || "0"),
   };
   if (form.spec_kind === "cron") {
-    if (!form.cron_expr.trim()) throw new Error("Cron expression is required");
+    if (!form.cron_expr.trim()) {
+      throw new Error(t("page.agentSchedules.validation.cronRequired"));
+    }
     body.cron_expr = form.cron_expr.trim();
   } else {
-    if (!form.interval_secs.trim()) throw new Error("Interval seconds is required");
+    if (!form.interval_secs.trim()) {
+      throw new Error(t("page.agentSchedules.validation.intervalRequired"));
+    }
     body.interval_secs = Number(form.interval_secs);
   }
   return body;
 }
 
-const SPEC_KIND_OPTIONS = [
-  { label: "Cron", value: "cron" },
-  { label: "Interval", value: "interval" },
-] as const;
+// Select-option labels resolve through the catalog at render time; `value` is
+// the raw contract discriminant submitted unchanged.
+const SPEC_KIND_OPTIONS: { labelKey: TranslationKey; value: string }[] = [
+  { labelKey: "page.agentSchedules.form.specKind.cron", value: "cron" },
+  { labelKey: "page.agentSchedules.form.specKind.interval", value: "interval" },
+];
 
-const TARGET_KIND_OPTIONS = [
-  { label: "Agent run", value: "agent_run" },
-  { label: "Self-hosted dispatch", value: "self_hosted_dispatch" },
-] as const;
+const TARGET_KIND_OPTIONS: { labelKey: TranslationKey; value: string }[] = [
+  { labelKey: "page.agentSchedules.form.targetKind.agentRun", value: "agent_run" },
+  {
+    labelKey: "page.agentSchedules.form.targetKind.selfHostedDispatch",
+    value: "self_hosted_dispatch",
+  },
+];
 
-function scheduleSpecLabel(schedule: AdminAgentSchedule): string {
+function scheduleSpecLabel(schedule: AdminAgentSchedule, t: Translate): string {
   return schedule.spec_kind === "cron"
-    ? `cron ${schedule.cron_expr ?? "?"} (${schedule.timezone})`
-    : `every ${schedule.interval_secs ?? "?"}s`;
+    ? t("page.agentSchedules.spec.cron", {
+        expr: schedule.cron_expr ?? "?",
+        tz: schedule.timezone,
+      })
+    : t("page.agentSchedules.spec.interval", { secs: schedule.interval_secs ?? "?" });
 }
 
 export default function AgentSchedulesPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const listQueryKey = ["agent-schedules"];
@@ -198,7 +220,7 @@ export default function AgentSchedulesPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const body = mutationFromForm(form);
+      const body = mutationFromForm(form, t);
       if (editing) {
         return adminPut(apiKey, "/admin/v1/agent-schedules/{id}", body, {
           params: { id: editing.id },
@@ -208,7 +230,11 @@ export default function AgentSchedulesPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: listQueryKey });
-      toast.success(editing ? "Schedule updated" : "Schedule created");
+      toast.success(
+        editing
+          ? t("page.agentSchedules.toast.updated")
+          : t("page.agentSchedules.toast.created"),
+      );
       setFormOpen(false);
       setEditing(null);
       setForm(EMPTY_FORM);
@@ -223,7 +249,9 @@ export default function AgentSchedulesPage() {
       }),
     onSuccess: (response, schedule) => {
       setLastFire({ scheduleName: schedule.name, fire: response.fire });
-      toast.success(`Manual fire recorded: ${response.fire.outcome}`);
+      toast.success(
+        t("page.agentSchedules.toast.manualFire", { outcome: response.fire.outcome }),
+      );
       queryClient.invalidateQueries({ queryKey: listQueryKey });
       queryClient.invalidateQueries({ queryKey: ["agent-schedule-fires", schedule.id] });
     },
@@ -238,7 +266,7 @@ export default function AgentSchedulesPage() {
     onSuccess: (_response, schedule) => {
       queryClient.invalidateQueries({ queryKey: listQueryKey });
       if (firesFor?.id === schedule.id) setFiresFor(null);
-      toast.success("Schedule deleted");
+      toast.success(t("page.agentSchedules.toast.deleted"));
     },
     onError: (deleteError: Error) => toast.error(deleteError.message),
   });
@@ -262,18 +290,17 @@ export default function AgentSchedulesPage() {
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold">Agent schedules</h1>
+          <h1 className="text-lg font-semibold">{t("page.agentSchedules.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            Cron/interval schedules that fire agent runs or self-hosted dispatches (#251). Fires
-            record the dispatch outcome; Run now fires a schedule immediately.
+            {t("page.agentSchedules.description")}
           </p>
         </div>
-        <Button onClick={openCreate}>New schedule</Button>
+        <Button onClick={openCreate}>{t("page.agentSchedules.new")}</Button>
       </div>
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load agent schedules: {error.message}
+          {t("page.agentSchedules.loadError", { message: error.message })}
         </p>
       )}
 
@@ -281,23 +308,31 @@ export default function AgentSchedulesPage() {
         <Card data-testid="last-manual-fire">
           <CardHeader>
             <CardTitle className="text-base">
-              Last manual fire — {lastFire.scheduleName}
+              {t("page.agentSchedules.lastFire.title", { name: lastFire.scheduleName })}
             </CardTitle>
-            <CardDescription>Recorded by POST /run-now.</CardDescription>
+            <CardDescription>{t("page.agentSchedules.lastFire.recordedBy")}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <Badge variant={fireOutcomeBadgeVariant(lastFire.fire.outcome)}>
               {lastFire.fire.outcome}
             </Badge>
-            <span className="font-mono text-xs">fire {lastFire.fire.fire_id}</span>
+            <span className="font-mono text-xs">
+              {t("page.agentSchedules.lastFire.fire", { id: lastFire.fire.fire_id })}
+            </span>
             {lastFire.fire.dispatch_id && (
-              <span className="font-mono text-xs">dispatch {lastFire.fire.dispatch_id}</span>
+              <span className="font-mono text-xs">
+                {t("page.agentSchedules.lastFire.dispatch", { id: lastFire.fire.dispatch_id })}
+              </span>
             )}
             {lastFire.fire.run_id && (
-              <span className="font-mono text-xs">run {lastFire.fire.run_id}</span>
+              <span className="font-mono text-xs">
+                {t("page.agentSchedules.lastFire.run", { id: lastFire.fire.run_id })}
+              </span>
             )}
             <span className="text-xs text-muted-foreground">
-              fired {formatUnix(lastFire.fire.fired_at_unix)}
+              {t("page.agentSchedules.lastFire.firedAt", {
+                time: formatUnix(lastFire.fire.fired_at_unix),
+              })}
             </span>
             {lastFire.fire.detail && (
               <span className="text-xs text-muted-foreground">{lastFire.fire.detail}</span>
@@ -310,13 +345,13 @@ export default function AgentSchedulesPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Tenant / workspace</TableHead>
-              <TableHead>Spec</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead>Next fire</TableHead>
-              <TableHead>Last fire</TableHead>
+              <TableHead>{t("page.agentSchedules.name")}</TableHead>
+              <TableHead>{t("page.agentSchedules.col.tenantWorkspace")}</TableHead>
+              <TableHead>{t("page.agentSchedules.col.spec")}</TableHead>
+              <TableHead>{t("page.agentSchedules.col.target")}</TableHead>
+              <TableHead>{t("common.enabled")}</TableHead>
+              <TableHead>{t("page.agentSchedules.col.nextFire")}</TableHead>
+              <TableHead>{t("page.agentSchedules.col.lastFire")}</TableHead>
               <TableHead className="w-72" />
             </TableRow>
           </TableHeader>
@@ -324,13 +359,13 @@ export default function AgentSchedulesPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  No schedules yet.
+                  {t("page.agentSchedules.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -340,11 +375,11 @@ export default function AgentSchedulesPage() {
                   <TableCell className="font-mono text-xs">
                     {schedule.tenant_id} / {schedule.workspace_id}
                   </TableCell>
-                  <TableCell className="text-xs">{scheduleSpecLabel(schedule)}</TableCell>
+                  <TableCell className="text-xs">{scheduleSpecLabel(schedule, t)}</TableCell>
                   <TableCell className="text-xs">{schedule.target_kind}</TableCell>
                   <TableCell>
                     <Badge variant={schedule.enabled ? "secondary" : "outline"}>
-                      {schedule.enabled ? "enabled" : "disabled"}
+                      {schedule.enabled ? t("common.enabled") : t("common.disabled")}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-xs">
@@ -360,20 +395,20 @@ export default function AgentSchedulesPage() {
                         size="sm"
                         onClick={() => setRunNowTarget(schedule)}
                       >
-                        Run now
+                        {t("page.agentSchedules.action.runNow")}
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => setFiresFor(schedule)}>
-                        Fires
+                        {t("page.agentSchedules.action.fires")}
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => openEdit(schedule)}>
-                        Edit
+                        {t("resource.action.edit")}
                       </Button>
                       <Button
                         variant="destructive"
                         size="sm"
                         onClick={() => setDeleteTarget(schedule)}
                       >
-                        Delete
+                        {t("resource.action.delete")}
                       </Button>
                     </div>
                   </TableCell>
@@ -387,40 +422,46 @@ export default function AgentSchedulesPage() {
       {firesFor && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Fire history — {firesFor.name}</CardTitle>
+            <CardTitle className="text-base">
+              {t("page.agentSchedules.fires.title", { name: firesFor.name })}
+            </CardTitle>
             <CardDescription>
-              Recorded fires for schedule <span className="font-mono">{firesFor.id}</span>.
+              {t("page.agentSchedules.fires.descriptionPrefix")}
+              <span className="font-mono">{firesFor.id}</span>
+              {t("page.agentSchedules.fires.descriptionSuffix")}
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
             {firesQuery.error ? (
               <p className="px-4 py-3 text-sm text-destructive">
-                Failed to load fires: {firesQuery.error.message}
+                {t("page.agentSchedules.fires.loadError", {
+                  message: firesQuery.error.message,
+                })}
               </p>
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Fire ID</TableHead>
-                    <TableHead>Scheduled</TableHead>
-                    <TableHead>Fired</TableHead>
-                    <TableHead>Outcome</TableHead>
-                    <TableHead>Dispatch / run</TableHead>
-                    <TableHead>Node</TableHead>
-                    <TableHead>Detail</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.fireId")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.scheduled")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.fired")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.outcome")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.dispatchRun")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.node")}</TableHead>
+                    <TableHead>{t("page.agentSchedules.fires.col.detail")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {firesQuery.isLoading ? (
                     <TableRow>
                       <TableCell colSpan={7} className="h-16 text-center">
-                        Loading…
+                        {t("resource.table.loading")}
                       </TableCell>
                     </TableRow>
                   ) : fires.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={7} className="h-16 text-center">
-                        No fires recorded yet.
+                        {t("page.agentSchedules.fires.empty")}
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -460,7 +501,11 @@ export default function AgentSchedulesPage() {
       >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{editing ? `Edit ${editing.name}` : "New schedule"}</DialogTitle>
+            <DialogTitle>
+              {editing
+                ? t("page.agentSchedules.form.editTitle", { name: editing.name })
+                : t("page.agentSchedules.new")}
+            </DialogTitle>
           </DialogHeader>
           <form
             className="grid gap-4 sm:grid-cols-2"
@@ -470,7 +515,7 @@ export default function AgentSchedulesPage() {
             }}
           >
             <div className="grid gap-2">
-              <Label htmlFor="schedule-name">Name</Label>
+              <Label htmlFor="schedule-name">{t("page.agentSchedules.name")}</Label>
               <Input
                 id="schedule-name"
                 value={form.name}
@@ -484,16 +529,16 @@ export default function AgentSchedulesPage() {
                 checked={form.enabled}
                 onCheckedChange={(checked) => setForm({ ...form, enabled: checked })}
               />
-              <Label htmlFor="schedule-enabled">Enabled</Label>
+              <Label htmlFor="schedule-enabled">{t("common.enabled")}</Label>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-tenant">Tenant</Label>
+              <Label htmlFor="schedule-tenant">{t("common.tenant")}</Label>
               {/* #342: pick the owning tenant account from the shared entity
                   registry; the schedule's tenant_id (canonical `id`) is
                   submitted unchanged. */}
               <EntityReferencePicker
                 id="schedule-tenant"
-                label="Tenant"
+                label={t("common.tenant")}
                 reference={{
                   target: "tenant-accounts",
                   valueKey: "id",
@@ -503,20 +548,20 @@ export default function AgentSchedulesPage() {
                 value={form.tenant_id}
                 dependencyValues={{}}
                 required
-                placeholder="Select tenant"
+                placeholder={t("page.agentSchedules.form.tenantPlaceholder")}
                 onChange={(value) =>
                   setForm({ ...form, tenant_id: typeof value === "string" ? value : "" })
                 }
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-workspace">Workspace</Label>
+              <Label htmlFor="schedule-workspace">{t("common.workspace")}</Label>
               {/* #342: workspace rows are scoped by project, not tenant, and the
                   workspaces list carries no tenant_id filter (see #340), so this
                   is an independent picker submitting the workspace `id`. */}
               <EntityReferencePicker
                 id="schedule-workspace"
-                label="Workspace"
+                label={t("common.workspace")}
                 reference={{
                   target: "workspaces",
                   valueKey: "id",
@@ -526,14 +571,14 @@ export default function AgentSchedulesPage() {
                 value={form.workspace_id}
                 dependencyValues={{}}
                 required
-                placeholder="Select workspace"
+                placeholder={t("page.agentSchedules.form.workspacePlaceholder")}
                 onChange={(value) =>
                   setForm({ ...form, workspace_id: typeof value === "string" ? value : "" })
                 }
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-spec-kind">Spec kind</Label>
+              <Label htmlFor="schedule-spec-kind">{t("page.agentSchedules.form.specKind")}</Label>
               <Select
                 value={form.spec_kind}
                 onValueChange={(value) =>
@@ -546,7 +591,7 @@ export default function AgentSchedulesPage() {
                 <SelectContent>
                   {SPEC_KIND_OPTIONS.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
-                      {option.label}
+                      {t(option.labelKey)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -555,7 +600,7 @@ export default function AgentSchedulesPage() {
             {form.spec_kind === "cron" ? (
               <>
                 <div className="grid gap-2">
-                  <Label htmlFor="schedule-cron">Cron expression</Label>
+                  <Label htmlFor="schedule-cron">{t("page.agentSchedules.form.cronExpr")}</Label>
                   <Input
                     id="schedule-cron"
                     value={form.cron_expr}
@@ -564,18 +609,21 @@ export default function AgentSchedulesPage() {
                   />
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="schedule-timezone">Timezone</Label>
+                  <Label htmlFor="schedule-timezone">{t("page.agentSchedules.form.timezone")}</Label>
                   <Input
                     id="schedule-timezone"
                     value={form.timezone}
                     onChange={(event) => setForm({ ...form, timezone: event.target.value })}
+                    // eslint-disable-next-line ferrogate/no-untranslated-literal -- IANA timezone token, identical in every locale
                     placeholder="UTC"
                   />
                 </div>
               </>
             ) : (
               <div className="grid gap-2">
-                <Label htmlFor="schedule-interval">Interval (seconds)</Label>
+                <Label htmlFor="schedule-interval">
+                  {t("page.agentSchedules.form.intervalSecs")}
+                </Label>
                 <Input
                   id="schedule-interval"
                   type="number"
@@ -586,7 +634,9 @@ export default function AgentSchedulesPage() {
               </div>
             )}
             <div className="grid gap-2">
-              <Label htmlFor="schedule-target-kind">Target kind</Label>
+              <Label htmlFor="schedule-target-kind">
+                {t("page.agentSchedules.form.targetKind")}
+              </Label>
               <Select
                 value={form.target_kind}
                 onValueChange={(value) =>
@@ -599,14 +649,14 @@ export default function AgentSchedulesPage() {
                 <SelectContent>
                   {TARGET_KIND_OPTIONS.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
-                      {option.label}
+                      {t(option.labelKey)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-jitter">Jitter (seconds)</Label>
+              <Label htmlFor="schedule-jitter">{t("page.agentSchedules.form.jitterSecs")}</Label>
               <Input
                 id="schedule-jitter"
                 type="number"
@@ -616,7 +666,9 @@ export default function AgentSchedulesPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-overlap">Overlap policy</Label>
+              <Label htmlFor="schedule-overlap">
+                {t("page.agentSchedules.form.overlapPolicy")}
+              </Label>
               <Select
                 value={form.overlap_policy}
                 onValueChange={(value) =>
@@ -630,13 +682,19 @@ export default function AgentSchedulesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="skip">Skip overlapping fires</SelectItem>
-                  <SelectItem value="allow">Allow overlapping fires</SelectItem>
+                  <SelectItem value="skip">
+                    {t("page.agentSchedules.form.overlap.skip")}
+                  </SelectItem>
+                  <SelectItem value="allow">
+                    {t("page.agentSchedules.form.overlap.allow")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="schedule-catchup">Catch-up policy</Label>
+              <Label htmlFor="schedule-catchup">
+                {t("page.agentSchedules.form.catchupPolicy")}
+              </Label>
               <Select
                 value={form.catchup_policy}
                 onValueChange={(value) =>
@@ -650,8 +708,12 @@ export default function AgentSchedulesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="skip_missed">Skip missed fires</SelectItem>
-                  <SelectItem value="fire_once">Fire once for missed window</SelectItem>
+                  <SelectItem value="skip_missed">
+                    {t("page.agentSchedules.form.catchup.skipMissed")}
+                  </SelectItem>
+                  <SelectItem value="fire_once">
+                    {t("page.agentSchedules.form.catchup.fireOnce")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -661,7 +723,7 @@ export default function AgentSchedulesPage() {
                 the follow-up structured-panel work (#342 remains open) and stays
                 raw JSON here so the free-form payload round-trips unchanged. */}
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="schedule-target">Target (JSON)</Label>
+              <Label htmlFor="schedule-target">{t("page.agentSchedules.form.target")}</Label>
               <Textarea
                 id="schedule-target"
                 className="font-mono text-xs"
@@ -672,7 +734,11 @@ export default function AgentSchedulesPage() {
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={saveMutation.isPending}>
-                {saveMutation.isPending ? "Saving…" : editing ? "Save" : "Create"}
+                {saveMutation.isPending
+                  ? t("resource.action.saving")
+                  : editing
+                    ? t("page.agentSchedules.form.save")
+                    : t("resource.action.create")}
               </Button>
             </div>
           </form>
@@ -687,22 +753,23 @@ export default function AgentSchedulesPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Run schedule now?</AlertDialogTitle>
+            <AlertDialogTitle>{t("page.agentSchedules.runNow.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This immediately fires "{runNowTarget?.name}" (target:{" "}
-              {runNowTarget?.target_kind}) outside its normal cadence and records the fire in its
-              history.
+              {t("page.agentSchedules.runNow.description", {
+                name: runNowTarget?.name ?? "",
+                target: runNowTarget?.target_kind ?? "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (runNowTarget) runNowMutation.mutate(runNowTarget);
                 setRunNowTarget(null);
               }}
             >
-              Run now
+              {t("page.agentSchedules.action.runNow")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -716,21 +783,22 @@ export default function AgentSchedulesPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete schedule?</AlertDialogTitle>
+            <AlertDialogTitle>{t("page.agentSchedules.delete.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes "{deleteTarget?.name}". Recorded fire history is kept but
-              the schedule stops firing.
+              {t("page.agentSchedules.delete.description", {
+                name: deleteTarget?.name ?? "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (deleteTarget) deleteMutation.mutate(deleteTarget);
                 setDeleteTarget(null);
               }}
             >
-              Delete
+              {t("resource.action.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

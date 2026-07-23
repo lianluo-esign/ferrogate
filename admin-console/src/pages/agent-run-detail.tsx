@@ -33,6 +33,7 @@ import {
   type TimelineEventFamily,
 } from "@/components/agent-ops/agent-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 export type AgentRunTimeline = AdminSchema<"AgentRunTimeline">;
@@ -104,6 +105,7 @@ export function mergeTimeline(timeline: AgentRunTimeline): TimelineEntry[] {
 export default function AgentRunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -118,12 +120,14 @@ export default function AgentRunDetailPage() {
   const entries = useMemo(() => (data ? mergeTimeline(data) : []), [data]);
 
   if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading run timeline…</p>;
+    return (
+      <p className="text-sm text-muted-foreground">{t("page.agentRunDetail.loading")}</p>
+    );
   }
   if (error) {
     return (
       <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        Failed to load agent run: {error.message}
+        {t("page.agentRunDetail.loadError", { message: error.message })}
       </p>
     );
   }
@@ -135,63 +139,85 @@ export default function AgentRunDetailPage() {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-lg font-semibold">
-          Agent run <span className="font-mono text-base">{data.id}</span>
+          {t("page.agentRunDetail.heading")}{" "}
+          <span className="font-mono text-base">{data.id}</span>
         </h1>
         <Badge variant={runStatusBadgeVariant(summary.status)}>{summary.status}</Badge>
         <Link
           to="/app/agent-runs"
           className="text-sm text-muted-foreground underline underline-offset-2"
         >
-          Back to runs
+          {t("page.agentRunDetail.backToRuns")}
         </Link>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Run summary</CardTitle>
+          <CardTitle className="text-base">{t("page.agentRunDetail.summary.title")}</CardTitle>
         </CardHeader>
         <CardContent>
           <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
             <div>
-              <dt className="text-muted-foreground">Tenant</dt>
+              <dt className="text-muted-foreground">{t("common.tenant")}</dt>
               <dd className="font-mono text-xs">{tenantLabel(summary.tenant)}</dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Request ID</dt>
+              <dt className="text-muted-foreground">{t("page.agentRunDetail.requestId")}</dt>
               <dd>
                 {run ? (
-                  <TruncatedCopyable value={run.request_id} label="request id" prefixLength={24} />
+                  <TruncatedCopyable
+                    value={run.request_id}
+                    label={t("page.agentRunDetail.label.requestId")}
+                    prefixLength={24}
+                  />
                 ) : (
                   "—"
                 )}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Trace ID</dt>
+              <dt className="text-muted-foreground">{t("page.agentRunDetail.traceId")}</dt>
               <dd>
                 {run?.trace_id ? (
-                  <TruncatedCopyable value={run.trace_id} label="trace id" prefixLength={24} />
+                  <TruncatedCopyable
+                    value={run.trace_id}
+                    label={t("page.agentRunDetail.label.traceId")}
+                    prefixLength={24}
+                  />
                 ) : (
                   "—"
                 )}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Provider / turns</dt>
+              <dt className="text-muted-foreground">{t("page.agentRunDetail.providerTurns")}</dt>
               <dd>
-                {run ? `${run.provider} / ${run.turns_executed} turns` : "—"}
-                {run ? (run.output_recorded ? " (output recorded)" : " (no output)") : ""}
+                {run
+                  ? t("page.agentRunDetail.providerTurnsValue", {
+                      provider: run.provider,
+                      turns: run.turns_executed,
+                    })
+                  : "—"}
+                {run
+                  ? run.output_recorded
+                    ? t("page.agentRunDetail.outputRecorded")
+                    : t("page.agentRunDetail.outputNone")
+                  : ""}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Correlated counts</dt>
+              <dt className="text-muted-foreground">{t("page.agentRunDetail.correlatedCounts")}</dt>
               <dd>
-                {summary.request_count} requests · {summary.billing_event_count} billing ·{" "}
-                {summary.audit_event_count} audit · {summary.agent_event_count} agent events
+                {t("page.agentRunDetail.correlatedCountsValue", {
+                  requests: summary.request_count,
+                  billing: summary.billing_event_count,
+                  audit: summary.audit_event_count,
+                  agent: summary.agent_event_count,
+                })}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Window</dt>
+              <dt className="text-muted-foreground">{t("page.agentRunDetail.window")}</dt>
               <dd className="text-xs">
                 {formatUnix(summary.first_seen_unix)} → {formatUnix(summary.last_seen_unix)}
               </dd>
@@ -202,31 +228,31 @@ export default function AgentRunDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Timeline</CardTitle>
+          <CardTitle className="text-base">{t("page.agentRunDetail.timeline.title")}</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Time</TableHead>
-                <TableHead>Turn</TableHead>
-                <TableHead>Family</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Outcome</TableHead>
-                <TableHead>Decision</TableHead>
-                <TableHead>Reason</TableHead>
-                <TableHead>Output</TableHead>
-                <TableHead>Fingerprint</TableHead>
-                <TableHead>Correlation</TableHead>
-                <TableHead>Message</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.time")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.turn")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.family")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.kind")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.target")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.outcome")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.decision")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.reason")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.output")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.fingerprint")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.correlation")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.message")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {entries.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={12} className="h-24 text-center">
-                    No timeline events recorded for this run.
+                    {t("page.agentRunDetail.timeline.empty")}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -252,19 +278,19 @@ export default function AgentRunDetailPage() {
                     <TableCell>
                       <TruncatedCopyable
                         value={entry.actionFingerprint}
-                        label="action fingerprint"
+                        label={t("page.agentRunDetail.label.fingerprint")}
                       />
                     </TableCell>
                     <TableCell className="text-xs">
                       <div className="flex flex-col gap-0.5">
                         <TruncatedCopyable
                           value={entry.requestId}
-                          label="request id"
+                          label={t("page.agentRunDetail.label.requestId")}
                           prefixLength={12}
                         />
                         <TruncatedCopyable
                           value={entry.traceId}
-                          label="trace id"
+                          label={t("page.agentRunDetail.label.traceId")}
                           prefixLength={12}
                         />
                       </div>
@@ -282,25 +308,27 @@ export default function AgentRunDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Requests ({data.requests.length})</CardTitle>
+          <CardTitle className="text-base">
+            {t("page.agentRunDetail.requests.title", { count: data.requests.length })}
+          </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Request ID</TableHead>
-                <TableHead>Route</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Provider</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Started</TableHead>
+                <TableHead>{t("page.agentRunDetail.requestId")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.route")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.model")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.provider")}</TableHead>
+                <TableHead>{t("common.status")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.started")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.requests.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="h-16 text-center">
-                    No correlated requests.
+                    {t("page.agentRunDetail.requests.empty")}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -309,7 +337,7 @@ export default function AgentRunDetailPage() {
                     <TableCell>
                       <TruncatedCopyable
                         value={request.request_id}
-                        label="request id"
+                        label={t("page.agentRunDetail.label.requestId")}
                         prefixLength={24}
                       />
                     </TableCell>
@@ -328,25 +356,27 @@ export default function AgentRunDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Billing events ({data.billing_events.length})</CardTitle>
+          <CardTitle className="text-base">
+            {t("page.agentRunDetail.billing.title", { count: data.billing_events.length })}
+          </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Request ID</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Provider</TableHead>
-                <TableHead>Tokens (p/c)</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Occurred</TableHead>
+                <TableHead>{t("page.agentRunDetail.requestId")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.model")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.provider")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.tokens")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.source")}</TableHead>
+                <TableHead>{t("page.agentRunDetail.col.occurred")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.billing_events.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="h-16 text-center">
-                    No correlated billing events.
+                    {t("page.agentRunDetail.billing.empty")}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -355,7 +385,7 @@ export default function AgentRunDetailPage() {
                     <TableCell>
                       <TruncatedCopyable
                         value={event.request_id}
-                        label="request id"
+                        label={t("page.agentRunDetail.label.requestId")}
                         prefixLength={24}
                       />
                     </TableCell>

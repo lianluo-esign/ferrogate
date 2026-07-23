@@ -11,6 +11,8 @@ import { zhCN } from "@/i18n/locales/zh-CN";
 import VirtualKeysPage from "@/pages/virtual-keys";
 import SiteDomainsPage from "@/pages/site-domains";
 import OpsStatusPage from "@/pages/ops-status";
+import AgentRunsPage from "@/pages/agent-runs";
+import AgentSchedulesPage from "@/pages/agent-schedules";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
 
@@ -160,5 +162,57 @@ describe("ops-status page copy is localized", () => {
     expect(screen.getByText(zhCN["page.opsStatus.cluster.title"])).toBeInTheDocument();
     const cluster = screen.getByText(zhCN["page.opsStatus.cluster.enabled"]).closest("div")!;
     expect(within(cluster).getByText(zhCN["common.yes"])).toBeInTheDocument();
+  });
+});
+
+describe("agent-runs page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/agent-runs", []);
+  });
+
+  it("renders English title, description, and empty state", async () => {
+    renderWithProviders(<AgentRunsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.agentRuns.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.agentRuns.description"])).toBeInTheDocument();
+    expect(await screen.findByText(en["page.agentRuns.empty"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, description, and empty state", async () => {
+    renderWithProviders(<AgentRunsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.agentRuns.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.agentRuns.description"])).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.agentRuns.empty"])).toBeInTheDocument();
+  });
+});
+
+describe("agent-schedules page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/agent-schedules", []);
+  });
+
+  it("renders English title, new-schedule action, and empty state", async () => {
+    renderWithProviders(<AgentSchedulesPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.agentSchedules.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.agentSchedules.new"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.agentSchedules.empty"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, new-schedule action, and empty state", async () => {
+    renderWithProviders(<AgentSchedulesPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.agentSchedules.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.agentSchedules.new"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.agentSchedules.empty"])).toBeInTheDocument();
   });
 });

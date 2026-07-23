@@ -76,8 +76,10 @@ describe("AgentSchedulesPage", () => {
     expect(screen.getByText("Interval sweep")).toBeInTheDocument();
     expect(screen.getByText("cron 0 2 * * * (UTC)")).toBeInTheDocument();
     expect(screen.getByText("every 300s")).toBeInTheDocument();
-    expect(screen.getByText("enabled")).toBeInTheDocument();
-    expect(screen.getByText("disabled")).toBeInTheDocument();
+    // Boolean state cells localize via the #385 common.enabled/disabled keys.
+    // "Enabled" also heads the column, so both the header and the badge match.
+    expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
   });
 
   it("creates a cron schedule posting the contract mutation body", async () => {

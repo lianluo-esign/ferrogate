@@ -31,21 +31,26 @@ import {
   tenantMatches,
 } from "@/components/agent-ops/agent-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 export type AgentRunSummary = AdminSchema<"AgentRunSummary">;
 
 const PAGE_SIZE = 50;
 
-const STATUS_OPTIONS: { label: string; value: string }[] = [
-  { label: "All statuses", value: "all" },
-  { label: "Completed", value: "completed" },
-  { label: "Blocked", value: "blocked" },
-  { label: "Failed", value: "failed" },
+// Option labels resolve through the catalog at render time; `value` is the raw
+// contract status token matched against `run.status`.
+const STATUS_OPTIONS: { labelKey: TranslationKey; value: string }[] = [
+  { labelKey: "page.agentRuns.status.all", value: "all" },
+  { labelKey: "page.agentRuns.status.completed", value: "completed" },
+  { labelKey: "page.agentRuns.status.blocked", value: "blocked" },
+  { labelKey: "page.agentRuns.status.failed", value: "failed" },
 ];
 
 export default function AgentRunsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [offset, setOffset] = useState(0);
@@ -75,16 +80,15 @@ export default function AgentRunsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Agent runs</h1>
+        <h1 className="text-lg font-semibold">{t("page.agentRuns.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Governed agent runs correlated across requests, billing, audit, and agent events. Open a
-          run to see its full evidence-chain timeline (#304).
+          {t("page.agentRuns.description")}
         </p>
       </div>
 
       <div className="flex flex-wrap items-end gap-4">
         <div className="grid gap-2">
-          <Label htmlFor="run-status-filter">Status</Label>
+          <Label htmlFor="run-status-filter">{t("common.status")}</Label>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
             <SelectTrigger id="run-status-filter" className="w-44">
               <SelectValue />
@@ -92,18 +96,18 @@ export default function AgentRunsPage() {
             <SelectContent>
               {STATUS_OPTIONS.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
-                  {option.label}
+                  {t(option.labelKey)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="run-tenant-filter">Tenant</Label>
+          <Label htmlFor="run-tenant-filter">{t("common.tenant")}</Label>
           <Input
             id="run-tenant-filter"
             className="w-64"
-            placeholder="org / project / user / key id"
+            placeholder={t("page.agentRuns.filter.tenantPlaceholder")}
             value={tenantFilter}
             onChange={(event) => setTenantFilter(event.target.value)}
           />
@@ -112,7 +116,7 @@ export default function AgentRunsPage() {
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load agent runs: {error.message}
+          {t("page.agentRuns.loadError", { message: error.message })}
         </p>
       )}
 
@@ -120,28 +124,28 @@ export default function AgentRunsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Run</TableHead>
-              <TableHead>Tenant</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Requests</TableHead>
-              <TableHead className="text-right">Billing</TableHead>
-              <TableHead className="text-right">Audit</TableHead>
-              <TableHead className="text-right">Agent events</TableHead>
-              <TableHead>First seen</TableHead>
-              <TableHead>Last seen</TableHead>
+              <TableHead>{t("page.agentRuns.col.run")}</TableHead>
+              <TableHead>{t("common.tenant")}</TableHead>
+              <TableHead>{t("common.status")}</TableHead>
+              <TableHead className="text-right">{t("page.agentRuns.col.requests")}</TableHead>
+              <TableHead className="text-right">{t("page.agentRuns.col.billing")}</TableHead>
+              <TableHead className="text-right">{t("page.agentRuns.col.audit")}</TableHead>
+              <TableHead className="text-right">{t("page.agentRuns.col.agentEvents")}</TableHead>
+              <TableHead>{t("page.agentRuns.col.firstSeen")}</TableHead>
+              <TableHead>{t("page.agentRuns.col.lastSeen")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={9} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={9} className="h-24 text-center">
-                  No agent runs match.
+                  {t("page.agentRuns.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -179,7 +183,7 @@ export default function AgentRunsPage() {
           disabled={offset === 0}
           onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
         >
-          Previous
+          {t("resource.pagination.previous")}
         </Button>
         <Button
           variant="outline"
@@ -187,10 +191,16 @@ export default function AgentRunsPage() {
           disabled={!hasNext}
           onClick={() => setOffset(offset + PAGE_SIZE)}
         >
-          Next
+          {t("resource.pagination.next")}
         </Button>
         <span className="text-xs text-muted-foreground">
-          {total > 0 ? `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total}` : ""}
+          {total > 0
+            ? t("page.agentRuns.pagination.range", {
+                start: offset + 1,
+                end: Math.min(offset + PAGE_SIZE, total),
+                total,
+              })
+            : ""}
         </span>
       </div>
     </div>

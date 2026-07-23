@@ -5,6 +5,7 @@ import { HttpResponse, http } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import AgentRunDetailPage, { type AgentRunTimeline } from "@/pages/agent-run-detail";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
@@ -152,13 +153,15 @@ function mockTimeline(fixture: AgentRunTimeline): void {
 function renderDetail(runId: string) {
   return render(
     <MemoryRouter initialEntries={[`/app/agent-runs/${runId}`]}>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <Routes>
-            <Route path="/app/agent-runs/:runId" element={<AgentRunDetailPage />} />
-          </Routes>
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route path="/app/agent-runs/:runId" element={<AgentRunDetailPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }
