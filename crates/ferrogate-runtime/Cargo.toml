@@ -43,6 +43,11 @@ subtle.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+# Cloudflare-hosted managed-worker control client (issue #412) reconciles run /
+# session status through the shared persistence row types; the storage crate is
+# test-only here (runtime keeps no storage dependency in non-test code) and does
+# not depend on ferrogate-runtime, so there is no dependency cycle.
+ferrogate-storage = { path = "../ferrogate-storage" }
 tempfile.workspace = true
 
 [features]
