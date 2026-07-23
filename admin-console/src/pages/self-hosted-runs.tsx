@@ -28,6 +28,7 @@ import {
   ReportedTrustBadge,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 
 function CorrelationField({
@@ -52,6 +53,7 @@ function CorrelationField({
 
 export default function SelfHostedRunsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [runInput, setRunInput] = useState("");
@@ -74,11 +76,11 @@ export default function SelfHostedRunsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Self-hosted runs</h1>
+        <h1 className="text-lg font-semibold">{t("page.selfHostedRuns.title")}</h1>
         <div className="text-sm text-muted-foreground">
-          Inspect a customer-reported run timeline (<ReportedTrustBadge />) by its
-          run id. The correlation triple and parent action fingerprint are lifted from
-          the worker's reported event documents.
+          {t("page.selfHostedRuns.description.before")}
+          <ReportedTrustBadge />
+          {t("page.selfHostedRuns.description.after")}
         </div>
       </div>
 
@@ -90,78 +92,86 @@ export default function SelfHostedRunsPage() {
         }}
       >
         <div className="grid flex-1 gap-1.5">
-          <Label htmlFor="run-id">Run id</Label>
+          <Label htmlFor="run-id">{t("page.selfHostedRuns.field.runId")}</Label>
           <Input
             id="run-id"
             value={runInput}
             onChange={(e) => setRunInput(e.target.value)}
+            // eslint-disable-next-line ferrogate/no-untranslated-literal -- example run id format, not translatable copy
             placeholder="run-..."
           />
         </div>
         <Button type="submit" disabled={runInput.trim() === ""}>
-          Inspect
+          {t("page.selfHostedRuns.inspect")}
         </Button>
       </form>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load run {activeRunId}: {error.message}
+          {t("page.selfHostedRuns.error", { runId: activeRunId, message: error.message })}
         </p>
       ) : null}
 
       {activeRunId === "" ? (
         <p className="text-sm text-muted-foreground">
-          Enter a run id reported by a self-hosted worker to inspect its timeline.
+          {t("page.selfHostedRuns.prompt")}
         </p>
       ) : isLoading || isFetching ? (
-        <p className="text-sm text-muted-foreground">Loading run {activeRunId}…</p>
+        <p className="text-sm text-muted-foreground">
+          {t("page.selfHostedRuns.loading", { runId: activeRunId })}
+        </p>
       ) : data ? (
         <>
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Run {data.run_id}</CardTitle>
+              <CardTitle className="text-base">
+                {t("page.selfHostedRuns.card.title", { runId: data.run_id })}
+              </CardTitle>
             </CardHeader>
             <CardContent className="grid gap-4">
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <CorrelationField
-                  label="Request id"
+                  label={t("page.selfHostedRuns.field.requestId")}
                   value={correlation.requestId}
-                  hint="#305 correlation triple"
+                  hint={t("page.selfHostedRuns.hint.correlationTriple")}
                 />
                 <CorrelationField
-                  label="Trace id"
+                  label={t("page.selfHostedRuns.field.traceId")}
                   value={correlation.traceId}
-                  hint="#305 correlation triple"
+                  hint={t("page.selfHostedRuns.hint.correlationTriple")}
                 />
                 <CorrelationField
-                  label="Agent run id"
+                  label={t("page.selfHostedRuns.field.agentRunId")}
                   value={correlation.agentRunId}
-                  hint="#305 correlation triple"
+                  hint={t("page.selfHostedRuns.hint.correlationTriple")}
                 />
                 <CorrelationField
-                  label="Parent action fingerprint"
+                  label={t("page.selfHostedRuns.field.parentFingerprint")}
                   value={correlation.parentActionFingerprint}
-                  hint="#307 parent action provenance"
+                  hint={t("page.selfHostedRuns.hint.parentProvenance")}
                 />
               </div>
               <div className="grid gap-3 text-sm sm:grid-cols-3">
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Latest lifecycle state
+                    {t("page.selfHostedRuns.field.latestLifecycleState")}
                   </span>
                   <div>{data.latest_lifecycle_state ?? "—"}</div>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Reported events
+                    {t("page.selfHostedRuns.field.reportedEvents")}
                   </span>
                   <div>
-                    {data.reported_event_count} ({data.lifecycle_event_count} lifecycle)
+                    {t("page.selfHostedRuns.events.summary", {
+                      reported: data.reported_event_count,
+                      lifecycle: data.lifecycle_event_count,
+                    })}
                   </div>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    First / last seen
+                    {t("page.selfHostedRuns.field.firstLastSeen")}
                   </span>
                   <div>
                     {formatUnix(data.first_seen_unix)} → {formatUnix(data.last_seen_unix)}
@@ -169,7 +179,7 @@ export default function SelfHostedRunsPage() {
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Worker ids
+                    {t("page.selfHostedRuns.field.workerIds")}
                   </span>
                   <div className="break-all">
                     {data.worker_ids.length > 0 ? data.worker_ids.join(", ") : "—"}
@@ -177,7 +187,7 @@ export default function SelfHostedRunsPage() {
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Session ids
+                    {t("page.selfHostedRuns.field.sessionIds")}
                   </span>
                   <div className="break-all">
                     {data.session_ids.length > 0 ? data.session_ids.join(", ") : "—"}
@@ -191,18 +201,18 @@ export default function SelfHostedRunsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Kind</TableHead>
-                  <TableHead>Worker / session</TableHead>
-                  <TableHead>Request / trace</TableHead>
-                  <TableHead>Parent fingerprint</TableHead>
-                  <TableHead>Occurred</TableHead>
+                  <TableHead>{t("page.selfHostedRuns.col.kind")}</TableHead>
+                  <TableHead>{t("page.selfHostedRuns.col.workerSession")}</TableHead>
+                  <TableHead>{t("page.selfHostedRuns.col.requestTrace")}</TableHead>
+                  <TableHead>{t("page.selfHostedRuns.col.parentFingerprint")}</TableHead>
+                  <TableHead>{t("page.selfHostedRuns.col.occurred")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {data.events.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="h-24 text-center">
-                      No reported events for this run.
+                      {t("page.selfHostedRuns.events.empty")}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -214,21 +224,29 @@ export default function SelfHostedRunsPage() {
                           <Badge variant="secondary">{event.kind}</Badge>
                         </TableCell>
                         <TableCell className="text-xs">
-                          <div>worker {event.worker_id}</div>
+                          <div>{t("page.selfHostedRuns.row.worker", { id: event.worker_id })}</div>
                           <div className="text-muted-foreground">
-                            session {event.session_id ?? "—"}
+                            {t("page.selfHostedRuns.row.session", {
+                              id: event.session_id ?? "—",
+                            })}
                           </div>
                         </TableCell>
                         <TableCell className="text-xs">
                           <div className="flex flex-col gap-1">
-                            <TruncatedCopyable value={c.requestId} label="Request id" />
-                            <TruncatedCopyable value={c.traceId} label="Trace id" />
+                            <TruncatedCopyable
+                              value={c.requestId}
+                              label={t("page.selfHostedRuns.field.requestId")}
+                            />
+                            <TruncatedCopyable
+                              value={c.traceId}
+                              label={t("page.selfHostedRuns.field.traceId")}
+                            />
                           </div>
                         </TableCell>
                         <TableCell className="text-xs">
                           <TruncatedCopyable
                             value={c.parentActionFingerprint}
-                            label="Parent action fingerprint"
+                            label={t("page.selfHostedRuns.field.parentFingerprint")}
                           />
                         </TableCell>
                         <TableCell className="text-xs">

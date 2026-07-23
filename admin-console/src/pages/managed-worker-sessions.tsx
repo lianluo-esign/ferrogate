@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/table";
 import { formatUnix, tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type ManagedWorkerSession = AdminSchema<"AdminManagedWorkerSession">;
@@ -52,6 +53,7 @@ function sessionStatusVariant(
 
 export default function ManagedWorkerSessionsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const [detail, setDetail] = useState<ManagedWorkerSession | null>(null);
@@ -69,16 +71,15 @@ export default function ManagedWorkerSessionsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Managed worker sessions</h1>
+        <h1 className="text-lg font-semibold">{t("page.managedWorkerSessions.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Persisted runtime sessions for gateway-managed isolated agent workers, with
-          their isolation backend and lifecycle event trail.
+          {t("page.managedWorkerSessions.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load managed worker sessions: {error.message}
+          {t("page.managedWorkerSessions.error", { message: error.message })}
         </p>
       ) : null}
 
@@ -86,13 +87,13 @@ export default function ManagedWorkerSessionsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Session</TableHead>
-              <TableHead>Run</TableHead>
-              <TableHead>Tenant</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Isolation</TableHead>
-              <TableHead>Started</TableHead>
-              <TableHead>Lifecycle events</TableHead>
+              <TableHead>{t("page.managedWorkerSessions.col.session")}</TableHead>
+              <TableHead>{t("page.managedWorkerSessions.col.run")}</TableHead>
+              <TableHead>{t("common.tenant")}</TableHead>
+              <TableHead>{t("common.status")}</TableHead>
+              <TableHead>{t("page.managedWorkerSessions.col.isolation")}</TableHead>
+              <TableHead>{t("page.managedWorkerSessions.col.started")}</TableHead>
+              <TableHead>{t("page.managedWorkerSessions.col.lifecycleEvents")}</TableHead>
               <TableHead className="w-24" />
             </TableRow>
           </TableHeader>
@@ -100,13 +101,13 @@ export default function ManagedWorkerSessionsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : sessions.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={8} className="h-24 text-center">
-                  No managed worker sessions recorded yet.
+                  {t("page.managedWorkerSessions.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -115,7 +116,9 @@ export default function ManagedWorkerSessionsPage() {
                   <TableCell>
                     <div className="font-medium">{row.id}</div>
                     <div className="text-xs text-muted-foreground">
-                      template {row.worker_template_id}
+                      {t("page.managedWorkerSessions.row.template", {
+                        id: row.worker_template_id,
+                      })}
                     </div>
                   </TableCell>
                   <TableCell className="text-xs">{row.run_id}</TableCell>
@@ -130,7 +133,7 @@ export default function ManagedWorkerSessionsPage() {
                   <TableCell className="text-xs">{row.lifecycle_events.length}</TableCell>
                   <TableCell>
                     <Button variant="outline" size="sm" onClick={() => setDetail(row)}>
-                      Details
+                      {t("page.managedWorkerSessions.details")}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -145,22 +148,31 @@ export default function ManagedWorkerSessionsPage() {
           {detail ? (
             <>
               <DialogHeader>
-                <DialogTitle>Session {detail.id}</DialogTitle>
+                <DialogTitle>
+                  {t("page.managedWorkerSessions.dialog.title", { id: detail.id })}
+                </DialogTitle>
                 <DialogDescription>
-                  Run {detail.run_id} · {detail.isolation_backend_kind} ·{" "}
-                  {detail.microvm_id ? `microVM ${detail.microvm_id}` : "no microVM id"}
+                  {t("page.managedWorkerSessions.dialog.description", {
+                    run: detail.run_id,
+                    backend: detail.isolation_backend_kind,
+                    vm: detail.microvm_id
+                      ? t("page.managedWorkerSessions.dialog.microvm", {
+                          id: detail.microvm_id,
+                        })
+                      : t("page.managedWorkerSessions.dialog.noMicrovm"),
+                  })}
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-3 text-sm sm:grid-cols-2">
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Capability envelope
+                    {t("page.managedWorkerSessions.field.capabilityEnvelope")}
                   </span>
                   <div className="break-all">{detail.capability_envelope_id}</div>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Worker instance
+                    {t("page.managedWorkerSessions.field.workerInstance")}
                   </span>
                   <div className="break-all">
                     {detail.agent_worker_instance_id ?? "—"}
@@ -168,7 +180,7 @@ export default function ManagedWorkerSessionsPage() {
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Requested / started
+                    {t("page.managedWorkerSessions.field.requestedStarted")}
                   </span>
                   <div>
                     {formatUnix(detail.requested_at_unix)} →{" "}
@@ -177,7 +189,7 @@ export default function ManagedWorkerSessionsPage() {
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
-                    Completed / cleaned up
+                    {t("page.managedWorkerSessions.field.completedCleanedUp")}
                   </span>
                   <div>
                     {formatUnix(detail.completed_at_unix)} →{" "}
@@ -189,17 +201,17 @@ export default function ManagedWorkerSessionsPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Action</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Outcome</TableHead>
-                      <TableHead>Occurred</TableHead>
+                      <TableHead>{t("page.managedWorkerSessions.events.col.action")}</TableHead>
+                      <TableHead>{t("common.status")}</TableHead>
+                      <TableHead>{t("page.managedWorkerSessions.events.col.outcome")}</TableHead>
+                      <TableHead>{t("page.managedWorkerSessions.events.col.occurred")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {detail.lifecycle_events.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={4} className="h-16 text-center">
-                          No lifecycle events.
+                          {t("page.managedWorkerSessions.events.empty")}
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -226,7 +238,7 @@ export default function ManagedWorkerSessionsPage() {
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setDetail(null)}>
-                  Close
+                  {t("page.managedWorkerSessions.close")}
                 </Button>
               </DialogFooter>
             </>

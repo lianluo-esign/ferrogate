@@ -43,11 +43,6 @@ const I18N_UNMIGRATED_ALLOWLIST = [
   "src/components/ui/sheet.tsx",
   "src/components/ui/sidebar.tsx",
   "src/components/worker-ops/worker-ops-primitives.tsx",
-  "src/pages/assets.tsx",
-  "src/pages/managed-worker-sessions.tsx",
-  "src/pages/plugin-tools.tsx",
-  "src/pages/self-hosted-runs.tsx",
-  "src/pages/self-hosted-worker-detail.tsx",
   "src/pages/self-hosted-workers-ops.tsx",
 ];
 

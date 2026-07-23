@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import PluginToolsPage from "@/pages/plugin-tools";
 import type { AdminSchema } from "@/lib/gateway-client";
 import { gatewayUrl, server } from "@/test/msw";
@@ -28,13 +29,15 @@ function tool(overrides: Partial<AdminTool> = {}): AdminTool {
 function renderPage(pluginId: string) {
   return render(
     <MemoryRouter initialEntries={[`/app/plugins/${pluginId}/tools`]}>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <Routes>
-            <Route path="/app/plugins/:pluginId/tools" element={<PluginToolsPage />} />
-          </Routes>
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider initialLocale="en">
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route path="/app/plugins/:pluginId/tools" element={<PluginToolsPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }

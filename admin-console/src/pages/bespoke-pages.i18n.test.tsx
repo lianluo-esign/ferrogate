@@ -31,6 +31,11 @@ import ToolApprovalsPage from "@/pages/tool-approvals";
 import TenantRolesPage from "@/pages/tenant-roles";
 import McpIdentitiesPage from "@/pages/mcp-identities";
 import InvestigationsPage from "@/pages/investigations";
+import AssetsPage from "@/pages/assets";
+import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
+import PluginToolsPage from "@/pages/plugin-tools";
+import SelfHostedRunsPage from "@/pages/self-hosted-runs";
+import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
 import { policyRevision } from "@/test/fixtures/guardrails";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import {
@@ -754,5 +759,236 @@ describe("investigations page copy is localized", () => {
       screen.getByRole("button", { name: zhCN["page.investigations.investigate"] }),
     ).toBeInTheDocument();
     expect(screen.getByText(zhCN["page.investigations.prompt"])).toBeInTheDocument();
+  });
+});
+
+// --- Assets / worker / plugin bespoke-page group (#348 slice) ----------------
+// Proves the five pages render their page-local copy from the typed catalog in
+// BOTH `en` and `zh-CN`, the runtime companion to the de-allowlisted lint gate.
+
+describe("assets page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/v1/assets", []);
+    server.use(
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
+        HttpResponse.json({ used_bytes: 2048, quota_bytes: null }),
+      ),
+    );
+  });
+
+  it("renders English title, push form, and empty state", async () => {
+    renderWithProviders(<AssetsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.assets.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.assets.push.title"])).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.assets.push.submit"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.assets.empty"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, push form, and empty state", async () => {
+    renderWithProviders(<AssetsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.assets.title"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.assets.push.title"])).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.assets.push.submit"] }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.assets.empty"])).toBeInTheDocument();
+  });
+});
+
+describe("managed-worker-sessions page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/managed-worker-sessions", []);
+  });
+
+  it("renders English title, description, and empty state", async () => {
+    renderWithProviders(<ManagedWorkerSessionsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", {
+        name: en["page.managedWorkerSessions.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(en["page.managedWorkerSessions.description"]),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.managedWorkerSessions.empty"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, description, and empty state", async () => {
+    renderWithProviders(<ManagedWorkerSessionsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", {
+        name: zhCN["page.managedWorkerSessions.title"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["page.managedWorkerSessions.description"]),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.managedWorkerSessions.empty"]),
+    ).toBeInTheDocument();
+  });
+});
+
+// plugin-tools reads pluginId from the route, so it needs a real router entry.
+function renderPluginTools(locale: Locale, pluginId = "plg-1") {
+  return render(
+    <MemoryRouter initialEntries={[`/app/plugins/${pluginId}/tools`]}>
+      <I18nProvider initialLocale={locale}>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route
+                path="/app/plugins/:pluginId/tools"
+                element={<PluginToolsPage />}
+              />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe("plugin-tools page copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/plugins/plg-1/tools", []);
+  });
+
+  it("renders English back link, interpolated title, and description", async () => {
+    renderPluginTools("en");
+    expect(
+      await screen.findByRole("heading", {
+        name: en["page.pluginTools.title"].replace("{pluginId}", "plg-1"),
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.pluginTools.back"])).toBeInTheDocument();
+    expect(screen.getByText(en["page.pluginTools.description"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese back link, interpolated title, and description", async () => {
+    renderPluginTools("zh-CN");
+    expect(
+      await screen.findByRole("heading", {
+        name: zhCN["page.pluginTools.title"].replace("{pluginId}", "plg-1"),
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.pluginTools.back"])).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.pluginTools.description"])).toBeInTheDocument();
+  });
+});
+
+describe("self-hosted-runs page copy is localized", () => {
+  it("renders English title, inspect action, and prompt", async () => {
+    renderWithProviders(<SelfHostedRunsPage />, { locale: "en" });
+    expect(
+      await screen.findByRole("heading", { name: en["page.selfHostedRuns.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en["page.selfHostedRuns.inspect"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.selfHostedRuns.prompt"])).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese title, inspect action, and prompt", async () => {
+    renderWithProviders(<SelfHostedRunsPage />, { locale: "zh-CN" });
+    expect(
+      await screen.findByRole("heading", { name: zhCN["page.selfHostedRuns.title"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zhCN["page.selfHostedRuns.inspect"] }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.selfHostedRuns.prompt"])).toBeInTheDocument();
+  });
+});
+
+// A minimal self-hosted worker projection: only the fields the detail page reads.
+function workerFixture() {
+  return {
+    id: "shw-1",
+    worker_name: "edge-worker",
+    workspace_id: "ws-1",
+    tenant: { organization_id: "org-acme" },
+    status: "active",
+    stale: false,
+    trust_level: "reported_by_self_hosted_worker",
+    orchestration_enabled: true,
+    identity_fingerprint: "sha256:abc",
+    identity_expires_at_unix: null,
+    registered_at_unix: 1_700_000_000,
+    last_seen_at_unix: 1_700_000_500,
+    stale_after_unix: 1_700_001_000,
+    latest_heartbeat: null,
+    telemetry_event_count: 3,
+    latest_event_at_unix: 1_700_000_400,
+    checkpoint_count: 1,
+    latest_checkpoint_at_unix: 1_700_000_300,
+    artifact_count: 0,
+    latest_artifact_at_unix: null,
+  } as unknown as Parameters<typeof HttpResponse.json>[0];
+}
+
+function renderWorkerDetail(locale: Locale, workerId = "shw-1") {
+  return render(
+    <MemoryRouter initialEntries={[`/app/workers/self-hosted/${workerId}`]}>
+      <I18nProvider initialLocale={locale}>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <Routes>
+              <Route
+                path="/app/workers/self-hosted/:workerId"
+                element={<SelfHostedWorkerDetailPage />}
+              />
+            </Routes>
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe("self-hosted-worker-detail page copy is localized", () => {
+  beforeEach(() => {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/self-hosted-workers/shw-1"), () =>
+        HttpResponse.json(workerFixture()),
+      ),
+    );
+    mockAdminList("/admin/v1/self-hosted-workers/shw-1/events", []);
+  });
+
+  it("renders English rotate action, count cards, and overview tab", async () => {
+    renderWorkerDetail("en");
+    expect(
+      await screen.findByRole("button", { name: en["page.selfHostedWorkerDetail.rotate"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(en["page.selfHostedWorkerDetail.count.telemetry"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: en["page.selfHostedWorkerDetail.tab.overview"] }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese rotate action, count cards, and overview tab", async () => {
+    renderWorkerDetail("zh-CN");
+    expect(
+      await screen.findByRole("button", {
+        name: zhCN["page.selfHostedWorkerDetail.rotate"],
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(zhCN["page.selfHostedWorkerDetail.count.telemetry"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: zhCN["page.selfHostedWorkerDetail.tab.overview"] }),
+    ).toBeInTheDocument();
   });
 });

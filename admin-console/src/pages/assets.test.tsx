@@ -5,6 +5,7 @@ import { HttpResponse, http } from "msw";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import type { AdminSchema } from "@/lib/gateway-client";
 import AssetsPage from "@/pages/assets";
 import { gatewayUrl, server } from "@/test/msw";
@@ -50,11 +51,13 @@ function storageSummary(
 function renderPage() {
   return render(
     <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <AssetsPage />
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider initialLocale="en">
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <AssetsPage />
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }
@@ -86,7 +89,7 @@ describe("AssetsPage", () => {
 
     renderPage();
 
-    expect(await screen.findByText("4.0 KB used of 8.0 KB")).toBeInTheDocument();
+    expect(await screen.findByText("4 KB used of 8 KB")).toBeInTheDocument();
     expect(screen.queryByText("100 B used")).not.toBeInTheDocument();
     await waitFor(() => expect(summaryRequests).toBe(1));
     expect(resolvedDefaultsRequests).toBe(0);
@@ -121,10 +124,10 @@ describe("AssetsPage", () => {
 
     renderPage();
 
-    expect(await screen.findByText("100 B used of 8.0 KB")).toBeInTheDocument();
+    expect(await screen.findByText("100 B used of 8 KB")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
-    expect(await screen.findByText("0 B used of 8.0 KB")).toBeInTheDocument();
+    expect(await screen.findByText("0 B used of 8 KB")).toBeInTheDocument();
     await waitFor(() => expect(summaryRequests).toBeGreaterThanOrEqual(2));
   });
 });

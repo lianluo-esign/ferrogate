@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
 import SelfHostedRunsPage from "@/pages/self-hosted-runs";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
@@ -59,11 +60,13 @@ function timeline() {
 function renderPage() {
   return render(
     <MemoryRouter>
-      <AuthProvider>
-        <QueryClientProvider client={createTestQueryClient()}>
-          <SelfHostedRunsPage />
-        </QueryClientProvider>
-      </AuthProvider>
+      <I18nProvider initialLocale="en">
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <SelfHostedRunsPage />
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }

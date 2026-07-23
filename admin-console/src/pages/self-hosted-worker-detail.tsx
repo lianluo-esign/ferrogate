@@ -46,6 +46,7 @@ import {
   workerStatusVariant,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 function OverviewField({
@@ -98,6 +99,7 @@ function CountCard({
 export default function SelfHostedWorkerDetailPage() {
   const { workerId = "" } = useParams<{ workerId: string }>();
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
@@ -137,7 +139,7 @@ export default function SelfHostedWorkerDetailPage() {
         params: { id: workerId },
       }),
     onSuccess: (response) => {
-      toast.success("Worker identity rotated");
+      toast.success(t("page.selfHostedWorkerDetail.toast.rotated"));
       setRotateOpen(false);
       setRotateFingerprint("");
       setRotateExpiry("");
@@ -154,11 +156,11 @@ export default function SelfHostedWorkerDetailPage() {
   function submitRotate() {
     setRotateError(null);
     if (!rotateFingerprint.trim()) {
-      setRotateError("A new identity fingerprint is required.");
+      setRotateError(t("page.selfHostedWorkerDetail.rotateDialog.errorFingerprintRequired"));
       return;
     }
     if (rotateExpiry.trim() && Number.isNaN(Number(rotateExpiry.trim()))) {
-      setRotateError("Identity expiry must be a Unix timestamp (seconds).");
+      setRotateError(t("page.selfHostedWorkerDetail.rotateDialog.errorExpiryInvalid"));
       return;
     }
     rotateMutation.mutate({
@@ -174,18 +176,20 @@ export default function SelfHostedWorkerDetailPage() {
           to="/app/workers/self-hosted"
           className="text-sm text-muted-foreground hover:underline"
         >
-          ← Self-hosted workers
+          {t("page.selfHostedWorkerDetail.back")}
         </Link>
       </div>
 
       {workerError ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load worker: {workerError.message}
+          {t("page.selfHostedWorkerDetail.error", { message: workerError.message })}
         </p>
       ) : null}
 
       {workerLoading ? (
-        <p className="text-sm text-muted-foreground">Loading worker…</p>
+        <p className="text-sm text-muted-foreground">
+          {t("page.selfHostedWorkerDetail.loading")}
+        </p>
       ) : worker ? (
         <>
           <div className="flex items-start justify-between gap-4">
@@ -197,84 +201,107 @@ export default function SelfHostedWorkerDetailPage() {
                 </Badge>
                 {worker.stale ? (
                   <Badge variant="outline" className="text-destructive">
-                    stale
+                    {t("page.selfHostedWorkerDetail.badge.stale")}
                   </Badge>
                 ) : null}
                 <ReportedTrustBadge />
               </div>
             </div>
-            <Button onClick={() => setRotateOpen(true)}>Rotate identity</Button>
+            <Button onClick={() => setRotateOpen(true)}>
+              {t("page.selfHostedWorkerDetail.rotate")}
+            </Button>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-3">
             <CountCard
-              title="Telemetry events"
+              title={t("page.selfHostedWorkerDetail.count.telemetry")}
               testId="count-events"
               count={worker.telemetry_event_count}
-              latestLabel="Latest"
+              latestLabel={t("page.selfHostedWorkerDetail.count.latest")}
               latestUnix={worker.latest_event_at_unix}
             />
             <CountCard
-              title="Checkpoints"
+              title={t("page.selfHostedWorkerDetail.count.checkpoints")}
               testId="count-checkpoints"
               count={worker.checkpoint_count}
-              latestLabel="Latest"
+              latestLabel={t("page.selfHostedWorkerDetail.count.latest")}
               latestUnix={worker.latest_checkpoint_at_unix}
             />
             <CountCard
-              title="Artifacts"
+              title={t("page.selfHostedWorkerDetail.count.artifacts")}
               testId="count-artifacts"
               count={worker.artifact_count}
-              latestLabel="Latest"
+              latestLabel={t("page.selfHostedWorkerDetail.count.latest")}
               latestUnix={worker.latest_artifact_at_unix}
             />
           </div>
 
           <Tabs defaultValue="overview">
             <TabsList>
-              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="overview">
+                {t("page.selfHostedWorkerDetail.tab.overview")}
+              </TabsTrigger>
               <TabsTrigger value="events">
-                Events{events.length > 0 ? ` (${events.length})` : ""}
+                {events.length > 0
+                  ? t("page.selfHostedWorkerDetail.tab.eventsCount", {
+                      count: events.length,
+                    })
+                  : t("page.selfHostedWorkerDetail.tab.events")}
               </TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview">
               <Card>
                 <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
-                  <OverviewField label="Worker id">
-                    <TruncatedCopyable value={worker.id} label="Worker id" prefixLength={28} />
-                  </OverviewField>
-                  <OverviewField label="Workspace">{worker.workspace_id}</OverviewField>
-                  <OverviewField label="Tenant">{tenantLabel(worker.tenant)}</OverviewField>
-                  <OverviewField label="Orchestration">
-                    {worker.orchestration_enabled ? "Enabled" : "Disabled"}
-                  </OverviewField>
-                  <OverviewField label="Identity fingerprint">
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.workerId")}>
                     <TruncatedCopyable
-                      value={worker.identity_fingerprint}
-                      label="Identity fingerprint"
+                      value={worker.id}
+                      label={t("page.selfHostedWorkerDetail.field.workerId")}
                       prefixLength={28}
                     />
                   </OverviewField>
-                  <OverviewField label="Identity expires">
+                  <OverviewField label={t("common.workspace")}>
+                    {worker.workspace_id}
+                  </OverviewField>
+                  <OverviewField label={t("common.tenant")}>
+                    {tenantLabel(worker.tenant)}
+                  </OverviewField>
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.orchestration")}>
+                    {worker.orchestration_enabled
+                      ? t("common.enabled")
+                      : t("common.disabled")}
+                  </OverviewField>
+                  <OverviewField
+                    label={t("page.selfHostedWorkerDetail.field.identityFingerprint")}
+                  >
+                    <TruncatedCopyable
+                      value={worker.identity_fingerprint}
+                      label={t("page.selfHostedWorkerDetail.field.identityFingerprint")}
+                      prefixLength={28}
+                    />
+                  </OverviewField>
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.identityExpires")}>
                     {formatUnix(worker.identity_expires_at_unix)}
                   </OverviewField>
-                  <OverviewField label="Registered">
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.registered")}>
                     {formatUnix(worker.registered_at_unix)}
                   </OverviewField>
-                  <OverviewField label="Last seen">
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.lastSeen")}>
                     {formatUnix(worker.last_seen_at_unix)}
                   </OverviewField>
-                  <OverviewField label="Stale after">
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.staleAfter")}>
                     {formatUnix(worker.stale_after_unix)}
                   </OverviewField>
-                  <OverviewField label="Latest heartbeat">
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.latestHeartbeat")}>
                     {worker.latest_heartbeat
-                      ? `${worker.latest_heartbeat.status} @ ${formatUnix(
-                          worker.latest_heartbeat.observed_at_unix ??
-                            worker.latest_heartbeat.reported_at_unix,
-                        )}`
-                      : "— (no heartbeat observed)"}
+                      ? t("page.selfHostedWorkerDetail.heartbeat.value", {
+                          status: worker.latest_heartbeat.status,
+                          time: formatUnix(
+                            worker.latest_heartbeat.observed_at_unix ??
+                              worker.latest_heartbeat.reported_at_unix,
+                          ),
+                        })
+                      : t("page.selfHostedWorkerDetail.heartbeat.none")}
                   </OverviewField>
                 </CardContent>
               </Card>
@@ -285,24 +312,24 @@ export default function SelfHostedWorkerDetailPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Kind</TableHead>
-                      <TableHead>Run / session</TableHead>
-                      <TableHead>Correlation</TableHead>
-                      <TableHead>Occurred</TableHead>
-                      <TableHead>Ingested</TableHead>
+                      <TableHead>{t("page.selfHostedWorkerDetail.col.kind")}</TableHead>
+                      <TableHead>{t("page.selfHostedWorkerDetail.col.runSession")}</TableHead>
+                      <TableHead>{t("page.selfHostedWorkerDetail.col.correlation")}</TableHead>
+                      <TableHead>{t("page.selfHostedWorkerDetail.col.occurred")}</TableHead>
+                      <TableHead>{t("page.selfHostedWorkerDetail.col.ingested")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {eventsLoading ? (
                       <TableRow>
                         <TableCell colSpan={5} className="h-24 text-center">
-                          Loading events…
+                          {t("page.selfHostedWorkerDetail.events.loading")}
                         </TableCell>
                       </TableRow>
                     ) : events.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={5} className="h-24 text-center">
-                          No reported telemetry events.
+                          {t("page.selfHostedWorkerDetail.events.empty")}
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -314,25 +341,31 @@ export default function SelfHostedWorkerDetailPage() {
                               <Badge variant="secondary">{event.kind}</Badge>
                             </TableCell>
                             <TableCell className="text-xs">
-                              <div>run {event.run_id ?? "—"}</div>
+                              <div>
+                                {t("page.selfHostedWorkerDetail.row.run", {
+                                  id: event.run_id ?? "—",
+                                })}
+                              </div>
                               <div className="text-muted-foreground">
-                                session {event.session_id ?? "—"}
+                                {t("page.selfHostedWorkerDetail.row.session", {
+                                  id: event.session_id ?? "—",
+                                })}
                               </div>
                             </TableCell>
                             <TableCell className="text-xs">
                               <div className="flex flex-col gap-1">
                                 <span>
-                                  req{" "}
+                                  {t("page.selfHostedWorkerDetail.row.req")}{" "}
                                   <TruncatedCopyable
                                     value={correlation.requestId}
-                                    label="Request id"
+                                    label={t("page.selfHostedWorkerDetail.field.requestId")}
                                   />
                                 </span>
                                 <span>
-                                  trace{" "}
+                                  {t("page.selfHostedWorkerDetail.row.trace")}{" "}
                                   <TruncatedCopyable
                                     value={correlation.traceId}
-                                    label="Trace id"
+                                    label={t("page.selfHostedWorkerDetail.field.traceId")}
                                   />
                                 </span>
                               </div>
@@ -368,29 +401,33 @@ export default function SelfHostedWorkerDetailPage() {
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Rotate worker identity</DialogTitle>
+            <DialogTitle>{t("page.selfHostedWorkerDetail.rotateDialog.title")}</DialogTitle>
             <DialogDescription>
-              Issue a replacement mTLS identity fingerprint. The previous identity is
-              retired and the new one is shown once.
+              {t("page.selfHostedWorkerDetail.rotateDialog.description")}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1.5">
-              <Label htmlFor="rotate-fingerprint">New identity fingerprint</Label>
+              <Label htmlFor="rotate-fingerprint">
+                {t("page.selfHostedWorkerDetail.rotateDialog.fingerprint")}
+              </Label>
               <Input
                 id="rotate-fingerprint"
                 value={rotateFingerprint}
                 onChange={(e) => setRotateFingerprint(e.target.value)}
+                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example fingerprint format, not translatable copy
                 placeholder="sha256:..."
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="rotate-expiry">Identity expiry Unix seconds (optional)</Label>
+              <Label htmlFor="rotate-expiry">
+                {t("page.selfHostedWorkerDetail.rotateDialog.expiry")}
+              </Label>
               <Input
                 id="rotate-expiry"
                 value={rotateExpiry}
                 onChange={(e) => setRotateExpiry(e.target.value)}
-                placeholder="leave blank for no expiry"
+                placeholder={t("page.selfHostedWorkerDetail.rotateDialog.expiryPlaceholder")}
               />
             </div>
             {rotateError ? (
@@ -401,14 +438,16 @@ export default function SelfHostedWorkerDetailPage() {
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setRotateOpen(false)}>
-              Cancel
+              {t("resource.action.cancel")}
             </Button>
             <Button
               type="button"
               disabled={rotateMutation.isPending}
               onClick={submitRotate}
             >
-              {rotateMutation.isPending ? "Rotating…" : "Rotate"}
+              {rotateMutation.isPending
+                ? t("page.selfHostedWorkerDetail.rotateDialog.submitting")
+                : t("page.selfHostedWorkerDetail.rotateDialog.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -417,9 +456,9 @@ export default function SelfHostedWorkerDetailPage() {
       <CredentialRevealDialog
         open={revealed !== null}
         onClose={() => setRevealed(null)}
-        title="Identity rotated"
-        description="Store the new identity fingerprint now. The previous credential no longer authenticates the worker."
-        credentialLabel="New identity fingerprint"
+        title={t("page.selfHostedWorkerDetail.reveal.title")}
+        description={t("page.selfHostedWorkerDetail.reveal.description")}
+        credentialLabel={t("page.selfHostedWorkerDetail.rotateDialog.fingerprint")}
         credential={revealed}
       />
     </div>
