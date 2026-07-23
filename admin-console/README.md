@@ -36,6 +36,40 @@ browser is allowed to call `/admin/v1/*` cross-origin.
 npm run build   # tsc -b && vite build, output in dist/
 ```
 
+## Lint
+
+```bash
+npm run lint   # eslint . — CI runs this via scripts/check-admin-console.sh
+```
+
+### i18n regression guard (`ferrogate/no-untranslated-literal`, #380)
+
+`npm run lint` rejects **newly introduced** hard-coded operator-facing strings
+so the surfaces migrated to `@/i18n` (#348) cannot regress to non-localized
+literals. The rule (`eslint-rules/no-untranslated-literal.js`) flags JSX text
+and operator-facing string props (`placeholder`, `title`, `alt`, `aria-label`,
+`label`, `description`, ...) that are bare literals instead of `t("<key>")`.
+
+It is scoped so the gate is green today without a full-console migration:
+
+- It runs on **every `src/**/*.{ts,tsx}` by default**, so any *new* file is
+  guarded automatically. Tests and the `src/i18n/` catalogs are excluded.
+- Pages/components #348 has **not migrated yet** are listed in the
+  `I18N_UNMIGRATED_ALLOWLIST` in [`eslint.config.js`](./eslint.config.js). This
+  is a shrinking baseline, not a permanent exemption.
+
+Adding or removing an exception:
+
+- **Migrating a file** — route its copy through `t()` with catalog keys and
+  delete its glob from the allowlist so it is guarded again.
+- **A single non-copy literal** the heuristic misfires on (a brand mark, an
+  illustrative example value) — prefer an inline
+  `// eslint-disable-next-line ferrogate/no-untranslated-literal -- <reason>`
+  over listing the whole file.
+- **A new page that genuinely cannot be localized yet** — add its glob to the
+  allowlist *with a one-line justification in review*. New files are guarded by
+  default so this stays a conscious, reviewed decision.
+
 ## Browser contract
 
 The Playwright suite runs against deterministic browser-side Admin API mocks;

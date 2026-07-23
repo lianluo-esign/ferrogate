@@ -71,6 +71,7 @@ export default function LoginPage() {
                   type="email"
                   inputMode="email"
                   spellCheck={false}
+                  // eslint-disable-next-line ferrogate/no-untranslated-literal -- illustrative email format, not translated copy (#380)
                   placeholder="you@example.com"
                   autoComplete="email"
                   required

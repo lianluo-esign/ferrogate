@@ -74,6 +74,7 @@ export default function RegisterPage() {
                   name="organization_name"
                   autoComplete="organization"
                   spellCheck={false}
+                  // eslint-disable-next-line ferrogate/no-untranslated-literal -- illustrative example name, not translated copy (#380)
                   placeholder="Acme Inc."
                   required
                   value={organizationName}
@@ -86,6 +87,7 @@ export default function RegisterPage() {
                   id="display_name"
                   name="display_name"
                   autoComplete="name"
+                  // eslint-disable-next-line ferrogate/no-untranslated-literal -- illustrative example name, not translated copy (#380)
                   placeholder="Jane Doe"
                   value={displayName}
                   onChange={(event) => setDisplayName(event.target.value)}
@@ -99,6 +101,7 @@ export default function RegisterPage() {
                   type="email"
                   inputMode="email"
                   spellCheck={false}
+                  // eslint-disable-next-line ferrogate/no-untranslated-literal -- illustrative email format, not translated copy (#380)
                   placeholder="you@example.com"
                   autoComplete="email"
                   required
