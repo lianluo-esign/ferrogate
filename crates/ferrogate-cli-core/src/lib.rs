@@ -55,18 +55,21 @@
 //! layers typed, generated-from-OpenAPI models on top of this seam without
 //! having to rip out ad-hoc shapes.
 
+pub mod agent;
 pub mod args;
 pub mod auth;
 pub mod command;
 pub mod context;
 pub mod error;
 pub mod iam;
+pub mod mcp;
 pub mod organization;
 pub mod output;
 pub mod registry_helpers;
 pub mod resource;
 pub mod transport;
 pub mod version;
+pub mod worker;
 
 pub use command::Registry;
 pub use error::{ApiError, CliError, CliResult, ExitClass};
@@ -74,9 +77,13 @@ pub use error::{ApiError, CliError, CliResult, ExitClass};
 /// Register every resource command family this crate provides onto a fresh
 /// [`Registry`]. The composing `ferrogate` binary (epic #358) calls this to get
 /// the full client command surface; #361 contributes the organization and IAM
-/// families, later slices add gateway configuration and the rest.
+/// families, #362 the agent / worker / MCP lifecycle families, and later slices
+/// add gateway configuration and the rest.
 pub fn register_resource_families(registry: &mut Registry) -> CliResult<()> {
     organization::register(registry)?;
     iam::register(registry)?;
+    agent::register(registry)?;
+    worker::register(registry)?;
+    mcp::register(registry)?;
     Ok(())
 }
