@@ -2344,3 +2344,78 @@ $$;
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (51, '051_asset_screening_visibility')
 ON CONFLICT (version) DO NOTHING;
+
+-- Migration 52 (#352): durable x402 payment attempts and their wallet coupling.
+-- A wallet hold alone cannot explain or reconcile an on-chain payment, so every
+-- attempt gets a durable identity carrying the complete immutable audit tuple
+-- (the frozen #350 wire contract fields plus the #351 policy decision output)
+-- and an explicit state machine. State moves through
+--   challenged -> authorized -> submitted -> settled
+-- with terminal denied/released/failed and non-terminal outcome_unknown; every
+-- transition is one short conditional CAS gated on the current state (see
+-- crates/ferrogate-storage/src/payment_attempt.rs). `generation` is the
+-- per-attempt operation token that survives the async storage scheduler so a
+-- stale reread across a timeout is never mistaken for a failed transition.
+--
+-- `hold_id` couples the attempt to its wallet reservation (#281,
+-- wallet_reservations.id); crossing into settled captures that hold, while
+-- released/failed/denied release it and outcome_unknown RETAINS it. No FK is
+-- placed on hold_id because a denied attempt legitimately has none and the
+-- linkage is resolved in-process; ownership is enforced by tenant_id on every
+-- read. Atomic amounts are TEXT (canonical decimal) so the on-chain u64 range
+-- survives a BIGINT that only spans i64; credits_amount stays BIGINT to match
+-- the wallet-credit domain. The insert-first/IF FOUND gate keeps the one-time
+-- DDL off the repeated startup schema-validation path.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (52, '052_x402_payment_attempts')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE TABLE IF NOT EXISTS payment_attempts (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            project_id TEXT,
+            workspace_id TEXT,
+            run_id TEXT,
+            worker_id TEXT,
+            request_id TEXT,
+            trace_id TEXT,
+            method TEXT NOT NULL,
+            resource_url TEXT NOT NULL,
+            request_body_hash TEXT,
+            challenge_hash TEXT NOT NULL,
+            x402_version BIGINT NOT NULL,
+            scheme TEXT NOT NULL,
+            network_caip2 TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            atomic_amount TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            credits_amount BIGINT,
+            conversion_version TEXT,
+            policy_revision BIGINT NOT NULL,
+            decision TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            hold_id TEXT,
+            state TEXT NOT NULL CHECK (state IN (
+                'challenged', 'authorized', 'submitted', 'settled',
+                'denied', 'released', 'failed', 'outcome_unknown'
+            )),
+            generation BIGINT NOT NULL DEFAULT 0,
+            submitted_at_unix BIGINT,
+            transaction_signature TEXT,
+            settled_atomic_amount TEXT,
+            settlement_response TEXT,
+            failure_code TEXT,
+            created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+            updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+        );
+        -- Tenant-scoped, newest-first admin listing without a separate sort step.
+        CREATE INDEX IF NOT EXISTS idx_payment_attempts_tenant_time
+            ON payment_attempts(tenant_id, created_at_unix DESC);
+        -- Resolve an attempt from its linked hold (reconciliation/inspection).
+        CREATE INDEX IF NOT EXISTS idx_payment_attempts_hold
+            ON payment_attempts(hold_id) WHERE hold_id IS NOT NULL;
+    END IF;
+END
+$$;

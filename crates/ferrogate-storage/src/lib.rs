@@ -240,6 +240,15 @@ pub use wallet::{
     WALLET_RESERVATION_SETTLED,
 };
 
+mod payment_attempt;
+pub use payment_attempt::{
+    payment_attempt_state_is_terminal, PaymentAttemptCreation, PaymentAttemptEvidenceArgs,
+    PaymentAttemptLinks, PaymentAttemptTransition, StoredPaymentAttempt,
+    PAYMENT_ATTEMPT_AUTHORIZED, PAYMENT_ATTEMPT_CHALLENGED, PAYMENT_ATTEMPT_DENIED,
+    PAYMENT_ATTEMPT_FAILED, PAYMENT_ATTEMPT_INITIAL_STATES, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN,
+    PAYMENT_ATTEMPT_RELEASED, PAYMENT_ATTEMPT_SETTLED, PAYMENT_ATTEMPT_SUBMITTED,
+};
+
 mod workflow_budget;
 pub use workflow_budget::{
     workflow_run_budget_id, StoredWorkflowRunBudget, WorkflowBudgetDebit, WorkflowBudgetDimension,
@@ -1265,6 +1274,8 @@ pub struct RuntimeControlPlaneState {
     wallet_settlements: InMemoryRepository<StoredWalletSettlement>,
     // #281: durable reserve/hold rows keyed by reservation id.
     wallet_reservations: InMemoryRepository<StoredWalletReservation>,
+    // #352: durable x402 payment attempts keyed by attempt/idempotency id.
+    payment_attempts: InMemoryRepository<StoredPaymentAttempt>,
     payment_methods: InMemoryRepository<StoredPaymentMethod>,
     guardrail_policy_revisions: InMemoryRepository<StoredGuardrailPolicyRevision>,
     guardrail_policy_bindings: InMemoryRepository<StoredGuardrailPolicyBinding>,
@@ -8269,6 +8280,7 @@ where
         "wallets",
         "wallet_settlements",
         "wallet_reservations",
+        "payment_attempts",
         "payment_methods",
         "agent_schedules",
         "agent_schedule_fires",
@@ -10013,6 +10025,7 @@ impl RuntimeControlPlaneState {
             wallets: InMemoryRepository::new(),
             wallet_settlements: InMemoryRepository::new(),
             wallet_reservations: InMemoryRepository::new(),
+            payment_attempts: InMemoryRepository::new(),
             payment_methods: InMemoryRepository::new(),
             guardrail_policy_revisions: InMemoryRepository::new(),
             guardrail_policy_bindings: InMemoryRepository::new(),
@@ -16258,6 +16271,10 @@ mod asset_channel_lifecycle_test;
 #[cfg(test)]
 #[path = "asset_visibility_test.rs"]
 mod asset_visibility_test;
+
+#[cfg(test)]
+#[path = "payment_attempt_test.rs"]
+mod payment_attempt_test;
 
 #[cfg(test)]
 mod tests {

@@ -180,7 +180,7 @@ fn payment_method_from_row(row: &PostgresRow) -> StoredPaymentMethod {
     }
 }
 
-fn wallet_settlement_from_row(row: &PostgresRow) -> StoredWalletSettlement {
+pub(super) fn wallet_settlement_from_row(row: &PostgresRow) -> StoredWalletSettlement {
     StoredWalletSettlement {
         id: row.get(0),
         tenant_id: row.get(1),
@@ -190,7 +190,7 @@ fn wallet_settlement_from_row(row: &PostgresRow) -> StoredWalletSettlement {
     }
 }
 
-fn wallet_reservation_from_row(row: &PostgresRow) -> StoredWalletReservation {
+pub(super) fn wallet_reservation_from_row(row: &PostgresRow) -> StoredWalletReservation {
     StoredWalletReservation {
         id: row.get(0),
         tenant_id: row.get(1),
@@ -205,8 +205,13 @@ fn wallet_reservation_from_row(row: &PostgresRow) -> StoredWalletReservation {
 
 /// Column list shared by every `wallet_reservations` read so the positional
 /// [`wallet_reservation_from_row`] indices stay in lockstep.
-const WALLET_RESERVATION_COLUMNS: &str = "id, tenant_id, amount_credits, status, \
+pub(super) const WALLET_RESERVATION_COLUMNS: &str = "id, tenant_id, amount_credits, status, \
      expires_at_unix, settlement_id, created_at_unix, updated_at_unix";
+
+/// Column list shared by every `wallet_settlements` read so the positional
+/// [`wallet_settlement_from_row`] indices stay in lockstep.
+pub(super) const WALLET_SETTLEMENT_COLUMNS: &str =
+    "id, tenant_id, delta_credits, balance_after_credits, created_at_unix";
 
 impl PostgresControlPlaneStore {
     fn wallet_operation(&self, name: &'static str) -> StorageOperation {
