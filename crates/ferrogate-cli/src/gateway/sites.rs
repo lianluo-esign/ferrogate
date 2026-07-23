@@ -19,7 +19,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{sha256_hex, stored_asset_id, StoredAsset};
+use ferrogate_storage::{sha256_hex, stored_asset_id, AssetVisibility, StoredAsset};
 
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
@@ -495,6 +495,10 @@ impl FerroGateway {
                 storage_uri,
                 variant: String::new(),
                 yanked: false,
+                // #366: per-file site rows are published only after the parent
+                // bundle screened clean (guarded in handle_asset_push), so they
+                // are visible.
+                visibility: AssetVisibility::Visible,
                 created_at_unix,
                 updated_at_unix: now,
             };
@@ -626,6 +630,9 @@ impl FerroGateway {
             storage_uri: None,
             variant: String::new(),
             yanked: false,
+            // #366: the site manifest row is written only on a clean bundle
+            // publish, so it is visible.
+            visibility: AssetVisibility::Visible,
             created_at_unix: manifest.created_at_unix.min(now),
             updated_at_unix: now,
         };

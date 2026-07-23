@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
 
-use ferrogate_storage::stored_asset_id;
+use ferrogate_storage::{stored_asset_id, StoredAsset};
 
 use crate::{
     auth::AuthContext,
@@ -236,6 +236,12 @@ async fn resources_list(
     };
     match state.list_assets(&tenant_id, None).await {
         Ok(assets) => {
+            // #366: the MCP resource listing withholds pending/quarantined
+            // assets, matching the REST list/manifest and the read chokepoint.
+            let assets: Vec<StoredAsset> = assets
+                .into_iter()
+                .filter(StoredAsset::is_downloadable)
+                .collect();
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,

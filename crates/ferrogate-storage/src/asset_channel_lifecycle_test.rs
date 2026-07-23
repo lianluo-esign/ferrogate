@@ -39,6 +39,7 @@ fn asset(version: &str, variant: &str, yanked: bool) -> StoredAsset {
         storage_uri: None,
         variant: variant.into(),
         yanked,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     }

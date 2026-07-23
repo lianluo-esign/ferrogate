@@ -389,6 +389,50 @@ fn presign_control_requests_reject_unknown_json_fields() {
 }
 
 #[test]
+fn commit_request_carries_typed_trust_inputs_for_the_shared_screening_service() {
+    // #366: the presigned commit body carries the same signature/visibility/
+    // approval inputs the inline push carries via headers, so the SAME
+    // screening service runs over the final verified bytes.
+    let commit: PresignCommitRequest = serde_json::from_str(&format!(
+        r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42,"sha256":"{}",
+             "content_type":"application/octet-stream","signature":"c2ln","signature_format":"ed25519",
+             "signature_key_id":"pub-1","visibility":"public","approval_id":"appr-9"}}"#,
+        "a".repeat(64)
+    ))
+    .expect("commit with trust inputs parses");
+
+    let signature = commit.signature_input().expect("signature input built");
+    assert!(matches!(
+        signature.format,
+        crate::gateway::asset_signature::SignatureFormat::Ed25519
+    ));
+    assert_eq!(signature.material, "c2ln");
+    assert_eq!(signature.key_id.as_deref(), Some("pub-1"));
+    assert_eq!(
+        commit.publish_visibility(),
+        crate::gateway::asset_publish_gate::PublishVisibility::Public
+    );
+    assert_eq!(commit.approval_id.as_deref(), Some("appr-9"));
+}
+
+#[test]
+fn commit_request_defaults_trust_inputs_when_omitted() {
+    // An unsigned tenant-private publish sends no trust fields: unsigned, and
+    // tenant-private visibility (the same defaults as the inline path).
+    let commit: PresignCommitRequest = serde_json::from_str(&format!(
+        r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42,"sha256":"{}"}}"#,
+        "a".repeat(64)
+    ))
+    .expect("minimal commit parses");
+    assert!(commit.signature_input().is_none());
+    assert_eq!(
+        commit.publish_visibility(),
+        crate::gateway::asset_publish_gate::PublishVisibility::TenantPrivate
+    );
+    assert!(commit.approval_id.is_none());
+}
+
+#[test]
 fn create_failure_cleanup_preserves_only_genuinely_unknown_outcomes() {
     let unknown = StorageError::OperationCommitOutcomeUnknown {
         operation: "create asset if absent",
@@ -427,6 +471,7 @@ fn committed_asset(storage_uri: Option<&str>) -> StoredAsset {
         storage_uri: storage_uri.map(str::to_string),
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     }

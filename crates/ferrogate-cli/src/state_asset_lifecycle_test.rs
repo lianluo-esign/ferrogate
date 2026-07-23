@@ -58,6 +58,7 @@ fn inline_asset(tenant: &str, name: &str, version: &str, created: i64) -> Stored
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: created,
         updated_at_unix: created,
     }

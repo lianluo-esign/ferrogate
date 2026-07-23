@@ -3887,6 +3887,7 @@ impl PostgresControlPlaneStore {
 
     async fn upsert_asset(&self, asset: &StoredAsset) -> Result<(), StorageError> {
         let size_bytes = saturating_i64(asset.size_bytes);
+        let visibility = asset.visibility.as_str();
         let operation = self.asset_operation("upsert asset");
         let mut client = self
             .async_pool
@@ -3907,13 +3908,14 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO stored_assets \
                  (id, tenant_id, project_id, asset_type, name, version, content_type, \
                   content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                  storage_uri, variant, yanked) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                  storage_uri, variant, yanked, visibility) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
                  ON CONFLICT (id) DO UPDATE SET \
                  content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, \
                  size_bytes = EXCLUDED.size_bytes, content = EXCLUDED.content, \
                  updated_at_unix = EXCLUDED.updated_at_unix, \
-                 storage_uri = EXCLUDED.storage_uri, yanked = EXCLUDED.yanked",
+                 storage_uri = EXCLUDED.storage_uri, yanked = EXCLUDED.yanked, \
+                 visibility = EXCLUDED.visibility",
                 &[
                     &asset.id,
                     &asset.tenant_id,
@@ -3930,6 +3932,7 @@ impl PostgresControlPlaneStore {
                     &asset.storage_uri,
                     &asset.variant,
                     &asset.yanked,
+                    &visibility,
                 ],
             )
             .await
@@ -3941,12 +3944,13 @@ impl PostgresControlPlaneStore {
     const CREATE_ASSET_IF_ABSENT_QUERY: &'static str = "INSERT INTO stored_assets \
          (id, tenant_id, project_id, asset_type, name, version, content_type, \
           content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-          storage_uri, variant, yanked) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+          storage_uri, variant, yanked, visibility) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
          ON CONFLICT (id) DO NOTHING";
 
     async fn create_asset_if_absent(&self, asset: &StoredAsset) -> Result<bool, StorageError> {
         let size_bytes = saturating_i64(asset.size_bytes);
+        let visibility = asset.visibility.as_str();
         let operation = self.asset_operation("create asset if absent");
         let mut client = self
             .async_pool
@@ -3978,6 +3982,7 @@ impl PostgresControlPlaneStore {
                     &asset.storage_uri,
                     &asset.variant,
                     &asset.yanked,
+                    &visibility,
                 ],
             )
             .await
@@ -4018,7 +4023,7 @@ impl PostgresControlPlaneStore {
             .query_opt(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                  content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                 storage_uri, variant, yanked \
+                 storage_uri, variant, yanked, visibility \
                  FROM stored_assets WHERE id = $1",
                 &[&id],
             )
@@ -4053,7 +4058,7 @@ impl PostgresControlPlaneStore {
                 .query(
                     "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                          content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                         storage_uri, variant, yanked \
+                         storage_uri, variant, yanked, visibility \
                          FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
                          ORDER BY name ASC, version ASC",
                     &[&tenant_id, &asset_type],
@@ -4064,7 +4069,7 @@ impl PostgresControlPlaneStore {
                 .query(
                     "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                          content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                         storage_uri, variant, yanked \
+                         storage_uri, variant, yanked, visibility \
                          FROM stored_assets WHERE tenant_id = $1 \
                          ORDER BY asset_type ASC, name ASC, version ASC",
                     &[&tenant_id],
@@ -4593,7 +4598,7 @@ impl PostgresControlPlaneStore {
             .query(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
                  content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
-                 storage_uri, variant, yanked \
+                 storage_uri, variant, yanked, visibility \
                  FROM stored_assets ORDER BY tenant_id ASC, asset_type ASC, name ASC, version ASC",
                 &[],
             )
@@ -8390,6 +8395,10 @@ where
             "text",
             "NO",
         ),
+        // #366 (migration 51): the trust-screening visibility state must exist
+        // and be NOT NULL, so a partially-migrated schema can never leave the
+        // read path unable to tell a withheld row from a clean one.
+        ("stored_assets", "visibility", "text", "NO"),
     ];
     for (table, column, expected_type, expected_nullable) in REQUIRED_MIGRATION_COLUMNS {
         let definition = client
@@ -9008,6 +9017,7 @@ fn asset_from_row(row: &PostgresRow) -> StoredAsset {
         storage_uri: row.get::<_, Option<String>>(12),
         variant: row.get::<_, String>(13),
         yanked: row.get::<_, bool>(14),
+        visibility: AssetVisibility::from_stored(&row.get::<_, String>(15)),
     }
 }
 
@@ -11371,6 +11381,58 @@ pub struct StoredPlan {
     pub extension_tools_enabled: bool,
 }
 
+/// Durable trust-screening state of a stored asset version (issue #366). Push
+/// screening (`asset_security::screen_asset_push`) resolves every asset -- from
+/// both the inline and the presigned commit path -- to one of these states over
+/// the *final verified bytes*. Only [`AssetVisibility::Visible`] is downloadable;
+/// `PendingScan`/`Quarantined` rows are persisted but withheld from every
+/// resolution and download surface until an out-of-band scan promotes them
+/// clean. This is the write-path == read-path guard (#188): the state the push
+/// path persists is exactly the state the read path enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetVisibility {
+    /// Screened clean (or a pre-#366 row, via `Default`): resolvable and
+    /// downloadable through every asset surface.
+    #[default]
+    Visible,
+    /// Admitted to storage but not yet proven clean (deferred/async scan). The
+    /// bytes exist durably but are withheld from consumers until promoted.
+    PendingScan,
+    /// The scanner (or a fail-closed-unavailable policy) flagged the bytes.
+    /// Stored for operator inspection but never served.
+    Quarantined,
+}
+
+impl AssetVisibility {
+    /// Stable wire/DB token. Kept in lockstep with `serde(rename_all)` so the
+    /// TEXT column, the JSON snapshot, and audit evidence all agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AssetVisibility::Visible => "visible",
+            AssetVisibility::PendingScan => "pending_scan",
+            AssetVisibility::Quarantined => "quarantined",
+        }
+    }
+
+    /// Parse the TEXT column back into a typed state. An unrecognized token
+    /// fails closed to `Quarantined` rather than silently becoming visible --
+    /// an unknown state must never be served (#188 lesson: never let a poisoned
+    /// or partially-migrated row default to downloadable).
+    pub fn from_stored(raw: &str) -> Self {
+        match raw {
+            "visible" => AssetVisibility::Visible,
+            "pending_scan" => AssetVisibility::PendingScan,
+            _ => AssetVisibility::Quarantined,
+        }
+    }
+
+    /// Whether a consumer may resolve/download this asset right now.
+    pub fn is_downloadable(self) -> bool {
+        matches!(self, AssetVisibility::Visible)
+    }
+}
+
 /// A tenant-scoped static asset (issue #176): the storage primitive behind
 /// the unified agent-asset hosting epic (#175) -- CLI tool packages, MCP
 /// connection manifests, Skill bundles, static sites, and config files all
@@ -11417,10 +11479,28 @@ pub struct StoredAsset {
     /// retained -- yank is not delete.
     #[serde(default)]
     pub yanked: bool,
+    /// Trust-screening visibility state (issue #366). A `Visible` asset is
+    /// resolvable and downloadable; `PendingScan`/`Quarantined` rows are
+    /// persisted but withheld from every list/manifest/resolution/download
+    /// surface. Defaults to `Visible` so pre-#366 rows (and any snapshot
+    /// exported before the column existed) deserialize as already-clean, which
+    /// is safe because those rows were only ever admitted after passing the
+    /// screening that existed at push time.
+    #[serde(default)]
+    pub visibility: AssetVisibility,
     #[serde(default)]
     pub created_at_unix: i64,
     #[serde(default)]
     pub updated_at_unix: i64,
+}
+
+impl StoredAsset {
+    /// Whether this asset may be resolved/served right now (#366). The read
+    /// path calls this at every download and resolution surface so a
+    /// `PendingScan`/`Quarantined` row is never served.
+    pub fn is_downloadable(&self) -> bool {
+        self.visibility.is_downloadable()
+    }
 }
 
 /// Deterministic id for an asset so `upsert` is naturally idempotent per
@@ -16176,6 +16256,10 @@ mod asset_storage_usage_test;
 mod asset_channel_lifecycle_test;
 
 #[cfg(test)]
+#[path = "asset_visibility_test.rs"]
+mod asset_visibility_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -17547,6 +17631,7 @@ mod tests {
             storage_uri: None,
             variant: "linux-x86_64".into(),
             yanked: false,
+            visibility: AssetVisibility::Visible,
             created_at_unix: 0,
             updated_at_unix: 0,
         };

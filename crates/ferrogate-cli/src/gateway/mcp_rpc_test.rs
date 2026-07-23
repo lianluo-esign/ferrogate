@@ -95,6 +95,7 @@ fn seed(state: &AppState, tenant: &str, asset_type: &str, name: &str, version: &
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     }))

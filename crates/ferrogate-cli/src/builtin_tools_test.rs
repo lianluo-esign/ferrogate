@@ -82,6 +82,7 @@ fn seed_asset(
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     };
@@ -131,6 +132,7 @@ fn resource_descriptor_exposes_uri_and_fingerprint_metadata() {
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     };
@@ -186,6 +188,7 @@ fn blank_asset() -> StoredAsset {
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     }
@@ -243,6 +246,58 @@ fn execute_fetch_asset_returns_content_matching_stored_fingerprint() {
     assert_eq!(block["resource"]["text"], "echo hello");
     assert_eq!(block["resource"]["_meta"]["sha256"], asset.content_hash);
     assert_eq!(response.content["_meta"]["sha256"], asset.content_hash);
+}
+
+#[test]
+fn execute_fetch_asset_withholds_a_quarantined_asset() {
+    // #366 write-path == read-path: a quarantined asset is persisted but must
+    // be withheld from the built-in `fetch_asset` download surface too (which
+    // routes through the shared read_asset_content chokepoint), reported as
+    // not-found exactly like the REST pull and presigned download paths.
+    let state = AppState::new(Config {
+        api_keys: vec![api_key(
+            "reader",
+            "reader-secret",
+            &["assets.read"],
+            Some("tenant-1"),
+        )],
+        ..Config::default()
+    });
+    let content = b"quarantined payload";
+    let quarantined = StoredAsset {
+        id: stored_asset_id("tenant-1", "cli_tool", "deploy", "9.9.9"),
+        tenant_id: "tenant-1".into(),
+        project_id: None,
+        asset_type: "cli_tool".into(),
+        name: "deploy".into(),
+        version: "9.9.9".into(),
+        content_type: "text/plain".into(),
+        content_hash: sha256_hex(content),
+        size_bytes: content.len() as u64,
+        content: content.to_vec(),
+        storage_uri: None,
+        variant: String::new(),
+        yanked: false,
+        visibility: ferrogate_storage::AssetVisibility::Quarantined,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    };
+    block_on(state.upsert_asset(quarantined)).unwrap();
+    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
+        .expect("assets.read key authenticates");
+
+    let request = ToolExecutionRequest {
+        name: FETCH_ASSET_TOOL_NAME.to_string(),
+        arguments: json!({ "uri": "asset://cli_tool/deploy/9.9.9" }),
+        route: Some("/v1/mcp".into()),
+        session_id: None,
+    };
+    let error = block_on(execute_fetch_asset(&state, &auth, &request, "req-1"))
+        .expect_err("quarantined asset must not be fetchable");
+    assert!(
+        matches!(error, ToolExecutionError::NotFound(_)),
+        "withheld asset must report NotFound, got {error:?}"
+    );
 }
 
 #[test]

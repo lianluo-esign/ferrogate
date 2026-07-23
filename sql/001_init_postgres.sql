@@ -2315,3 +2315,32 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 51 (#366): durable trust-screening visibility state on every
+-- stored asset. Before #366 the presigned commit path ran only size/SHA-256 +
+-- built-in content validation, bypassing the signature/approval/scanner
+-- screening the inline path applied, and a `pending_scan`/`quarantined` verdict
+-- had nowhere durable to live -- so the download path could not withhold an
+-- unproven object. This column is the persisted half of that fix: both the
+-- inline and the presigned publish path now write the screening verdict here,
+-- and every read/resolution/download surface serves a row only when it is
+-- 'visible'. Added NOT NULL DEFAULT 'visible' so pre-#366 rows (only ever
+-- admitted after passing the screening that existed at push time) stay
+-- downloadable, while every new withheld row is explicit. Idempotent
+-- ADD COLUMN IF NOT EXISTS; no index (visibility is filtered in-process over
+-- the already tenant-indexed row set, never as a standalone lookup key).
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (51, '051_asset_screening_visibility')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE stored_assets
+            ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'visible';
+    END IF;
+END
+$$;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (51, '051_asset_screening_visibility')
+ON CONFLICT (version) DO NOTHING;

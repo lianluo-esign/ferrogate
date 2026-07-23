@@ -28,6 +28,7 @@ fn asset(id: &str, tenant_id: &str, size_bytes: u64) -> StoredAsset {
         storage_uri: None,
         variant: String::new(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: 1,
         updated_at_unix: 1,
     }

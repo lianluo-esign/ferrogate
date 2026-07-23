@@ -50,6 +50,14 @@ impl AppState {
             Ok(None) => return Err(AssetReadError::NotFound),
             Err(error) => return Err(AssetReadError::Storage(error.to_string())),
         };
+        // #366: a pending/quarantined asset is withheld from EVERY read surface
+        // that routes through this shared chokepoint -- the REST pull, the MCP
+        // `resources/read`, and the `fetch_asset` built-in tool. Reported as
+        // NotFound so an unproven object is indistinguishable from absent, the
+        // same disposition the REST resolution and presigned download paths use.
+        if !asset.is_downloadable() {
+            return Err(AssetReadError::NotFound);
+        }
         let content = if let Some(storage_uri) = asset.storage_uri.as_deref() {
             let Some(bucket) = self.asset_bucket_client() else {
                 return Err(AssetReadError::BucketUnavailable(

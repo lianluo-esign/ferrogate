@@ -98,6 +98,18 @@ fn schema_contract_includes_latest_asset_egress_migration() {
     assert!(POSTGRES_SCHEMA_SQL.contains(
         "CHECK (size_bytes >= 0 AND (storage_uri IS NOT NULL OR size_bytes <= 10485760))"
     ));
+    // #366: durable trust-screening visibility state on stored assets (051), so
+    // the presigned commit path persists the same screening verdict as inline
+    // and the read path can withhold pending/quarantined rows.
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (51, '051_asset_screening_visibility')"));
+    let migration_51 = POSTGRES_SCHEMA_SQL
+        .split("-- Migration 51 (#366)")
+        .nth(1)
+        .expect("migration 51 block present");
+    assert!(migration_51.contains("DO $$"));
+    assert!(migration_51.contains("IF FOUND THEN"));
+    assert!(POSTGRES_SCHEMA_SQL
+        .contains("ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'visible'"));
     assert!(
         POSTGRES_SCHEMA_SQL.contains("monthly_egress_bytes_budget BIGINT")
             && POSTGRES_SCHEMA_SQL.contains("default_download_rpm_limit BIGINT")

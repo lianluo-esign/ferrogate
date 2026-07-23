@@ -34,6 +34,7 @@ fn asset_at(name: &str, version: &str, variant: &str, created: i64) -> StoredAss
         )),
         variant: variant.into(),
         yanked: false,
+        visibility: Default::default(),
         created_at_unix: created,
         updated_at_unix: created,
     }

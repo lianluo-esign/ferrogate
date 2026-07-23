@@ -270,7 +270,16 @@ impl FerroGateway {
         };
         match state.list_assets(&tenant_id, asset_type).await {
             Ok(assets) => {
-                let body = AdminList::new(assets.iter().map(asset_summary).collect());
+                // #366: the ordinary tenant listing withholds pending/quarantined
+                // rows; they are surfaced only through the dedicated screening
+                // audit evidence, never as ordinary resolvable assets.
+                let body = AdminList::new(
+                    assets
+                        .iter()
+                        .filter(|asset| asset.is_downloadable())
+                        .map(asset_summary)
+                        .collect(),
+                );
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => storage_unavailable(session, ctx, error.to_string()).await,
@@ -452,8 +461,11 @@ impl FerroGateway {
         // Site bundles (issue #258): a `static_site` pushed as a zip archive is
         // unpacked into per-file objects and a site manifest, published under
         // the `/sites/{tenant}/{name}` serve surface, rather than stored as a
-        // single opaque blob.
-        if asset_type == "static_site" && is_zip_archive(&content) {
+        // single opaque blob. #366: only take this serve-publishing path when
+        // the bundle screened clean; a pending/quarantined verdict must be
+        // stored withheld (fall through to the ordinary blob store below) so
+        // the site is never served before it is proven clean.
+        if asset_type == "static_site" && is_zip_archive(&content) && screening.is_visible() {
             return self
                 .publish_site_bundle(
                     session, ctx, &auth, headers, &tenant_id, name, version, &content,
@@ -538,6 +550,10 @@ impl FerroGateway {
             storage_uri,
             variant: variant.clone(),
             yanked: false,
+            // #366: persist the screening verdict so a pending/quarantined push
+            // is durably withheld from every read path, not merely labeled on
+            // the (transient) response.
+            visibility: screening.visibility(),
             created_at_unix: now,
             updated_at_unix: now,
         };
@@ -616,6 +632,14 @@ impl FerroGateway {
             Ok(assets) => assets,
             Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
         };
+        // #366: withhold pending/quarantined rows from resolution entirely, so a
+        // still-unproven asset is absent from exact/channel/range resolution and
+        // can never be selected for download -- the read half of the persisted
+        // screening state (write-path == read-path, #188).
+        let assets: Vec<StoredAsset> = assets
+            .into_iter()
+            .filter(StoredAsset::is_downloadable)
+            .collect();
         let channels = match state
             .list_asset_channels(&tenant_id, asset_type, name)
             .await
@@ -1157,6 +1181,13 @@ impl FerroGateway {
             Ok(assets) => assets,
             Err(error) => return storage_unavailable(session, ctx, error.to_string()).await,
         };
+        // #366: the self-serve manifest advertises resolvable versions; a
+        // pending/quarantined row must be absent from it just as it is absent
+        // from resolution and download.
+        let assets: Vec<StoredAsset> = assets
+            .into_iter()
+            .filter(StoredAsset::is_downloadable)
+            .collect();
         if assets.is_empty() {
             return write_json_error(
                 session,

@@ -11757,7 +11757,7 @@
           "gateway"
         ],
         "summary": "Verify and commit a presigned asset upload.",
-        "description": "Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and applies the built-in asset content/type validation. This path does not claim parity with inline detached-signature, approval, or pluggable scanner checks. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.",
+        "description": "Resolves the opaque upload_id to its unique staging object, verifies declared size and SHA-256, and then runs the SAME full trust screening the inline push applies over the final verified bytes: detached-signature verification, the cross-tenant approval gate, the configured malware scanner, and the built-in content/type policy (issue #366). Invalid signature, missing approval, and scanner reject/unavailable fail closed with no durable write; a pending/quarantined scan verdict is persisted with an explicit visibility state and withheld from every list, manifest, resolution, and download surface until promoted clean. Verified bytes are copied to an internal immutable final key before the metadata row is created atomically. That key is never a client PUT target and is not serialized in list, manifest, or standalone response fields; an authorized presigned download URL necessarily contains its path. Only the same upload_id with matching metadata is idempotent; a different upload_id for an existing immutable version returns 409 without changing the live asset. Definitive validation, quota, and losing-conflict failures clean only this intent's temporary objects best-effort, while infrastructure outcomes that cannot be proven preserve its staging and final candidates for retry or garbage collection. Successful commits clean staging best-effort. If the atomic metadata create may have committed but its result cannot be proven, the gateway returns 503 asset_commit_outcome_unknown and preserves both objects for a same-upload_id retry or operator reconciliation.",
         "x-ferrogate-contract": {
           "visibility": "public",
           "auth": {
@@ -24465,6 +24465,57 @@
               "null"
             ],
             "description": "Stored content type; null or omission defaults to application/octet-stream."
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Detached minisign file or base64 Ed25519 signature material over the uploaded bytes. Screened identically to the inline x-asset-signature header; omission is an unsigned publish (rejected only when the tenant requires signatures)."
+          },
+          "signature_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Detached signature encoding; defaults to minisign when a signature is present without a format.",
+            "enum": [
+              "minisign",
+              "ed25519",
+              "cosign",
+              null
+            ]
+          },
+          "signature_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Publisher key hint for bare Ed25519 signatures."
+          },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Publish visibility. Cross-tenant values require a durable approval record. Omission defaults to tenant-private.",
+            "enum": [
+              "private",
+              "tenant",
+              "tenant_private",
+              "shared",
+              "cross_tenant",
+              "cross_tenant_shared",
+              "public",
+              null
+            ]
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Durable tool-approval record used for cross-tenant publication; its status is read server-side, never client-asserted."
           }
         },
         "additionalProperties": false,

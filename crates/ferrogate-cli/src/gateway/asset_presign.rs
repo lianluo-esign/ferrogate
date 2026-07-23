@@ -71,6 +71,58 @@ struct PresignCommitRequest {
     sha256: String,
     #[serde(default)]
     content_type: Option<String>,
+    // #366: the trust-screening inputs the presigned commit must carry so the
+    // SAME signature/approval/scanner/content-policy service the inline path
+    // runs is applied over the final verified bytes. Every field is optional
+    // (an unsigned tenant-private publish sends none), typed here so a malformed
+    // request fails with a `deny_unknown_fields` / type error rather than
+    // silently skipping a control. These mirror the inline path's
+    // `x-asset-signature*` / `x-asset-visibility` / `x-asset-approval-id`
+    // headers one-for-one -- one shared contract, two transports.
+    /// Detached minisign file or base64 Ed25519 signature material.
+    #[serde(default)]
+    signature: Option<String>,
+    /// Detached signature encoding; defaults to minisign when a signature is
+    /// present but no format is given (matches the inline default).
+    #[serde(default)]
+    signature_format: Option<String>,
+    /// Publisher key hint for bare Ed25519 signatures.
+    #[serde(default)]
+    signature_key_id: Option<String>,
+    /// Publish visibility; cross-tenant values require a durable approval.
+    /// Omission defaults to tenant-private, same as the inline path.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// Durable tool-approval record id used for cross-tenant publication.
+    #[serde(default)]
+    approval_id: Option<String>,
+}
+
+impl PresignCommitRequest {
+    /// Build the detached-signature input for screening, mirroring the inline
+    /// `x-asset-signature*` header parsing. `None` means an unsigned publish.
+    fn signature_input(&self) -> Option<super::asset_signature::AssetSignatureInput> {
+        self.signature
+            .as_ref()
+            .map(|material| super::asset_signature::AssetSignatureInput {
+                format: self
+                    .signature_format
+                    .as_deref()
+                    .and_then(super::asset_signature::SignatureFormat::parse)
+                    .unwrap_or(super::asset_signature::SignatureFormat::Minisign),
+                material: material.clone(),
+                key_id: self.signature_key_id.clone(),
+            })
+    }
+
+    /// Resolve the requested publish visibility, defaulting to tenant-private
+    /// exactly as the inline path does for an absent/unparsable value.
+    fn publish_visibility(&self) -> super::asset_publish_gate::PublishVisibility {
+        self.visibility
+            .as_deref()
+            .and_then(super::asset_publish_gate::PublishVisibility::parse)
+            .unwrap_or(super::asset_publish_gate::PublishVisibility::TenantPrivate)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -621,6 +673,67 @@ impl FerroGateway {
         };
         let actual_size = verified_bytes.len() as u64;
 
+        // #366: full trust screening over the FINAL verified bytes -- the exact
+        // signature/approval/scanner/content-policy service the inline path runs
+        // (`asset_security::screen_asset_push`). Before #366 this path applied
+        // only size/SHA-256 + built-in content validation, so a presigned upload
+        // silently bypassed the signature requirement, cross-tenant approval
+        // gate, pluggable malware scanner, and the pending/quarantined
+        // withholding the inline path enforced. Screening runs before the
+        // durable publish so a rejection fails closed: the staging object is
+        // best-effort deleted and no asset row is created.
+        let security = super::asset_security::AssetSecurityContext::from_env();
+        let signature_input = commit.signature_input();
+        let visibility = commit.publish_visibility();
+        // The approval id names a durable tool-approval record whose status the
+        // gate reads (never a client-asserted status), same as the inline path.
+        let approval = commit.approval_id.as_deref().and_then(|id| {
+            state
+                .tool_approval(id)
+                .map(|record| (id.to_string(), record.status))
+        });
+        let screening = match super::asset_security::screen_asset_push(
+            &security,
+            super::asset_security::AssetPushScreeningRequest {
+                asset_id: &id,
+                tenant_id: &tenant_id,
+                asset_type,
+                content_type: &content_type,
+                content: &verified_bytes,
+                content_sha256: &actual_sha256,
+                signature: signature_input,
+                visibility,
+                approval,
+                now_unix: now_unix_seconds(),
+            },
+        )
+        .await
+        {
+            Ok(screening) => screening,
+            Err(rejection) => {
+                best_effort_delete(&bucket, &staging_key).await;
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "asset.push",
+                    &id,
+                    "rejected_commit",
+                    format!(
+                        "asset {id} upload {} failed trust screening ({}): {}",
+                        commit.upload_id, rejection.code, rejection.message
+                    ),
+                ));
+                return write_json_error(
+                    session,
+                    rejection.status(),
+                    rejection.code,
+                    rejection.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
         // Quota is counted at commit, when the real object exists.
         match self
             .asset_quota_status(
@@ -728,11 +841,18 @@ impl FerroGateway {
             storage_uri: Some(final_key.clone()),
             variant: String::new(),
             yanked: false,
+            // #366: persist the same screening verdict the inline path persists,
+            // so a pending/quarantined presigned commit is durably withheld.
+            visibility: screening.visibility(),
             created_at_unix: now,
             updated_at_unix: now,
         };
         match state.create_asset_if_absent(asset.clone()).await {
             Ok(true) => {
+                // #366: the committed audit event carries the full trust
+                // evidence -- scan/signature/approval outcome + verification
+                // manifest -- linked to the asset id, tenant, and request id,
+                // exactly as the inline push event does.
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -740,8 +860,10 @@ impl FerroGateway {
                     &id,
                     "committed",
                     format!(
-                        "asset {id} committed via presigned upload {} ({actual_size} bytes)",
-                        commit.upload_id
+                        "asset {id} committed via presigned upload {} ({actual_size} bytes); {}; manifest={}",
+                        commit.upload_id,
+                        screening.audit_detail(),
+                        screening.manifest_json(),
                     ),
                 ));
                 best_effort_delete(&bucket, &staging_key).await;
@@ -913,6 +1035,21 @@ impl FerroGateway {
                 .await;
             }
         };
+
+        // #366: a pending/quarantined asset is withheld from the presigned
+        // download path exactly as it is from the inline pull path -- the
+        // persisted screening state gates both. Report the same 404 a missing
+        // asset gets so an unproven object is indistinguishable from absent.
+        if !asset.is_downloadable() {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "asset_not_found",
+                format!("no asset at {asset_type}/{name}/{version}"),
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         // The private-bucket read path (issue #259): a presigned GET is only
         // meaningful for a bucket-backed object. Inline-stored assets have

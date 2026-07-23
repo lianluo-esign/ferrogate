@@ -22,9 +22,56 @@ fn asset(version: &str, variant: &str, yanked: bool, hash: &str) -> StoredAsset 
         storage_uri: None,
         variant: variant.into(),
         yanked,
+        visibility: Default::default(),
         created_at_unix: 0,
         updated_at_unix: 0,
     }
+}
+
+fn asset_with_visibility(
+    version: &str,
+    visibility: ferrogate_storage::AssetVisibility,
+) -> StoredAsset {
+    let mut asset = asset(version, "", false, "hash");
+    asset.visibility = visibility;
+    asset
+}
+
+/// #366 / #188 write-path == read-path: the read path filters withheld rows
+/// (`is_downloadable`) BEFORE resolution, exactly as `handle_asset_pull` does,
+/// so a pending/quarantined version is absent from exact, channel, and range
+/// resolution alike and can never be selected for download.
+#[test]
+fn pending_and_quarantined_versions_are_withheld_from_every_resolution() {
+    use ferrogate_storage::AssetVisibility;
+
+    let assets = vec![
+        asset_with_visibility("1.0.0", AssetVisibility::Visible),
+        asset_with_visibility("1.1.0", AssetVisibility::Quarantined),
+        asset_with_visibility("1.2.0", AssetVisibility::PendingScan),
+    ];
+    // The read path's withholding filter (the exact expression handle_asset_pull
+    // and handle_asset_manifest apply).
+    let downloadable: Vec<StoredAsset> = assets
+        .into_iter()
+        .filter(StoredAsset::is_downloadable)
+        .collect();
+    assert_eq!(downloadable.len(), 1, "only the Visible version survives");
+
+    // Exact pull of a quarantined/pending version is withheld (404), even though
+    // an exact pull of a *yanked* version would still resolve.
+    assert!(resolve_version(&downloadable, &[], "1.1.0").is_none());
+    assert!(resolve_version(&downloadable, &[], "1.2.0").is_none());
+
+    // latest / range never fall through to a withheld newer version.
+    let latest = resolve_version(&downloadable, &[], "latest").expect("latest resolves to visible");
+    assert_eq!(latest.version, "1.0.0");
+    let range = resolve_version(&downloadable, &[], "^1.0").expect("range resolves to visible");
+    assert_eq!(range.version, "1.0.0");
+
+    // The one clean version still resolves exactly.
+    let exact = resolve_version(&downloadable, &[], "1.0.0").expect("clean exact resolves");
+    assert_eq!(exact.version, "1.0.0");
 }
 
 #[test]
