@@ -101,11 +101,51 @@ request id (via the standard audit draft):
 - `asset.delete` — `committed`, or `rejected` when it is the last resolvable
   variant of a channel-referenced version.
 
+## Static-site serve resolution + retained bundles (issue #397)
+
+A `static_site` publish reuses this channel model so console rollback (#345) is
+truthful at the runtime. The keying (`crates/ferrogate-cli/src/gateway/sites.rs`):
+
+- Each published bundle version is RETAINED and immutable, keyed under the
+  `static_site` asset type / `name = {site}`:
+  - the **bundle manifest** row lives at the bare `{bundle_version}` version and
+    is the channel-resolvable target (its single row is the version's only
+    variant);
+  - each **file object** lives at `__site_file__:{bundle_version}:{path}`, so a
+    new publish never overwrites a prior version's objects in place.
+- A well-known **`serving` channel** (`{tenant}/static_site/{site}/serving`)
+  points at the active bundle version. The serve path
+  (`serve_site_file` → `resolve_active_site_bundle`) reads the ACTIVE bundle
+  through exactly this channel, so a channel move re-points what is served —
+  write-path == read-path (#188). Publishing moves `serving` to the new version
+  through the atomic [`move_asset_channel_if_resolvable`] CAS above; a console
+  rollback is the SAME CAS moving `serving` back to a retained prior version.
+
+### Migration / backward compatibility
+
+- The mutable `__site_manifest__` marker row is still rewritten on every publish
+  (newest bundle). It keeps the `/admin/v1/site-domains` existence check working
+  and is the **backward-compat serve source**: a site published before #397 has
+  no `serving` channel, so `resolve_active_site_bundle` falls back to the marker
+  and the legacy bare-`{path}` file keying. Such sites keep serving unchanged and
+  migrate forward on their next publish (which writes the versioned rows + moves
+  the `serving` channel). No offline backfill is required.
+- Retained bundles are ADDITIVE for tenant asset-storage quota: a new version
+  keeps every prior version's bytes (nothing is subtracted); reclaiming space is
+  an explicit yank/delete of an old version. Re-publishing an existing
+  `{bundle_version}` is rejected `409 site_version_immutable`.
+
 ## Tests
 
 - `crates/ferrogate-storage/src/asset_channel_lifecycle_test.rs` — the truth
   table on the in-memory backend, plus the barrier-based
   `concurrent_move_and_yank_never_strand_a_channel` race proof (no timing sleep).
+- `crates/ferrogate-cli/src/gateway/sites_test.rs` — the #397 static-site slice
+  on the in-memory backend: two bundle versions retain both, the serve path
+  resolves the active version through the `serving` channel, a channel move to a
+  prior version changes the served bytes (write == read), a legacy
+  manifest-only site still serves, and a barrier-aligned concurrent
+  `serving`-channel race never strands the pointer (no timing sleep).
 - Live-Postgres coverage of the `FOR UPDATE` serialization is proved by
   inspection of the SQL here + the equivalent in-memory proof; a live Supabase
   scenario is deferred where no local Postgres is available.

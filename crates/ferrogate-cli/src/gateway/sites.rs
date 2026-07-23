@@ -11,6 +11,14 @@
 // authenticated, reusing the same `assets.read` key/tenant gating as
 // `handle_asset_pull`); HTTP caching (ETag/Last-Modified/Range/304/206) is
 // shared with the pull path through `responses::write_cacheable_response`.
+//
+// #397: bundles are now RETAINED and immutable (keyed by bundle version), and
+// the serve path resolves the ACTIVE bundle through the `serving` asset channel
+// (reusing the #367 channel model) instead of a single overwritten manifest, so
+// a channel move actually re-points what is served (write-path == read-path,
+// #188) and console rollback (#345) is truthful. Sites published before #397
+// (no `serving` channel) fall back to the mutable `__site_manifest__` marker and
+// legacy bare-`{path}` file keying. See docs/assets/channel-version-lifecycle.md.
 
 use std::io::Read;
 
@@ -19,7 +27,10 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
-use ferrogate_storage::{sha256_hex, stored_asset_id, AssetVisibility, StoredAsset};
+use ferrogate_storage::{
+    asset_channel_id, sha256_hex, stored_asset_id, AssetVisibility, ChannelMoveOutcome,
+    StoredAsset, StoredAssetChannel,
+};
 
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
@@ -35,10 +46,32 @@ use crate::{
 /// table and tenant quota accounting as any other asset.
 pub(super) const SITE_ASSET_TYPE: &str = "static_site";
 
-/// Reserved `version` for the per-site manifest row. A normal file path never
-/// collides with this because it contains no `/` yet is not a plausible
-/// file name a bundle would ship.
+/// Reserved `version` for the per-site "latest" manifest row (#258). Kept as a
+/// mutable existence/latest marker after #397: it is rewritten to the newest
+/// published bundle every publish, still backs the `/admin/v1/site-domains`
+/// existence check, and is the backward-compat serve source for legacy sites
+/// that predate the channel-resolved serve path (a site with no `serving`
+/// channel). A normal file path never collides with this because it contains no
+/// `/` yet is not a plausible file name a bundle would ship.
 pub(super) const SITE_MANIFEST_VERSION: &str = "__site_manifest__";
+
+/// Well-known asset channel (#367 channel model, reused per #397) whose target
+/// version is the bundle a site currently serves. Publishing a bundle moves this
+/// channel to the new immutable bundle version through the atomic
+/// [`move_asset_channel_if_resolvable`] CAS; a truthful console rollback (#345)
+/// moves it back to a retained prior bundle version. The serve path resolves the
+/// ACTIVE bundle through this channel, so a channel move actually re-points what
+/// is served (write-path == read-path, #188).
+pub(super) const SITE_SERVE_CHANNEL: &str = "serving";
+
+/// Reserved `version` PREFIX for a bundle's per-file object rows (#397). Under
+/// the retained-bundle model a file's row is keyed by
+/// `__site_file__:{bundle_version}:{path}` so two bundle versions retain both
+/// full sets of file objects instead of overwriting each other in place. The
+/// bare `{bundle_version}` row is the bundle manifest (the channel-resolvable
+/// version target); legacy sites (pre-#397) key each file row by the bare
+/// `{path}` and are still served through the manifest fallback.
+const SITE_FILE_VERSION_PREFIX: &str = "__site_file__";
 
 /// Default `Cache-Control` for served site files when the site does not set
 /// its own. Public sites are cacheable; the strong `ETag` still lets a client
@@ -91,9 +124,78 @@ impl SiteManifest {
     fn file(&self, path: &str) -> Option<&SiteFileEntry> {
         self.files.iter().find(|entry| entry.path == path)
     }
+}
 
-    fn total_bytes(&self) -> u64 {
-        self.files.iter().map(|entry| entry.size_bytes).sum()
+/// Reserved `version` key for one file object inside a retained bundle (#397):
+/// `__site_file__:{bundle_version}:{path}`. Namespacing the file rows under the
+/// bundle version is what lets two published bundle versions retain both full
+/// sets of objects instead of overwriting each other in place.
+fn site_file_version(bundle_version: &str, path: &str) -> String {
+    format!("{SITE_FILE_VERSION_PREFIX}:{bundle_version}:{path}")
+}
+
+/// The bundle a serve request resolved to, plus how to key its per-file object
+/// rows (#397). The two arms are the write-path == read-path (#188) contract:
+///
+/// - `Bundle(bundle_version)` — resolved through the `serving` channel to a
+///   retained, immutable bundle version. File rows are keyed by
+///   [`site_file_version`], so moving the channel to a prior version re-points
+///   BOTH the manifest and every file object the serve path reads.
+/// - `Legacy` — no `serving` channel exists (a site published before #397). The
+///   manifest came from the `__site_manifest__` marker and file rows are keyed
+///   by the bare `{path}`, exactly as the pre-#397 serve path read them.
+#[derive(Debug, Clone)]
+enum SiteFileKeying {
+    Bundle(String),
+    Legacy,
+}
+
+/// Serving policy for a bundle publish (#397), parsed from the push headers by
+/// the Session-facing wrapper and passed to the Session-free commit core.
+pub(super) struct SiteBundlePublish {
+    pub(super) public: bool,
+    pub(super) spa_fallback: bool,
+    pub(super) cache_control: Option<String>,
+    pub(super) project_id: Option<String>,
+}
+
+/// Definitive, non-error outcome of [`FerroGateway::commit_site_bundle`] (#397).
+pub(super) enum SiteBundleCommit {
+    /// The bundle was retained under its immutable version and the `serving`
+    /// channel now points at it. `prior_serving_version` is the version the
+    /// channel pointed at before this publish (`None` for a brand-new site).
+    Committed {
+        manifest: SiteManifest,
+        prior_serving_version: Option<String>,
+    },
+    /// This bundle version already exists and is immutable; nothing was written.
+    VersionExists,
+    /// The manifest row was written but the `serving`-channel CAS found the
+    /// target unresolvable (should be unreachable on a live path).
+    ServeChannelUnresolvable,
+}
+
+/// A site's active bundle as resolved for serving: the manifest to resolve a
+/// request path against, and the keying used to load the matched file object.
+struct ResolvedSiteBundle {
+    manifest: SiteManifest,
+    keying: SiteFileKeying,
+}
+
+impl ResolvedSiteBundle {
+    /// Deterministic `stored_assets` id of one file object under the resolved
+    /// keying. The serve path MUST load the object through this id so what a
+    /// channel move re-points is exactly what is read.
+    fn file_asset_id(&self, tenant: &str, site: &str, path: &str) -> String {
+        match &self.keying {
+            SiteFileKeying::Bundle(bundle_version) => stored_asset_id(
+                tenant,
+                SITE_ASSET_TYPE,
+                site,
+                &site_file_version(bundle_version, path),
+            ),
+            SiteFileKeying::Legacy => stored_asset_id(tenant, SITE_ASSET_TYPE, site, path),
+        }
     }
 }
 
@@ -226,8 +328,12 @@ impl FerroGateway {
         }
 
         let state = self.state.current();
-        let manifest = match self.load_site_manifest(tenant, site).await {
-            Ok(Some(manifest)) => manifest,
+        // #397: resolve the ACTIVE bundle through the `serving` channel (falling
+        // back to the legacy `__site_manifest__` marker for pre-#397 sites), so a
+        // channel move to a prior retained bundle version actually re-points what
+        // this path serves -- write-path == read-path (#188).
+        let resolved = match self.resolve_active_site_bundle(tenant, site).await {
+            Ok(Some(resolved)) => resolved,
             Ok(None) => {
                 write_json_error(
                     session,
@@ -251,6 +357,7 @@ impl FerroGateway {
                 return Ok(StatusCode::SERVICE_UNAVAILABLE);
             }
         };
+        let manifest = &resolved.manifest;
 
         // Visibility: a public site is served anonymously; otherwise the caller
         // must present an `assets.read` key attributed to this exact tenant.
@@ -277,7 +384,7 @@ impl FerroGateway {
             }
         }
 
-        let Some(entry) = resolve_site_file(&manifest, file_path) else {
+        let Some(entry) = resolve_site_file(manifest, file_path) else {
             write_json_error(
                 session,
                 StatusCode::NOT_FOUND,
@@ -290,7 +397,7 @@ impl FerroGateway {
         };
         let entry = entry.clone();
 
-        let id = stored_asset_id(tenant, SITE_ASSET_TYPE, site, &entry.path);
+        let id = resolved.file_asset_id(tenant, site, &entry.path);
         let asset = match state.get_asset(&id).await {
             Ok(Some(asset)) => asset,
             Ok(None) => {
@@ -427,19 +534,13 @@ impl FerroGateway {
 
         let state = self.state.current();
 
-        // Tenant storage-quota check across the whole bundle. Re-publishing the
-        // same site does not double-count: the currently-stored bytes for this
-        // site are subtracted from the running total first.
+        // Tenant storage-quota check across the whole bundle. Retained bundles
+        // are ADDITIVE (#397): a new version keeps every prior version's bytes,
+        // so nothing is subtracted -- the tenant pays for what it retains, and
+        // reclaiming space is an explicit yank/delete of an old version.
         if let Some(quota) = auth.effective_quota.asset_storage_quota_bytes {
-            let existing_site_bytes = self
-                .load_site_manifest(tenant_id, site)
-                .await
-                .ok()
-                .flatten()
-                .map(|manifest| manifest.total_bytes())
-                .unwrap_or(0);
-            let used_by_others = match state.tenant_asset_storage_bytes_used(tenant_id).await {
-                Ok(used) => used.saturating_sub(existing_site_bytes),
+            let used = match state.tenant_asset_storage_bytes_used(tenant_id).await {
+                Ok(used) => used,
                 Err(error) => {
                     return write_json_error(
                         session,
@@ -451,7 +552,7 @@ impl FerroGateway {
                     .await;
                 }
             };
-            if used_by_others.saturating_add(total_bytes) > quota {
+            if used.saturating_add(total_bytes) > quota {
                 return write_json_error(
                     session,
                     StatusCode::FORBIDDEN,
@@ -465,44 +566,57 @@ impl FerroGateway {
             }
         }
 
-        let now = now_unix_seconds();
-        let mut entries = Vec::with_capacity(prepared.len());
-        for (path, content_type, content) in &prepared {
-            let id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, site, path);
-            let content_hash = sha256_hex(content);
-            let created_at_unix = state
-                .get_asset(&id)
-                .await
-                .ok()
-                .flatten()
-                .map_or(now, |existing| existing.created_at_unix);
-            let (stored_content, storage_uri) =
-                match self.store_asset_bytes(&id, content, content_type).await {
-                    Ok(pair) => pair,
-                    Err(response) => return response.write(session, &ctx.request_id).await,
-                };
-            let asset = StoredAsset {
-                id,
-                tenant_id: tenant_id.to_string(),
-                project_id: auth.project_id.clone(),
-                asset_type: SITE_ASSET_TYPE.to_string(),
-                name: site.to_string(),
-                version: path.clone(),
-                content_type: content_type.clone(),
-                content_hash: content_hash.clone(),
-                size_bytes: content.len() as u64,
-                content: stored_content,
-                storage_uri,
-                variant: String::new(),
-                yanked: false,
-                // #366: per-file site rows are published only after the parent
-                // bundle screened clean (guarded in handle_asset_push), so they
-                // are visible.
-                visibility: AssetVisibility::Visible,
-                created_at_unix,
-                updated_at_unix: now,
-            };
-            if let Err(error) = state.upsert_asset(asset).await {
+        let public = header_flag(headers, "x-site-public");
+        let spa_fallback = header_flag(headers, "x-site-spa-fallback");
+        let cache_control = headers
+            .get("x-site-cache-control")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+
+        // The storage-committing core is Session-free so a sibling test can drive
+        // the exact write path the serve path reads (write == read, #188).
+        let options = SiteBundlePublish {
+            public,
+            spa_fallback,
+            cache_control,
+            project_id: auth.project_id.clone(),
+        };
+        let (manifest, prior_serving_version) = match self
+            .commit_site_bundle(tenant_id, site, bundle_version, &prepared, &options)
+            .await
+        {
+            Ok(SiteBundleCommit::Committed {
+                manifest,
+                prior_serving_version,
+            }) => (manifest, prior_serving_version),
+            Ok(SiteBundleCommit::VersionExists) => {
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "site_version_immutable",
+                    format!(
+                        "site {tenant_id}/{site} version {bundle_version} already exists and is \
+                         immutable; publish a new version"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            Ok(SiteBundleCommit::ServeChannelUnresolvable) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "site_serve_channel_unresolvable",
+                    format!(
+                        "published bundle {bundle_version} for {tenant_id}/{site} but its serve \
+                         channel target was not resolvable"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            Err(error) => {
                 return write_json_error(
                     session,
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -512,50 +626,13 @@ impl FerroGateway {
                 )
                 .await;
             }
-            entries.push(SiteFileEntry {
-                path: path.clone(),
-                content_type: content_type.clone(),
-                content_hash,
-                size_bytes: content.len() as u64,
-            });
-        }
-
-        let public = header_flag(headers, "x-site-public");
-        let spa_fallback = header_flag(headers, "x-site-spa-fallback");
-        let cache_control = headers
-            .get("x-site-cache-control")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-            .filter(|value| !value.is_empty());
-
-        let manifest_created_at = self
-            .load_site_manifest(tenant_id, site)
-            .await
-            .ok()
-            .flatten()
-            .map_or(now, |manifest| manifest.created_at_unix);
-        let manifest = SiteManifest {
-            site: site.to_string(),
-            bundle_version: bundle_version.to_string(),
-            public,
-            spa_fallback,
-            cache_control,
-            files: entries,
-            created_at_unix: manifest_created_at,
-            updated_at_unix: now,
         };
-        if let Err(error) = self.store_site_manifest(tenant_id, &manifest, now).await {
-            return write_json_error(
-                session,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "storage_unavailable",
-                error.to_string(),
-                &ctx.request_id,
-            )
-            .await;
-        }
 
         let manifest_id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, site, SITE_MANIFEST_VERSION);
+        let prior_note = prior_serving_version
+            .as_deref()
+            .map(|prior| format!(", serving moved {prior} -> {bundle_version}"))
+            .unwrap_or_else(|| format!(", serving set to {bundle_version}"));
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
             auth,
@@ -563,7 +640,8 @@ impl FerroGateway {
             &manifest_id,
             "committed",
             format!(
-                "site {tenant_id}/{site} published ({} files, {total_bytes} bytes, public={public})",
+                "site {tenant_id}/{site} published ({} files, {total_bytes} bytes, \
+                 public={public}{prior_note})",
                 manifest.files.len()
             ),
         ));
@@ -584,6 +662,189 @@ impl FerroGateway {
                 .collect::<Vec<_>>(),
         });
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+    }
+
+    /// Session-free core of a static-site publish (#397): the immutability guard,
+    /// the per-file retained-bundle object writes, both manifest rows, and the
+    /// atomic `serving`-channel move. Extracted from [`Self::publish_site_bundle`]
+    /// so the WRITE path is exercised directly by the same code the serve READ
+    /// path resolves against (write == read, #188), instead of a test-only
+    /// reimplementation. Storage failures surface as `Err`; the definitive
+    /// non-error dispositions are the [`SiteBundleCommit`] arms.
+    pub(super) async fn commit_site_bundle(
+        &self,
+        tenant_id: &str,
+        site: &str,
+        bundle_version: &str,
+        prepared: &[(String, String, Vec<u8>)],
+        options: &SiteBundlePublish,
+    ) -> anyhow::Result<SiteBundleCommit> {
+        let state = self.state.current();
+
+        // Immutability (#397, mirroring the single-asset #260 rule): a published
+        // bundle version is frozen and RETAINED. Its manifest row lives at the
+        // bare `{bundle_version}` version key (the channel-resolvable target).
+        // Re-publishing the same version would overwrite retained bytes a prior
+        // hash/rollback pins, so it is rejected -- the operator publishes a new
+        // version instead. This is the concrete "retain, do not overwrite in
+        // place" behavior #397 asks for.
+        let bundle_manifest_id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, site, bundle_version);
+        if state.get_asset(&bundle_manifest_id).await?.is_some() {
+            return Ok(SiteBundleCommit::VersionExists);
+        }
+
+        let now = now_unix_seconds();
+        let mut entries = Vec::with_capacity(prepared.len());
+        for (path, content_type, content) in prepared {
+            // #397: key each file object under the immutable bundle version so a
+            // new publish RETAINS the prior version's objects instead of
+            // overwriting them in place. The bundle_version row itself is the
+            // manifest below; file rows carry the `__site_file__:` prefix.
+            let id = stored_asset_id(
+                tenant_id,
+                SITE_ASSET_TYPE,
+                site,
+                &site_file_version(bundle_version, path),
+            );
+            let content_hash = sha256_hex(content);
+            let (stored_content, storage_uri) = self
+                .store_asset_bytes(&id, content, content_type)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let asset = StoredAsset {
+                id,
+                tenant_id: tenant_id.to_string(),
+                project_id: options.project_id.clone(),
+                asset_type: SITE_ASSET_TYPE.to_string(),
+                name: site.to_string(),
+                version: site_file_version(bundle_version, path),
+                content_type: content_type.clone(),
+                content_hash: content_hash.clone(),
+                size_bytes: content.len() as u64,
+                content: stored_content,
+                storage_uri,
+                variant: String::new(),
+                yanked: false,
+                // #366: per-file site rows are published only after the parent
+                // bundle screened clean (guarded in handle_asset_push), so they
+                // are visible.
+                visibility: AssetVisibility::Visible,
+                created_at_unix: now,
+                updated_at_unix: now,
+            };
+            state.upsert_asset(asset).await?;
+            entries.push(SiteFileEntry {
+                path: path.clone(),
+                content_type: content_type.clone(),
+                content_hash,
+                size_bytes: content.len() as u64,
+            });
+        }
+
+        let manifest_created_at = self
+            .load_site_manifest(tenant_id, site)
+            .await
+            .ok()
+            .flatten()
+            .map_or(now, |manifest| manifest.created_at_unix);
+        let manifest = SiteManifest {
+            site: site.to_string(),
+            bundle_version: bundle_version.to_string(),
+            public: options.public,
+            spa_fallback: options.spa_fallback,
+            cache_control: options.cache_control.clone(),
+            files: entries,
+            created_at_unix: manifest_created_at,
+            updated_at_unix: now,
+        };
+        // #397: the bundle manifest row at the bare `{bundle_version}` version is
+        // the channel-resolvable target (its single row is the version's only
+        // "variant"). It is written BEFORE the channel move so the target is
+        // durably resolvable when the #367 CAS checks it. It is immutable and
+        // retained -- one row per published bundle version.
+        self.store_site_manifest_at(tenant_id, &manifest, bundle_version, now)
+            .await?;
+        // Also refresh the mutable `__site_manifest__` marker: it keeps the
+        // `/admin/v1/site-domains` existence check and any legacy reader working,
+        // and is the backward-compat serve source for sites with no channel.
+        self.store_site_manifest(tenant_id, &manifest, now).await?;
+
+        // #397 + #367: move the `serving` channel to the newly published bundle
+        // version through the atomic resolvability CAS. This is the single
+        // write-path == read-path point (#188): the serve path reads the ACTIVE
+        // bundle through exactly this channel. A truthful console rollback (#345)
+        // is the same CAS moving the channel back to a retained prior version.
+        let channel = StoredAssetChannel {
+            id: asset_channel_id(tenant_id, SITE_ASSET_TYPE, site, SITE_SERVE_CHANNEL),
+            tenant_id: tenant_id.to_string(),
+            asset_type: SITE_ASSET_TYPE.to_string(),
+            name: site.to_string(),
+            channel: SITE_SERVE_CHANNEL.to_string(),
+            version: bundle_version.to_string(),
+            updated_at_unix: now,
+        };
+        match state.move_asset_channel_if_resolvable(channel).await? {
+            ChannelMoveOutcome::Moved { prior_version } => Ok(SiteBundleCommit::Committed {
+                manifest,
+                prior_serving_version: prior_version,
+            }),
+            // The bundle manifest row was just written and is not yanked, so this
+            // should be unreachable; report it rather than silently serving stale.
+            ChannelMoveOutcome::TargetNotResolvable => {
+                Ok(SiteBundleCommit::ServeChannelUnresolvable)
+            }
+        }
+    }
+
+    /// Resolves the ACTIVE bundle a site currently serves (#397). Preferred
+    /// path: the `serving` channel points at an immutable, retained bundle
+    /// version whose manifest row (`stored_asset_id(.., bundle_version)`) is the
+    /// channel-resolvable target; the returned keying loads that bundle's file
+    /// objects. A channel move (rollback, #345) to a prior retained version
+    /// therefore re-points BOTH the manifest and every file object the serve
+    /// path reads. Backward-compat: a site with no `serving` channel (published
+    /// before #397) falls back to the mutable `__site_manifest__` marker and the
+    /// legacy bare-`{path}` file keying, so already-served sites keep serving.
+    async fn resolve_active_site_bundle(
+        &self,
+        tenant_id: &str,
+        site: &str,
+    ) -> anyhow::Result<Option<ResolvedSiteBundle>> {
+        let state = self.state.current();
+        let serving = state
+            .list_asset_channels(tenant_id, SITE_ASSET_TYPE, site)
+            .await?
+            .into_iter()
+            .find(|channel| channel.channel == SITE_SERVE_CHANNEL);
+        if let Some(serving) = serving {
+            let bundle_version = serving.version;
+            let manifest_id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, site, &bundle_version);
+            let Some(asset) = state.get_asset(&manifest_id).await? else {
+                // The channel points at a version whose manifest row is gone.
+                // The #367 CAS keeps this from happening on a live path, but fail
+                // closed (treat as not found) rather than serve nothing.
+                return Ok(None);
+            };
+            let manifest =
+                serde_json::from_slice::<SiteManifest>(&asset.content).map_err(|error| {
+                    anyhow::anyhow!(
+                        "corrupt bundle manifest for {tenant_id}/{site}@{bundle_version}: {error}"
+                    )
+                })?;
+            return Ok(Some(ResolvedSiteBundle {
+                manifest,
+                keying: SiteFileKeying::Bundle(bundle_version),
+            }));
+        }
+        // No serving channel: legacy site. Serve from the mutable marker with the
+        // pre-#397 bare-path file keying.
+        Ok(self
+            .load_site_manifest(tenant_id, site)
+            .await?
+            .map(|manifest| ResolvedSiteBundle {
+                manifest,
+                keying: SiteFileKeying::Legacy,
+            }))
     }
 
     pub(super) async fn load_site_manifest(
@@ -607,13 +868,23 @@ impl FerroGateway {
         manifest: &SiteManifest,
         now: i64,
     ) -> anyhow::Result<()> {
+        self.store_site_manifest_at(tenant_id, manifest, SITE_MANIFEST_VERSION, now)
+            .await
+    }
+
+    /// Stores a [`SiteManifest`] JSON row under an explicit `version` key (#397).
+    /// Two callers share it: the mutable `__site_manifest__` marker, and the
+    /// immutable per-bundle manifest at the bare `{bundle_version}` version that
+    /// the `serving` channel resolves to.
+    async fn store_site_manifest_at(
+        &self,
+        tenant_id: &str,
+        manifest: &SiteManifest,
+        version: &str,
+        now: i64,
+    ) -> anyhow::Result<()> {
         let body = serde_json::to_vec(manifest)?;
-        let id = stored_asset_id(
-            tenant_id,
-            SITE_ASSET_TYPE,
-            &manifest.site,
-            SITE_MANIFEST_VERSION,
-        );
+        let id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, &manifest.site, version);
         // The manifest is always stored inline (not bucket-backed): it is small,
         // and serve-mode lookups must read it before deciding anything.
         let asset = StoredAsset {
@@ -622,7 +893,7 @@ impl FerroGateway {
             project_id: None,
             asset_type: SITE_ASSET_TYPE.to_string(),
             name: manifest.site.clone(),
-            version: SITE_MANIFEST_VERSION.to_string(),
+            version: version.to_string(),
             content_type: "application/json".to_string(),
             content_hash: sha256_hex(&body),
             size_bytes: body.len() as u64,
