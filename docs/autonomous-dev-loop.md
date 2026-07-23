@@ -58,8 +58,8 @@ Project board unusable. Therefore:
 
 ## Concurrency ceiling
 
-- **At most 3 subagents developing code in parallel.** Hard ceiling, never
-  exceeded. Fewer is fine; hold a slot as integration margin when the in-flight
+- **At most 2 subagents developing code in parallel.** Hard ceiling, never
+  exceeded (lowered from 3 by the user on 2026-07-23). Fewer is fine; hold a slot as integration margin when the in-flight
   slices touch shared crates.
 - On each loop tick, if the cap is already full, **hold** — do not launch more
   and do not re-read the board. Integrate finished work first.

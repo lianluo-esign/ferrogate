@@ -18,7 +18,7 @@ the quick operational checklist.
    (initial plan read; each completed slice's status move). Cache the board dump
    + field/option IDs to local files and reuse them. `gh issue view/comment/
    create` are fine (general budget); subagents must never call `gh project`.
-3. **≤ 3 code-developing subagents in parallel.** Hard ceiling. If full on a
+3. **≤ 2 code-developing subagents in parallel.** Hard ceiling (lowered from 3, 2026-07-23). If full on a
    loop tick, hold — integrate finished work, don't launch more, don't re-read
    the board.
 4. **Delete every worktree the instant its slice is integrated.** Each Rust
@@ -36,7 +36,7 @@ the quick operational checklist.
 1. **Plan (key node):** cache board + IDs once; pick up to 3 **maximally
    file-separated** slices (different crates, or `admin-console/` vs Rust, or a
    new crate). Prefer In-progress → Ready → Backlog; P0/P1 first.
-2. **Dispatch** each as a worktree-isolated subagent. It reads its own issue
+2. **Dispatch** each as a worktree-isolated subagent (≤2 at a time). It reads its own issue
    (`gh issue view`), implements narrowly per AGENTS.md, adds sibling
    `*_test.rs` (no inline `mod tests {}`) tests, verifies locally, and **commits
    to its branch only — no push, never touches `main`**.
