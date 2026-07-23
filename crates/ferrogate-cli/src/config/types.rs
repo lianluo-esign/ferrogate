@@ -448,10 +448,32 @@ impl Default for X402ReconcilerConfig {
 /// Storage exposes an S3-compatible endpoint using the same SigV4 auth
 /// scheme AWS S3 does, so this also works against a real AWS S3 bucket or
 /// any other S3-compatible service (MinIO, etc.), not only Supabase.
+/// Which object-storage backend `[asset_bucket]` drives (issue #411). The
+/// default `s3` covers every S3-compatible service (AWS S3, Supabase Storage,
+/// MinIO, Cloudflare R2) through the one SigV4 client. `workers-static-assets`
+/// selects a Cloudflare-native publish backend that is NOT S3-shaped and is
+/// wired through the shared [`ferrogate_cloudflare::CloudflareClient`] instead;
+/// it uses the `cf_*` fields below rather than the S3 credential pieces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AssetBucketBackend {
+    /// The S3-compatible SigV4 backend (AWS S3 / Supabase / MinIO / R2). The
+    /// historical and default behavior — unchanged by #411.
+    #[default]
+    S3,
+    /// Cloudflare Workers Static Assets direct-upload publish backend (#411).
+    WorkersStaticAssets,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct AssetBucketConfig {
     #[serde(default)]
     pub(crate) enabled: bool,
+    /// Selects the object-storage backend (issue #411). Defaults to the
+    /// S3-compatible client, so existing `[asset_bucket]` configs are
+    /// unchanged.
+    #[serde(default)]
+    pub(crate) backend: AssetBucketBackend,
     /// `scheme://host[:port]`, no trailing slash, no bucket/key suffix --
     /// e.g. `https://<project>.supabase.co/storage/v1/s3`.
     #[serde(default)]
@@ -477,6 +499,20 @@ pub(crate) struct AssetBucketConfig {
     /// `asset_storage_quota_bytes` cap. Defaults to 5 GiB when unset.
     #[serde(default)]
     pub(crate) presign_max_object_bytes: Option<u64>,
+    /// Cloudflare account id for the `workers-static-assets` backend (#411).
+    /// Ignored by the default S3 backend.
+    #[serde(default)]
+    pub(crate) cf_account_id: Option<String>,
+    /// Cloudflare API token *reference* for the `workers-static-assets`
+    /// backend (#411) — an `env://VAR` reference or an inline token, resolved
+    /// via [`ferrogate_cloudflare::EnvTokenResolver`]. Ignored by the S3
+    /// backend.
+    #[serde(default)]
+    pub(crate) cf_api_token: Option<String>,
+    /// The Worker script name the uploaded static assets attach to for the
+    /// `workers-static-assets` backend (#411). Ignored by the S3 backend.
+    #[serde(default)]
+    pub(crate) cf_script_name: Option<String>,
 }
 
 /// Pre-authentication network controls (issue #166), applied to every

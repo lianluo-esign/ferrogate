@@ -132,6 +132,7 @@ impl Config {
         self.validate_asset_bucket_r2()?;
         self.validate_cloudflare_ai_gateway_providers()?;
         self.validate_cloudflare_mcp_servers()?;
+        self.validate_asset_bucket_backend()?;
         Ok(())
     }
 
@@ -399,6 +400,12 @@ impl Config {
         if !bucket.enabled {
             return Ok(());
         }
+        // The S3 credential pieces below are required only for the S3-compatible
+        // backend (issue #411). A CF-native backend uses the `cf_*` fields and
+        // is validated by `validate_asset_bucket_backend`.
+        if bucket.backend != crate::config::AssetBucketBackend::S3 {
+            return Ok(());
+        }
         if bucket.endpoint.is_none() {
             bail!("field asset_bucket.endpoint: required when asset_bucket.enabled = true");
         }
@@ -414,6 +421,54 @@ impl Config {
         if bucket.secret_access_key_env.is_none() {
             bail!(
                 "field asset_bucket.secret_access_key_env: required when asset_bucket.enabled = true"
+            );
+        }
+        Ok(())
+    }
+
+    /// Validates the Cloudflare-native `[asset_bucket]` backend (issue #411). A
+    /// no-op unless `enabled = true` and `backend = "workers-static-assets"`;
+    /// when selected, the three `cf_*` fields the CF publish client needs are
+    /// required at config-load time (mirroring the S3 backend's credential
+    /// presence checks) rather than failing silently at first publish.
+    fn validate_asset_bucket_backend(&self) -> AnyResult<()> {
+        let bucket = &self.asset_bucket;
+        if !bucket.enabled
+            || bucket.backend != crate::config::AssetBucketBackend::WorkersStaticAssets
+        {
+            return Ok(());
+        }
+        if bucket
+            .cf_account_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            bail!(
+                "field asset_bucket.cf_account_id: required when asset_bucket.backend = \"workers-static-assets\""
+            );
+        }
+        if bucket
+            .cf_api_token
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            bail!(
+                "field asset_bucket.cf_api_token: required when asset_bucket.backend = \"workers-static-assets\""
+            );
+        }
+        if bucket
+            .cf_script_name
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            bail!(
+                "field asset_bucket.cf_script_name: required when asset_bucket.backend = \"workers-static-assets\""
             );
         }
         Ok(())

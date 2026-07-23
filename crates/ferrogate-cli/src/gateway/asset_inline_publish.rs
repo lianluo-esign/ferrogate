@@ -35,11 +35,11 @@ pub(super) trait AssetCandidateSink: Send + Sync {
 /// Production sink: deletes the candidate object from the configured asset
 /// bucket, best-effort.
 pub(super) struct BucketCandidateSink {
-    bucket: super::asset_bucket::AssetBucketClient,
+    bucket: Box<dyn super::asset_bucket::AssetObjectStore>,
 }
 
 impl BucketCandidateSink {
-    pub(super) fn new(bucket: super::asset_bucket::AssetBucketClient) -> Self {
+    pub(super) fn new(bucket: Box<dyn super::asset_bucket::AssetObjectStore>) -> Self {
         Self { bucket }
     }
 }

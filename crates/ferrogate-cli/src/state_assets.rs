@@ -280,28 +280,56 @@ impl AppState {
             .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
     }
 
+    /// Resolves the object-storage backend for `/v1/assets/*` content behind
+    /// the [`AssetObjectStore`](crate::gateway::asset_bucket::AssetObjectStore)
+    /// trait (issue #411). Defaults to the S3/R2 SigV4 client; the
+    /// `workers-static-assets` backend selects a Cloudflare-native publish
+    /// target instead. `None` when disabled or any required piece is missing,
+    /// the same opt-in, fail-closed-only-when-misconfigured shape as before.
     pub(crate) fn asset_bucket_client(
         &self,
-    ) -> Option<crate::gateway::asset_bucket::AssetBucketClient> {
+    ) -> Option<Box<dyn crate::gateway::asset_bucket::AssetObjectStore>> {
         let bucket = &self.config.asset_bucket;
         if !bucket.enabled {
             return None;
         }
-        let endpoint = bucket.endpoint.clone()?;
-        let bucket_name = bucket.bucket.clone()?;
-        let region = bucket.region.clone()?;
-        let access_key_id = bucket.access_key_id.clone()?;
-        let secret_access_key = std::env::var(bucket.secret_access_key_env.as_deref()?)
-            .ok()
-            .filter(|value| !value.is_empty())?;
-        Some(crate::gateway::asset_bucket::AssetBucketClient::new(
-            crate::gateway::asset_bucket::AssetBucketConfig {
-                endpoint,
-                bucket: bucket_name,
-                region,
-                access_key_id,
-                secret_access_key,
-            },
-        ))
+        match bucket.backend {
+            crate::config::AssetBucketBackend::S3 => {
+                let endpoint = bucket.endpoint.clone()?;
+                let bucket_name = bucket.bucket.clone()?;
+                let region = bucket.region.clone()?;
+                let access_key_id = bucket.access_key_id.clone()?;
+                let secret_access_key = std::env::var(bucket.secret_access_key_env.as_deref()?)
+                    .ok()
+                    .filter(|value| !value.is_empty())?;
+                Some(Box::new(
+                    crate::gateway::asset_bucket::AssetBucketClient::new(
+                        crate::gateway::asset_bucket::AssetBucketConfig {
+                            endpoint,
+                            bucket: bucket_name,
+                            region,
+                            access_key_id,
+                            secret_access_key,
+                        },
+                    ),
+                ))
+            }
+            crate::config::AssetBucketBackend::WorkersStaticAssets => {
+                let account_id = bucket.cf_account_id.clone()?;
+                let api_token = bucket.cf_api_token.clone()?;
+                let script_name = bucket.cf_script_name.clone()?;
+                let cf_config = ferrogate_cloudflare::CloudflareConfig::new(account_id, api_token);
+                let resolver =
+                    std::sync::Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env());
+                let client =
+                    ferrogate_cloudflare::CloudflareClient::new(cf_config, resolver).ok()?;
+                Some(Box::new(
+                    crate::gateway::asset_bucket::WorkersStaticAssetsStore::new(
+                        std::sync::Arc::new(client),
+                        script_name,
+                    ),
+                ))
+            }
+        }
     }
 }

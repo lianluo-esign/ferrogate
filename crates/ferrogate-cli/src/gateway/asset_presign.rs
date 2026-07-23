@@ -1153,7 +1153,7 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &super::ProxyContext,
-        bucket: &super::asset_bucket::AssetBucketClient,
+        bucket: &dyn super::asset_bucket::AssetObjectStore,
         staging_key: &str,
         code: &'static str,
         message: String,
@@ -1431,7 +1431,7 @@ async fn write_asset_version_immutable(
 /// transport errors) which the caller maps to 503; validation failures are
 /// the inner `Rejected` variant (mapped to 422).
 async fn verify_and_fetch_committed_object(
-    bucket: &super::asset_bucket::AssetBucketClient,
+    bucket: &dyn super::asset_bucket::AssetObjectStore,
     staging_key: &str,
     expected_size: u64,
     expected_sha256: &str,
@@ -1482,7 +1482,7 @@ async fn verify_and_fetch_committed_object(
     })
 }
 
-async fn best_effort_delete(bucket: &super::asset_bucket::AssetBucketClient, object_key: &str) {
+async fn best_effort_delete(bucket: &dyn super::asset_bucket::AssetObjectStore, object_key: &str) {
     if let Err(error) = bucket.delete_object(object_key).await {
         tracing::warn!(
             object_key = %object_key,

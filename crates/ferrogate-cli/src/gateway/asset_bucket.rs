@@ -21,8 +21,12 @@
 // Row-Level Security tenant-isolation policies. That remains open on
 // issue #176.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use ferrogate_cloudflare::{CloudflareClient, HttpMethod};
 use ferrogate_providers::{
     presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
     AwsCredentials, PresignBoundPayload, PresignRequest, SigningRequest,
@@ -142,6 +146,167 @@ pub(crate) struct PresignedUpload {
     /// `(header name, value)` pairs; `host` is also signed but derives from
     /// the URL itself.
     pub(crate) required_headers: Vec<(&'static str, String)>,
+}
+
+/// The object-storage backend seam for `/v1/assets/*` content (issue #411).
+///
+/// Extracted from [`AssetBucketClient`]'s inherent methods so the asset
+/// pipeline funnels every read/write through one `dyn` boundary instead of a
+/// single concrete S3 client. The existing S3/R2 client implements it with NO
+/// behavior change (the trait methods forward to the same inherent SigV4/R2
+/// methods); a Cloudflare-native publish backend
+/// ([`WorkersStaticAssetsStore`]) implements the same seam for a
+/// non-S3-shaped target and returns a clear `Unsupported`-style error for the
+/// S3-only operations (presign, arbitrary GET/HEAD/LIST) it cannot serve.
+///
+/// Method signatures are byte-for-byte the current [`AssetBucketClient`]
+/// signatures so the accessor swap is the only call-site change.
+#[async_trait]
+pub(crate) trait AssetObjectStore: Send + Sync {
+    async fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> anyhow::Result<()>;
+    async fn put_object_owned(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<()>;
+    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>>;
+    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn delete_object(&self, key: &str) -> anyhow::Result<()>;
+    async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>>;
+    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>>;
+    fn presign_put(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+        size_bytes: u64,
+        content_sha256_hex: &str,
+    ) -> anyhow::Result<PresignedUpload>;
+    fn presign_get(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String>;
+}
+
+/// Forwarding impl so a `Box<dyn AssetObjectStore>` (what the accessor hands
+/// out) is itself an [`AssetObjectStore`] — this lets the helper functions
+/// that take `&dyn AssetObjectStore` be called with a plain `&boxed_client`
+/// (deref/unsize) without every call site spelling out `.as_ref()`.
+#[async_trait]
+impl AssetObjectStore for Box<dyn AssetObjectStore> {
+    async fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> anyhow::Result<()> {
+        self.as_ref().put_object(key, body, content_type).await
+    }
+    async fn put_object_owned(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<()> {
+        self.as_ref()
+            .put_object_owned(key, body, content_type)
+            .await
+    }
+    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        self.as_ref().get_object(key).await
+    }
+    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.as_ref().get_object_if_present(key).await
+    }
+    async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
+        self.as_ref().delete_object(key).await
+    }
+    async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        self.as_ref().head_object(key).await
+    }
+    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+        self.as_ref().list_objects().await
+    }
+    fn presign_put(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+        size_bytes: u64,
+        content_sha256_hex: &str,
+    ) -> anyhow::Result<PresignedUpload> {
+        self.as_ref().presign_put(
+            key,
+            expires_secs,
+            timestamp_unix,
+            size_bytes,
+            content_sha256_hex,
+        )
+    }
+    fn presign_get(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        self.as_ref().presign_get(key, expires_secs, timestamp_unix)
+    }
+}
+
+/// The S3/R2 backend behind the trait (issue #411). Every method forwards to
+/// the identically-named inherent method, so the SigV4/R2 request shaping is
+/// unchanged — the trait is a pure indirection layer over the existing client.
+#[async_trait]
+impl AssetObjectStore for AssetBucketClient {
+    async fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> anyhow::Result<()> {
+        AssetBucketClient::put_object(self, key, body, content_type).await
+    }
+    async fn put_object_owned(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<()> {
+        AssetBucketClient::put_object_owned(self, key, body, content_type).await
+    }
+    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        AssetBucketClient::get_object(self, key).await
+    }
+    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        AssetBucketClient::get_object_if_present(self, key).await
+    }
+    async fn delete_object(&self, key: &str) -> anyhow::Result<()> {
+        AssetBucketClient::delete_object(self, key).await
+    }
+    async fn head_object(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        AssetBucketClient::head_object(self, key).await
+    }
+    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+        AssetBucketClient::list_objects(self).await
+    }
+    fn presign_put(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+        size_bytes: u64,
+        content_sha256_hex: &str,
+    ) -> anyhow::Result<PresignedUpload> {
+        AssetBucketClient::presign_put(
+            self,
+            key,
+            expires_secs,
+            timestamp_unix,
+            size_bytes,
+            content_sha256_hex,
+        )
+    }
+    fn presign_get(
+        &self,
+        key: &str,
+        expires_secs: u64,
+        timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        AssetBucketClient::presign_get(self, key, expires_secs, timestamp_unix)
+    }
 }
 
 impl AssetBucketClient {
@@ -493,6 +658,231 @@ impl AssetBucketClient {
             anyhow::bail!("asset_bucket.endpoint {} has no host", self.config.endpoint);
         }
         Ok((scheme, host.to_string()))
+    }
+}
+
+// ---- Cloudflare Workers Static Assets backend (issue #411) ------------------
+
+/// One entry in a Workers Static Assets upload manifest: the content hash the
+/// direct-upload session is keyed on plus the file's byte length.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AssetManifestEntry {
+    hash: String,
+    size: u64,
+}
+
+/// A Workers Static Assets upload manifest: `path -> (hash, size)`.
+///
+/// This is the body Cloudflare's `assets-upload-session` endpoint negotiates
+/// against — it replies with which content hashes still need their bytes
+/// uploaded. Paths are site-root-relative and always start with `/`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AssetUploadManifest {
+    files: BTreeMap<String, AssetManifestEntry>,
+}
+
+/// Cloudflare's manifest hash width. CF keys the direct-upload session on a
+/// 32-hex-char content hash (a SHA-256 prefix); the exact CF hashing recipe is
+/// pinned by the live publish test-agent, but the request-construction seam
+/// here computes a deterministic SHA-256 prefix so the manifest shape and the
+/// bucket-negotiation round-trip are unit-testable offline.
+const CF_ASSET_HASH_HEX_LEN: usize = 32;
+
+impl AssetUploadManifest {
+    /// A single-file manifest for `path` holding `body` — the shape a
+    /// per-object publish negotiates. `path` is normalized to a leading `/`.
+    pub(crate) fn single(path: &str, body: &[u8]) -> Self {
+        let mut files = BTreeMap::new();
+        files.insert(
+            normalize_asset_path(path),
+            AssetManifestEntry::for_bytes(body),
+        );
+        Self { files }
+    }
+
+    /// The number of files described. (Kept small on purpose — the manifest is
+    /// a plan, not the bytes.)
+    pub(crate) fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// The `{ "manifest": { ... } }` JSON body the upload-session endpoint
+    /// expects.
+    fn request_body(&self) -> serde_json::Value {
+        serde_json::json!({ "manifest": self.files })
+    }
+}
+
+impl AssetManifestEntry {
+    fn for_bytes(body: &[u8]) -> Self {
+        let mut hash = ferrogate_storage::sha256_hex(body);
+        hash.truncate(CF_ASSET_HASH_HEX_LEN);
+        Self {
+            hash,
+            size: body.len() as u64,
+        }
+    }
+}
+
+/// Normalizes an asset key to a Workers-Static-Assets site path (leading `/`,
+/// no duplicate slashes at the root).
+fn normalize_asset_path(key: &str) -> String {
+    let trimmed = key.trim_start_matches('/');
+    format!("/{trimmed}")
+}
+
+/// The decoded `result` of a Workers Static Assets upload-session negotiation:
+/// a JWT authorizing the follow-up file upload and the buckets of content
+/// hashes whose bytes CF still needs. Empty `buckets` means every asset is
+/// already present server-side.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct UploadSession {
+    #[serde(default)]
+    pub(crate) jwt: Option<String>,
+    #[serde(default)]
+    pub(crate) buckets: Vec<Vec<String>>,
+}
+
+/// A Cloudflare-native static-asset publish backend built on Workers Static
+/// Assets (issue #411). NOT S3-shaped: it publishes a bundle through the CF
+/// direct-upload flow rather than exposing arbitrary object GET/HEAD/LIST or
+/// SigV4 presign. Wired through the shared [`CloudflareClient`] so the publish
+/// request construction is unit-testable against a mocked transport.
+///
+/// Publish is a 3-step flow: (1) negotiate an upload session against a file
+/// manifest, (2) upload the pending file bytes referencing the session JWT,
+/// (3) PUT the Worker script referencing the completion token. Only step 1 is
+/// a plain JSON request the shared client models today; steps 2-3 use the
+/// multipart direct-upload transport and are the live-publish path owned by
+/// the #411 test-agent. This backend therefore constructs and issues step 1
+/// (mock-tested) and refuses to claim a durable publish it has not completed.
+pub(crate) struct WorkersStaticAssetsStore {
+    client: Arc<CloudflareClient>,
+    script_name: String,
+}
+
+impl WorkersStaticAssetsStore {
+    pub(crate) fn new(client: Arc<CloudflareClient>, script_name: String) -> Self {
+        Self {
+            client,
+            script_name,
+        }
+    }
+
+    /// Step 1 of the Workers Static Assets direct upload: negotiate an upload
+    /// session for `manifest`. Issues
+    /// `POST /accounts/{account_id}/workers/scripts/{script}/assets-upload-session`
+    /// through the shared client and decodes the `{ jwt, buckets }` result.
+    pub(crate) async fn create_upload_session(
+        &self,
+        manifest: &AssetUploadManifest,
+    ) -> anyhow::Result<UploadSession> {
+        let path = format!(
+            "accounts/{{account_id}}/workers/scripts/{}/assets-upload-session",
+            self.script_name
+        );
+        let body = serde_json::to_vec(&manifest.request_body())?;
+        let session = self
+            .client
+            .request_json::<UploadSession>(HttpMethod::Post, &path, Some(body), None)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("workers-static-assets upload-session negotiation failed: {error}")
+            })?;
+        Ok(session)
+    }
+
+    /// The publish path for a single asset. Negotiates the upload session
+    /// (step 1) and then reports honestly that the direct byte upload + Worker
+    /// script deploy (steps 2-3) are not yet wired for a live publish — it does
+    /// NOT fake a durable publish from a negotiated session alone.
+    async fn publish_object(&self, key: &str, body: &[u8]) -> anyhow::Result<()> {
+        let manifest = AssetUploadManifest::single(key, body);
+        if manifest.is_empty() {
+            anyhow::bail!("workers-static-assets: refusing to publish an empty manifest");
+        }
+        let session = self.create_upload_session(&manifest).await?;
+        // The negotiation succeeded; the completion JWT authorizes steps 2-3.
+        let jwt_state = if session.jwt.is_some() {
+            "a completion JWT was issued"
+        } else {
+            "no completion JWT was returned"
+        };
+        anyhow::bail!(
+            "workers-static-assets: negotiated an upload session for {} file(s) ({jwt_state}, {} \
+             bucket(s) pending upload), but the direct byte upload and Worker script deploy (steps \
+             2-3 of the Cloudflare direct-upload flow) are not yet wired for live publish (issue \
+             #411 test-agent follow-up); this backend does not claim a durable publish it has not \
+             completed",
+            manifest.len(),
+            session.buckets.len(),
+        )
+    }
+}
+
+/// The clear error the CF-native backend returns for an S3-only operation it
+/// structurally cannot serve (arbitrary GET/HEAD/LIST/DELETE by key, or SigV4
+/// presign). CF Workers Static Assets serves published bundles from the edge
+/// under a route/custom domain, not as a keyed private object store.
+fn workers_static_assets_unsupported(operation: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "workers-static-assets backend does not support {operation}: it is a static-site publish \
+         target served from Cloudflare's edge, not an S3-style keyed object store or a SigV4 \
+         presign source"
+    )
+}
+
+#[async_trait]
+impl AssetObjectStore for WorkersStaticAssetsStore {
+    async fn put_object(&self, key: &str, body: &[u8], _content_type: &str) -> anyhow::Result<()> {
+        self.publish_object(key, body).await
+    }
+    async fn put_object_owned(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        _content_type: &str,
+    ) -> anyhow::Result<()> {
+        self.publish_object(key, &body).await
+    }
+    async fn get_object(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+        Err(workers_static_assets_unsupported("object GET by key"))
+    }
+    async fn get_object_if_present(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Err(workers_static_assets_unsupported("object GET by key"))
+    }
+    async fn delete_object(&self, _key: &str) -> anyhow::Result<()> {
+        Err(workers_static_assets_unsupported("object DELETE by key"))
+    }
+    async fn head_object(&self, _key: &str) -> anyhow::Result<Option<u64>> {
+        Err(workers_static_assets_unsupported("object HEAD by key"))
+    }
+    async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+        Err(workers_static_assets_unsupported("object listing"))
+    }
+    fn presign_put(
+        &self,
+        _key: &str,
+        _expires_secs: u64,
+        _timestamp_unix: u64,
+        _size_bytes: u64,
+        _content_sha256_hex: &str,
+    ) -> anyhow::Result<PresignedUpload> {
+        Err(workers_static_assets_unsupported("SigV4 presigned upload"))
+    }
+    fn presign_get(
+        &self,
+        _key: &str,
+        _expires_secs: u64,
+        _timestamp_unix: u64,
+    ) -> anyhow::Result<String> {
+        Err(workers_static_assets_unsupported(
+            "SigV4 presigned download",
+        ))
     }
 }
 
@@ -1083,6 +1473,238 @@ mod tests {
                 ("content-length", "42".to_string()),
                 ("x-amz-content-sha256", sha),
             ]
+        );
+    }
+
+    // ---- #411 AssetObjectStore trait extraction (S3/R2 behind the trait) ----
+
+    #[tokio::test]
+    async fn s3_impl_shapes_a_put_identically_through_the_trait() {
+        // The extracted trait must be a pure indirection over the existing
+        // client: a PUT issued through `&dyn AssetObjectStore` produces the
+        // same signed path-style request the inherent method does.
+        let (endpoint, captured) = spawn_bucket_mock("200 OK", b"");
+        let concrete = client(endpoint);
+        let store: &dyn AssetObjectStore = &concrete;
+
+        store
+            .put_object(
+                "tenant-a:cli_tool:hello:1.0.0",
+                b"asset bytes",
+                "text/plain",
+            )
+            .await
+            .unwrap();
+
+        let request = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, "PUT");
+        assert_eq!(
+            request.path,
+            "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0"
+        );
+        assert_eq!(request.body, b"asset bytes");
+        assert!(request.has_authorization);
+        assert!(request.content_sha256_header.is_some());
+    }
+
+    #[test]
+    fn s3_presign_is_byte_for_byte_identical_through_the_trait() {
+        // Behavior-identical: the inherent presign and the trait presign of the
+        // same key at the same instant must produce the same URL.
+        let concrete = client("http://127.0.0.1:9999".into());
+        let inherent = AssetBucketClient::presign_get(&concrete, "k", 300, 1_440_938_160).unwrap();
+        let via_trait = <AssetBucketClient as AssetObjectStore>::presign_get(
+            &concrete,
+            "k",
+            300,
+            1_440_938_160,
+        )
+        .unwrap();
+        assert_eq!(inherent, via_trait);
+
+        let sha = "a".repeat(64);
+        let inherent_put = AssetBucketClient::presign_put(&concrete, "k", 300, 1, 42, &sha)
+            .unwrap()
+            .url;
+        let via_trait_put =
+            <AssetBucketClient as AssetObjectStore>::presign_put(&concrete, "k", 300, 1, 42, &sha)
+                .unwrap()
+                .url;
+        assert_eq!(inherent_put, via_trait_put);
+    }
+
+    // ---- #411 Cloudflare Workers Static Assets backend --------------------
+
+    /// A CloudflareClient transport that records the request it was handed and
+    /// replays a fixed envelope — no network. Mirrors the crate's own
+    /// `ScriptedTransport`, but captures the request so the publish request
+    /// construction is assertable.
+    struct CapturingCfTransport {
+        last: Arc<Mutex<Option<ferrogate_cloudflare::HttpRequest>>>,
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl ferrogate_cloudflare::HttpTransport for CapturingCfTransport {
+        async fn execute(
+            &self,
+            request: ferrogate_cloudflare::HttpRequest,
+        ) -> Result<ferrogate_cloudflare::HttpResponse, ferrogate_cloudflare::CloudflareError>
+        {
+            *self.last.lock().unwrap() = Some(request);
+            Ok(ferrogate_cloudflare::HttpResponse {
+                status: self.status,
+                retry_after: None,
+                body: self.body.clone(),
+            })
+        }
+    }
+
+    fn cf_store(
+        status: u16,
+        body: &str,
+    ) -> (
+        WorkersStaticAssetsStore,
+        Arc<Mutex<Option<ferrogate_cloudflare::HttpRequest>>>,
+    ) {
+        let last = Arc::new(Mutex::new(None));
+        let transport = Arc::new(CapturingCfTransport {
+            last: Arc::clone(&last),
+            status,
+            body: body.as_bytes().to_vec(),
+        });
+        let cf = CloudflareClient::from_parts(
+            ferrogate_cloudflare::CloudflareConfig::new("acct-123", "plaintext-token"),
+            Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env()),
+            transport,
+            Arc::new(ferrogate_cloudflare::TokioClock),
+            ferrogate_cloudflare::RetryPolicy::default(),
+        );
+        let store = WorkersStaticAssetsStore::new(Arc::new(cf), "my-worker".to_string());
+        (store, last)
+    }
+
+    const UPLOAD_SESSION_OK: &str = r#"{"success":true,"errors":[],"messages":[],"result":{"jwt":"upload-jwt","buckets":[["deadbeef"]]}}"#;
+
+    #[test]
+    fn asset_upload_manifest_is_a_leading_slash_path_map() {
+        let empty = AssetUploadManifest::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        let manifest = AssetUploadManifest::single("index.html", b"abc");
+        assert!(!manifest.is_empty());
+        assert_eq!(manifest.len(), 1);
+
+        let body = manifest.request_body();
+        // The key is normalized to a site-root-relative leading-slash path.
+        let entry = &body["manifest"]["/index.html"];
+        assert!(entry.is_object());
+        assert_eq!(entry["size"], 3);
+        // CF keys the session on a 32-hex-char content hash.
+        assert_eq!(entry["hash"].as_str().unwrap().len(), CF_ASSET_HASH_HEX_LEN);
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_constructs_the_upload_session_request() {
+        // #411: the publish request (step 1 of the 3-step direct upload) is
+        // constructed correctly against a MOCKED CloudflareClient transport.
+        let (store, last) = cf_store(200, UPLOAD_SESSION_OK);
+        let manifest = AssetUploadManifest::single("/index.html", b"<html>hi</html>");
+
+        let session = store.create_upload_session(&manifest).await.unwrap();
+        assert_eq!(session.jwt.as_deref(), Some("upload-jwt"));
+        assert_eq!(session.buckets, vec![vec!["deadbeef".to_string()]]);
+
+        let request = last.lock().unwrap().clone().unwrap();
+        assert_eq!(request.method, HttpMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.cloudflare.com/client/v4/accounts/acct-123/workers/scripts/my-worker/assets-upload-session"
+        );
+        let sent: serde_json::Value =
+            serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        let entry = &sent["manifest"]["/index.html"];
+        assert_eq!(entry["size"], 15);
+        assert_eq!(entry["hash"].as_str().unwrap().len(), CF_ASSET_HASH_HEX_LEN);
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_put_negotiates_but_does_not_fake_a_publish() {
+        // #411 honesty guard: put issues the real negotiation request but must
+        // NOT claim a durable publish it has not completed (steps 2-3 are the
+        // live-publish path).
+        let (store, last) = cf_store(200, UPLOAD_SESSION_OK);
+        let store_dyn: &dyn AssetObjectStore = &store;
+
+        let error = store_dyn
+            .put_object("/index.html", b"bytes", "text/html")
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not yet wired for live publish"),
+            "unexpected error: {error}"
+        );
+        // It did issue the step-1 negotiation request.
+        assert!(last.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_reports_s3_only_operations_unsupported() {
+        // #411: presign + arbitrary keyed GET/HEAD/LIST/DELETE are structurally
+        // unsupported on this CF-native publish target and return a clear error.
+        let (store, _last) = cf_store(200, UPLOAD_SESSION_OK);
+        let store_dyn: &dyn AssetObjectStore = &store;
+
+        assert!(store_dyn
+            .get_object("k")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support"));
+        assert!(store_dyn
+            .head_object("k")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support"));
+        assert!(store_dyn
+            .list_objects()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support"));
+        assert!(store_dyn
+            .delete_object("k")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support"));
+
+        let presign_get_err = store_dyn.presign_get("k", 300, 1).unwrap_err().to_string();
+        assert!(presign_get_err.contains("presign"), "{presign_get_err}");
+        // `PresignedUpload` is not `Debug`, so match rather than `unwrap_err`.
+        let presign_put_err = match store_dyn.presign_put("k", 300, 1, 5, &"a".repeat(64)) {
+            Ok(_) => panic!("expected presign_put to be unsupported on the CF backend"),
+            Err(error) => error.to_string(),
+        };
+        assert!(presign_put_err.contains("presign"), "{presign_put_err}");
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_maps_a_cloudflare_api_error() {
+        // A non-2xx CF envelope surfaces as a clear negotiation failure, not a
+        // silent success.
+        let error_body = r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#;
+        let (store, _last) = cf_store(403, error_body);
+        let manifest = AssetUploadManifest::single("/index.html", b"x");
+        let error = store.create_upload_session(&manifest).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("upload-session negotiation failed"),
+            "unexpected error: {error}"
         );
     }
 }
