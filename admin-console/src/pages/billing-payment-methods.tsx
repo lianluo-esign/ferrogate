@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -179,7 +180,6 @@ export default function BillingPaymentMethodsPage() {
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
 
-  const [tenantInput, setTenantInput] = useState("");
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<AdminPaymentMethod | null>(null);
 
@@ -222,30 +222,32 @@ export default function BillingPaymentMethodsPage() {
         </p>
       </div>
 
-      <form
-        className="flex items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setTenantId(tenantInput.trim() === "" ? null : tenantInput.trim());
-        }}
-      >
-        <div className="grid gap-2">
-          <Label htmlFor="pm-tenant">
-            {t("page.billingPaymentMethods.tenantIdLabel")}
-          </Label>
-          <Input
+      <div className="flex items-end gap-2">
+        <div className="grid w-72 gap-2">
+          {/* #340: select the tenant account from the shared #337 registry
+              instead of pasting a tenant id; selecting a tenant lists its stored
+              methods (the canonical `id` drives the required tenant_id query and
+              the register payload). */}
+          <Label htmlFor="pm-tenant">{t("common.tenant")}</Label>
+          <EntityReferencePicker
             id="pm-tenant"
-            className="w-72"
+            label={t("common.tenant")}
+            reference={{
+              target: "tenant-accounts",
+              valueKey: "id",
+              primaryLabelKey: "name",
+              secondaryLabelKeys: ["slug"],
+            }}
+            value={tenantId ?? ""}
+            dependencyValues={{}}
             placeholder={t("page.billingPaymentMethods.tenantIdPlaceholder")}
-            value={tenantInput}
-            onChange={(event) => setTenantInput(event.target.value)}
+            onChange={(value) =>
+              setTenantId(typeof value === "string" && value ? value : null)
+            }
           />
         </div>
-        <Button type="submit" disabled={tenantInput.trim() === ""}>
-          {t("page.billingPaymentMethods.list")}
-        </Button>
         {tenantId ? <CreatePaymentMethodDialog tenantId={tenantId} /> : null}
-      </form>
+      </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">

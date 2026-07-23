@@ -194,7 +194,28 @@ describe("BillingWalletsPage charge action", () => {
     const user = userEvent.setup();
     mockWallets([wallet()]);
     let chargeBody: unknown = null;
+    let seenTenant: string | null = null;
     server.use(
+      // #340: the charge dialog selects a registered payment method for THIS
+      // wallet's tenant from the shared #337 picker. The picker lists the
+      // tenant-scoped methods (tenant_id filter) rather than accepting a raw id.
+      http.get(gatewayUrl("/admin/v1/payment-methods"), ({ request }) => {
+        seenTenant = new URL(request.url).searchParams.get("tenant_id");
+        return HttpResponse.json({
+          object: "list",
+          data: [
+            {
+              id: "pm_default",
+              tenant_id: "org-acme",
+              provider: "stripe",
+              provider_customer_id: "cus_1",
+              provider_payment_method_id: "pm_tok_1",
+              is_default: true,
+              created_at_unix: 1,
+            },
+          ],
+        });
+      }),
       http.post(gatewayUrl(`${WALLETS_PATH}/org-acme/charge`), async ({ request }) => {
         chargeBody = await request.json();
         return HttpResponse.json({
@@ -220,10 +241,12 @@ describe("BillingWalletsPage charge action", () => {
 
     await user.clear(within(dialog).getByLabelText("Amount (USD cents)"));
     await user.type(within(dialog).getByLabelText("Amount (USD cents)"), "5000");
-    await user.type(
-      within(dialog).getByLabelText("Payment method id (optional)"),
-      "pm_default",
+
+    // Pick the tenant's stored method; the canonical `id` is submitted.
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "Payment method id (optional)" }),
     );
+    await user.click(await screen.findByRole("option", { name: /stripe/ }));
     await user.click(capture);
 
     await waitFor(() =>
@@ -232,6 +255,7 @@ describe("BillingWalletsPage charge action", () => {
         payment_method_id: "pm_default",
       }),
     );
+    await waitFor(() => expect(seenTenant).toBe("org-acme"));
   });
 
   it("surfaces a declined charge without closing the dialog", async () => {

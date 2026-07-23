@@ -27,8 +27,29 @@ function method(overrides: Partial<AdminPaymentMethod> = {}): AdminPaymentMethod
   };
 }
 
+// #340: the tenant filter is a shared #337 entity picker now. Mock the
+// tenant-accounts list (picker options) + detail (hydration of the selected
+// value); onUnhandledRequest is "error", so an un-mocked picker call fails.
+function mockTenantAccounts() {
+  server.use(
+    http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+      HttpResponse.json({ object: "list", data: [{ id: "org-acme", name: "Acme", slug: "acme" }] }),
+    ),
+    http.get(gatewayUrl("/admin/v1/tenant-accounts/org-acme"), () =>
+      HttpResponse.json({ object: "tenant", tenant: { id: "org-acme", name: "Acme", slug: "acme" } }),
+    ),
+  );
+}
+
+/** Select the "Acme" tenant (id org-acme) through the tenant picker. */
+async function selectTenant(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+  await user.click(await screen.findByRole("option", { name: /Acme/ }));
+}
+
 beforeEach(() => {
   seedSession();
+  mockTenantAccounts();
 });
 
 it("prompts for a tenant id before listing", async () => {
@@ -37,9 +58,12 @@ it("prompts for a tenant id before listing", async () => {
   expect(
     await screen.findByText("Enter a tenant id above to load payment methods."),
   ).toBeInTheDocument();
+  // The tenant filter is a picker, not a raw id textbox.
+  expect(screen.getByRole("combobox", { name: "Tenant" })).toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: /Tenant/ })).not.toBeInTheDocument();
 });
 
-it("lists payment methods for the entered tenant with a tenant_id query", async () => {
+it("lists payment methods for the selected tenant with a tenant_id query", async () => {
   const user = userEvent.setup();
   let seenTenant: string | null = null;
   server.use(
@@ -50,8 +74,7 @@ it("lists payment methods for the entered tenant with a tenant_id query", async 
   );
 
   renderWithProviders(<BillingPaymentMethodsPage />);
-  await user.type(screen.getByLabelText("Tenant id"), "org-acme");
-  await user.click(screen.getByRole("button", { name: "List" }));
+  await selectTenant(user);
 
   expect(await screen.findByText("pm-1")).toBeInTheDocument();
   expect(screen.getByText("cus_123")).toBeInTheDocument();
@@ -73,8 +96,7 @@ it("registers a new payment method with the full body", async () => {
   );
 
   renderWithProviders(<BillingPaymentMethodsPage />);
-  await user.type(screen.getByLabelText("Tenant id"), "org-acme");
-  await user.click(screen.getByRole("button", { name: "List" }));
+  await selectTenant(user);
 
   await user.click(
     await screen.findByRole("button", { name: "Register payment method" }),
@@ -113,8 +135,7 @@ it("deletes a payment method after confirmation", async () => {
   );
 
   renderWithProviders(<BillingPaymentMethodsPage />);
-  await user.type(screen.getByLabelText("Tenant id"), "org-acme");
-  await user.click(screen.getByRole("button", { name: "List" }));
+  await selectTenant(user);
   await screen.findByText("pm-1");
 
   await user.click(screen.getByRole("button", { name: "Delete" }));

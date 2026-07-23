@@ -134,6 +134,13 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
       },
     },
     {
+      // #340: the workspace picker is scoped to the selected project via a
+      // dependent selector (the workspaces list honours a `project_id` filter),
+      // so an operator cannot pair project A's id with a workspace that lives in
+      // project B — a cross-project (and therefore cross-tenant) combo the API
+      // would reject. Choosing/clearing the project clears a stale workspace
+      // (clearDependentReferenceValues); the picker stays disabled until a
+      // project is picked.
       name: "workspace_id",
       labelKey: "resource.apiKeys.field.workspace",
       type: "entity",
@@ -142,6 +149,10 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug", "project_id"],
+        // No inline `label`: the picker humanizes the field name ("project id")
+        // for its "select … first" prompt, so no untranslated literal is baked
+        // into the shared config data.
+        dependencies: [{ field: "project_id", queryKey: "project_id" }],
       },
     },
     { name: "user_id", labelKey: "resource.apiKeys.field.userId", type: "text" },

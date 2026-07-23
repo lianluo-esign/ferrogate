@@ -11,6 +11,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -276,14 +277,30 @@ function ChargeDialog({
             />
           </div>
           <div className="grid gap-2">
+            {/* #340: choose one of the tenant's registered payment methods from
+                the shared #337 registry rather than pasting a method id. The
+                picker is scoped to this wallet's tenant, so only that tenant's
+                methods are selectable; leaving it blank charges the tenant
+                default. The stored method's canonical `id` is submitted. */}
             <Label htmlFor="charge-pm">
               {t("page.billingWallets.charge.pmLabel")}
             </Label>
-            <Input
+            <EntityReferencePicker
               id="charge-pm"
-              placeholder={t("page.billingWallets.charge.pmPlaceholder")}
+              label={t("page.billingWallets.charge.pmLabel")}
+              reference={{
+                target: "payment-methods",
+                valueKey: "id",
+                primaryLabelKey: "provider",
+                secondaryLabelKeys: ["provider_payment_method_id"],
+                dependencies: [{ field: "tenant_id", queryKey: "tenant_id" }],
+              }}
               value={paymentMethodId}
-              onChange={(event) => setPaymentMethodId(event.target.value)}
+              dependencyValues={{ tenant_id: wallet.tenant_id }}
+              placeholder={t("page.billingWallets.charge.pmPlaceholder")}
+              onChange={(value) =>
+                setPaymentMethodId(typeof value === "string" ? value : "")
+              }
             />
           </div>
           {error ? (

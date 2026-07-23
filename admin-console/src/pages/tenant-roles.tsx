@@ -18,8 +18,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -101,14 +101,24 @@ export default function TenantRolesPage() {
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
-        <div className="grid gap-2">
-          <Label htmlFor="tenant-id">{t("page.tenantRoles.field.tenantId")}</Label>
-          <Input
+        <div className="grid w-72 gap-2">
+          {/* #340: pick the owning tenant account from the shared #337 registry
+              instead of pasting a tenant id; the canonical `id` still drives the
+              parameterised list/assign/remove paths. */}
+          <Label htmlFor="tenant-id">{t("common.tenant")}</Label>
+          <EntityReferencePicker
             id="tenant-id"
-            className="w-72"
+            label={t("common.tenant")}
+            reference={{
+              target: "tenant-accounts",
+              valueKey: "id",
+              primaryLabelKey: "name",
+              secondaryLabelKeys: ["slug"],
+            }}
             value={tenantId}
-            onChange={(event) => setTenantId(event.target.value)}
+            dependencyValues={{}}
             placeholder={t("page.tenantRoles.placeholder.tenantId")}
+            onChange={(value) => setTenantId(typeof value === "string" ? value : "")}
           />
         </div>
       </div>
@@ -120,14 +130,24 @@ export default function TenantRolesPage() {
           if (roleId.trim() !== "") assignMutation.mutate(roleId.trim());
         }}
       >
-        <div className="grid gap-2">
-          <Label htmlFor="role-id">{t("page.tenantRoles.field.roleId")}</Label>
-          <Input
+        <div className="grid w-72 gap-2">
+          {/* #340: choose the RBAC role from the roles catalog; the binding still
+              submits the role's canonical `id`. A deleted role selected earlier
+              stays inspectable as an unresolved chip. */}
+          <Label htmlFor="role-id">{t("page.tenantRoles.field.role")}</Label>
+          <EntityReferencePicker
             id="role-id"
-            className="w-72"
+            label={t("page.tenantRoles.field.role")}
+            reference={{
+              target: "roles",
+              valueKey: "id",
+              primaryLabelKey: "name",
+              secondaryLabelKeys: ["slug"],
+            }}
             value={roleId}
-            onChange={(event) => setRoleId(event.target.value)}
+            dependencyValues={{}}
             placeholder={t("page.tenantRoles.placeholder.roleId")}
+            onChange={(value) => setRoleId(typeof value === "string" ? value : "")}
           />
         </div>
         <Button

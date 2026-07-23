@@ -53,9 +53,21 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
     { name: "asset_hosting_enabled", labelKey: "resource.plans.field.assetHostingEnabled", type: "boolean" },
     { name: "admin_console_seats", labelKey: "resource.plans.field.adminConsoleSeats", type: "number" },
     {
+      // #340: the plan's default model allowlist was a raw CSV of model names.
+      // Models are a first-class catalog, so it now uses the shared multi-entity
+      // picker targeting the model catalog by canonical `name` (same shape as the
+      // key allowlists). The submitted value is unchanged: an array of model
+      // names. An existing name no longer in the catalog stays inspectable as an
+      // unresolved chip rather than silently disappearing.
       name: "default_model_allowlist",
       labelKey: "resource.plans.field.defaultModelAllowlist",
-      type: "csv",
+      type: "entities",
+      reference: {
+        target: "models",
+        valueKey: "name",
+        primaryLabelKey: "name",
+        secondaryLabelKeys: ["provider", "provider_model"],
+      },
     },
     { name: "default_rpm_limit", labelKey: "resource.plans.field.defaultRpmLimit", type: "number" },
     { name: "default_tpm_limit", labelKey: "resource.plans.field.defaultTpmLimit", type: "number" },

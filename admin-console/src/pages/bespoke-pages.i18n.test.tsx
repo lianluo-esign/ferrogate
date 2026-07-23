@@ -438,8 +438,9 @@ describe("billing-payment-methods page copy is localized", () => {
     expect(
       await screen.findByText(en["page.billingPaymentMethods.prompt"]),
     ).toBeInTheDocument();
+    // #340: the tenant filter is a localized entity picker, not a free-text id.
     expect(
-      screen.getByRole("button", { name: en["page.billingPaymentMethods.list"] }),
+      screen.getByRole("combobox", { name: en["common.tenant"] }),
     ).toBeInTheDocument();
   });
 
@@ -454,7 +455,7 @@ describe("billing-payment-methods page copy is localized", () => {
       await screen.findByText(zhCN["page.billingPaymentMethods.prompt"]),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: zhCN["page.billingPaymentMethods.list"] }),
+      screen.getByRole("combobox", { name: zhCN["common.tenant"] }),
     ).toBeInTheDocument();
   });
 });
@@ -685,6 +686,13 @@ describe("tool-approvals page copy is localized", () => {
 describe("tenant-roles page copy is localized", () => {
   beforeEach(() => {
     mockAdminList("/admin/v1/tenant-roles/tenant-1", []);
+    // #340: the tenant field is now an entity picker that hydrates the signed-in
+    // tenant on mount; mock its detail lookup (onUnhandledRequest is "error").
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
+        HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
+      ),
+    );
   });
 
   it("renders English title, assign action, and empty state", async () => {

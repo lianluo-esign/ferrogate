@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
 import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
 import { apiKeysConfig } from "@/resources/api-keys";
+import { plansConfig } from "@/resources/plans";
 import { tenantAccountsConfig } from "@/resources/tenant-accounts";
 import { virtualKeysConfig } from "@/resources/virtual-keys";
 import { gatewayUrl, server } from "@/test/msw";
@@ -200,5 +201,70 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
         }),
       ),
     );
+  });
+
+  it("plan default model allowlist is a model picker submitting canonical names", async () => {
+    installCatalogHandlers();
+    const user = userEvent.setup();
+    const onSubmit = renderForm(plansConfig.fields, {
+      ...defaultFieldValues(plansConfig.fields),
+      id: "plan-x",
+      name: "Pro",
+      slug: "pro",
+    });
+
+    // Formerly a raw comma-separated field; now a multi-select model picker.
+    const picker = screen.getByRole("combobox", { name: "Default model allowlist" });
+    expect(picker).toBeInTheDocument();
+
+    await user.click(picker);
+    await user.click(await screen.findByRole("option", { name: /gpt-4o/ }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Pro",
+          slug: "pro",
+          default_model_allowlist: ["gpt-4o"],
+        }),
+      ),
+    );
+  });
+
+  it("native api-key workspace picker cascades from (and is filtered by) the selected project", async () => {
+    const user = userEvent.setup();
+    let workspaceProjectFilter: string | null = "unset";
+    server.use(
+      http.get(gatewayUrl("/admin/v1/projects"), () =>
+        HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
+      ),
+      http.get(gatewayUrl("/admin/v1/workspaces"), ({ request }) => {
+        workspaceProjectFilter = new URL(request.url).searchParams.get("project_id");
+        return HttpResponse.json({ object: "list", data: workspaces, total: workspaces.length, offset: 0, limit: 20 });
+      }),
+    );
+
+    renderForm(apiKeysConfig.fields, {
+      ...defaultFieldValues(apiKeysConfig.fields),
+      name: "native-key",
+    });
+
+    // The workspace picker is disabled until a project scopes it — no
+    // cross-project (hence cross-tenant) combo is selectable.
+    expect(screen.getByRole("combobox", { name: "Workspace" })).toBeDisabled();
+
+    await user.click(screen.getByRole("combobox", { name: "Project" }));
+    await user.click(await screen.findByRole("option", { name: /Production/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Workspace" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("combobox", { name: "Workspace" }));
+    await screen.findByRole("option", { name: /Staging/ });
+
+    // The workspace list is scoped to the selected project.
+    await waitFor(() => expect(workspaceProjectFilter).toBe("project-1"));
   });
 });

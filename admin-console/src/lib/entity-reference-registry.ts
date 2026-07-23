@@ -73,6 +73,25 @@ export const entityReferenceRegistry: EntityReferenceRegistry = {
     detailPath: (value) => `/admin/v1/permissions/${encodeURIComponent(value)}`,
     unwrapDetail: unwrapNamedRecord("permission"),
   },
+  // #340: tenant-role bindings reference an RBAC role by its canonical `id`. The
+  // roles collection exposes GET/POST (+ DELETE per id) but no per-item GET and
+  // no server-side search/offset params, so this adapter has no detailPath —
+  // `hydrateEntityReference` resolves an existing value from the (full) list
+  // response, and a deleted role that no longer appears stays inspectable as an
+  // unresolved badge on the binding.
+  roles: {
+    listPath: "/admin/v1/roles",
+  },
+  // #340: wallet-charge selects a tenant's already-registered payment method by
+  // its canonical `id`. The list endpoint requires a `tenant_id` query param
+  // (supplied by the picker's tenant dependency filter) and exposes no per-item
+  // GET, so this adapter has no detailPath — `hydrateEntityReference` resolves an
+  // existing value from the tenant-scoped list. Only the non-secret provider
+  // metadata is surfaced as labels; the opaque provider payment-method token is
+  // never used as a selector (issue non-goal).
+  "payment-methods": {
+    listPath: "/admin/v1/payment-methods",
+  },
   // #340: tenant accounts reference a sellable plan by its canonical `id`
   // (tenant-accounts.plan_id). The plans list endpoint exposes no server-side
   // search/offset params (same shape as models/providers below), so the picker

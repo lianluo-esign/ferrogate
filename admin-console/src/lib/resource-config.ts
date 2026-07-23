@@ -51,6 +51,8 @@ export type EntityReferenceTarget =
   | "projects"
   | "workspaces"
   | "permissions"
+  | "roles"
+  | "payment-methods"
   | "models"
   | "providers"
   | "plans"
