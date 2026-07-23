@@ -21,11 +21,17 @@
 //! lifecycle REST API**, so this issue does not talk to Cloudflare directly.
 //! Instead it defines the [`CloudflareControlSurface`] seam — the small set of
 //! CF-side operations a hosted run needs (start / exec-or-attach / stop /
-//! cleanup / status) — and maps the scheduler's isolation lifecycle onto it. The
-//! two real implementations are sibling sub-issues:
+//! cancel / cleanup / status) — and maps the scheduler's isolation lifecycle
+//! onto it. The real implementation and its refinement are sibling sub-issues:
 //!
-//! - **#413** — a fronting deploy-Worker that exposes start/stop/status.
-//! - **#414** — the Cloudflare Workflows REST API lifecycle.
+//! - **#413** — a fronting deploy-Worker that exposes the `/control/*` routes,
+//!   implemented by [`crate::WorkerGatewayControlSurface`].
+//! - **#414** — refines the verb→primitive mapping onto the *actual* Cloudflare
+//!   agent primitives (lazy create, `onStart(props)`, hibernation-as-stop,
+//!   fiber-cancel, `this.destroy()`, custom status) and threads per-run `props`
+//!   (model/tools/prompt + placement) into `onStart`. See
+//!   [`CloudflareRunProps`] and the module docs of
+//!   [`crate::WorkerGatewayControlSurface`].
 //!
 //! Both bridge onto `ferrogate_cloudflare::CloudflareClient` (issue #405). The
 //! seam is intentionally **synchronous** to match [`AgentWorkerControlClient`];
@@ -34,7 +40,10 @@
 //! provides a no-network implementation for tests.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::{error::Error, fmt};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentWorkerControlClient, AgentWorkerFrameworkHandler, IsolationBackendCapabilities,
@@ -140,8 +149,47 @@ pub fn managed_worker_session_status_wire(status: ManagedWorkerSessionStatus) ->
     }
 }
 
+/// Per-run **initialization props** delivered to the agent's `onStart(props)` on
+/// the Cloudflare side.
+///
+/// These are the runtime-selectable dials for a single run. In the Cloudflare
+/// Agents model there is **no deploy-time `model` field**: the agent chooses its
+/// model/tools/system-prompt *in code* at start, reading them from the props it
+/// is handed. FerroGate therefore threads the per-run selection here and the
+/// gateway Worker's `onStart(props)` reads them — making the model (and tools /
+/// system prompt) selectable per run without redeploying the Worker.
+///
+/// Props are **transient**: they are the input to a run's `onStart`, distinct
+/// from the agent's **persistent state** (the DO's SQLite rows). Re-addressing a
+/// hibernated agent by name does not re-deliver props; the agent reads its
+/// already-resolved selections from persistent state on wake.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareRunProps {
+    /// Runtime-selected model id (e.g. an Anthropic model). `None` = the agent's
+    /// coded default. There is no deploy-time model field on Cloudflare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Runtime-selected tool set for this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// Runtime-selected system prompt for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Placement hint for the agent's Durable Object (`wnam`/`enam`/`weur`/…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_hint: Option<String>,
+    /// Data-jurisdiction constraint (`eu`/`fedramp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<String>,
+    /// Dispatch routing-retry budget for reaching the agent instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_retry: Option<u32>,
+}
+
 /// Request to start a Cloudflare-hosted run. Derived from the scheduler's
-/// [`IsolationPrepareRequest`].
+/// [`IsolationPrepareRequest`], plus the per-run [`CloudflareRunProps`] that the
+/// gateway Worker delivers to the agent's `onStart(props)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareRunStartRequest {
     pub session_id: String,
@@ -149,11 +197,15 @@ pub struct CloudflareRunStartRequest {
     pub worker_template_id: String,
     pub framework_adapter: String,
     pub capability_envelope_id: String,
+    /// Transient per-run init props (model/tools/prompt + placement) handed to
+    /// `onStart(props)`. Resolved from the run request via the client's
+    /// [`CloudflareRunPropsResolver`].
+    pub props: CloudflareRunProps,
 }
 
 /// A handle to a started CF-hosted run. `run_ref` is the Cloudflare-side
-/// instance identifier (a Workflows `instanceId` for #414, or the fronting
-/// Worker's run id for #413) and becomes the scheduler's `instance_id`.
+/// instance identifier (the agent instance **name** the fronting Worker
+/// addresses by `getAgentByName`) and becomes the scheduler's `instance_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareRunHandle {
     pub run_ref: String,
@@ -230,14 +282,33 @@ pub trait CloudflareControlSurface {
         request: CloudflareRunExecRequest,
     ) -> Result<CloudflareRunExecOutcome, CloudflareControlSurfaceError>;
 
-    /// Stop the hosted run. Maps `stop`.
+    /// Model a terminal **stop** for the hosted run.
+    ///
+    /// Cloudflare has **no stop/pause primitive**: an idle agent hibernates
+    /// automatically (~70–140s idle → zero compute, state retained) and is woken
+    /// simply by re-addressing it by name. So a normal terminal stop is a
+    /// **hibernate / no-op**: implementations should NOT invoke a "stop" control
+    /// route (there is none). Real in-flight cancellation goes through
+    /// [`Self::cancel_run`] (fibers), not here.
     fn stop_run(
         &mut self,
         run_ref: &str,
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError>;
 
-    /// Tear down the hosted run's resources. Maps `cleanup`.
+    /// Actively **cancel** in-flight work for the hosted run.
+    ///
+    /// Cloudflare's only cancellation primitive is **fibers**
+    /// (`startFiber().cancel` / `abortSubAgent`), exposed as a dedicated control
+    /// route on the gateway Worker. Distinct from [`Self::stop_run`] (hibernation)
+    /// and [`Self::cleanup_run`] (`this.destroy()`).
+    fn cancel_run(
+        &mut self,
+        run_ref: &str,
+        reason: &str,
+    ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError>;
+
+    /// Tear down the hosted run's resources (`this.destroy()`). Maps `cleanup`.
     fn cleanup_run(
         &mut self,
         run_ref: &str,
@@ -276,6 +347,32 @@ pub struct CloudflareAgentControlClient<S: CloudflareControlSurface> {
     backends: Vec<IsolationBackendDescriptor>,
     framework_handlers: Vec<AgentWorkerFrameworkHandler>,
     runs: HashMap<String, CloudflareRunContext>,
+    props_resolver: CloudflareRunPropsResolver,
+}
+
+/// Resolves a run's transient [`CloudflareRunProps`] (model/tools/system-prompt +
+/// placement) from the scheduler's [`IsolationPrepareRequest`].
+///
+/// This is the injection point for FerroGate's **per-run parameterization**: the
+/// scheduler seam ([`AgentWorkerControlClient`]) is left unchanged — it still only
+/// carries the `IsolationPrepareRequest` — while this resolver maps that request
+/// (e.g. its `worker_template_id`) onto the model/tools/prompt selection handed to
+/// the agent's `onStart(props)`. The default resolver yields
+/// [`CloudflareRunProps::default`] (the agent's coded defaults).
+pub type CloudflareRunPropsResolver =
+    Arc<dyn Fn(&IsolationPrepareRequest) -> CloudflareRunProps + Send + Sync>;
+
+/// Terminal stop reasons the scheduler uses for a run that reached a terminal
+/// state on its own. On Cloudflare these are modeled as **hibernation** (no stop
+/// RPC — the idle agent goes to zero compute and stays re-addressable by name).
+/// Any *other* reason is treated as an operator **cancel** and routed to the
+/// fiber-cancel primitive ([`CloudflareControlSurface::cancel_run`]).
+const HIBERNATE_STOP_REASONS: [&str; 2] = ["completed", "failed"];
+
+/// Whether a scheduler stop `reason` is a natural terminal transition (→
+/// hibernation) rather than an active operator cancel (→ fiber-cancel).
+fn stop_is_hibernation(reason: &str) -> bool {
+    HIBERNATE_STOP_REASONS.contains(&reason)
 }
 
 impl<S: CloudflareControlSurface> CloudflareAgentControlClient<S> {
@@ -308,7 +405,18 @@ impl<S: CloudflareControlSurface> CloudflareAgentControlClient<S> {
             backends: vec![descriptor],
             framework_handlers,
             runs: HashMap::new(),
+            props_resolver: Arc::new(|_| CloudflareRunProps::default()),
         }
+    }
+
+    /// Install a [`CloudflareRunPropsResolver`] that derives each run's
+    /// `onStart(props)` selection (model/tools/prompt + placement) from the
+    /// scheduler's prepare request. Leaves [`ManagedWorkerScheduler`] unchanged.
+    ///
+    /// [`ManagedWorkerScheduler`]: crate::ManagedWorkerScheduler
+    pub fn with_props_resolver(mut self, resolver: CloudflareRunPropsResolver) -> Self {
+        self.props_resolver = resolver;
+        self
     }
 
     /// The advertised Cloudflare descriptor.
@@ -392,12 +500,18 @@ impl<S: CloudflareControlSurface> AgentWorkerControlClient for CloudflareAgentCo
         &mut self,
         request: IsolationPrepareRequest,
     ) -> Result<IsolationStarted, ManagedWorkerError> {
+        // Resolve the per-run props (model/tools/prompt + placement) that the
+        // gateway Worker will deliver to `onStart(props)`. "create" is LAZY on
+        // Cloudflare: `start_run` addresses the agent by name — first addressing
+        // instantiates it — so there is no separate create call.
+        let props = (self.props_resolver)(&request);
         let handle = self.surface.start_run(CloudflareRunStartRequest {
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
             worker_template_id: request.worker_template_id.clone(),
             framework_adapter: request.framework_adapter.clone(),
             capability_envelope_id: request.capability_envelope_id.clone(),
+            props,
         })?;
         self.runs.insert(
             handle.run_ref.clone(),
@@ -453,7 +567,16 @@ impl<S: CloudflareControlSurface> AgentWorkerControlClient for CloudflareAgentCo
         instance_id: &str,
         reason: &str,
     ) -> Result<IsolationStopOutcome, ManagedWorkerError> {
-        let status = self.surface.stop_run(instance_id, reason)?;
+        // CF reality: no "stop" primitive. A natural terminal transition
+        // (`completed`/`failed`) is modeled as HIBERNATION (`stop_run`, a no-op —
+        // the idle agent goes to zero compute, re-addressable by name). An
+        // operator cancel actively aborts in-flight work via the fiber-cancel
+        // route (`cancel_run`).
+        let status = if stop_is_hibernation(reason) {
+            self.surface.stop_run(instance_id, reason)?
+        } else {
+            self.surface.cancel_run(instance_id, reason)?
+        };
         if let Some(context) = self.runs.get_mut(instance_id) {
             context.status = status;
         }
@@ -494,6 +617,7 @@ pub enum MockCloudflareCall {
     StartRun(CloudflareRunStartRequest),
     ExecRun(CloudflareRunExecRequest),
     StopRun { run_ref: String, reason: String },
+    CancelRun { run_ref: String, reason: String },
     CleanupRun { run_ref: String },
     RunStatus { run_ref: String },
 }
@@ -588,7 +712,22 @@ impl CloudflareControlSurface for MockCloudflareControlSurface {
         run_ref: &str,
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
+        // Models hibernation: no stop RPC exists on Cloudflare. The mock records
+        // the intent and reports `Stopped` without contacting a control route.
         self.calls.push(MockCloudflareCall::StopRun {
+            run_ref: run_ref.to_string(),
+            reason: reason.to_string(),
+        });
+        Ok(CloudflareRunStatus::Stopped)
+    }
+
+    fn cancel_run(
+        &mut self,
+        run_ref: &str,
+        reason: &str,
+    ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
+        // Models the fiber-cancel primitive.
+        self.calls.push(MockCloudflareCall::CancelRun {
             run_ref: run_ref.to_string(),
             reason: reason.to_string(),
         });

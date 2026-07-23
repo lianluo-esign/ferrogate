@@ -54,9 +54,9 @@ pub use cloudflare_worker::{
     cloudflare_backend_descriptor, cloudflare_backend_descriptor_default,
     managed_worker_session_status_wire, CloudflareAgentControlClient, CloudflareControlSurface,
     CloudflareControlSurfaceError, CloudflareRunExecOutcome, CloudflareRunExecRequest,
-    CloudflareRunHandle, CloudflareRunStartRequest, CloudflareRunStatus, MockCloudflareCall,
-    MockCloudflareControlSurface, CLOUDFLARE_BACKEND_NAME, CLOUDFLARE_BACKEND_VERSION,
-    CLOUDFLARE_HOST_LIFECYCLE_OWNER,
+    CloudflareRunHandle, CloudflareRunProps, CloudflareRunPropsResolver, CloudflareRunStartRequest,
+    CloudflareRunStatus, MockCloudflareCall, MockCloudflareControlSurface, CLOUDFLARE_BACKEND_NAME,
+    CLOUDFLARE_BACKEND_VERSION, CLOUDFLARE_HOST_LIFECYCLE_OWNER,
 };
 pub use framework_adapter::{
     authorize_framework_capability, self_hosted_framework_capability_report, FrameworkAdapter,

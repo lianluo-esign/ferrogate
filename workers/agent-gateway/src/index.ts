@@ -29,7 +29,37 @@ type RunStatus =
   | "stopped"
   | "cleaned_up";
 
-/** Persisted per-agent state (lives in the DO's embedded SQLite). */
+/**
+ * Transient per-run **init props** delivered to {@link AgentGateway.onStart}.
+ *
+ * Cloudflare has NO deploy-time `model` field: the agent picks its model / tools
+ * / system prompt IN CODE at start, reading them from these props. That makes the
+ * run runtime-selectable without redeploying the Worker. Props are the INPUT to a
+ * run; they are distinct from the agent's persistent {@link AgentGatewayState}.
+ */
+interface RunProps {
+  /** Runtime-selected model id (mirrors the Rust `CloudflareRunProps.model`). */
+  model?: string;
+  /** Runtime-selected tool set. */
+  tools?: string[];
+  /** Runtime-selected system prompt. */
+  systemPrompt?: string;
+  /** DO placement hint (`wnam`/`enam`/`weur`/…). */
+  locationHint?: string;
+  /** Data-jurisdiction constraint (`eu`/`fedramp`). */
+  jurisdiction?: string;
+  /** Dispatch routing-retry budget. */
+  routingRetry?: number;
+}
+
+/**
+ * Persisted per-agent state (lives in the DO's embedded SQLite).
+ *
+ * The `resolved*` fields are the model/tools/prompt/placement the agent RESOLVED
+ * from the run's transient {@link RunProps} at start. They are persistent (they
+ * survive hibernation) so a re-addressed, woken agent reads its already-chosen
+ * runtime configuration from state without props being re-delivered.
+ */
 interface AgentGatewayState {
   status: RunStatus;
   runId: string | null;
@@ -37,6 +67,11 @@ interface AgentGatewayState {
   workerTemplateId: string | null;
   frameworkAdapter: string | null;
   capabilityEnvelopeId: string | null;
+  resolvedModel: string | null;
+  resolvedTools: string[];
+  resolvedSystemPrompt: string | null;
+  resolvedLocationHint: string | null;
+  resolvedJurisdiction: string | null;
   lastMessage: string | null;
   exitCode: number | null;
   updatedAt: number;
@@ -49,6 +84,11 @@ const INITIAL_STATE: AgentGatewayState = {
   workerTemplateId: null,
   frameworkAdapter: null,
   capabilityEnvelopeId: null,
+  resolvedModel: null,
+  resolvedTools: [],
+  resolvedSystemPrompt: null,
+  resolvedLocationHint: null,
+  resolvedJurisdiction: null,
   lastMessage: null,
   exitCode: null,
   updatedAt: 0,
@@ -61,6 +101,8 @@ interface StartRequest {
   workerTemplateId: string;
   frameworkAdapter: string;
   capabilityEnvelopeId: string;
+  /** Per-run init props handed to `onStart(props)`. Optional; defaults empty. */
+  props?: RunProps;
 }
 
 /** Body of an `invoke` (exec/attach) control call. */
@@ -82,8 +124,20 @@ interface InvokeRequest {
 export class AgentGateway extends Agent<Env, AgentGatewayState> {
   initialState = INITIAL_STATE;
 
-  /** RPC: start (provision) this run. Maps the Rust `start_run`. */
+  /**
+   * RPC: start (provision) this run. Maps the Rust `start_run`.
+   *
+   * "create" is LAZY on Cloudflare: `getAgentByName(ns, this.name)` already
+   * instantiated this Durable Object (first addressing creates it; the same name
+   * always resolves to the same instance). There is no separate create call — so
+   * `start` just delivers the per-run {@link RunProps} to {@link onStart}, which
+   * resolves the runtime-selectable model/tools/prompt, then records the run ids.
+   */
   async start(request: StartRequest): Promise<{ runRef: string; status: RunStatus }> {
+    // onStart(props) reads the runtime-selectable model/tools/prompt from the
+    // transient props. On a real cold start/wake Cloudflare calls onStart
+    // automatically; here we invoke it at run start with the per-run props.
+    this.onStart(request.props ?? {});
     this.setState({
       ...this.state,
       status: "running",
@@ -96,6 +150,28 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
       updatedAt: Date.now(),
     });
     return { runRef: this.name, status: this.state.status };
+  }
+
+  /**
+   * Resolve this run's runtime configuration from its transient init props.
+   *
+   * This is where the agent chooses its model / tools / system prompt IN CODE
+   * (Cloudflare has no deploy-time model field). The selections are read from the
+   * per-run props and written into persistent state so they survive hibernation
+   * and are available to every subsequent invoke without props being re-sent.
+   * `locationHint` / `jurisdiction` are recorded for placement/compliance; a real
+   * deployment would honor them when addressing sub-agents or storage.
+   */
+  onStart(props: RunProps): void {
+    this.setState({
+      ...this.state,
+      resolvedModel: props.model ?? this.state.resolvedModel,
+      resolvedTools: props.tools ?? this.state.resolvedTools,
+      resolvedSystemPrompt: props.systemPrompt ?? this.state.resolvedSystemPrompt,
+      resolvedLocationHint: props.locationHint ?? this.state.resolvedLocationHint,
+      resolvedJurisdiction: props.jurisdiction ?? this.state.resolvedJurisdiction,
+      updatedAt: Date.now(),
+    });
   }
 
   /** RPC: exec/attach and drive the run. Maps the Rust `exec_run`. */
@@ -115,13 +191,38 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     return { runRef: this.name, status: this.state.status, exitCode: 0, message };
   }
 
-  /** RPC: current status (out-of-band reconcile). Maps the Rust `run_status`. */
-  async status(): Promise<{ runRef: string; status: RunStatus; message: string | null }> {
-    return { runRef: this.name, status: this.state.status, message: this.state.lastMessage };
+  /**
+   * RPC: current status (out-of-band reconcile). Maps the Rust `run_status`.
+   *
+   * This is a CUSTOM status method — Cloudflare has NO `getStatus` primitive.
+   * Returns the resolved model so a caller can confirm props round-tripped into
+   * `onStart`.
+   */
+  async status(): Promise<{
+    runRef: string;
+    status: RunStatus;
+    message: string | null;
+    resolvedModel: string | null;
+  }> {
+    return {
+      runRef: this.name,
+      status: this.state.status,
+      message: this.state.lastMessage,
+      resolvedModel: this.state.resolvedModel,
+    };
   }
 
-  /** RPC: cancel/stop the run. Maps the Rust `stop_run`. */
+  /**
+   * RPC: actively CANCEL in-flight work. Maps the Rust `cancel_run`.
+   *
+   * Cloudflare's only cancellation primitive is FIBERS: a real run would hold a
+   * `startFiber()` handle and call `.cancel()` (or `abortSubAgent(...)`) here.
+   * This is distinct from a terminal "stop" — there is no stop/pause primitive;
+   * an idle agent hibernates automatically. The minimal Worker records the cancel
+   * and marks the run stopped.
+   */
   async cancel(reason: string): Promise<{ runRef: string; status: RunStatus }> {
+    // e.g. this.fiber?.cancel(); await this.abortSubAgent(...);
     this.setState({
       ...this.state,
       status: "stopped",
@@ -205,13 +306,23 @@ function json(body: unknown, status = 200): Response {
 /**
  * Explicit control routes. Each verb addresses an agent instance BY NAME and
  * invokes an RPC method on it. This is the lifecycle surface FerroGate's Rust
- * control-surface impl (#412) calls.
+ * control-surface impl (#412/#414) calls. The routes map onto the ACTUAL
+ * Cloudflare agent primitives (issue #414), which are narrower than a typical
+ * lifecycle API:
  *
- *   POST /control/start   { sessionId, runId, ... }      -> { runRef, status }
+ *   POST /control/start   { ..., props }  -> { runRef, status }  (LAZY create via
+ *       getAgentByName + agent.start(props); onStart(props) picks model/tools)
  *   POST /control/invoke  { runRef, workloadRef, args }  -> { runRef, status, exitCode, message }
- *   POST /control/cancel  { runRef, reason }             -> { runRef, status }
- *   POST /control/destroy { runRef }                     -> { runRef, status }
- *   GET  /control/status?runRef=NAME                     -> { runRef, status, message }
+ *   POST /control/cancel  { runRef, reason }  -> { runRef, status }  (FIBER cancel —
+ *       the only cancellation primitive; NOT a "stop")
+ *   POST /control/destroy { runRef }  -> { runRef, status }  (this.destroy())
+ *   GET  /control/status?runRef=NAME  -> { runRef, status, message, resolvedModel }
+ *       (CUSTOM status method — there is no getStatus primitive)
+ *
+ * There is deliberately NO stop/pause/resume/restart route: Cloudflare hibernates
+ * an idle agent automatically (zero compute, state retained) and wakes it on the
+ * next request. FerroGate models "stop" as hibernate + re-address, entirely
+ * client-side (see the Rust `stop_run`), so it needs no route here.
  */
 async function handleControl(request: Request, env: Env, url: URL): Promise<Response> {
   const denied = requireBearer(request, env.GATEWAY_CONTROL_TOKEN);

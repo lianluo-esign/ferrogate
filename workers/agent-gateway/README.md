@@ -36,15 +36,30 @@ See `docs/cloudflare-agent-gateway.md` for the full architecture and how #412 /
 
 | Verb | Route | Body / query | Returns |
 |------|-------|--------------|---------|
-| start   | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId }` | `{ runRef, status }` |
+| start (lazy create + `onStart(props)`) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }` |
 | invoke  | `POST /control/invoke`  | `{ runRef, workloadRef, args[] }` | `{ runRef, status, exitCode, message }` |
-| cancel  | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
-| destroy | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
-| status  | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message }` |
+| cancel (fiber-cancel) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
+| destroy (`this.destroy()`) | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
+| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message, resolvedModel }` |
 
 `runRef` is the agent instance name (the `runId` supplied to `start`). All
 routes require `Authorization: Bearer <GATEWAY_CONTROL_TOKEN>`. `GET /healthz`
 is the only unauthenticated route.
+
+`props` (`RunProps`) is the transient per-run init — `model`, `tools`,
+`systemPrompt`, `locationHint`, `jurisdiction`, `routingRetry` — that the agent's
+`onStart(props)` reads to pick its runtime-selectable model/tools/prompt in code
+(Cloudflare has no deploy-time model field). Props are distinct from the agent's
+persistent state.
+
+There is deliberately **no** stop / pause / resume / restart / getStatus route:
+Cloudflare has no such primitive. An idle agent **hibernates** automatically
+(zero compute, state retained) and wakes on the next request, so FerroGate models
+"stop" as hibernate + re-address entirely client-side. `cancel` is the *fiber*
+cancellation primitive (distinct from a terminal stop); `status` is a custom RPC,
+not a platform `getStatus`. See
+[`../../docs/cloudflare-agent-gateway.md`](../../docs/cloudflare-agent-gateway.md)
+§3a for the full verb→primitive→route mapping.
 
 The Rust side (`crates/ferrogate-runtime/src/cloudflare_gateway_control.rs`)
 maps `CloudflareControlSurface` verbs onto exactly these routes.

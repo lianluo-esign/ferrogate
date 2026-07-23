@@ -106,14 +106,84 @@ All routes require `Authorization: Bearer <GATEWAY_CONTROL_TOKEN>`.
 
 | Verb | Route | Body / query | Returns |
 |------|-------|--------------|---------|
-| start   | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId }` | `{ runRef, status }` |
+| start (lazy create + `onStart(props)`) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }` |
 | invoke  | `POST /control/invoke`  | `{ runRef, workloadRef, args[] }` | `{ runRef, status, exitCode, message }` |
-| cancel  | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
-| destroy | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
-| status  | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message }` |
+| cancel (fiber-cancel) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
+| destroy (`this.destroy()`) | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
+| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message, resolvedModel }` |
 
 `status` ∈ `queued | running | completed | failed | stopped | cleaned_up`,
-mirroring the Rust `CloudflareRunStatus`.
+mirroring the Rust `CloudflareRunStatus`. `props` carries the per-run
+model/tools/prompt + placement (see §3a). There is deliberately **no** stop /
+pause / resume / getStatus route — those primitives do not exist on Cloudflare
+(§3a).
+
+## 3a. Run verbs → Cloudflare primitives (issue #414)
+
+FerroGate's run-lifecycle verbs do **not** map onto a conventional
+start/stop/pause lifecycle API — Cloudflare's actual agent primitives are
+**narrower**. Issue #414 pins the mapping to that reality so downstream code
+stops assuming verbs that do not exist.
+
+| FerroGate verb (scheduler / surface) | Cloudflare primitive (reality) | Gateway route / mechanism |
+|---|---|---|
+| **create / instantiate** | **LAZY** — the first `getAgentByName(ns, name)` (or `routeAgentRequest`) for a name *creates* the instance; the same name always resolves to the same instance. There is no explicit "create". | `POST /control/start` (`getAgentByName` addresses the run by name — first addressing instantiates it) |
+| **start** | `onStart(props)` runs **automatically** on every cold start / wake — it is not caller-invoked. | delivered as the `props` field of `POST /control/start`; the Worker's `onStart(props)` reads model/tools/prompt |
+| **exec / invoke** | agent RPC method | `POST /control/invoke` |
+| **stop / pause / resume / restart** | **do NOT exist.** Hibernation is automatic (~70–140s idle → zero compute, state retained; wakes on the next HTTP/WS/alarm/email). | *no route.* Modeled entirely client-side as **hibernate + re-address**: `stop_run` is a local no-op returning `Stopped`; "resume/restart" is just re-addressing the agent by name (which wakes it). |
+| **getStatus** | **does NOT exist** as a primitive. | `GET /control/status` — a **custom** `status()` RPC we expose on the agent, not a built-in `getStatus`. |
+| **cancel** | only via **fibers** (`startFiber().cancel`, `abortSubAgent`). | `POST /control/cancel` — the fiber-cancel route (distinct from "stop") |
+| **destroy / delete** | `this.destroy()` — drops the DO's tables, deletes alarms, clears storage. | `POST /control/destroy` |
+
+### RPC vs. path routing (per verb)
+
+Every control verb uses **DO RPC** via `getAgentByName(ns, name).method(...)` (the
+`/control/*` routes), because lifecycle operations must target one named instance
+and return a structured result. `routeAgentRequest` **path routing**
+(`/agents/:agent/:name/...`) is reserved for *in-agent* HTTP/WS traffic (the
+agent's own request handler), not lifecycle control.
+
+### The no-stop / no-getStatus constraint (do not design against it)
+
+There is **no** `stop`, `pause`, `resume`, `restart`, or `getStatus` primitive on
+Cloudflare. Concretely:
+
+- **"Stop" is hibernation.** To "stop" an agent you simply stop addressing it; it
+  hibernates automatically. FerroGate's `stop_run` therefore performs **no HTTP
+  request** — it returns `Stopped` locally. On the completion/failure path the
+  scheduler's stop is exactly this hibernation no-op; the subsequent
+  `destroy` (cleanup) is what actually tears the instance down.
+- **"Resume/restart" is re-addressing.** `getAgentByName(ns, name)` wakes a
+  hibernated instance; persistent state is retained across hibernation, so a woken
+  agent reads its already-resolved run config from state (props are **not**
+  re-delivered).
+- **Status is custom.** `run_status` calls our own `status()` RPC; do not expect a
+  platform `getStatus`.
+- **Cancel is fibers, not stop.** Actively aborting in-flight work is a *separate*
+  operation from a terminal stop. The Rust client routes a natural terminal
+  reason (`completed`/`failed`) to the hibernation no-op, and any operator cancel
+  reason to the `cancel_run` fiber-cancel route — all through the unchanged #412
+  `AgentWorkerControlClient` seam, so `ManagedWorkerScheduler` drives it as-is.
+
+### Run parameterization: `props` (transient) vs. state (persistent)
+
+Per-run initialization is delivered as **`props`**, not persistent state:
+
+- **`props`** (`CloudflareRunProps` in Rust → `RunProps` in the Worker): the
+  run's runtime-selectable dials — **model**, **tools**, **system prompt**, plus
+  `locationHint` (`wnam`/`enam`/`weur`/…), `jurisdiction` (`eu`/`fedramp`), and
+  `routingRetry`. Cloudflare has **no deploy-time `model` field**: the agent
+  chooses its model/tools/prompt *in code* inside `onStart(props)`, so those
+  become selectable per run without redeploying the Worker.
+- **State**: the agent's persistent DO SQLite rows. `onStart` reads the transient
+  props and writes the *resolved* selections into state, so they survive
+  hibernation and are available to every later invoke without props being re-sent.
+
+FerroGate injects per-run props through a **`CloudflareRunPropsResolver`** on the
+`CloudflareAgentControlClient`, which maps the scheduler's `IsolationPrepareRequest`
+(e.g. its `worker_template_id`) onto the props. The scheduler seam itself is left
+unchanged — the resolver is the only new injection point — and the props ride the
+`props` field of `POST /control/start` into `onStart(props)`.
 
 ## 4. Deploy / teardown (Rust)
 

@@ -15,7 +15,7 @@ use ferrogate_cloudflare::{CloudflareError, HttpMethod, HttpRequest, HttpRespons
 use super::{BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface};
 use crate::cloudflare_worker::{
     CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunExecRequest,
-    CloudflareRunStartRequest, CloudflareRunStatus,
+    CloudflareRunProps, CloudflareRunStartRequest, CloudflareRunStatus,
 };
 
 /// A synchronous scripted transport: records requests, replays responses.
@@ -34,6 +34,10 @@ impl MockControlTransport {
 
     fn last(&self) -> HttpRequest {
         self.captured.lock().unwrap().last().cloned().unwrap()
+    }
+
+    fn captured_len(&self) -> usize {
+        self.captured.lock().unwrap().len()
     }
 }
 
@@ -81,6 +85,7 @@ fn start_run_posts_to_control_start_with_bearer_and_body() {
             worker_template_id: "tmpl-1".into(),
             framework_adapter: "native".into(),
             capability_envelope_id: "env-1".into(),
+            props: CloudflareRunProps::default(),
         })
         .unwrap();
 
@@ -129,9 +134,25 @@ fn exec_run_posts_to_control_invoke_and_maps_outcome() {
 }
 
 #[test]
-fn stop_run_posts_to_control_cancel_with_reason() {
+fn stop_run_is_a_local_hibernation_no_op() {
+    // CF has no stop primitive: `stop_run` must NOT hit any control route. It
+    // reports Stopped locally (the idle agent hibernates on its own). The surface
+    // is given zero canned responses — if it tried to send, the mock would panic.
+    let mut s = surface(vec![]);
+    let status = s.stop_run("cf-run-r1", "completed").unwrap();
+    assert_eq!(status, CloudflareRunStatus::Stopped);
+    assert_eq!(
+        s.transport().captured_len(),
+        0,
+        "stop_run must send no HTTP"
+    );
+}
+
+#[test]
+fn cancel_run_posts_to_control_cancel_with_reason() {
+    // Active cancellation IS a route: the fiber-cancel primitive.
     let mut s = surface(vec![ok(r#"{ "status": "stopped" }"#)]);
-    let status = s.stop_run("cf-run-r1", "operator-cancel").unwrap();
+    let status = s.cancel_run("cf-run-r1", "operator-cancel").unwrap();
     assert_eq!(status, CloudflareRunStatus::Stopped);
 
     let req = s.transport().last();
@@ -142,6 +163,39 @@ fn stop_run_posts_to_control_cancel_with_reason() {
     let body = body_json(&req);
     assert_eq!(body["runRef"], "cf-run-r1");
     assert_eq!(body["reason"], "operator-cancel");
+}
+
+#[test]
+fn start_run_props_round_trip_into_the_start_body() {
+    let mut s = surface(vec![ok(
+        r#"{ "runRef": "cf-run-r1", "status": "running" }"#,
+    )]);
+    s.start_run(CloudflareRunStartRequest {
+        session_id: "sess-1".into(),
+        run_id: "r1".into(),
+        worker_template_id: "tmpl-1".into(),
+        framework_adapter: "native".into(),
+        capability_envelope_id: "env-1".into(),
+        props: CloudflareRunProps {
+            model: Some("claude-opus-4-8".into()),
+            tools: vec!["shell".into()],
+            system_prompt: Some("be terse".into()),
+            location_hint: Some("weur".into()),
+            jurisdiction: Some("eu".into()),
+            routing_retry: Some(3),
+        },
+    })
+    .unwrap();
+
+    // The runtime-selected model (and the rest) reach the Worker under `props`,
+    // where `onStart(props)` reads them.
+    let body = body_json(&s.transport().last());
+    assert_eq!(body["props"]["model"], "claude-opus-4-8");
+    assert_eq!(body["props"]["tools"][0], "shell");
+    assert_eq!(body["props"]["systemPrompt"], "be terse");
+    assert_eq!(body["props"]["locationHint"], "weur");
+    assert_eq!(body["props"]["jurisdiction"], "eu");
+    assert_eq!(body["props"]["routingRetry"], 3);
 }
 
 #[test]
@@ -191,6 +245,7 @@ fn non_2xx_maps_to_verb_specific_error() {
             worker_template_id: "t".into(),
             framework_adapter: "native".into(),
             capability_envelope_id: "e".into(),
+            props: CloudflareRunProps::default(),
         })
         .unwrap_err();
     match err {

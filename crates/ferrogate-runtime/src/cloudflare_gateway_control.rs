@@ -14,14 +14,28 @@
 //! [`WorkerGatewayControlSurface`], that maps each lifecycle verb onto one HTTP
 //! call to the deployed Worker's control routes, presenting the DIY bearer
 //! token:
+//! The mapping is refined (issue #414) to match the **actual Cloudflare agent
+//! primitives**, which are narrower than a typical lifecycle API:
 //!
-//! | verb ([`CloudflareControlSurface`]) | Worker route |
-//! |---|---|
-//! | `start_run`   | `POST /control/start` |
-//! | `exec_run`    | `POST /control/invoke` |
-//! | `stop_run`    | `POST /control/cancel` |
-//! | `cleanup_run` | `POST /control/destroy` |
-//! | `run_status`  | `GET  /control/status?runRef=…` |
+//! | verb ([`CloudflareControlSurface`]) | CF primitive | Worker route |
+//! |---|---|---|
+//! | `start_run`   | LAZY create + `onStart(props)` | `POST /control/start` (`getAgentByName` + `agent.start(props)`) |
+//! | `exec_run`    | agent RPC method | `POST /control/invoke` |
+//! | `stop_run`    | **hibernation** (automatic; no primitive) | *(none — local no-op; see below)* |
+//! | `cancel_run`  | **fibers** (`startFiber().cancel` / `abortSubAgent`) | `POST /control/cancel` |
+//! | `cleanup_run` | `this.destroy()` | `POST /control/destroy` |
+//! | `run_status`  | **custom** `onRequest`/RPC (no `getStatus`) | `GET  /control/status?runRef=…` |
+//!
+//! ## Why `stop_run` sends no request
+//!
+//! Cloudflare exposes **no stop/pause/resume/restart/getStatus** primitive.
+//! Hibernation is automatic (~70–140s idle → zero compute, state retained; the
+//! instance wakes on the next HTTP/WS/alarm). So a terminal "stop" is nothing to
+//! call — `stop_run` returns [`CloudflareRunStatus::Stopped`] **without any HTTP
+//! request** and the agent hibernates on its own, staying re-addressable by name.
+//! Active cancellation of in-flight work is a *different* operation
+//! (`cancel_run`, the fiber-cancel route). `run_status` is a **custom** status
+//! method we expose, not a built-in `getStatus`.
 //!
 //! HTTP goes through a small synchronous [`GatewayControlTransport`] seam so the
 //! verb→route→status mapping is unit-tested with a scripted mock and **no
@@ -175,6 +189,12 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         &mut self,
         request: CloudflareRunStartRequest,
     ) -> Result<CloudflareRunHandle, CloudflareControlSurfaceError> {
+        // `props` are the transient per-run init (model/tools/prompt + placement)
+        // the Worker delivers to `onStart(props)`. Serialize them into the start
+        // body so the agent can read its runtime-selectable model in code.
+        let props = serde_json::to_value(&request.props).map_err(|e| {
+            CloudflareControlSurfaceError::Transport(format!("failed to encode run props: {e}"))
+        })?;
         let response = self.post(
             "control/start",
             json!({
@@ -183,6 +203,7 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
                 "workerTemplateId": request.worker_template_id,
                 "frameworkAdapter": request.framework_adapter,
                 "capabilityEnvelopeId": request.capability_envelope_id,
+                "props": props,
             }),
         )?;
         let decoded: StartResponse = decode_ok(response, |status, body| {
@@ -219,9 +240,23 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
 
     fn stop_run(
         &mut self,
+        _run_ref: &str,
+        _reason: &str,
+    ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
+        // Hibernation is automatic on Cloudflare — there is no stop/pause
+        // primitive and therefore no control route to call. A terminal "stop" is
+        // a no-op: the idle agent goes to zero compute on its own and stays
+        // re-addressable by name. (Active cancellation is `cancel_run`.)
+        Ok(CloudflareRunStatus::Stopped)
+    }
+
+    fn cancel_run(
+        &mut self,
         run_ref: &str,
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
+        // Fiber-cancel: the only Cloudflare cancellation primitive. Routes to the
+        // Worker's `cancel` control route (`startFiber().cancel`/`abortSubAgent`).
         let response = self.post(
             "control/cancel",
             json!({ "runRef": run_ref, "reason": reason }),

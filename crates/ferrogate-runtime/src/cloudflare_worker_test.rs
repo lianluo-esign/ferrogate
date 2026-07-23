@@ -144,6 +144,7 @@ fn runs_hosted_session_end_to_end_against_mock_cloudflare_surface() {
                 worker_template_id: "template-codex-cloudflare".to_string(),
                 framework_adapter: "codex".to_string(),
                 capability_envelope_id: "capability-1".to_string(),
+                props: CloudflareRunProps::default(),
             }),
             MockCloudflareCall::ExecRun(CloudflareRunExecRequest {
                 run_ref: "cf-run-run-1".to_string(),
@@ -286,6 +287,114 @@ fn refresh_reconciled_status_queries_the_control_surface() {
         client.surface().calls().last(),
         Some(MockCloudflareCall::RunStatus { run_ref }) if run_ref == &started.instance_id
     ));
+}
+
+#[test]
+fn props_resolver_round_trips_model_selection_into_start_request() {
+    // FerroGate's per-run parameterization: a resolver maps the prepare request
+    // (here keyed on the worker template) onto the model/tools/prompt props that
+    // the gateway Worker delivers to `onStart(props)`. The scheduler seam is
+    // untouched — the resolver is the only injection point.
+    let resolver: CloudflareRunPropsResolver = Arc::new(|request: &IsolationPrepareRequest| {
+        assert_eq!(request.worker_template_id, "template-codex-cloudflare");
+        CloudflareRunProps {
+            model: Some("claude-opus-4-8".to_string()),
+            tools: vec!["shell".to_string(), "browser".to_string()],
+            system_prompt: Some("be terse".to_string()),
+            location_hint: Some("weur".to_string()),
+            jurisdiction: Some("eu".to_string()),
+            routing_retry: Some(2),
+        }
+    });
+    let mut client = client(MockCloudflareControlSurface::new()).with_props_resolver(resolver);
+
+    client
+        .provision_managed_worker(IsolationPrepareRequest {
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            worker_template_id: "template-codex-cloudflare".to_string(),
+            framework_adapter: "codex".to_string(),
+            capability_envelope_id: "capability-1".to_string(),
+            policy: template().isolation_policy,
+        })
+        .unwrap();
+
+    // The resolved props (incl. the runtime-selected model) reached the surface's
+    // start_run — i.e. they will be delivered to `onStart(props)`.
+    match client.surface().calls().first().unwrap() {
+        MockCloudflareCall::StartRun(request) => {
+            assert_eq!(request.props.model.as_deref(), Some("claude-opus-4-8"));
+            assert_eq!(request.props.tools, vec!["shell", "browser"]);
+            assert_eq!(request.props.system_prompt.as_deref(), Some("be terse"));
+            assert_eq!(request.props.location_hint.as_deref(), Some("weur"));
+            assert_eq!(request.props.jurisdiction.as_deref(), Some("eu"));
+            assert_eq!(request.props.routing_retry, Some(2));
+        }
+        other => panic!("expected StartRun, got {other:?}"),
+    }
+}
+
+#[test]
+fn default_props_resolver_yields_empty_props() {
+    let mut client = client(MockCloudflareControlSurface::new());
+    client
+        .provision_managed_worker(IsolationPrepareRequest {
+            session_id: "s".to_string(),
+            run_id: "r".to_string(),
+            worker_template_id: "template-codex-cloudflare".to_string(),
+            framework_adapter: "codex".to_string(),
+            capability_envelope_id: "e".to_string(),
+            policy: template().isolation_policy,
+        })
+        .unwrap();
+    match client.surface().calls().first().unwrap() {
+        MockCloudflareCall::StartRun(request) => {
+            assert_eq!(request.props, CloudflareRunProps::default());
+        }
+        other => panic!("expected StartRun, got {other:?}"),
+    }
+}
+
+#[test]
+fn terminal_stop_is_modeled_as_hibernation_not_a_cancel() {
+    // The scheduler's terminal reasons (`completed`/`failed`) map to hibernation:
+    // `stop_run` (a no-op that reports Stopped), NOT the fiber-cancel route.
+    let mut client = client(MockCloudflareControlSurface::new());
+    client.stop_managed_worker("cf-run-x", "completed").unwrap();
+    client.stop_managed_worker("cf-run-x", "failed").unwrap();
+
+    let calls = client.surface().calls();
+    assert!(matches!(
+        calls[0],
+        MockCloudflareCall::StopRun { ref reason, .. } if reason == "completed"
+    ));
+    assert!(matches!(
+        calls[1],
+        MockCloudflareCall::StopRun { ref reason, .. } if reason == "failed"
+    ));
+    assert!(!calls
+        .iter()
+        .any(|c| matches!(c, MockCloudflareCall::CancelRun { .. })));
+}
+
+#[test]
+fn operator_cancel_routes_to_the_fiber_cancel_primitive() {
+    // A non-terminal (operator) reason is an active cancel → fiber-cancel route,
+    // not hibernation.
+    let mut client = client(MockCloudflareControlSurface::new());
+    client
+        .stop_managed_worker("cf-run-x", "operator_cancelled")
+        .unwrap();
+
+    let calls = client.surface().calls();
+    assert!(matches!(
+        calls.last().unwrap(),
+        MockCloudflareCall::CancelRun { run_ref, reason }
+            if run_ref == "cf-run-x" && reason == "operator_cancelled"
+    ));
+    assert!(!calls
+        .iter()
+        .any(|c| matches!(c, MockCloudflareCall::StopRun { .. })));
 }
 
 #[test]
