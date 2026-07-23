@@ -35,6 +35,8 @@ import {
 import { ResourceForm } from "@/components/resource/resource-form";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
 import {
   adminDelete,
   adminGet,
@@ -46,46 +48,52 @@ import { virtualKeysConfig, type AdminVirtualApiKey } from "@/resources/virtual-
 
 type KeyAction = "enable" | "disable" | "rotate" | "revoke" | "delete";
 
-const ACTION_COPY: Record<
+// Per-action metadata drives the confirm dialog and success toast. Copy stays
+// as typed catalog keys resolved with `t()` at render time so the lifecycle
+// actions localize; `destructive` toggles the destructive dialog styling.
+const ACTION_META: Record<
   KeyAction,
-  { title: string; description: string; confirmLabel: string; success: string; destructive: boolean }
+  {
+    labelKey: TranslationKey;
+    titleKey: TranslationKey;
+    descriptionKey: TranslationKey;
+    successKey: TranslationKey;
+    destructive: boolean;
+  }
 > = {
   enable: {
-    title: "Enable key",
-    description: "Re-enable this virtual key so it can authenticate requests again.",
-    confirmLabel: "Enable",
-    success: "Virtual key enabled",
+    labelKey: "page.virtualKeys.action.enable.label",
+    titleKey: "page.virtualKeys.action.enable.title",
+    descriptionKey: "page.virtualKeys.action.enable.description",
+    successKey: "page.virtualKeys.action.enable.success",
     destructive: false,
   },
   disable: {
-    title: "Disable key",
-    description:
-      "Disable this virtual key. Requests using it are rejected until it is re-enabled.",
-    confirmLabel: "Disable",
-    success: "Virtual key disabled",
+    labelKey: "page.virtualKeys.action.disable.label",
+    titleKey: "page.virtualKeys.action.disable.title",
+    descriptionKey: "page.virtualKeys.action.disable.description",
+    successKey: "page.virtualKeys.action.disable.success",
     destructive: false,
   },
   rotate: {
-    title: "Rotate key",
-    description:
-      "Issue a fresh secret for this key and invalidate the previous one. The new secret is shown ONCE.",
-    confirmLabel: "Rotate",
-    success: "Virtual key rotated",
+    labelKey: "page.virtualKeys.action.rotate.label",
+    titleKey: "page.virtualKeys.action.rotate.title",
+    descriptionKey: "page.virtualKeys.action.rotate.description",
+    successKey: "page.virtualKeys.action.rotate.success",
     destructive: false,
   },
   revoke: {
-    title: "Revoke key",
-    description:
-      "Permanently revoke this virtual key. It can no longer be enabled and cannot authenticate.",
-    confirmLabel: "Revoke",
-    success: "Virtual key revoked",
+    labelKey: "page.virtualKeys.action.revoke.label",
+    titleKey: "page.virtualKeys.action.revoke.title",
+    descriptionKey: "page.virtualKeys.action.revoke.description",
+    successKey: "page.virtualKeys.action.revoke.success",
     destructive: true,
   },
   delete: {
-    title: "Delete key",
-    description: "Delete this virtual key record entirely. This cannot be undone.",
-    confirmLabel: "Delete",
-    success: "Virtual key deleted",
+    labelKey: "page.virtualKeys.action.delete.label",
+    titleKey: "page.virtualKeys.action.delete.title",
+    descriptionKey: "page.virtualKeys.action.delete.description",
+    successKey: "page.virtualKeys.action.delete.success",
     destructive: true,
   },
 };
@@ -123,6 +131,7 @@ function runAction(
 
 export default function VirtualKeysPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["resource", "virtual-keys"];
@@ -150,7 +159,7 @@ export default function VirtualKeysPage() {
       ),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success("Virtual key created");
+      toast.success(t("page.virtualKeys.toast.created"));
       setFormOpen(false);
       const secret = extractSecret(response);
       if (secret) setRevealedSecret(secret);
@@ -163,7 +172,7 @@ export default function VirtualKeysPage() {
       runAction(apiKey, action, row.id),
     onSuccess: (response, variables) => {
       queryClient.invalidateQueries({ queryKey });
-      toast.success(ACTION_COPY[variables.action].success);
+      toast.success(t(ACTION_META[variables.action].successKey));
       setPendingAction(null);
       if (variables.action === "rotate") {
         const secret = extractSecret(response);
@@ -177,28 +186,28 @@ export default function VirtualKeysPage() {
     },
   });
 
-  const actionCopy = pendingAction ? ACTION_COPY[pendingAction.action] : null;
+  const actionMeta = pendingAction ? ACTION_META[pendingAction.action] : null;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold">{virtualKeysConfig.title}</h1>
+          <h1 className="text-lg font-semibold">{t("page.virtualKeys.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            {virtualKeysConfig.description}
+            {t("page.virtualKeys.description")}
           </p>
         </div>
         <Button
           onClick={() => setFormOpen(true)}
         >
           <Plus className="mr-1 h-4 w-4" />
-          New
+          {t("resource.action.new")}
         </Button>
       </div>
 
       {listError ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load virtual keys: {(listError as Error).message}
+          {t("page.virtualKeys.loadError", { message: (listError as Error).message })}
         </p>
       ) : null}
 
@@ -207,7 +216,7 @@ export default function VirtualKeysPage() {
         rows={rows}
         isLoading={isLoading}
         readOnly={false}
-        emptyLabel="No virtual keys yet."
+        emptyLabel={t("page.virtualKeys.empty")}
         rowLabel={virtualKeysConfig.rowLabel}
         renderActions={(row) => {
           const revoked = row.revoked_at_unix != null;
@@ -218,7 +227,7 @@ export default function VirtualKeysPage() {
                   variant="outline"
                   size="icon"
                   className="size-11 lg:size-8"
-                  aria-label={`Actions for ${row.name}`}
+                  aria-label={t("resource.action.rowActions", { label: row.name })}
                 >
                   <MoreHorizontal className="size-4" aria-hidden="true" />
                 </Button>
@@ -230,25 +239,27 @@ export default function VirtualKeysPage() {
                     setPendingAction({ row, action: row.enabled ? "disable" : "enable" })
                   }
                 >
-                  {row.enabled ? "Disable" : "Enable"}
+                  {row.enabled
+                    ? t("page.virtualKeys.action.disable.label")
+                    : t("page.virtualKeys.action.enable.label")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={revoked}
                   onSelect={() => setPendingAction({ row, action: "rotate" })}
                 >
-                  Rotate
+                  {t("page.virtualKeys.action.rotate.label")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={revoked}
                   onSelect={() => setPendingAction({ row, action: "revoke" })}
                 >
-                  Revoke
+                  {t("page.virtualKeys.action.revoke.label")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="text-destructive"
                   onSelect={() => setPendingAction({ row, action: "delete" })}
                 >
-                  Delete
+                  {t("page.virtualKeys.action.delete.label")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -259,13 +270,15 @@ export default function VirtualKeysPage() {
       <Sheet open={formOpen} onOpenChange={setFormOpen}>
         <SheetContent className="overflow-y-auto sm:max-w-lg">
           <SheetHeader>
-            <SheetTitle>New {virtualKeysConfig.title}</SheetTitle>
+            <SheetTitle>
+              {t("resource.dialog.createTitle", { name: t("page.virtualKeys.title") })}
+            </SheetTitle>
           </SheetHeader>
           <div className="px-4 pb-4">
             <ResourceForm
               fields={virtualKeysConfig.fields}
               initialValues={defaultFieldValues(virtualKeysConfig.fields)}
-              submitLabel="Create"
+              submitLabel={t("resource.action.create")}
               onCancel={() => setFormOpen(false)}
               onSubmit={async (values) => {
                 await createMutation.mutateAsync(values);
@@ -280,22 +293,22 @@ export default function VirtualKeysPage() {
         onOpenChange={(open) => !open && setPendingAction(null)}
       >
         <AlertDialogContent>
-          {pendingAction && actionCopy ? (
+          {pendingAction && actionMeta ? (
             <>
               <AlertDialogHeader>
-                <AlertDialogTitle>{actionCopy.title}</AlertDialogTitle>
+                <AlertDialogTitle>{t(actionMeta.titleKey)}</AlertDialogTitle>
                 <AlertDialogDescription>
-                  {actionCopy.description}
+                  {t(actionMeta.descriptionKey)}
                   <br />
                   <span className="font-medium">{pendingAction.row.name}</span> (
                   {pendingAction.row.key_prefix}...{pendingAction.row.last4})
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
                 <AlertDialogAction
                   className={
-                    actionCopy.destructive
+                    actionMeta.destructive
                       ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
                       : undefined
                   }
@@ -306,7 +319,7 @@ export default function VirtualKeysPage() {
                     actionMutation.mutate(pendingAction);
                   }}
                 >
-                  {actionMutation.isPending ? "Working…" : actionCopy.confirmLabel}
+                  {actionMutation.isPending ? t("common.working") : t(actionMeta.labelKey)}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </>
@@ -320,9 +333,9 @@ export default function VirtualKeysPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Save this secret now</AlertDialogTitle>
+            <AlertDialogTitle>{t("resource.secret.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This value will not be shown again. Store it somewhere safe.
+              {t("resource.secret.description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <code className="block break-all rounded-md bg-muted p-3 text-sm">
@@ -333,13 +346,13 @@ export default function VirtualKeysPage() {
               onClick={() => {
                 if (revealedSecret) {
                   navigator.clipboard.writeText(revealedSecret).catch(() => {
-                    toast.error("Could not copy to clipboard; the secret is shown above.");
+                    toast.error(t("resource.secret.copyError"));
                   });
                 }
                 setRevealedSecret(null);
               }}
             >
-              Copy &amp; close
+              {t("resource.secret.copyClose")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

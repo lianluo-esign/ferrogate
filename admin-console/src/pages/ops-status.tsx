@@ -19,6 +19,7 @@ import {
   StatTile,
 } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminStatus = AdminSchema<"AdminStatus">;
@@ -27,48 +28,54 @@ type AdminAcmeStatus = AdminSchema<"AdminAcmeStatus">;
 const STATUS_REFETCH_INTERVAL_MS = 10_000;
 
 function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
+  const { t } = useI18n();
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
-          TLS / ACME
+          {t("page.opsStatus.acme.title")}
           {acme?.reload_required ? (
-            <Badge variant="destructive">reload required</Badge>
+            <Badge variant="destructive">{t("page.opsStatus.acme.reloadRequired")}</Badge>
           ) : null}
         </CardTitle>
       </CardHeader>
       <CardContent>
         {!acme || !acme.enabled ? (
           <p className="text-sm text-muted-foreground">
-            ACME automatic certificate management is disabled.
+            {t("page.opsStatus.acme.disabled")}
           </p>
         ) : (
           <div className="divide-y">
-            <DefinitionRow label="Domains" value={acme.domains.join(", ") || "-"} />
             <DefinitionRow
-              label="Renewal due"
+              label={t("page.opsStatus.acme.domains")}
+              value={acme.domains.join(", ") || "-"}
+            />
+            <DefinitionRow
+              label={t("page.opsStatus.acme.renewalDue")}
               value={
                 <BoolBadge
                   value={acme.renewal_due}
-                  trueLabel="due"
-                  falseLabel="not due"
+                  trueLabel={t("page.opsStatus.acme.renewalDue.due")}
+                  falseLabel={t("page.opsStatus.acme.renewalDue.notDue")}
                   good="false"
                 />
               }
             />
             <DefinitionRow
-              label="Reload required"
+              label={t("page.opsStatus.acme.reloadRow")}
               value={
                 <BoolBadge
                   value={acme.reload_required}
-                  trueLabel={`required (${acme.reload_mode})`}
-                  falseLabel="up to date"
+                  trueLabel={t("page.opsStatus.acme.reload.required", {
+                    mode: acme.reload_mode,
+                  })}
+                  falseLabel={t("page.opsStatus.acme.reload.upToDate")}
                   good="false"
                 />
               }
             />
             <DefinitionRow
-              label="Last renewal"
+              label={t("page.opsStatus.acme.lastRenewal")}
               value={
                 <span className="flex items-center gap-2">
                   <HealthBadge health={acme.last_renewal_status} />
@@ -79,16 +86,16 @@ function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
               }
             />
             <DefinitionRow
-              label="Certificate expires"
+              label={t("page.opsStatus.acme.certExpires")}
               value={formatUnix(acme.certificate_expires_at_unix)}
             />
             <DefinitionRow
-              label="Next check"
+              label={t("page.opsStatus.acme.nextCheck")}
               value={formatUnix(acme.next_check_at_unix)}
             />
             {acme.last_renewal_error ? (
               <DefinitionRow
-                label="Last error"
+                label={t("page.opsStatus.field.lastError")}
                 value={
                   <span className="text-destructive">{acme.last_renewal_error}</span>
                 }
@@ -102,22 +109,33 @@ function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
 }
 
 function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
+  const { t } = useI18n();
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Cluster</CardTitle>
+        <CardTitle className="text-base">{t("page.opsStatus.cluster.title")}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="divide-y">
           <DefinitionRow
-            label="Enabled"
-            value={<BoolBadge value={cluster.enabled} />}
+            label={t("page.opsStatus.cluster.enabled")}
+            value={
+              <BoolBadge
+                value={cluster.enabled}
+                trueLabel={t("common.yes")}
+                falseLabel={t("common.no")}
+              />
+            }
           />
           <DefinitionRow
-            label="Ready"
+            label={t("page.opsStatus.cluster.ready")}
             value={
               <span className="flex items-center gap-2">
-                <BoolBadge value={cluster.ready} />
+                <BoolBadge
+                  value={cluster.ready}
+                  trueLabel={t("common.yes")}
+                  falseLabel={t("common.no")}
+                />
                 <span className="text-xs text-muted-foreground">
                   {cluster.readiness_reason}
                 </span>
@@ -125,39 +143,53 @@ function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
             }
           />
           <DefinitionRow
-            label="Draining"
+            label={t("page.opsStatus.cluster.draining")}
             value={
               <BoolBadge
                 value={cluster.draining}
-                trueLabel="draining"
-                falseLabel="serving"
+                trueLabel={t("page.opsStatus.cluster.draining.draining")}
+                falseLabel={t("page.opsStatus.cluster.draining.serving")}
                 good="false"
               />
             }
           />
           <DefinitionRow
-            label="Accepting requests"
-            value={<BoolBadge value={cluster.accepting_new_requests} />}
+            label={t("page.opsStatus.cluster.accepting")}
+            value={
+              <BoolBadge
+                value={cluster.accepting_new_requests}
+                trueLabel={t("common.yes")}
+                falseLabel={t("common.no")}
+              />
+            }
           />
-          <DefinitionRow label="Node" value={cluster.node_id || "-"} />
-          <DefinitionRow label="Cluster id" value={cluster.cluster_id || "-"} />
-          <DefinitionRow label="Active revision" value={cluster.active_revision || "-"} />
+          <DefinitionRow label={t("page.opsStatus.cluster.node")} value={cluster.node_id || "-"} />
           <DefinitionRow
-            label="State / counter backend"
+            label={t("page.opsStatus.cluster.clusterId")}
+            value={cluster.cluster_id || "-"}
+          />
+          <DefinitionRow
+            label={t("page.opsStatus.cluster.activeRevision")}
+            value={cluster.active_revision || "-"}
+          />
+          <DefinitionRow
+            label={t("page.opsStatus.cluster.backends")}
             value={`${cluster.state_backend} / ${cluster.counter_backend}`}
           />
           <DefinitionRow
-            label="Last sync"
+            label={t("page.opsStatus.cluster.lastSync")}
             value={
               <span className="flex items-center gap-2">
                 {formatUnix(cluster.last_sync_at_unix)}
-                {cluster.stale ? <Badge variant="destructive">stale</Badge> : null}
+                {cluster.stale ? (
+                  <Badge variant="destructive">{t("page.opsStatus.cluster.stale")}</Badge>
+                ) : null}
               </span>
             }
           />
           {cluster.last_sync_error ? (
             <DefinitionRow
-              label="Sync error"
+              label={t("page.opsStatus.cluster.syncError")}
               value={<span className="text-destructive">{cluster.last_sync_error}</span>}
             />
           ) : null}
@@ -169,6 +201,7 @@ function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
 
 export default function OpsStatusPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
@@ -180,68 +213,71 @@ export default function OpsStatusPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Ops status</h1>
+        <h1 className="text-lg font-semibold">{t("page.opsStatus.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Live gateway status: running snapshot, enabled-vs-total counters, TLS
-          renewal posture and cluster readiness.
+          {t("page.opsStatus.description")}
         </p>
       </div>
 
       {error ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load status: {(error as Error).message}
+          {t("page.opsStatus.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
 
       {isLoading || !data ? (
-        <p className="text-sm text-muted-foreground">Loading status…</p>
+        <p className="text-sm text-muted-foreground">{t("page.opsStatus.loading")}</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="secondary">{data.service}</Badge>
             <Badge variant="secondary">v{data.version}</Badge>
-            <Badge variant="outline">runtime {data.runtime}</Badge>
-            <Badge variant="outline">snapshot {data.snapshot}</Badge>
+            <Badge variant="outline">
+              {t("page.opsStatus.badge.runtime", { value: data.runtime })}
+            </Badge>
+            <Badge variant="outline">
+              {t("page.opsStatus.badge.snapshot", { value: data.snapshot })}
+            </Badge>
             <BoolBadge
               value={data.auth_required}
-              trueLabel="auth required"
-              falseLabel="auth open"
+              trueLabel={t("page.opsStatus.auth.required")}
+              falseLabel={t("page.opsStatus.auth.open")}
             />
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <StatTile
-              label="Providers"
+              label={t("page.opsStatus.stat.providers")}
               value={`${data.enabled_providers} / ${data.providers}`}
-              hint="enabled / total"
+              hint={t("page.opsStatus.hint.enabledTotal")}
             />
             <StatTile
-              label="Models"
+              label={t("page.opsStatus.stat.models")}
               value={`${data.enabled_models} / ${data.models}`}
-              hint="enabled / total"
+              hint={t("page.opsStatus.hint.enabledTotal")}
             />
             <StatTile
-              label="Upstreams"
+              label={t("page.opsStatus.stat.upstreams")}
               value={`${data.enabled_upstreams} / ${data.upstreams}`}
-              hint="enabled / total"
+              hint={t("page.opsStatus.hint.enabledTotal")}
             />
             <StatTile
-              label="Routes"
+              label={t("page.opsStatus.stat.routes")}
               value={`${data.enabled_routes} / ${data.routes}`}
-              hint="enabled / total"
+              hint={t("page.opsStatus.hint.enabledTotal")}
             />
-            <StatTile label="API keys" value={data.api_keys} />
+            <StatTile label={t("page.opsStatus.stat.apiKeys")} value={data.api_keys} />
             <StatTile
-              label="Plugins"
+              label={t("page.opsStatus.stat.plugins")}
               value={`${data.active_plugins} / ${data.plugins}`}
-              hint="active / total"
+              hint={t("page.opsStatus.hint.activeTotal")}
             />
             <StatTile
-              label="Extensions"
+              label={t("page.opsStatus.stat.extensions")}
               value={`${data.active_extensions} / ${data.extensions}`}
-              hint="active / total"
+              hint={t("page.opsStatus.hint.activeTotal")}
             />
-            <StatTile label="Tools" value={data.tools} />
+            <StatTile label={t("page.opsStatus.stat.tools")} value={data.tools} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
@@ -252,12 +288,12 @@ export default function OpsStatusPage() {
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Storage backend</CardTitle>
+                <CardTitle className="text-base">{t("page.opsStatus.storage.title")}</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="divide-y">
                   <DefinitionRow
-                    label="Provider"
+                    label={t("page.opsStatus.field.provider")}
                     value={
                       <span className="flex items-center gap-2">
                         {data.storage.provider}
@@ -266,15 +302,27 @@ export default function OpsStatusPage() {
                     }
                   />
                   <DefinitionRow
-                    label="Durable"
-                    value={<BoolBadge value={data.storage.durable} />}
+                    label={t("page.opsStatus.storage.durable")}
+                    value={
+                      <BoolBadge
+                        value={data.storage.durable}
+                        trueLabel={t("common.yes")}
+                        falseLabel={t("common.no")}
+                      />
+                    }
                   />
                   <DefinitionRow
-                    label="Required"
-                    value={<BoolBadge value={data.storage.required} />}
+                    label={t("page.opsStatus.storage.required")}
+                    value={
+                      <BoolBadge
+                        value={data.storage.required}
+                        trueLabel={t("common.yes")}
+                        falseLabel={t("common.no")}
+                      />
+                    }
                   />
                   <DefinitionRow
-                    label="Migration mode"
+                    label={t("page.opsStatus.storage.migrationMode")}
                     value={data.storage.migration_mode}
                   />
                 </div>
@@ -282,12 +330,12 @@ export default function OpsStatusPage() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Analytics pipeline</CardTitle>
+                <CardTitle className="text-base">{t("page.opsStatus.analytics.title")}</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="divide-y">
                   <DefinitionRow
-                    label="Provider"
+                    label={t("page.opsStatus.field.provider")}
                     value={
                       <span className="flex items-center gap-2">
                         {data.analytics.provider}
@@ -295,18 +343,27 @@ export default function OpsStatusPage() {
                       </span>
                     }
                   />
-                  <DefinitionRow label="Mode" value={data.analytics.mode} />
                   <DefinitionRow
-                    label="Active"
-                    value={<BoolBadge value={data.analytics.active} />}
+                    label={t("page.opsStatus.analytics.mode")}
+                    value={data.analytics.mode}
                   />
                   <DefinitionRow
-                    label="Last success"
+                    label={t("page.opsStatus.analytics.active")}
+                    value={
+                      <BoolBadge
+                        value={data.analytics.active}
+                        trueLabel={t("common.yes")}
+                        falseLabel={t("common.no")}
+                      />
+                    }
+                  />
+                  <DefinitionRow
+                    label={t("page.opsStatus.analytics.lastSuccess")}
                     value={formatUnix(data.analytics.last_success_at_unix)}
                   />
                   {data.analytics.last_export_error ? (
                     <DefinitionRow
-                      label="Last error"
+                      label={t("page.opsStatus.field.lastError")}
                       value={
                         <span className="text-destructive">
                           {data.analytics.last_export_error}

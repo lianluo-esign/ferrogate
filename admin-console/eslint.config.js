@@ -62,18 +62,14 @@ const I18N_UNMIGRATED_ALLOWLIST = [
   "src/pages/ops-gateway-configs.tsx",
   "src/pages/ops-observability.tsx",
   "src/pages/ops-provider-health.tsx",
-  "src/pages/ops-status.tsx",
   "src/pages/plugin-tools.tsx",
   "src/pages/self-hosted-runs.tsx",
   "src/pages/self-hosted-worker-detail.tsx",
   "src/pages/self-hosted-workers-ops.tsx",
-  "src/pages/site-domains.tsx",
-  "src/pages/tenant-resolved-defaults.tsx",
   "src/pages/tenant-roles.tsx",
   "src/pages/tool-approvals.tsx",
   "src/pages/tool-sessions.tsx",
   "src/pages/tools-catalog.tsx",
-  "src/pages/virtual-keys.tsx",
 ];
 
 export default [

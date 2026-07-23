@@ -37,6 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 import { validateSiteDomainHostname } from "@/lib/hostname";
 
@@ -49,6 +50,7 @@ function formatUnix(unix: number | null | undefined): string {
 
 export default function SiteDomainsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["site-domains"];
@@ -78,10 +80,10 @@ export default function SiteDomainsPage() {
       const acme = response.acme;
       const acmeNote = acme.enabled
         ? acme.reload_triggered
-          ? " ACME reload triggered — certificate re-issues with the new domain."
-          : " ACME enabled; no listener reload was required."
-        : " ACME issuance is disabled on this gateway; provision TLS out-of-band.";
-      toast.success(`Bound ${bound}.${acmeNote}`);
+          ? t("page.siteDomains.acme.reloadTriggered")
+          : t("page.siteDomains.acme.enabledNoReload")
+        : t("page.siteDomains.acme.disabled");
+      toast.success(t("page.siteDomains.toast.bound", { hostname: bound, note: acmeNote }));
       setHostname("");
       setTenantId("");
       setSite("");
@@ -100,7 +102,7 @@ export default function SiteDomainsPage() {
         params: { hostname: target.hostname },
       }),
     onSuccess: (_res, target) => {
-      toast.success(`Unbound ${target.hostname}`);
+      toast.success(t("page.siteDomains.toast.unbound", { hostname: target.hostname }));
       setPendingUnbind(null);
       queryClient.invalidateQueries({ queryKey });
     },
@@ -118,11 +120,11 @@ export default function SiteDomainsPage() {
       return;
     }
     if (tenantId.trim() === "") {
-      setBindError("tenant is required");
+      setBindError(t("page.siteDomains.validation.tenantRequired"));
       return;
     }
     if (site.trim() === "") {
-      setBindError("site is required");
+      setBindError(t("page.siteDomains.validation.siteRequired"));
       return;
     }
     bindMutation.mutate({
@@ -135,25 +137,26 @@ export default function SiteDomainsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Site domains</h1>
+        <h1 className="text-lg font-semibold">{t("page.siteDomains.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Custom hostnames bound to hosted static sites. Binding and unbinding are
-          audited admin actions; TLS for a bound hostname rides the existing ACME
-          issuance and graceful-upgrade reload.
+          {t("page.siteDomains.description")}
         </p>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">Bind a hostname</CardTitle>
+          <CardTitle className="text-sm font-medium">
+            {t("page.siteDomains.bind.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-3">
           <div className="grid gap-1.5">
-            <Label htmlFor="bind-hostname">Hostname (FQDN)</Label>
+            <Label htmlFor="bind-hostname">{t("page.siteDomains.field.hostname")}</Label>
             <Input
               id="bind-hostname"
               value={hostname}
               onChange={(e) => setHostname(e.target.value)}
+              // eslint-disable-next-line ferrogate/no-untranslated-literal -- example FQDN, identical across locales
               placeholder="app.example.com"
               aria-invalid={hostnameInvalid}
             />
@@ -163,18 +166,18 @@ export default function SiteDomainsPage() {
               </p>
             ) : (
               <p className="text-xs text-muted-foreground">
-                FQDN with 2+ labels; no wildcard, IP, or port.
+                {t("page.siteDomains.field.hostname.hint")}
               </p>
             )}
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="bind-tenant">Tenant</Label>
+            <Label htmlFor="bind-tenant">{t("page.siteDomains.field.tenant")}</Label>
             {/* #342: bind a hostname to a known tenant account via the shared
                 entity picker; the underlying tenant_id (canonical `id`) is
                 submitted unchanged. */}
             <EntityReferencePicker
               id="bind-tenant"
-              label="Tenant"
+              label={t("page.siteDomains.field.tenant")}
               reference={{
                 target: "tenant-accounts",
                 valueKey: "id",
@@ -183,12 +186,12 @@ export default function SiteDomainsPage() {
               }}
               value={tenantId}
               dependencyValues={{}}
-              placeholder="Select tenant"
+              placeholder={t("page.siteDomains.field.tenant.select")}
               onChange={(value) => setTenantId(typeof value === "string" ? value : "")}
             />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="bind-site">Site</Label>
+            <Label htmlFor="bind-site">{t("page.siteDomains.field.site")}</Label>
             {/* `site` names a published static-site slug within the tenant's
                 hosting bundle, not an entity row the admin API lists/gets, so it
                 stays free-text (no list/get endpoint exists to back a picker). */}
@@ -196,6 +199,7 @@ export default function SiteDomainsPage() {
               id="bind-site"
               value={site}
               onChange={(e) => setSite(e.target.value)}
+              // eslint-disable-next-line ferrogate/no-untranslated-literal -- example site slug, identical across locales
               placeholder="marketing"
             />
           </div>
@@ -210,7 +214,9 @@ export default function SiteDomainsPage() {
               onClick={submitBind}
               disabled={bindMutation.isPending || hostnameInvalid}
             >
-              {bindMutation.isPending ? "Binding…" : "Bind hostname"}
+              {bindMutation.isPending
+                ? t("page.siteDomains.bind.submitting")
+                : t("page.siteDomains.bind.submit")}
             </Button>
           </div>
         </CardContent>
@@ -218,7 +224,7 @@ export default function SiteDomainsPage() {
 
       {listError ? (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load site domains: {listError.message}
+          {t("page.siteDomains.loadError", { message: listError.message })}
         </p>
       ) : null}
 
@@ -226,11 +232,11 @@ export default function SiteDomainsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Hostname</TableHead>
-              <TableHead>Tenant</TableHead>
-              <TableHead>Site</TableHead>
-              <TableHead>Serve path</TableHead>
-              <TableHead>Bound</TableHead>
+              <TableHead>{t("page.siteDomains.col.hostname")}</TableHead>
+              <TableHead>{t("page.siteDomains.field.tenant")}</TableHead>
+              <TableHead>{t("page.siteDomains.field.site")}</TableHead>
+              <TableHead>{t("page.siteDomains.col.servePath")}</TableHead>
+              <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
               <TableHead className="w-24" />
             </TableRow>
           </TableHeader>
@@ -238,13 +244,13 @@ export default function SiteDomainsPage() {
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  Loading…
+                  {t("resource.table.loading")}
                 </TableCell>
               </TableRow>
             ) : domains.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-24 text-center">
-                  No bound hostnames.
+                  {t("page.siteDomains.empty")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -263,7 +269,7 @@ export default function SiteDomainsPage() {
                       size="sm"
                       onClick={() => setPendingUnbind(domain)}
                     >
-                      Unbind
+                      {t("page.siteDomains.unbind")}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -279,22 +285,24 @@ export default function SiteDomainsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Unbind {pendingUnbind?.hostname}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t("page.siteDomains.unbind.title", { hostname: pendingUnbind?.hostname ?? "" })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              The hostname stops serving {pendingUnbind?.tenant_id}/{pendingUnbind?.site}.
-              This is an audited action. Path-based access via the serve prefix is
-              unaffected.
+              {t("page.siteDomains.unbind.description", {
+                target: `${pendingUnbind?.tenant_id ?? ""}/${pendingUnbind?.site ?? ""}`,
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
                 if (pendingUnbind) unbindMutation.mutate(pendingUnbind);
               }}
             >
-              Unbind
+              {t("page.siteDomains.unbind")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

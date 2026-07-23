@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import { gatewayGet } from "@/lib/gateway-client";
 
 interface ResolvedDefaults {
@@ -27,19 +28,20 @@ interface ResolvedDefaults {
   default_asset_storage_quota_bytes: number | null;
 }
 
-function formatLimit(value: number | null): string {
-  return value === null ? "Unlimited" : value.toLocaleString();
-}
-
-function formatFlag(value: boolean): string {
-  return value ? "Enabled" : "Disabled";
-}
-
 export default function TenantResolvedDefaultsPage() {
   const { session } = useAuth();
+  const { t } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const [tenantIdInput, setTenantIdInput] = useState("");
   const [lookupTenantId, setLookupTenantId] = useState<string | null>(null);
+
+  // Numeric limits and boolean feature flags render page-locally; a null limit
+  // shows the localized "unlimited" copy and flags reuse the shared #385
+  // enabled/disabled state keys.
+  const formatLimit = (value: number | null): string =>
+    value === null ? t("page.resolvedDefaults.value.unlimited") : value.toLocaleString();
+  const formatFlag = (value: boolean): string =>
+    value ? t("common.enabled") : t("common.disabled");
 
   const { data, isFetching, error } = useQuery({
     queryKey: ["tenant-resolved-defaults", lookupTenantId],
@@ -54,19 +56,16 @@ export default function TenantResolvedDefaultsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Resolved tenant defaults</h1>
+        <h1 className="text-lg font-semibold">{t("page.resolvedDefaults.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          The merged, effective quota and feature entitlements a tenant's plan actually grants --
-          resolved the same way the auth path resolves them at request time, not just the raw
-          plan_id pointer. See the Plans page to change a plan's defaults, and Tenant accounts to
-          reassign which plan a tenant is on.
+          {t("page.resolvedDefaults.description")}
         </p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Look up a tenant</CardTitle>
-          <CardDescription>Enter a tenant account ID (not slug or name).</CardDescription>
+          <CardTitle className="text-base">{t("page.resolvedDefaults.lookup.title")}</CardTitle>
+          <CardDescription>{t("page.resolvedDefaults.lookup.description")}</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -77,22 +76,25 @@ export default function TenantResolvedDefaultsPage() {
             }}
           >
             <div className="flex-1">
-              <Label htmlFor="tenant-id">Tenant ID</Label>
+              <Label htmlFor="tenant-id">{t("page.resolvedDefaults.field.tenantId")}</Label>
               <Input
                 id="tenant-id"
                 value={tenantIdInput}
                 onChange={(event) => setTenantIdInput(event.target.value)}
+                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example tenant ID, identical across locales
                 placeholder="tenant-abc123"
               />
             </div>
             <Button type="submit" disabled={!tenantIdInput.trim()}>
-              Look up
+              {t("page.resolvedDefaults.lookup.submit")}
             </Button>
           </form>
         </CardContent>
       </Card>
 
-      {isFetching && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {isFetching && (
+        <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
+      )}
 
       {error && (
         <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -104,59 +106,83 @@ export default function TenantResolvedDefaultsPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">{data.tenant_id}</CardTitle>
-            <CardDescription>Plan: {data.plan_id}</CardDescription>
+            <CardDescription>
+              {t("page.resolvedDefaults.plan", { plan: data.plan_id })}
+            </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <div>
-              <h3 className="mb-2 text-sm font-medium">Feature entitlements</h3>
+              <h3 className="mb-2 text-sm font-medium">
+                {t("page.resolvedDefaults.section.features")}
+              </h3>
               <dl className="space-y-1 text-sm">
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">MCP tool execution</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.feature.mcp")}
+                  </dt>
                   <dd>{formatFlag(data.mcp_enabled)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Extension tool execution</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.feature.extension")}
+                  </dt>
                   <dd>{formatFlag(data.extension_tools_enabled)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Self-hosted workers</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.feature.selfHostedWorkers")}
+                  </dt>
                   <dd>{formatFlag(data.self_hosted_workers_enabled)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Asset hosting</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.feature.assetHosting")}
+                  </dt>
                   <dd>{formatFlag(data.asset_hosting_enabled)}</dd>
                 </div>
               </dl>
             </div>
             <div>
-              <h3 className="mb-2 text-sm font-medium">Resolved quota</h3>
+              <h3 className="mb-2 text-sm font-medium">
+                {t("page.resolvedDefaults.section.quota")}
+              </h3>
               <dl className="space-y-1 text-sm">
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">RPM limit</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.quota.rpm")}
+                  </dt>
                   <dd>{formatLimit(data.rpm_limit)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">TPM limit</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.quota.tpm")}
+                  </dt>
                   <dd>{formatLimit(data.tpm_limit)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Monthly budget (USD)</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.quota.monthlyBudget")}
+                  </dt>
                   <dd>
                     {data.monthly_budget_usd === null
-                      ? "Unlimited"
+                      ? t("page.resolvedDefaults.value.unlimited")
                       : `$${data.monthly_budget_usd.toLocaleString()}`}
                   </dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Asset storage quota (bytes)</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.quota.assetStorage")}
+                  </dt>
                   <dd>{formatLimit(data.default_asset_storage_quota_bytes)}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Model allowlist</dt>
+                  <dt className="text-muted-foreground">
+                    {t("page.resolvedDefaults.quota.modelAllowlist")}
+                  </dt>
                   <dd>
                     {data.model_allowlist && data.model_allowlist.length > 0
                       ? data.model_allowlist.join(", ")
-                      : "All models"}
+                      : t("page.resolvedDefaults.value.allModels")}
                   </dd>
                 </div>
               </dl>
