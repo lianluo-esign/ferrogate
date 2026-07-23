@@ -1242,8 +1242,11 @@ name = "ferrogate-config"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "ferrogate-policy",
  "serde",
+ "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

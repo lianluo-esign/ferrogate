@@ -24938,6 +24938,266 @@
           }
         },
         "additionalProperties": false
+      },
+      "X402PolicyNetwork": {
+        "description": "A recognised Solana network, encoded as its canonical CAIP-2 identifier. A mainnet pin is always explicit and self-describing on the wire; a token symbol such as USDC is never accepted as a network.",
+        "type": "string",
+        "enum": [
+          "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+        ],
+        "example": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+      },
+      "X402Rounding": {
+        "description": "Rounding direction applied when an atomic->credits conversion does not divide evenly. 'up' (ceil) is the safe default for cap enforcement because it never under-counts a spend.",
+        "type": "string",
+        "enum": [
+          "down",
+          "up"
+        ]
+      },
+      "X402ConversionRule": {
+        "description": "Checked-integer conversion from atomic token units to internal credits: credits = round(atomic * numerator / denominator). A zero numerator or denominator is an impossible ratio and is rejected by config validation.",
+        "type": "object",
+        "properties": {
+          "numerator": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "denominator": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "rounding": {
+            "$ref": "#/components/schemas/X402Rounding"
+          },
+          "version": {
+            "description": "Opaque operator-set version tag for this ratio, persisted into every conversion snapshot.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "numerator",
+          "denominator",
+          "rounding",
+          "version"
+        ]
+      },
+      "X402AllowedAsset": {
+        "description": "One explicitly allowlisted (network, mint) pair. The mint is a canonical base58 SPL mint address, never a token symbol.",
+        "type": "object",
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/X402PolicyNetwork"
+          },
+          "mint": {
+            "description": "Canonical base58 SPL mint address (validated 32 bytes).",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "network",
+          "mint"
+        ]
+      },
+      "X402ResourceRule": {
+        "description": "A canonicalised resource rule: which HTTPS origin + path prefix a payment may unlock. Both the challenge resource and the already-authorized egress URL must match one of these.",
+        "type": "object",
+        "properties": {
+          "origin": {
+            "description": "Canonical origin scheme://host[:port]. Must be https unless allow_insecure_local_resources is set.",
+            "type": "string"
+          },
+          "path_prefix": {
+            "description": "Path prefix that gates the origin. '/' allows the whole origin.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "origin",
+          "path_prefix"
+        ]
+      },
+      "X402SpendCaps": {
+        "description": "Spend caps, denominated in internal credits except the two atomic bounds which act directly on the on-chain amount. null means uncapped for that dimension; an explicit 0 is rejected by validation.",
+        "type": "object",
+        "properties": {
+          "max_credits_per_payment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_credits_per_run": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_credits_per_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "window_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_atomic_per_payment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "min_atomic_per_payment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "X402ApprovalPolicy": {
+        "description": "Approval-mode policy: payments whose computed credits exceed the threshold require explicit out-of-band approval instead of auto-allow. null never requires approval.",
+        "type": "object",
+        "properties": {
+          "threshold_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "X402SpendPolicy": {
+        "description": "The typed, disabled-by-default x402 spend policy an operator declares through FerroGate's structured config (issue #351). Parsed and validated into a runtime-evaluable policy; x402 spending is off unless enabled is explicitly true. This is config-in shape only; the runtime never evaluates a policy that failed validation.",
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "description": "Master switch. x402 spending is OFF unless explicitly true.",
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "Monotonic policy revision echoed into every decision for audit/diagnostics.",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "allowed_networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/X402PolicyNetwork"
+            }
+          },
+          "allowed_assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/X402AllowedAsset"
+            }
+          },
+          "allowed_recipients": {
+            "description": "Explicit recipient (payTo) allowlist, canonical base58. Empty => nothing payable.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allowed_resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/X402ResourceRule"
+            }
+          },
+          "caps": {
+            "$ref": "#/components/schemas/X402SpendCaps"
+          },
+          "conversion": {
+            "$ref": "#/components/schemas/X402ConversionRule"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/X402ApprovalPolicy"
+          },
+          "allow_insecure_local_resources": {
+            "description": "Test-only escape hatch permitting http:// resource origins. MUST be false in production.",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "revision",
+          "allowed_networks",
+          "allowed_assets",
+          "allowed_recipients",
+          "allowed_resources",
+          "caps",
+          "conversion",
+          "approval"
+        ],
+        "example": {
+          "enabled": true,
+          "revision": 7,
+          "allowed_networks": [
+            "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+          ],
+          "allowed_assets": [
+            {
+              "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+              "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+            }
+          ],
+          "allowed_recipients": [
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+          ],
+          "allowed_resources": [
+            {
+              "origin": "https://api.example.com",
+              "path_prefix": "/paid"
+            }
+          ],
+          "caps": {
+            "max_credits_per_payment": 1000,
+            "max_credits_per_run": 5000,
+            "max_credits_per_window": 10000,
+            "window_seconds": 3600,
+            "max_atomic_per_payment": 2000000,
+            "min_atomic_per_payment": 10
+          },
+          "conversion": {
+            "numerator": 1,
+            "denominator": 1000,
+            "rounding": "up",
+            "version": "usdc-devnet-v1"
+          },
+          "approval": {
+            "threshold_credits": 500
+          },
+          "allow_insecure_local_resources": false
+        }
       }
     }
   }

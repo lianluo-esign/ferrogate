@@ -17,9 +17,17 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Reuse the frozen #351 policy model (types + `validate()` + structured
+# `X402PolicyConfigError`) instead of re-implementing it here; this crate only
+# owns the operator-facing config surface and parse/validate wiring.
+ferrogate-policy = { path = "../ferrogate-policy" }
 serde.workspace = true
+# The canonical FerroGate structured-config format. The runtime already parses
+# TOML for its top-level config; the x402 section loader parses the same format.
+toml.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [features]

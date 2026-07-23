@@ -14,6 +14,7 @@ mod caddyfile;
 mod diagnostic;
 mod loader;
 mod types;
+mod x402;
 
 pub use caddyfile::parse_caddyfile;
 pub use diagnostic::CaddyfileDiagnostic;
@@ -21,4 +22,9 @@ pub use loader::{is_caddyfile_path, load_caddyfile};
 pub use types::{
     GatewayApiKey, GatewayConfig, GatewayHeader, GatewayLog, GatewayModel, GatewayProvider,
     GatewayRoute, GatewayTlsAcmeConfig, GatewayTlsConfig, GatewayUpstream, StaticResponse,
+};
+pub use x402::{
+    default_x402_spend_policy, load_x402_spend_policy_toml, AllowedAsset, ApprovalPolicy,
+    ConversionRule, PolicyNetwork, ResourceRule, Rounding, ValidatedX402SpendPolicy,
+    X402ConfigError, X402PolicyConfigError, X402SpendCaps, X402SpendPolicy, X402SpendPolicyConfig,
 };
