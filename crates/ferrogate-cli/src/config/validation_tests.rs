@@ -469,6 +469,81 @@ fn rejects_empty_asset_bucket_bucket() {
     assert!(error.contains("field asset_bucket.bucket: cannot be empty"));
 }
 
+/// An `[asset_bucket]` targeting a well-formed Cloudflare R2 host with region
+/// `auto` validates (issue #410).
+fn enabled_r2_asset_bucket() -> AssetBucketConfig {
+    AssetBucketConfig {
+        enabled: true,
+        endpoint: Some("https://abc123def456.r2.cloudflarestorage.com".into()),
+        bucket: Some("ferrogate-assets".into()),
+        region: Some("auto".into()),
+        access_key_id: Some("R2ACCESSKEYID".into()),
+        secret_access_key_env: Some("FERROGATE_ASSET_BUCKET_SECRET".into()),
+        ..AssetBucketConfig::default()
+    }
+}
+
+#[test]
+fn accepts_a_cloudflare_r2_asset_bucket() {
+    let config = Config {
+        asset_bucket: enabled_r2_asset_bucket(),
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_a_cloudflare_r2_jurisdiction_asset_bucket() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://abc123def456.eu.r2.cloudflarestorage.com".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_r2_asset_bucket_with_non_auto_region() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.region = Some("us-east-1".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.region"));
+    assert!(error.contains("requires region \"auto\""));
+}
+
+#[test]
+fn rejects_malformed_r2_asset_bucket_host() {
+    // Clearly an R2 host (ends with the R2 suffix) but missing the account
+    // label -- rejected with an R2-specific error rather than silently treated
+    // as a generic S3 endpoint.
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://.r2.cloudflarestorage.com".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.endpoint"));
+    assert!(error.contains("Cloudflare R2 endpoint"));
+}
+
+/// A non-R2 endpoint with a geographic region must NOT trip the R2 region
+/// check -- the R2 rules apply only to R2 hosts.
+#[test]
+fn non_r2_asset_bucket_is_unaffected_by_r2_region_rule() {
+    let asset_bucket = enabled_asset_bucket(); // Supabase host, region us-east-1
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
 #[test]
 fn rejects_api_key_region_allowlist_entry_with_no_matching_provider() {
     let mut provider = provider();

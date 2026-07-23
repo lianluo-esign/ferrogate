@@ -36,11 +36,98 @@ pub(crate) struct AssetBucketConfig {
     /// -- e.g. `https://<project>.supabase.co/storage/v1/s3` for Supabase
     /// Storage's S3-compatible endpoint, or `http://127.0.0.1:PORT` for a
     /// local mock in tests.
+    ///
+    /// Cloudflare R2 (issue #410) is S3-compatible and slots in here with no
+    /// client change: point this at the account's R2 S3 host
+    /// `https://<account_id>.r2.cloudflarestorage.com` (or the jurisdiction
+    /// hosts `<account_id>.eu.r2.cloudflarestorage.com` /
+    /// `<account_id>.fedramp.r2.cloudflarestorage.com`), set `region` to R2's
+    /// fixed [`R2_REGION`] (`auto`), and use an R2 Access Key ID + Secret
+    /// (created via R2's Create-Token API) through the same `access_key_id` +
+    /// `secret_access_key` pair. R2 buckets are addressed path-style
+    /// (`/{bucket}/{key}`), which is exactly how this client already builds its
+    /// object paths, and R2 accepts the real `x-amz-content-sha256` payload
+    /// hash this client sends. `[asset_bucket]` targeting an R2 host is
+    /// auto-detected and validated (see `validate_asset_bucket_r2`); no extra
+    /// config marker is needed. NOTE: R2 buckets are private by default -- for
+    /// *public* static serving you must attach a custom domain to the bucket
+    /// (the `r2.dev` subdomain is rate-limited/dev-only); the gateway's
+    /// presigned-GET path serves private objects without a public bucket.
     pub(crate) endpoint: String,
     pub(crate) bucket: String,
     pub(crate) region: String,
     pub(crate) access_key_id: String,
     pub(crate) secret_access_key: String,
+}
+
+/// The DNS suffix every Cloudflare R2 S3-API host ends with (issue #410).
+/// The per-account host is `<account_id>.r2.cloudflarestorage.com`; the
+/// jurisdiction hosts insert a `.eu.` / `.fedramp.` label before it.
+pub(crate) const R2_ENDPOINT_SUFFIX: &str = "r2.cloudflarestorage.com";
+
+/// R2's required SigV4 region. R2 ignores geographic regions and mandates the
+/// literal `auto` in the credential scope (`.../auto/s3/aws4_request`); the
+/// existing signer folds whatever region string it is given into the scope, so
+/// setting this value is the only R2-specific config the SigV4 path needs.
+pub(crate) const R2_REGION: &str = "auto";
+
+/// A parsed Cloudflare R2 S3 endpoint (issue #410): the account id and the
+/// optional data-residency jurisdiction (`eu` / `fedramp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct R2Endpoint {
+    pub(crate) account_id: String,
+    /// `None` for the default global host; `Some("eu")` / `Some("fedramp")`
+    /// for the jurisdiction hosts.
+    pub(crate) jurisdiction: Option<&'static str>,
+}
+
+/// Reduces `endpoint` to its bare host (drops scheme, any `:port`, and any
+/// path suffix). Shared by the R2 detection/parsing helpers so they agree on
+/// what "the host" is.
+fn endpoint_host(endpoint: &str) -> &str {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let host = without_scheme.split('/').next().unwrap_or(without_scheme);
+    host.split(':').next().unwrap_or(host)
+}
+
+/// True when `endpoint`'s host is under the R2 S3 domain (any account /
+/// jurisdiction), used to decide whether the R2-specific validation applies.
+/// This is a permissive detector: it matches even a malformed R2 host (e.g. a
+/// missing account label) so `validate_asset_bucket_r2` can reject that with a
+/// clear error rather than silently treating it as a generic S3 endpoint.
+pub(crate) fn endpoint_targets_r2(endpoint: &str) -> bool {
+    let host = endpoint_host(endpoint);
+    host == R2_ENDPOINT_SUFFIX || host.ends_with(&format!(".{R2_ENDPOINT_SUFFIX}"))
+}
+
+/// Strictly parses an R2 S3 endpoint of the form
+/// `https://<account_id>.r2.cloudflarestorage.com` (optionally with a
+/// `.eu.` / `.fedramp.` jurisdiction label). Returns `None` when the host is
+/// not R2 *or* is malformed (empty / multi-label account id). The account id
+/// must be a single DNS label (no dots), matching R2's 32-hex-char account id.
+pub(crate) fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
+    let host = endpoint_host(endpoint);
+    // `<...>.r2.cloudflarestorage.com` -> `<...>` (with its trailing dot).
+    let prefix = host.strip_suffix(R2_ENDPOINT_SUFFIX)?.strip_suffix('.')?; // reject the bare suffix domain (empty account)
+    let (account_id, jurisdiction) = if let Some(account) = prefix.strip_suffix(".eu") {
+        (account, Some("eu"))
+    } else if let Some(account) = prefix.strip_suffix(".fedramp") {
+        (account, Some("fedramp"))
+    } else {
+        (prefix, None)
+    };
+    // A valid account id is a single, non-empty DNS label.
+    if account_id.is_empty() || account_id.contains('.') {
+        return None;
+    }
+    Some(R2Endpoint {
+        account_id: account_id.to_string(),
+        jurisdiction,
+    })
 }
 
 pub(crate) struct AssetBucketClient {
@@ -818,6 +905,184 @@ mod tests {
         assert_eq!(
             https_bucket.scheme_and_host().unwrap(),
             ("https", "project.supabase.co/storage/v1/s3".to_string())
+        );
+    }
+
+    // ---- Cloudflare R2 (issue #410) -----------------------------------------
+
+    /// SHA-256 of the empty string -- the payload hash the signer emits for a
+    /// bodyless GET/DELETE/HEAD. R2 requires this real hash (not a stub) in the
+    /// signed `x-amz-content-sha256`, so asserting it here pins the quirk.
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn r2_client(endpoint: &str) -> AssetBucketClient {
+        AssetBucketClient::new(AssetBucketConfig {
+            endpoint: endpoint.to_string(),
+            bucket: "ferrogate-assets".into(),
+            region: R2_REGION.into(),
+            access_key_id: "R2ACCESSKEYID".into(),
+            secret_access_key: "0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+        })
+    }
+
+    #[test]
+    fn parse_r2_endpoint_accepts_the_default_and_jurisdiction_hosts() {
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com"),
+            Some(R2Endpoint {
+                account_id: "abc123def456".into(),
+                jurisdiction: None,
+            })
+        );
+        // Trailing slash and virtual-host-irrelevant path suffixes are ignored;
+        // R2 addresses buckets path-style.
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com/"),
+            Some(R2Endpoint {
+                account_id: "abc123def456".into(),
+                jurisdiction: None,
+            })
+        );
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.eu.r2.cloudflarestorage.com"),
+            Some(R2Endpoint {
+                account_id: "abc123def456".into(),
+                jurisdiction: Some("eu"),
+            })
+        );
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.fedramp.r2.cloudflarestorage.com"),
+            Some(R2Endpoint {
+                account_id: "abc123def456".into(),
+                jurisdiction: Some("fedramp"),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_r2_endpoint_rejects_non_r2_and_malformed_hosts() {
+        // Not an R2 host at all.
+        assert_eq!(
+            parse_r2_endpoint("https://project.supabase.co/storage/v1/s3"),
+            None
+        );
+        assert_eq!(parse_r2_endpoint("http://127.0.0.1:9999"), None);
+        // The bare suffix domain with no account label.
+        assert_eq!(parse_r2_endpoint("https://r2.cloudflarestorage.com"), None);
+        assert_eq!(parse_r2_endpoint("https://.r2.cloudflarestorage.com"), None);
+    }
+
+    #[test]
+    fn endpoint_targets_r2_detects_r2_even_when_the_account_label_is_malformed() {
+        assert!(endpoint_targets_r2(
+            "https://abc123def456.r2.cloudflarestorage.com"
+        ));
+        assert!(endpoint_targets_r2(
+            "https://abc123def456.eu.r2.cloudflarestorage.com"
+        ));
+        // Malformed-but-clearly-R2 so validation can reject it with a clear error.
+        assert!(endpoint_targets_r2("https://.r2.cloudflarestorage.com"));
+        // Non-R2 endpoints must not trip the R2-specific validation.
+        assert!(!endpoint_targets_r2(
+            "https://project.supabase.co/storage/v1/s3"
+        ));
+        assert!(!endpoint_targets_r2("http://127.0.0.1:9999"));
+    }
+
+    #[test]
+    fn r2_scheme_and_host_yields_the_account_host_for_the_signed_host_header() {
+        let bucket = r2_client("https://abc123def456.r2.cloudflarestorage.com");
+        assert_eq!(
+            bucket.scheme_and_host().unwrap(),
+            ("https", "abc123def456.r2.cloudflarestorage.com".to_string())
+        );
+    }
+
+    #[test]
+    fn r2_put_signs_host_region_auto_and_a_real_payload_hash() {
+        // The three SigV4 quirks R2 cares about, on a non-presigned PUT:
+        //   * `host` header = the account R2 host (signed),
+        //   * region `auto` in the credential scope,
+        //   * a real `x-amz-content-sha256` (not UNSIGNED-PAYLOAD), path-style.
+        let bucket = r2_client("https://abc123def456.r2.cloudflarestorage.com");
+        let (_scheme, host) = bucket.scheme_and_host().unwrap();
+        let path = bucket.object_path("tenant-a:cli_tool:hello:1.0.0");
+        assert_eq!(path, "/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0");
+
+        let signed = bucket.sign("PUT", &path, &host, b"asset bytes");
+        assert!(
+            signed.authorization.contains("/auto/s3/aws4_request"),
+            "credential scope must carry region `auto`: {}",
+            signed.authorization
+        );
+        assert!(signed
+            .authorization
+            .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        // A concrete body hash, not a stub or UNSIGNED-PAYLOAD -- R2 verifies
+        // it. A 64-char lowercase-hex digest that differs from the empty-body
+        // hash proves the real payload was hashed.
+        let hash = signed.x_amz_content_sha256.expect("content hash header");
+        assert_eq!(hash.len(), 64);
+        assert!(hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(hash, EMPTY_SHA256);
+    }
+
+    #[test]
+    fn r2_get_signs_the_empty_payload_hash() {
+        let bucket = r2_client("https://abc123def456.eu.r2.cloudflarestorage.com");
+        let (_scheme, host) = bucket.scheme_and_host().unwrap();
+        let signed = bucket.sign("GET", "/ferrogate-assets/k", &host, b"");
+        assert_eq!(signed.x_amz_content_sha256.as_deref(), Some(EMPTY_SHA256));
+        assert!(signed.authorization.contains("/auto/s3/aws4_request"));
+    }
+
+    #[test]
+    fn r2_presign_get_is_well_formed_path_style_with_region_auto() {
+        let bucket = r2_client("https://abc123def456.r2.cloudflarestorage.com");
+        let url = bucket
+            .presign_get("tenant-a:cli_tool:hello:1.0.0", 900, 1_440_938_160)
+            .unwrap();
+        assert!(url.starts_with(
+            "https://abc123def456.r2.cloudflarestorage.com/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0?"
+        ));
+        assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(url.contains("X-Amz-Expires=900"));
+        // The credential scope (URL-encoded) pins region `auto` + service `s3`.
+        assert!(url.contains("%2Fauto%2Fs3%2Faws4_request"));
+        assert!(url.contains("X-Amz-Signature="));
+        // The secret never leaks into the URL.
+        assert!(!url.contains("0000000000000000"));
+    }
+
+    #[test]
+    fn r2_presign_put_binds_size_and_checksum_against_the_r2_host() {
+        let bucket = r2_client("https://abc123def456.r2.cloudflarestorage.com");
+        let sha = "a".repeat(64);
+        let upload = bucket
+            .presign_put(
+                "tenant-a:cli_tool:hello:1.0.0",
+                900,
+                1_440_938_160,
+                42,
+                &sha,
+            )
+            .unwrap();
+        assert!(upload.url.starts_with(
+            "https://abc123def456.r2.cloudflarestorage.com/ferrogate-assets/tenant-a:cli_tool:hello:1.0.0?"
+        ));
+        assert!(upload.url.contains("%2Fauto%2Fs3%2Faws4_request"));
+        assert!(upload
+            .url
+            .contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256"));
+        assert_eq!(
+            upload.required_headers,
+            vec![
+                ("content-length", "42".to_string()),
+                ("x-amz-content-sha256", sha),
+            ]
         );
     }
 }

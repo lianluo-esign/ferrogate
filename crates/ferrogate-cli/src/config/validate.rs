@@ -129,6 +129,57 @@ impl Config {
         self.validate_asset_bucket()?;
         self.validate_x402_reconciler()?;
         self.validate_cloudflare()?;
+        self.validate_asset_bucket_r2()?;
+        Ok(())
+    }
+
+    /// Cloudflare-R2-specific checks for `[asset_bucket]` (issue #410).
+    ///
+    /// R2 is S3-compatible, so an R2 bucket is configured by pointing
+    /// `[asset_bucket].endpoint` at the account's R2 S3 host and using an R2
+    /// Access Key ID + Secret through the existing credential fields -- there
+    /// is no separate backend switch. This runs only when the endpoint is
+    /// detected as an R2 host (`endpoint_targets_r2`); non-R2 endpoints
+    /// (Supabase, MinIO, AWS S3, the local mock) are entirely unaffected.
+    ///
+    /// When the endpoint *is* R2 we enforce the two things a config load can
+    /// prove and that R2 gets wrong most often:
+    ///   1. the host is the well-formed `https://<account_id>.r2.cloudflarestorage.com`
+    ///      (optionally an `.eu.`/`.fedramp.` jurisdiction) with a single-label
+    ///      account id, and
+    ///   2. `region` is R2's required literal `auto` (R2 ignores geographic
+    ///      regions; a stray `us-east-1` yields a `SignatureDoesNotMatch` at
+    ///      the bucket, which is painful to diagnose live).
+    ///
+    /// Credential presence is already enforced by `validate_asset_bucket` when
+    /// `enabled = true`, so it is not re-checked here. Live token/bucket
+    /// existence and the public-serving custom-domain requirement are runtime
+    /// concerns, not config-load invariants.
+    fn validate_asset_bucket_r2(&self) -> AnyResult<()> {
+        use crate::gateway::asset_bucket::{endpoint_targets_r2, parse_r2_endpoint, R2_REGION};
+
+        let bucket = &self.asset_bucket;
+        let Some(endpoint) = bucket.endpoint.as_deref() else {
+            return Ok(());
+        };
+        if !endpoint_targets_r2(endpoint) {
+            return Ok(());
+        }
+        if parse_r2_endpoint(endpoint).is_none() {
+            bail!(
+                "field asset_bucket.endpoint: {endpoint} looks like a Cloudflare R2 endpoint but \
+                 is not of the form https://<account_id>.r2.cloudflarestorage.com (optionally with \
+                 an .eu./.fedramp. jurisdiction label); the account id must be a single DNS label"
+            );
+        }
+        match bucket.region.as_deref() {
+            Some(region) if region == R2_REGION => {}
+            other => bail!(
+                "field asset_bucket.region: Cloudflare R2 requires region \"{R2_REGION}\" (got \
+                 {other:?}); R2 ignores geographic regions and signs the credential scope with \
+                 `auto`"
+            ),
+        }
         Ok(())
     }
 
