@@ -44,6 +44,14 @@ struct ServeArgs {
         default_value = "require"
     )]
     supabase_tls_mode: String,
+    /// Optional CA certificate path for Supabase/PostgreSQL TLS validation.
+    /// Required when `--supabase-tls-mode` is `verify_ca`/`verify_full` against
+    /// Supabase's pooler, whose chain terminates in the self-signed Supabase
+    /// Root 2021 CA rather than a system root (#386, twin of #382). Mirrors the
+    /// gateway's `storage.postgres_tls_ca_cert_path`; unset defers to the system
+    /// trust store.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_TLS_CA_CERT_PATH")]
+    supabase_tls_ca_cert_path: Option<String>,
     /// PostgreSQL schema holding the auth service's own tenant/RBAC tables.
     /// Dedicated by default so this service never shares a namespace with the
     /// gateway's own `ferrogate_control` schema or the billing service's
@@ -110,34 +118,12 @@ fn supabase_api_key_authenticator(
     let Some(dsn) = args.supabase_dsn.as_deref() else {
         return Ok(None);
     };
-    let dsn = dsn.trim();
-    if dsn.is_empty() {
+    if dsn.trim().is_empty() {
         return Ok(None);
     }
 
     let repositories = RuntimeStorageRepositories::supabase(
-        PostgresStorageConfig {
-            dsn: dsn.to_string(),
-            pool_size: args.supabase_pool_size,
-            pool_acquire_timeout_millis: 1_000,
-            tls_mode: parse_postgres_tls_mode(&args.supabase_tls_mode)?,
-            tls_ca_cert_path: None,
-            connect_timeout_secs: args.supabase_connect_timeout_secs,
-            statement_timeout_millis: args.supabase_statement_timeout_millis,
-            schema: args
-                .supabase_schema
-                .as_deref()
-                .map(str::trim)
-                .filter(|schema| !schema.is_empty())
-                .map(ToOwned::to_owned),
-            search_path: args
-                .supabase_search_path
-                .iter()
-                .map(|item| item.trim())
-                .filter(|item| !item.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-        },
+        build_supabase_storage_config(args)?,
         RuntimeStorageOptions {
             provider_order: vec![StorageProviderKind::Supabase],
             required: true,
@@ -159,6 +145,49 @@ fn supabase_api_key_authenticator(
     )))
 }
 
+/// Translate the parsed [`ServeArgs`] into the durable [`PostgresStorageConfig`]
+/// this standalone binary opens. Split out from
+/// [`supabase_api_key_authenticator`] (which connects eagerly) so the arg/env →
+/// `PostgresStorageConfig.tls_ca_cert_path` threading is unit-testable without a
+/// live Supabase pool — mirroring #382's `build_supabase_storage_config` (#386).
+fn build_supabase_storage_config(args: &ServeArgs) -> anyhow::Result<PostgresStorageConfig> {
+    let dsn = args.supabase_dsn.as_deref().unwrap_or_default().trim();
+    if dsn.is_empty() {
+        anyhow::bail!("supabase DSN must not be empty");
+    }
+    Ok(PostgresStorageConfig {
+        dsn: dsn.to_string(),
+        pool_size: args.supabase_pool_size,
+        pool_acquire_timeout_millis: 1_000,
+        tls_mode: parse_postgres_tls_mode(&args.supabase_tls_mode)?,
+        // Thread the operator-supplied CA through, matching the gateway path
+        // (`storage.rs`/`state.rs`) and #382: trim and drop empties so a blank
+        // flag/env value is treated as absent rather than a bogus zero-length
+        // path.
+        tls_ca_cert_path: args
+            .supabase_tls_ca_cert_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned),
+        connect_timeout_secs: args.supabase_connect_timeout_secs,
+        statement_timeout_millis: args.supabase_statement_timeout_millis,
+        schema: args
+            .supabase_schema
+            .as_deref()
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(ToOwned::to_owned),
+        search_path: args
+            .supabase_search_path
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    })
+}
+
 fn parse_postgres_tls_mode(value: &str) -> anyhow::Result<PostgresTlsMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "disable" => Ok(PostgresTlsMode::Disable),
@@ -171,3 +200,7 @@ fn parse_postgres_tls_mode(value: &str) -> anyhow::Result<PostgresTlsMode> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;
