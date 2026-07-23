@@ -3,11 +3,13 @@
 // Import from `@/i18n` rather than reaching into submodules so #348 can move
 // internals (e.g. swap in lazy namespace loading) without churning call sites.
 export {
-  CATALOGS,
+  DEFAULT_CATALOG,
   DEFAULT_LOCALE,
   LOCALE_META,
   LOCALES,
+  getLoadedCatalog,
   isLocale,
+  loadCatalog,
   type Locale,
   type Messages,
   type TranslationKey,

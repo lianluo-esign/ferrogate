@@ -1,9 +1,10 @@
-import { render, renderHook, screen } from "@testing-library/react";
+import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { I18nProvider, useI18n } from "./i18n-provider";
 import { LanguageSwitcher } from "./language-switcher";
+import { getLoadedCatalog, loadCatalog } from "./catalog";
 import { LOCALE_STORAGE_KEY } from "./detect";
 
 afterEach(() => {
@@ -30,6 +31,24 @@ describe("useI18n", () => {
 
     const zh = renderHook(() => useI18n(), { wrapper: wrapper("zh-CN") });
     expect(zh.result.current.t("language.label")).toBe("语言");
+  });
+
+  it("renders the DEFAULT (English) locale synchronously, no async needed", () => {
+    // The eager default catalog is always resolvable without awaiting — this is
+    // the path every page test relies on (`renderWithProviders` default locale).
+    expect(getLoadedCatalog("en")).toBeDefined();
+    const { result } = renderHook(() => useI18n(), { wrapper: wrapper("en") });
+    expect(result.current.t("language.label")).toBe("Language");
+  });
+
+  it("lazy-loads the non-default (zh-CN) catalog via dynamic import()", async () => {
+    // `loadCatalog` is the dynamic-import() entry point Vite emits as its own
+    // chunk in production; awaiting it yields the fully translated catalog.
+    const messages = await loadCatalog("zh-CN");
+    expect(messages["language.label"]).toBe("语言");
+    // Once resolved, the provider renders the lazily loaded copy.
+    const { result } = renderHook(() => useI18n(), { wrapper: wrapper("zh-CN") });
+    expect(result.current.t("language.label")).toBe("语言");
   });
 
   it("interpolates placeholders through t()", () => {
@@ -67,8 +86,10 @@ describe("LanguageSwitcher", () => {
     await user.click(screen.getByRole("button", { name: /Change language/i }));
     await user.click(screen.getByRole("menuitemradio", { name: "简体中文" }));
 
-    // No reload: same React tree re-renders with the new locale.
-    expect(screen.getByTestId("label")).toHaveTextContent("语言");
+    // No reload: same React tree re-renders with the new locale once the lazily
+    // loaded zh-CN catalog resolves (awaited via waitFor to tolerate the async
+    // dynamic import when its chunk is not already cached).
+    await waitFor(() => expect(screen.getByTestId("label")).toHaveTextContent("语言"));
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("zh-CN");
   });

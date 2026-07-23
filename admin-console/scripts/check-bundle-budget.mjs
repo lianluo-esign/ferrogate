@@ -5,36 +5,27 @@ import { fileURLToPath } from "node:url";
 
 // Entry-chunk ceiling. The console's i18n runtime is hand-rolled precisely to
 // keep the localized catalogs OUT of a heavyweight i18next dependency (see
-// src/i18n/catalog.ts), but the EN + zh-CN catalogs are still eagerly imported
-// into the entry chunk by design. #348 migrates ALL operator copy into those
-// typed catalogs; its final copy slice (shared primitives + the last shared
-// ops page + vendored shadcn a11y labels) lands the remaining page's strings,
-// so the eager catalog legitimately grows. Bumped 300_000 -> 312_000 to seat
-// the completed catalog with a small (~1.8%) headroom. The migration is now
-// copy-complete, so this ceiling should hold; a large jump past it again would
-// signal an unintended heavy dependency (e.g. i18next) reaching the entry.
+// src/i18n/catalog.ts). Historically BOTH the EN and zh-CN catalogs were eagerly
+// imported into the entry chunk, so every catalog growth ratcheted this ceiling
+// up: 300_000 -> 312_000 (#348 copy-complete) -> 316_000 (#344 Assets registry)
+// -> 321_000 (#345 Static Sites). Each bump was the real cost of new copy across
+// BOTH locales landing in the entry — the ratchet #393 set out to break.
 //
-// Bumped 312_000 -> 316_000 (#344): the Assets route was rebuilt from a thin
-// push/list screen into a static-resource REGISTRY (list + manifest/versions/
-// variants/channels detail + yank/unyank/channel lifecycle). The PAGE code is a
-// lazy route (its own chunk, outside the entry), but the ~30 new typed catalog
-// keys — including the load-bearing "explain the consequence" copy the
-// destructive confirmations require — are eagerly imported by src/i18n/catalog.ts
-// and so land in the entry chunk. Measured cost: +~3.6 KiB min / +~0.9 KiB gzip
-// of copy across EN + zh-CN, not a new runtime dependency. Headroom stays tight
-// (<1 KiB) so this remains a guard, not a blank cheque.
-//
-// Bumped 316_000 -> 321_000 (#345): the Static Sites route (list of published
-// static_site bundles + a ZIP publish/republish flow with client-side archive
-// validation and verbatim gateway-error display) added ~37 typed catalog keys
-// across EN + zh-CN. The PAGE is a lazy route (its own chunk, outside the
-// entry), but those keys are eagerly imported by src/i18n/catalog.ts and so
-// land in the entry chunk (measured entry 312.22 KiB). This is the same eager-
-// catalog pressure #393 tracks fixing at the root via catalog code-splitting;
-// until then the ceiling grows by the copy's real cost (~3.6 KiB min) with a
-// small (~1.2 KiB) headroom, and stays a guard against an unintended heavy
-// runtime dependency reaching the entry.
-const MAX_ENTRY_BYTES = 321_000;
+// LOWERED 321_000 -> 225_000 (#393): the i18n catalog is now code-split. Only the
+// DEFAULT locale (English) is eagerly bundled; the non-default zh-CN catalog is
+// pulled in by a dynamic import() (src/i18n/catalog.ts `catalogLoaders`) so Vite
+// emits it as its OWN chunk OUTSIDE the entry (an operator downloads Chinese copy
+// only if they switch to Chinese). Measured effect of the split on the SAME tree:
+//   * entry  index-*.js : 319_716 B (312.22 KiB min / 80.06 KiB gzip)
+//                      -> 221_805 B (216.61 KiB min / 56.76 KiB gzip)
+//     i.e. -97_911 B min (-30.6%) / -23.3 KiB gzip left the entry chunk.
+//   * new    zh-CN-*.js : 98_220 B — the Simplified Chinese copy, now lazy.
+// The ceiling drops to 225_000 B: ~3.2 KiB (~1.4%) headroom over the measured
+// 221_805 B entry — tight, so it stays a guard against an unintended heavy
+// dependency (or a locale catalog accidentally re-entering the entry) rather than
+// a blank cheque. Future EN-only key growth still nudges this; a large jump would
+// signal regression (e.g. zh-CN back in the entry, or i18next reaching it).
+const MAX_ENTRY_BYTES = 225_000;
 const MAX_CHUNK_BYTES = 500_000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");

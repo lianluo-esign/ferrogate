@@ -10,9 +10,19 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll } from "vitest";
+import { LOCALES, loadCatalog } from "@/i18n";
 import { server } from "@/test/msw";
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+
+// Warm the lazy locale-chunk cache once per test file so `I18nProvider` renders
+// EVERY locale SYNCHRONOUSLY under jsdom (production still lazy-loads the
+// non-default catalogs via dynamic `import()` — see src/i18n/catalog.ts #393).
+// This keeps the many `renderWithProviders(..., { locale: "zh-CN" })` page tests
+// synchronous, so they need no `await` for the first assertion.
+beforeAll(async () => {
+  await Promise.all(LOCALES.map((locale) => loadCatalog(locale)));
+});
 
 afterEach(() => {
   server.resetHandlers();

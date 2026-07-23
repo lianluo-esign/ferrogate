@@ -14,10 +14,12 @@ import {
   type ReactNode,
 } from "react";
 import {
-  CATALOGS,
-  DEFAULT_LOCALE,
+  DEFAULT_CATALOG,
+  getLoadedCatalog,
+  loadCatalog,
   LOCALE_META,
   type Locale,
+  type Messages,
   type TranslationKey,
 } from "./catalog";
 import { resolveInitialLocale, writeStoredLocale } from "./detect";
@@ -35,15 +37,25 @@ import {
   type InterpolationValues,
 } from "./format";
 
-/** Translate a typed key for `locale`, interpolating `{name}` placeholders. */
+/**
+ * Translate a typed key for `locale`, interpolating `{name}` placeholders.
+ *
+ * Resolves against the locale's catalog IF it has already been lazily loaded
+ * (`getLoadedCatalog`), else against the eager default catalog. The default
+ * locale is always available synchronously; a non-default locale whose chunk
+ * has not resolved yet gracefully yields the English string. For a live,
+ * re-rendering surface prefer the context `t` (below), which tracks the active
+ * catalog as it loads; this free function is for one-shot/synchronous callers.
+ */
 export function translate(
   locale: Locale,
   key: TranslationKey,
   values?: InterpolationValues,
 ): string {
+  const catalog = getLoadedCatalog(locale) ?? DEFAULT_CATALOG;
   // Typed catalogs guarantee the key exists; the `?? DEFAULT` chain only guards
   // against a locale catalog being hand-edited out of sync at runtime.
-  const template = CATALOGS[locale][key] ?? CATALOGS[DEFAULT_LOCALE][key] ?? key;
+  const template = catalog[key] ?? DEFAULT_CATALOG[key] ?? key;
   return interpolate(template, values);
 }
 
@@ -83,13 +95,46 @@ export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
     () => initialLocale ?? resolveInitialLocale(),
   );
 
+  // The active message catalog. The default locale — and any non-default locale
+  // whose chunk is already cached — resolves SYNCHRONOUSLY here, so the common
+  // case (and every default-locale render, including the test suite's) paints
+  // with no async hop. A not-yet-loaded non-default locale seeds with the eager
+  // default catalog (graceful English pending state) and swaps in once its
+  // dynamically imported chunk resolves via the effect below.
+  const [catalog, setCatalog] = useState<Messages>(
+    () => getLoadedCatalog(locale) ?? DEFAULT_CATALOG,
+  );
+
   // Reflect the active locale on the document element for a11y + `:lang()` CSS.
   useEffect(() => {
     document.documentElement.lang = LOCALE_META[locale].htmlLang;
   }, [locale]);
 
+  // Keep `catalog` in sync with `locale`, lazily importing non-default locales.
+  useEffect(() => {
+    const alreadyLoaded = getLoadedCatalog(locale);
+    if (alreadyLoaded) {
+      setCatalog(alreadyLoaded);
+      return;
+    }
+    // Non-default locale not yet resolved: show the default copy while its chunk
+    // downloads, then re-render with the real catalog. `cancelled` guards a
+    // locale change (or unmount) that lands before the import settles.
+    let cancelled = false;
+    setCatalog(DEFAULT_CATALOG);
+    void loadCatalog(locale).then((messages) => {
+      if (!cancelled) setCatalog(messages);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [locale]);
+
   const setLocale = useCallback((next: Locale) => {
     writeStoredLocale(next);
+    // Kick the lazy chunk fetch off at click time so the switch feels immediate;
+    // the effect above also awaits it and commits the swap when it lands.
+    void loadCatalog(next);
     setLocaleState(next);
   }, []);
 
@@ -108,10 +153,12 @@ export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
     return {
       locale,
       setLocale,
-      t: (key, values) => translate(locale, key, values),
+      // Resolve from the active (possibly lazily loaded) catalog, falling back
+      // to the eager default so a pending non-default locale renders English.
+      t: (key, values) => interpolate(catalog[key] ?? DEFAULT_CATALOG[key] ?? key, values),
       format,
     };
-  }, [locale, setLocale]);
+  }, [locale, catalog, setLocale]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

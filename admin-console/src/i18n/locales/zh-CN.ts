@@ -12,7 +12,7 @@
 // selector always shows a language in its own name regardless of active locale.
 import type { Messages } from "../catalog";
 
-export const zhCN: Messages = {
+export const zhCN = {
   "language.label": "语言",
   "language.change": "切换语言",
   "language.current": "当前语言：{name}。切换语言",
@@ -1882,4 +1882,9 @@ export const zhCN: Messages = {
   // 移动端侧边栏抽屉的无障碍文案（src/components/ui/sidebar.tsx）。
   "component.sidebar.title": "侧边栏",
   "component.sidebar.description": "显示移动端侧边栏。",
-};
+  // `satisfies` (not a `: Messages` annotation) validates completeness AND drift
+  // here while keeping `typeof zhCN` a precise literal type, so the type-only
+  // completeness gate in `../catalog.ts` (`_ZhCatalogIsComplete`) stays a real
+  // check rather than a tautology. This value is imported ONLY via a dynamic
+  // `import()` (#393), so it lands in its own chunk, outside the entry.
+} satisfies Messages;
