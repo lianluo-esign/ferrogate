@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminSelfHostedWorkerRecord extends Record<string, unknown> {
   id: string;
@@ -14,9 +14,9 @@ export interface AdminSelfHostedWorkerRecord extends Record<string, unknown> {
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
-// locale. Column `key`s, layout hints, and the data-driven cell renders
-// (boolean Yes/No + Enabled/Disabled `render` callbacks — deferred to #385)
-// stay untouched; this is a read-only resource with no fields.
+// locale. Column `key`s and layout hints stay untouched; the boolean Yes/No
+// (`stale`) and Enabled/Disabled (`orchestration_enabled`) cells now localize
+// via `booleanColumn` (#385). This is a read-only resource with no fields.
 export const selfHostedWorkersConfig: ResourceConfig<AdminSelfHostedWorkerRecord> = {
   key: "self-hosted-workers",
   titleKey: "resource.selfHostedWorkers.title",
@@ -29,15 +29,16 @@ export const selfHostedWorkersConfig: ResourceConfig<AdminSelfHostedWorkerRecord
     { key: "worker_name", headerKey: "resource.selfHostedWorkers.col.name", priority: "primary", minWidth: 200, mobileVisibility: "always" },
     { key: "status", headerKey: "resource.selfHostedWorkers.col.status", priority: "secondary", minWidth: 110, mobileVisibility: "always" },
     { key: "trust_level", headerKey: "resource.selfHostedWorkers.col.trustLevel", priority: "detail", minWidth: 230, mobileVisibility: "details" },
-    { key: "stale", headerKey: "resource.selfHostedWorkers.col.stale", priority: "secondary", minWidth: 90, mobileVisibility: "always", render: (row) => (row.stale ? "Yes" : "No") },
-    {
+    booleanColumn<AdminSelfHostedWorkerRecord>({ key: "stale", headerKey: "resource.selfHostedWorkers.col.stale", priority: "secondary", minWidth: 90, mobileVisibility: "always" }),
+    booleanColumn<AdminSelfHostedWorkerRecord>({
       key: "orchestration_enabled",
       headerKey: "resource.selfHostedWorkers.col.orchestration",
       priority: "secondary",
       minWidth: 130,
       mobileVisibility: "always",
-      render: (row) => (row.orchestration_enabled ? "Enabled" : "Disabled"),
-    },
+      trueKey: "common.enabled",
+      falseKey: "common.disabled",
+    }),
     { key: "telemetry_event_count", headerKey: "resource.selfHostedWorkers.col.telemetryEvents", priority: "detail", minWidth: 140, mobileVisibility: "details" },
   ],
   fields: [],

@@ -37,6 +37,13 @@ export const en = {
   "common.pending": "pending",
   "common.unableToLoad": "Unable to load: {message}",
 
+  // Localized boolean/state cell labels resolved by the resource framework's
+  // column render callbacks (`booleanColumn`, #385).
+  "common.yes": "Yes",
+  "common.no": "No",
+  "common.enabled": "Enabled",
+  "common.disabled": "Disabled",
+
   // Auth surfaces — login + register (#348).
   "auth.field.email": "Email",
   "auth.field.password": "Password",

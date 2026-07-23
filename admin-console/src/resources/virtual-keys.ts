@@ -1,5 +1,5 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 /**
  * Row shape derived from the OpenAPI contract (#314): if
@@ -15,8 +15,9 @@ export type AdminVirtualApiKey = AdminSchema<"AdminVirtualApiKey"> &
 // (src/pages/virtual-keys.tsx) renders. `title`/`description` stay inline
 // literals because that bespoke page reads them page-locally (not through the
 // framework); localizing them belongs to the bespoke-page slice — noted as
-// remaining. Resource IDs, field `name`s, the boolean Yes/No cell render, and
-// the example scopes placeholder (`admin.read,admin.write`) stay data-driven.
+// remaining. Resource IDs, field `name`s, and the example scopes placeholder
+// (`admin.read,admin.write`) stay data-driven; the boolean Yes/No cell now
+// localizes via `booleanColumn` (#385).
 export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   key: "virtual-keys",
   title: "API / virtual keys",
@@ -30,7 +31,7 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
     { key: "name", headerKey: "resource.virtualKeys.col.name", priority: "primary", minWidth: 190, mobileVisibility: "always" },
     { key: "key_prefix", headerKey: "resource.virtualKeys.col.prefix", priority: "secondary", minWidth: 150, mobileVisibility: "always", render: (row) => `${row.key_prefix}...${row.last4}` },
     { key: "workspace_id", headerKey: "resource.virtualKeys.col.workspace", priority: "detail", minWidth: 190, copyable: true, mobileVisibility: "details" },
-    { key: "enabled", headerKey: "resource.virtualKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    booleanColumn<AdminVirtualApiKey>({ key: "enabled", headerKey: "resource.virtualKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always" }),
     { key: "scopes", headerKey: "resource.virtualKeys.col.scopes", priority: "detail", minWidth: 220, mobileVisibility: "details", render: (row) => row.scopes.join(", ") },
   ],
   fields: [

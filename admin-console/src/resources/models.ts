@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminModel extends Record<string, unknown> {
   name: string;
@@ -14,8 +14,8 @@ export interface AdminModel extends Record<string, unknown> {
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
-// locale. Column `key`s and the boolean Yes/No cell render (deferred to #385)
-// stay data-driven; this is a read-only resource with no fields.
+// locale. Column `key`s stay data-driven; the boolean Yes/No cell now localizes
+// via `booleanColumn` (#385). This is a read-only resource with no fields.
 export const modelsConfig: ResourceConfig<AdminModel> = {
   key: "models",
   titleKey: "resource.models.title",
@@ -29,7 +29,7 @@ export const modelsConfig: ResourceConfig<AdminModel> = {
     { key: "provider_model", headerKey: "resource.models.col.providerModel" },
     { key: "routing_strategy", headerKey: "resource.models.col.routingStrategy" },
     { key: "context_window", headerKey: "resource.models.col.contextWindow" },
-    { key: "enabled", headerKey: "resource.models.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    booleanColumn<AdminModel>({ key: "enabled", headerKey: "resource.models.col.enabled" }),
   ],
   fields: [],
 };

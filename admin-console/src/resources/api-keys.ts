@@ -1,5 +1,5 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 /**
  * Native gateway API keys (#321) over `/admin/v1/api-keys` — distinct from the
@@ -17,9 +17,9 @@ export type AdminApiKey = AdminSchema<"AdminApiKey"> & Record<string, unknown>;
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
 // `placeholderKey`/`descriptionKey` resolve under the active locale. Resource
-// IDs, field `name`s, the boolean Yes/No cell render, and the example env-var
-// placeholder (`FERRO_API_KEY_ACME`, an issue-protected example value) stay
-// data-driven.
+// IDs, field `name`s, and the example env-var placeholder (`FERRO_API_KEY_ACME`,
+// an issue-protected example value) stay data-driven; the boolean Yes/No cell
+// now localizes via `booleanColumn` (#385).
 export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
   key: "api-keys-native",
   titleKey: "resource.apiKeys.title",
@@ -31,7 +31,7 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
   columns: [
     { key: "name", headerKey: "resource.apiKeys.col.name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
     { key: "key_source", headerKey: "resource.apiKeys.col.source", priority: "secondary", minWidth: 140, mobileVisibility: "always" },
-    { key: "enabled", headerKey: "resource.apiKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    booleanColumn<AdminApiKey>({ key: "enabled", headerKey: "resource.apiKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always" }),
     { key: "scopes", headerKey: "resource.apiKeys.col.scopes", priority: "detail", minWidth: 240, mobileVisibility: "details", render: (row) => (row.scopes ?? []).join(", ") || "-" },
   ],
   fields: [

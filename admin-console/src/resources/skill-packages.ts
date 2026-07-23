@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminSkillPackage extends Record<string, unknown> {
   id: string;
@@ -12,10 +12,11 @@ export interface AdminSkillPackage extends Record<string, unknown> {
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey` resolve
-// under the active locale. Resource IDs, field `name`s, the data-driven column
-// renders (boolean Yes/No — deferred to #385, and the capabilities count), and
-// the JSON/example placeholders (`0.1.0`, JSON shapes — protected code/config
-// values) stay data-driven.
+// under the active locale. The boolean Yes/No cell now localizes via
+// `booleanColumn` (#385). Resource IDs, field `name`s, the remaining
+// data-driven column render (capabilities count), and the JSON/example
+// placeholders (`0.1.0`, JSON shapes — protected code/config values) stay
+// data-driven.
 export const skillPackagesConfig: ResourceConfig<AdminSkillPackage> = {
   key: "skill-packages",
   titleKey: "resource.skillPackages.title",
@@ -25,7 +26,7 @@ export const skillPackagesConfig: ResourceConfig<AdminSkillPackage> = {
   columns: [
     { key: "name", headerKey: "resource.skillPackages.col.name" },
     { key: "version", headerKey: "resource.skillPackages.col.version" },
-    { key: "enabled", headerKey: "resource.skillPackages.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    booleanColumn<AdminSkillPackage>({ key: "enabled", headerKey: "resource.skillPackages.col.enabled" }),
     { key: "capabilities", headerKey: "resource.skillPackages.col.capabilities", render: (row) => String(row.capabilities?.length ?? 0) },
   ],
   fields: [

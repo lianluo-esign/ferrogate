@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminAgentUpstream extends Record<string, unknown> {
   id: string;
@@ -14,8 +14,8 @@ export interface AdminAgentUpstream extends Record<string, unknown> {
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey`/
 // `descriptionKey` resolve under the active locale. Resource IDs, field
-// `name`s, the boolean Yes/No cell render and the comma-joined capabilities
-// cell (data-driven `render` callbacks, deferred to #385) stay untouched. The
+// `name`s and the comma-joined capabilities cell stay data-driven; the boolean
+// Yes/No cell now localizes via `booleanColumn` (#385). The
 // capabilities/auth labels keep their inline code/config example values
 // (`invoke,read,stream,discover`, JSON shapes) inside the translated copy.
 export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
@@ -28,7 +28,7 @@ export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
     { key: "name", headerKey: "resource.agentUpstreams.col.name" },
     { key: "endpoint", headerKey: "resource.agentUpstreams.col.endpoint" },
     { key: "protocol", headerKey: "resource.agentUpstreams.col.protocol" },
-    { key: "enabled", headerKey: "resource.agentUpstreams.col.enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+    booleanColumn<AdminAgentUpstream>({ key: "enabled", headerKey: "resource.agentUpstreams.col.enabled" }),
     { key: "capabilities", headerKey: "resource.agentUpstreams.col.capabilities", render: (row) => row.capabilities.join(", ") },
   ],
   fields: [

@@ -133,17 +133,54 @@ export interface ColumnConfig<T> {
   header?: string;
   /** Typed catalog key for the column header, resolved per locale (#348). */
   headerKey?: TranslationKey;
-  render?: (row: T) => ReactNode;
+  /**
+   * Custom cell renderer. Receives the active `t` (#385) so cell-derived copy
+   * — boolean Yes/No, Enabled/Disabled, and any other display string built in
+   * the callback — localizes with the rest of the table instead of hard-coding
+   * English. Prefer the declarative {@link booleanColumn} helper for the common
+   * boolean case; reach for a raw callback only for bespoke derived text.
+   */
+  render?: (row: T, t: ResourceTranslator) => ReactNode;
   /** Information hierarchy used by the compact record view. */
   priority?: "primary" | "secondary" | "detail";
   /** Minimum desktop column width in pixels. */
   minWidth?: number;
-  /** Alternate value for the compact record view. */
-  compactRender?: (row: T) => ReactNode;
+  /** Alternate value for the compact record view; also receives the active `t` (#385). */
+  compactRender?: (row: T, t: ResourceTranslator) => ReactNode;
   /** Truncate the visible value and expose a named copy-full-value action. */
   copyable?: boolean;
   /** Explicit small-screen visibility; defaults from priority and column order. */
   mobileVisibility?: "always" | "details" | "hidden";
+}
+
+/**
+ * Build a column whose cell shows a localized label for a boolean field (#385).
+ *
+ * The framework resolves `trueKey`/`falseKey` under the active locale at render
+ * time (via the `t` now threaded into `render`), so the cell tracks the table's
+ * locale instead of the hard-coded English "Yes"/"No" the inline render
+ * callbacks emitted before this. `trueKey`/`falseKey` are `TranslationKey`-typed,
+ * so a mistyped key fails `tsc` rather than falling through at runtime.
+ *
+ * The boolean is read from `row[key]` by default; pass `value` for rows whose
+ * flag lives behind an accessor (e.g. an unwrapped nested record).
+ */
+export function booleanColumn<T extends Record<string, unknown>>(
+  config: Omit<ColumnConfig<T>, "render" | "compactRender"> & {
+    /** Reads the boolean from the row; defaults to `Boolean(row[key])`. */
+    value?: (row: T) => boolean | null | undefined;
+    /** Catalog key for the truthy cell; defaults to `common.yes`. */
+    trueKey?: TranslationKey;
+    /** Catalog key for the falsy cell; defaults to `common.no`. */
+    falseKey?: TranslationKey;
+  },
+): ColumnConfig<T> {
+  const { value, trueKey = "common.yes", falseKey = "common.no", ...column } = config;
+  const read = value ?? ((row: T) => Boolean(row[column.key]));
+  return {
+    ...column,
+    render: (row, t) => t(read(row) ? trueKey : falseKey),
+  };
 }
 
 export interface ResourceListRequest {

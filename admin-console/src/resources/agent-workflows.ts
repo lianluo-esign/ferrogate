@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 interface AgentWorkflowPolicy {
   id: string;
@@ -28,10 +28,12 @@ function workflowOf(row: AdminAgentWorkflowRow): AgentWorkflowPolicy | undefined
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey` resolve
-// under the active locale. Resource IDs, field `name`s, the data-driven column
-// `render` callbacks (workflow field unwrapping, boolean Yes/No — deferred to
-// #385), and the JSON/example placeholders (`1`, node/edge shapes — protected
-// code/config values) stay data-driven.
+// under the active locale. The boolean Yes/No cell now localizes via
+// `booleanColumn` reading the unwrapped workflow flag (#385). Resource IDs,
+// field `name`s, the remaining data-driven column `render` callbacks (workflow
+// field unwrapping, request-count formatting), and the JSON/example
+// placeholders (`1`, node/edge shapes — protected code/config values) stay
+// data-driven.
 export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
   key: "agent-workflows",
   titleKey: "resource.agentWorkflows.title",
@@ -44,11 +46,11 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
     { key: "name", headerKey: "resource.agentWorkflows.col.name", render: (row) => workflowOf(row)?.name ?? "" },
     { key: "id", headerKey: "resource.agentWorkflows.col.id", render: (row) => workflowOf(row)?.id ?? "" },
     { key: "version", headerKey: "resource.agentWorkflows.col.version", render: (row) => String(workflowOf(row)?.version ?? "") },
-    {
+    booleanColumn<AdminAgentWorkflowRow>({
       key: "enabled",
       headerKey: "resource.agentWorkflows.col.enabled",
-      render: (row) => (workflowOf(row)?.enabled ? "Yes" : "No"),
-    },
+      value: (row) => workflowOf(row)?.enabled,
+    }),
     {
       key: "requests",
       headerKey: "resource.agentWorkflows.col.requests",

@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminPlugin extends Record<string, unknown> {
   id: string;
@@ -15,7 +15,7 @@ export interface AdminPlugin extends Record<string, unknown> {
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348).
 // Resource ID, field `name`s, and option `value`s stay data-driven; the
-// boolean Yes/No cell render is a cross-cutting concern left for a later slice.
+// boolean Yes/No cell now localizes via `booleanColumn` (#385).
 export const pluginsConfig: ResourceConfig<AdminPlugin> = {
   key: "plugins",
   titleKey: "resource.plugins.title",
@@ -26,11 +26,7 @@ export const pluginsConfig: ResourceConfig<AdminPlugin> = {
     { key: "id", headerKey: "resource.plugins.col.id" },
     { key: "kind", headerKey: "resource.plugins.col.kind" },
     { key: "version", headerKey: "resource.plugins.col.version" },
-    {
-      key: "enabled",
-      headerKey: "resource.plugins.col.enabled",
-      render: (row) => (row.enabled ? "Yes" : "No"),
-    },
+    booleanColumn<AdminPlugin>({ key: "enabled", headerKey: "resource.plugins.col.enabled" }),
     { key: "health", headerKey: "resource.plugins.col.health" },
     { key: "last_error", headerKey: "resource.plugins.col.lastError" },
   ],

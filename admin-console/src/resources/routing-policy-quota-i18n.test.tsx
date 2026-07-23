@@ -102,8 +102,9 @@ describe("quota-policies columns localize per locale", () => {
     expect(
       screen.getByRole("columnheader", { name: en["resource.quotaPolicies.col.rpmLimit"] }),
     ).toBeInTheDocument();
-    // Boolean cell render stays data-driven (English Yes/No; later slice).
-    expect(screen.getByRole("cell", { name: "Yes" })).toBeInTheDocument();
+    // The boolean cell now localizes via `booleanColumn`; en resolves to "Yes"
+    // (dual-locale coverage lives in boolean-column-i18n.test.tsx) (#385).
+    expect(screen.getByRole("cell", { name: en["common.yes"] })).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese headers", () => {

@@ -1,4 +1,4 @@
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminQuotaPolicy extends Record<string, unknown> {
   id: string;
@@ -18,7 +18,8 @@ export interface AdminQuotaPolicy extends Record<string, unknown> {
 // `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
 // `descriptionKey`, and select-option `labelKey` resolve under the active
 // locale in the shared resource-CRUD framework. Resource IDs, field `name`s,
-// option `value`s, and the boolean Yes/No cell render stay data-driven.
+// and option `value`s stay data-driven; the boolean Yes/No cell now localizes
+// via `booleanColumn` (#385).
 export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
   key: "quota-policies",
   titleKey: "resource.quotaPolicies.title",
@@ -33,11 +34,7 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { key: "tpm_limit", headerKey: "resource.quotaPolicies.col.tpmLimit" },
     { key: "monthly_budget_usd", headerKey: "resource.quotaPolicies.col.monthlyBudget" },
     { key: "asset_storage_quota_bytes", headerKey: "resource.quotaPolicies.col.assetQuota" },
-    {
-      key: "enabled",
-      headerKey: "resource.quotaPolicies.col.enabled",
-      render: (row) => (row.enabled ? "Yes" : "No"),
-    },
+    booleanColumn<AdminQuotaPolicy>({ key: "enabled", headerKey: "resource.quotaPolicies.col.enabled" }),
   ],
   fields: [
     {

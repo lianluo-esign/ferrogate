@@ -27,6 +27,12 @@ export const zhCN: Messages = {
   "common.pending": "待处理",
   "common.unableToLoad": "加载失败：{message}",
 
+  // 资源框架列渲染回调（`booleanColumn`，#385）解析的布尔/状态单元格标签。
+  "common.yes": "是",
+  "common.no": "否",
+  "common.enabled": "已启用",
+  "common.disabled": "已禁用",
+
   "auth.field.email": "邮箱",
   "auth.field.password": "密码",
   "auth.login.subtitle": "登录以管理你的工作空间",

@@ -19,7 +19,11 @@ import {
 } from "@/components/ui/table";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useI18n } from "@/i18n";
-import { resolveConfigText, type ColumnConfig } from "@/lib/resource-config";
+import {
+  resolveConfigText,
+  type ColumnConfig,
+  type ResourceTranslator,
+} from "@/lib/resource-config";
 
 interface ResourceTableProps<T extends Record<string, unknown>> {
   columns: ColumnConfig<T>[];
@@ -44,12 +48,15 @@ function columnValue<T>(
   row: T,
   compact: boolean,
   header: string,
+  t: ResourceTranslator,
 ): ReactNode {
   if (column.copyable) {
     return <TruncatedCopyable value={rawColumnValue(column, row)} label={header} />;
   }
   const renderer = compact ? column.compactRender ?? column.render : column.render;
-  return renderer ? renderer(row) : rawColumnValue(column, row);
+  // Render callbacks receive the active translator so cell-derived copy
+  // (boolean Yes/No, Enabled/Disabled, …) localizes with the table (#385).
+  return renderer ? renderer(row, t) : rawColumnValue(column, row);
 }
 
 function RowActions<T extends Record<string, unknown>>({
@@ -153,7 +160,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
                 {summaryColumns.map((column) => (
                   <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
                     <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
-                    <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column))}</dd>
+                    <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column), t)}</dd>
                   </div>
                 ))}
               </dl>
@@ -166,7 +173,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
                     {detailColumns.map((column) => (
                       <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
                         <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
-                        <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column))}</dd>
+                        <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column), t)}</dd>
                       </div>
                     ))}
                   </dl>
@@ -222,7 +229,7 @@ export function ResourceTable<T extends Record<string, unknown>>({
                 <TableRow key={`${label}-${rowIndex}`}>
                   {columns.map((column) => (
                     <TableCell key={column.key} className="min-w-0 overflow-hidden">
-                      {columnValue(column, row, false, headerFor(column))}
+                      {columnValue(column, row, false, headerFor(column), t)}
                     </TableCell>
                   ))}
                   {hasActions ? (

@@ -1,5 +1,5 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 /**
  * Access-control policy rules (#321) over `/admin/v1/policies`. Full CRUD:
@@ -16,7 +16,8 @@ export type PolicyRule = AdminSchema<"PolicyRule"> & Record<string, unknown>;
 // Rule `name`, field `name`s, and option `value`s stay data-driven; the two
 // example placeholders (`policy_denied`, `request denied by policy`) stay inline
 // literals because they are illustrative code/config values the issue protects
-// from translation. The boolean Yes/No cell render is left for a later slice.
+// from translation. The boolean Yes/No cell now localizes via `booleanColumn`
+// (#385).
 export const policiesConfig: ResourceConfig<PolicyRule> = {
   key: "policies",
   titleKey: "resource.policies.title",
@@ -27,11 +28,7 @@ export const policiesConfig: ResourceConfig<PolicyRule> = {
   columns: [
     { key: "name", headerKey: "resource.policies.col.name" },
     { key: "effect", headerKey: "resource.policies.col.effect" },
-    {
-      key: "enabled",
-      headerKey: "resource.policies.col.enabled",
-      render: (row) => (row.enabled ? "Yes" : "No"),
-    },
+    booleanColumn<PolicyRule>({ key: "enabled", headerKey: "resource.policies.col.enabled" }),
     { key: "code", headerKey: "resource.policies.col.code" },
   ],
   fields: [

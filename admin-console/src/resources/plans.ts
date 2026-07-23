@@ -1,5 +1,5 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
 
 /**
  * Row shape derived from the OpenAPI contract (#314): if
@@ -11,8 +11,8 @@ export type AdminPlan = AdminSchema<"AdminPlan"> & Record<string, unknown>;
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
 // `placeholderKey`/`descriptionKey` resolve under the active locale. Resource
-// IDs, field `name`s, and the boolean Yes/No cell renders (data-driven, deferred
-// per the framework follow-up) stay untouched.
+// IDs and field `name`s stay untouched; the boolean Yes/No cell renders now
+// localize via `booleanColumn` (#385).
 export const plansConfig: ResourceConfig<AdminPlan> = {
   key: "plans",
   titleKey: "resource.plans.title",
@@ -23,22 +23,13 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
   columns: [
     { key: "name", headerKey: "resource.plans.col.name" },
     { key: "slug", headerKey: "resource.plans.col.slug" },
-    { key: "mcp_enabled", headerKey: "resource.plans.col.mcp", render: (row) => (row.mcp_enabled ? "Yes" : "No") },
-    {
-      key: "extension_tools_enabled",
-      headerKey: "resource.plans.col.extensions",
-      render: (row) => (row.extension_tools_enabled ? "Yes" : "No"),
-    },
-    {
+    booleanColumn<AdminPlan>({ key: "mcp_enabled", headerKey: "resource.plans.col.mcp" }),
+    booleanColumn<AdminPlan>({ key: "extension_tools_enabled", headerKey: "resource.plans.col.extensions" }),
+    booleanColumn<AdminPlan>({
       key: "self_hosted_workers_enabled",
       headerKey: "resource.plans.col.selfHostedWorkers",
-      render: (row) => (row.self_hosted_workers_enabled ? "Yes" : "No"),
-    },
-    {
-      key: "asset_hosting_enabled",
-      headerKey: "resource.plans.col.assetHosting",
-      render: (row) => (row.asset_hosting_enabled ? "Yes" : "No"),
-    },
+    }),
+    booleanColumn<AdminPlan>({ key: "asset_hosting_enabled", headerKey: "resource.plans.col.assetHosting" }),
     { key: "default_monthly_budget_usd", headerKey: "resource.plans.col.defaultMonthlyBudget" },
   ],
   fields: [
