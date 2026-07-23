@@ -11,10 +11,14 @@ export interface AdminProject extends Record<string, unknown> {
   updated_at_unix: number;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey` resolve
+// under the active locale. Resource IDs, field `name`s, and the example status
+// placeholder (`active`) stay data-driven.
 export const projectsConfig: ResourceConfig<AdminProject> = {
   key: "projects",
-  title: "Projects",
-  description: "Projects group workspaces under a tenant.",
+  titleKey: "resource.projects.title",
+  descriptionKey: "resource.projects.description",
   basePath: "/admin/v1/projects",
   idField: "id",
   pagination: "offset",
@@ -22,15 +26,15 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
     adminGet(apiKey, "/admin/v1/projects", { query: request }),
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
-    { key: "slug", header: "Slug", priority: "secondary", minWidth: 180, mobileVisibility: "always" },
-    { key: "tenant_id", header: "Tenant", priority: "detail", minWidth: 220, copyable: true, mobileVisibility: "details" },
-    { key: "status", header: "Status", priority: "secondary", minWidth: 100, mobileVisibility: "always" },
+    { key: "name", headerKey: "resource.projects.col.name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
+    { key: "slug", headerKey: "resource.projects.col.slug", priority: "secondary", minWidth: 180, mobileVisibility: "always" },
+    { key: "tenant_id", headerKey: "resource.projects.col.tenant", priority: "detail", minWidth: 220, copyable: true, mobileVisibility: "details" },
+    { key: "status", headerKey: "resource.projects.col.status", priority: "secondary", minWidth: 100, mobileVisibility: "always" },
   ],
   fields: [
     {
       name: "tenant_id",
-      label: "Tenant",
+      labelKey: "resource.projects.field.tenant",
       type: "entity",
       required: true,
       reference: {
@@ -43,8 +47,8 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
       // with 400 to avoid stranding child rows), so it is hidden on edit.
       createOnly: true,
     },
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "slug", label: "Slug", type: "text", required: true },
-    { name: "status", label: "Status", type: "text", placeholder: "active" },
+    { name: "name", labelKey: "resource.projects.field.name", type: "text", required: true },
+    { name: "slug", labelKey: "resource.projects.field.slug", type: "text", required: true },
+    { name: "status", labelKey: "resource.projects.field.status", type: "text", placeholder: "active" },
   ],
 };

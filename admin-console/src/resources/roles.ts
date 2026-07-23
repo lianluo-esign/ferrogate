@@ -13,32 +13,34 @@ import type { ResourceConfig } from "@/lib/resource-config";
  */
 export type AdminRole = AdminSchema<"AdminRole"> & Record<string, unknown>;
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey` resolve
+// under the active locale. Resource IDs and field `name`s stay data-driven.
 export const rolesConfig: ResourceConfig<AdminRole> = {
   key: "roles",
-  title: "Roles",
-  description:
-    "Named permission bundles assigned to tenants via tenant-role bindings.",
+  titleKey: "resource.roles.title",
+  descriptionKey: "resource.roles.description",
   basePath: "/admin/v1/roles",
   idField: "id",
   noUpdate: true,
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/roles"),
   columns: [
-    { key: "name", header: "Name" },
-    { key: "slug", header: "Slug" },
-    { key: "description", header: "Description" },
+    { key: "name", headerKey: "resource.roles.col.name" },
+    { key: "slug", headerKey: "resource.roles.col.slug" },
+    { key: "description", headerKey: "resource.roles.col.description" },
     {
       key: "permission_keys",
-      header: "Permissions",
+      headerKey: "resource.roles.col.permissions",
       render: (row) => (row.permission_keys ?? []).join(", ") || "-",
     },
   ],
   fields: [
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "slug", label: "Slug", type: "text", required: true },
-    { name: "description", label: "Description", type: "textarea" },
+    { name: "name", labelKey: "resource.roles.field.name", type: "text", required: true },
+    { name: "slug", labelKey: "resource.roles.field.slug", type: "text", required: true },
+    { name: "description", labelKey: "resource.roles.field.description", type: "textarea" },
     {
       name: "permission_keys",
-      label: "Permissions",
+      labelKey: "resource.roles.field.permissions",
       type: "entities",
       reference: {
         target: "permissions",

@@ -12,10 +12,14 @@ import type { ResourceConfig } from "@/lib/resource-config";
 export type AdminPermission = AdminSchema<"AdminPermission"> &
   Record<string, unknown>;
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey` resolve
+// under the active locale. Resource IDs, field `name`s, and the example key
+// placeholder (`admin.read`, an issue-protected example value) stay data-driven.
 export const permissionsConfig: ResourceConfig<AdminPermission> = {
   key: "permissions",
-  title: "Permissions",
-  description: "Atomic capability keys referenced by roles.",
+  titleKey: "resource.permissions.title",
+  descriptionKey: "resource.permissions.description",
   basePath: "/admin/v1/permissions",
   idField: "id",
   noUpdate: true,
@@ -23,19 +27,19 @@ export const permissionsConfig: ResourceConfig<AdminPermission> = {
   fetchList: (apiKey, request) =>
     adminGet(apiKey, "/admin/v1/permissions", { query: request }),
   columns: [
-    { key: "key", header: "Key" },
-    { key: "name", header: "Name" },
-    { key: "description", header: "Description" },
+    { key: "key", headerKey: "resource.permissions.col.key" },
+    { key: "name", headerKey: "resource.permissions.col.name" },
+    { key: "description", headerKey: "resource.permissions.col.description" },
   ],
   fields: [
     {
       name: "key",
-      label: "Key",
+      labelKey: "resource.permissions.field.key",
       type: "text",
       required: true,
       placeholder: "admin.read",
     },
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "description", label: "Description", type: "textarea" },
+    { name: "name", labelKey: "resource.permissions.field.name", type: "text", required: true },
+    { name: "description", labelKey: "resource.permissions.field.description", type: "textarea" },
   ],
 };

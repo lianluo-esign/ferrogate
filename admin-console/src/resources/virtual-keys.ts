@@ -9,6 +9,14 @@ import type { ResourceConfig } from "@/lib/resource-config";
 export type AdminVirtualApiKey = AdminSchema<"AdminVirtualApiKey"> &
   Record<string, unknown>;
 
+// Per-resource operator copy partially migrated onto the typed i18n catalog
+// (#348): column `headerKey` and field `labelKey`/`placeholderKey` resolve under
+// the active locale via the shared ResourceTable/ResourceForm the bespoke page
+// (src/pages/virtual-keys.tsx) renders. `title`/`description` stay inline
+// literals because that bespoke page reads them page-locally (not through the
+// framework); localizing them belongs to the bespoke-page slice — noted as
+// remaining. Resource IDs, field `name`s, the boolean Yes/No cell render, and
+// the example scopes placeholder (`admin.read,admin.write`) stay data-driven.
 export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   key: "virtual-keys",
   title: "API / virtual keys",
@@ -19,21 +27,21 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   secretResponseKey: "secret",
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name", priority: "primary", minWidth: 190, mobileVisibility: "always" },
-    { key: "key_prefix", header: "Prefix", priority: "secondary", minWidth: 150, mobileVisibility: "always", render: (row) => `${row.key_prefix}...${row.last4}` },
-    { key: "workspace_id", header: "Workspace", priority: "detail", minWidth: 190, copyable: true, mobileVisibility: "details" },
-    { key: "enabled", header: "Enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "scopes", header: "Scopes", priority: "detail", minWidth: 220, mobileVisibility: "details", render: (row) => row.scopes.join(", ") },
+    { key: "name", headerKey: "resource.virtualKeys.col.name", priority: "primary", minWidth: 190, mobileVisibility: "always" },
+    { key: "key_prefix", headerKey: "resource.virtualKeys.col.prefix", priority: "secondary", minWidth: 150, mobileVisibility: "always", render: (row) => `${row.key_prefix}...${row.last4}` },
+    { key: "workspace_id", headerKey: "resource.virtualKeys.col.workspace", priority: "detail", minWidth: 190, copyable: true, mobileVisibility: "details" },
+    { key: "enabled", headerKey: "resource.virtualKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "scopes", headerKey: "resource.virtualKeys.col.scopes", priority: "detail", minWidth: 220, mobileVisibility: "details", render: (row) => row.scopes.join(", ") },
   ],
   fields: [
-    { name: "name", label: "Name", type: "text", required: true, createOnly: true },
+    { name: "name", labelKey: "resource.virtualKeys.field.name", type: "text", required: true, createOnly: true },
     {
       // #340: workspace_id was a raw text field. A virtual key is issued against
       // a workspace row, so it now uses the shared single-entity picker.
       // Immutable after create (the key's workspace scope is fixed at issue
       // time), so it stays `createOnly`. Submitted value is the workspace `id`.
       name: "workspace_id",
-      label: "Workspace",
+      labelKey: "resource.virtualKeys.field.workspace",
       type: "entity",
       required: true,
       createOnly: true,
@@ -49,14 +57,14 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
       // (admin.read, admin.write, …), not entity rows backed by a list/get API,
       // so they stay free text per the #337 escape-hatch guidance (#340).
       name: "scopes",
-      label: "Scopes (comma-separated)",
+      labelKey: "resource.virtualKeys.field.scopes",
       type: "csv",
       placeholder: "admin.read,admin.write",
     },
     {
       // #340: allowed_models targets the model catalog by canonical `name`.
       name: "allowed_models",
-      label: "Allowed models",
+      labelKey: "resource.virtualKeys.field.allowedModels",
       type: "entities",
       reference: {
         target: "models",
@@ -68,7 +76,7 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
     {
       // #340: allowed_providers targets the provider catalog by canonical `name`.
       name: "allowed_providers",
-      label: "Allowed providers",
+      labelKey: "resource.virtualKeys.field.allowedProviders",
       type: "entities",
       reference: {
         target: "providers",
@@ -77,7 +85,7 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
         secondaryLabelKeys: ["kind", "base_url"],
       },
     },
-    { name: "monthly_token_budget", label: "Monthly token budget", type: "number" },
-    { name: "request_limit_per_minute", label: "Requests per minute", type: "number" },
+    { name: "monthly_token_budget", labelKey: "resource.virtualKeys.field.monthlyTokenBudget", type: "number" },
+    { name: "request_limit_per_minute", labelKey: "resource.virtualKeys.field.requestLimitPerMinute", type: "number" },
   ],
 };

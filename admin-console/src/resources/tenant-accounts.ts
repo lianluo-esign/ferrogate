@@ -9,10 +9,15 @@ import type { ResourceConfig } from "@/lib/resource-config";
 export type AdminTenantAccount = AdminSchema<"AdminTenantAccount"> &
   Record<string, unknown>;
 
+// Per-resource operator copy is migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, and field `labelKey`/
+// `descriptionKey` resolve under the active locale in the shared resource-CRUD
+// framework. Resource IDs, field `name`s, and the example status placeholder
+// (`active`, an issue-protected example value) stay data-driven.
 export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
   key: "tenant-accounts",
-  title: "Tenant accounts",
-  description: "Top-level organizations in the control plane.",
+  titleKey: "resource.tenantAccounts.title",
+  descriptionKey: "resource.tenantAccounts.description",
   basePath: "/admin/v1/tenant-accounts",
   idField: "id",
   pagination: "offset",
@@ -26,25 +31,25 @@ export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
   // generic edit form (which always sends PUT) can reassign plan_id.
   noDelete: true,
   columns: [
-    { key: "name", header: "Name" },
-    { key: "slug", header: "Slug" },
-    { key: "status", header: "Status" },
-    { key: "plan_id", header: "Plan" },
-    { key: "id", header: "ID" },
+    { key: "name", headerKey: "resource.tenantAccounts.col.name" },
+    { key: "slug", headerKey: "resource.tenantAccounts.col.slug" },
+    { key: "status", headerKey: "resource.tenantAccounts.col.status" },
+    { key: "plan_id", headerKey: "resource.tenantAccounts.col.plan" },
+    { key: "id", headerKey: "resource.tenantAccounts.col.id" },
   ],
   fields: [
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "slug", label: "Slug", type: "text", required: true },
-    { name: "status", label: "Status", type: "text", placeholder: "active" },
+    { name: "name", labelKey: "resource.tenantAccounts.field.name", type: "text", required: true },
+    { name: "slug", labelKey: "resource.tenantAccounts.field.slug", type: "text", required: true },
+    { name: "status", labelKey: "resource.tenantAccounts.field.status", type: "text", placeholder: "active" },
     {
       // #340: plan_id was a raw text field asking operators to paste a plan
       // id/slug. It is a first-class entity (the Plans catalog), so it now uses
       // the shared single-entity picker. The submitted value is unchanged: the
       // plan's canonical `id`.
       name: "plan_id",
-      label: "Plan",
+      labelKey: "resource.tenantAccounts.field.plan",
       type: "entity",
-      description: "The subscription plan this tenant inherits quota/features from.",
+      descriptionKey: "resource.tenantAccounts.field.plan.desc",
       reference: {
         target: "plans",
         valueKey: "id",

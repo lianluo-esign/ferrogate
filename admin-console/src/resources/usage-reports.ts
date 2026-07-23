@@ -12,21 +12,25 @@ export interface AdminUsageReportRow extends Record<string, unknown> {
   error_count: number;
 }
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey` and column `headerKey` resolve under the active
+// locale. Column `key`s and the data-driven cell renders stay untouched; this is
+// a read-only resource with no fields.
 export const usageReportsConfig: ResourceConfig<AdminUsageReportRow> = {
   key: "usage-reports",
-  title: "Usage reports",
-  description: "Monthly token usage and cost rollups, grouped by scope or period.",
+  titleKey: "resource.usageReports.title",
+  descriptionKey: "resource.usageReports.description",
   basePath: "/admin/v1/usage-reports",
   idField: "scope_id",
   readOnly: true,
   columns: [
-    { key: "period_month", header: "Month", render: (row) => row.period_month ?? "" },
-    { key: "scope_type", header: "Scope", render: (row) => row.scope_type ?? "" },
-    { key: "scope_id", header: "Scope ID", render: (row) => row.scope_id ?? "" },
-    { key: "total_tokens", header: "Total tokens" },
-    { key: "cost_usd", header: "Cost (USD)" },
-    { key: "request_count", header: "Requests" },
-    { key: "error_count", header: "Errors" },
+    { key: "period_month", headerKey: "resource.usageReports.col.month", render: (row) => row.period_month ?? "" },
+    { key: "scope_type", headerKey: "resource.usageReports.col.scope", render: (row) => row.scope_type ?? "" },
+    { key: "scope_id", headerKey: "resource.usageReports.col.scopeId", render: (row) => row.scope_id ?? "" },
+    { key: "total_tokens", headerKey: "resource.usageReports.col.totalTokens" },
+    { key: "cost_usd", headerKey: "resource.usageReports.col.cost" },
+    { key: "request_count", headerKey: "resource.usageReports.col.requests" },
+    { key: "error_count", headerKey: "resource.usageReports.col.errors" },
   ],
   fields: [],
 };

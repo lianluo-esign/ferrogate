@@ -8,66 +8,70 @@ import type { ResourceConfig } from "@/lib/resource-config";
  */
 export type AdminPlan = AdminSchema<"AdminPlan"> & Record<string, unknown>;
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
+// `placeholderKey`/`descriptionKey` resolve under the active locale. Resource
+// IDs, field `name`s, and the boolean Yes/No cell renders (data-driven, deferred
+// per the framework follow-up) stay untouched.
 export const plansConfig: ResourceConfig<AdminPlan> = {
   key: "plans",
-  title: "Plans",
-  description:
-    "Sellable subscription tiers: the feature flags and default quota/budget a tenant inherits via tenant-accounts.plan_id.",
+  titleKey: "resource.plans.title",
+  descriptionKey: "resource.plans.description",
   basePath: "/admin/v1/plans",
   idField: "id",
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/plans"),
   columns: [
-    { key: "name", header: "Name" },
-    { key: "slug", header: "Slug" },
-    { key: "mcp_enabled", header: "MCP", render: (row) => (row.mcp_enabled ? "Yes" : "No") },
+    { key: "name", headerKey: "resource.plans.col.name" },
+    { key: "slug", headerKey: "resource.plans.col.slug" },
+    { key: "mcp_enabled", headerKey: "resource.plans.col.mcp", render: (row) => (row.mcp_enabled ? "Yes" : "No") },
     {
       key: "extension_tools_enabled",
-      header: "Extensions",
+      headerKey: "resource.plans.col.extensions",
       render: (row) => (row.extension_tools_enabled ? "Yes" : "No"),
     },
     {
       key: "self_hosted_workers_enabled",
-      header: "Self-hosted workers",
+      headerKey: "resource.plans.col.selfHostedWorkers",
       render: (row) => (row.self_hosted_workers_enabled ? "Yes" : "No"),
     },
     {
       key: "asset_hosting_enabled",
-      header: "Asset hosting",
+      headerKey: "resource.plans.col.assetHosting",
       render: (row) => (row.asset_hosting_enabled ? "Yes" : "No"),
     },
-    { key: "default_monthly_budget_usd", header: "Default monthly budget (USD)" },
+    { key: "default_monthly_budget_usd", headerKey: "resource.plans.col.defaultMonthlyBudget" },
   ],
   fields: [
     {
       name: "id",
-      label: "ID",
+      labelKey: "resource.plans.field.id",
       type: "text",
       createOnly: true,
-      placeholder: "defaults to slug when left blank",
-      description: "Referenced by tenant-accounts.plan_id. Immutable after creation.",
+      placeholderKey: "resource.plans.field.id.placeholder",
+      descriptionKey: "resource.plans.field.id.desc",
     },
-    { name: "name", label: "Name", type: "text", required: true },
-    { name: "slug", label: "Slug", type: "text", required: true },
-    { name: "mcp_enabled", label: "MCP tool execution enabled", type: "boolean" },
-    { name: "extension_tools_enabled", label: "Extension tool execution enabled", type: "boolean" },
+    { name: "name", labelKey: "resource.plans.field.name", type: "text", required: true },
+    { name: "slug", labelKey: "resource.plans.field.slug", type: "text", required: true },
+    { name: "mcp_enabled", labelKey: "resource.plans.field.mcpEnabled", type: "boolean" },
+    { name: "extension_tools_enabled", labelKey: "resource.plans.field.extensionToolsEnabled", type: "boolean" },
     {
       name: "self_hosted_workers_enabled",
-      label: "Self-hosted workers enabled",
+      labelKey: "resource.plans.field.selfHostedWorkersEnabled",
       type: "boolean",
     },
-    { name: "asset_hosting_enabled", label: "Asset hosting enabled", type: "boolean" },
-    { name: "admin_console_seats", label: "Admin console seats", type: "number" },
+    { name: "asset_hosting_enabled", labelKey: "resource.plans.field.assetHostingEnabled", type: "boolean" },
+    { name: "admin_console_seats", labelKey: "resource.plans.field.adminConsoleSeats", type: "number" },
     {
       name: "default_model_allowlist",
-      label: "Default model allowlist (comma-separated)",
+      labelKey: "resource.plans.field.defaultModelAllowlist",
       type: "csv",
     },
-    { name: "default_rpm_limit", label: "Default RPM limit", type: "number" },
-    { name: "default_tpm_limit", label: "Default TPM limit", type: "number" },
-    { name: "default_monthly_budget_usd", label: "Default monthly budget (USD)", type: "number" },
+    { name: "default_rpm_limit", labelKey: "resource.plans.field.defaultRpmLimit", type: "number" },
+    { name: "default_tpm_limit", labelKey: "resource.plans.field.defaultTpmLimit", type: "number" },
+    { name: "default_monthly_budget_usd", labelKey: "resource.plans.field.defaultMonthlyBudget", type: "number" },
     {
       name: "default_asset_storage_quota_bytes",
-      label: "Default asset storage quota (bytes)",
+      labelKey: "resource.plans.field.defaultAssetStorageQuota",
       type: "number",
     },
   ],

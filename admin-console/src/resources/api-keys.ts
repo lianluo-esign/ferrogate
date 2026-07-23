@@ -14,58 +14,63 @@ import type { ResourceConfig } from "@/lib/resource-config";
  */
 export type AdminApiKey = AdminSchema<"AdminApiKey"> & Record<string, unknown>;
 
+// Per-resource operator copy migrated onto the typed i18n catalog (#348):
+// `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey`/
+// `placeholderKey`/`descriptionKey` resolve under the active locale. Resource
+// IDs, field `name`s, the boolean Yes/No cell render, and the example env-var
+// placeholder (`FERRO_API_KEY_ACME`, an issue-protected example value) stay
+// data-driven.
 export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
   key: "api-keys-native",
-  title: "API keys",
-  description:
-    "Native gateway API keys the caller presents directly (distinct from virtual keys).",
+  titleKey: "resource.apiKeys.title",
+  descriptionKey: "resource.apiKeys.description",
   basePath: "/admin/v1/api-keys",
   idField: "id",
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/api-keys"),
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", header: "Name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
-    { key: "key_source", header: "Source", priority: "secondary", minWidth: 140, mobileVisibility: "always" },
-    { key: "enabled", header: "Enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
-    { key: "scopes", header: "Scopes", priority: "detail", minWidth: 240, mobileVisibility: "details", render: (row) => (row.scopes ?? []).join(", ") || "-" },
+    { key: "name", headerKey: "resource.apiKeys.col.name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
+    { key: "key_source", headerKey: "resource.apiKeys.col.source", priority: "secondary", minWidth: 140, mobileVisibility: "always" },
+    { key: "enabled", headerKey: "resource.apiKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (row) => (row.enabled ? "Yes" : "No") },
+    { key: "scopes", headerKey: "resource.apiKeys.col.scopes", priority: "detail", minWidth: 240, mobileVisibility: "details", render: (row) => (row.scopes ?? []).join(", ") || "-" },
   ],
   fields: [
     {
       name: "id",
-      label: "ID",
+      labelKey: "resource.apiKeys.field.id",
       type: "text",
       createOnly: true,
-      placeholder: "auto-generated when blank",
+      placeholderKey: "resource.apiKeys.field.id.placeholder",
     },
-    { name: "name", label: "Name", type: "text", required: true },
+    { name: "name", labelKey: "resource.apiKeys.field.name", type: "text", required: true },
     {
       name: "key_env",
-      label: "Key environment variable",
+      labelKey: "resource.apiKeys.field.keyEnv",
       type: "text",
       createOnly: true,
       placeholder: "FERRO_API_KEY_ACME",
-      description: "Reference an env var holding the secret (preferred over inline key).",
+      descriptionKey: "resource.apiKeys.field.keyEnv.desc",
     },
     {
       name: "key",
-      label: "Key (plaintext)",
+      labelKey: "resource.apiKeys.field.key",
       type: "text",
       createOnly: true,
-      description: "Inline secret; stored hashed. Set once at creation.",
+      descriptionKey: "resource.apiKeys.field.key.desc",
     },
-    { name: "enabled", label: "Enabled", type: "boolean" },
+    { name: "enabled", labelKey: "resource.apiKeys.field.enabled", type: "boolean" },
     {
       // Scopes are an enumerated set of Admin API permission strings, not entity
       // rows with a list/get API, so they stay free text (#337 escape hatch, #340).
       name: "scopes",
-      label: "Scopes (comma-separated)",
+      labelKey: "resource.apiKeys.field.scopes",
       type: "csv",
     },
     {
       // #340: allow/deny model + provider lists target the model/provider
       // catalogs by canonical `name` (same shape as policies.ts from #341).
       name: "allowed_models",
-      label: "Allowed models",
+      labelKey: "resource.apiKeys.field.allowedModels",
       type: "entities",
       reference: {
         target: "models",
@@ -76,7 +81,7 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     },
     {
       name: "denied_models",
-      label: "Denied models",
+      labelKey: "resource.apiKeys.field.deniedModels",
       type: "entities",
       reference: {
         target: "models",
@@ -87,7 +92,7 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     },
     {
       name: "allowed_providers",
-      label: "Allowed providers",
+      labelKey: "resource.apiKeys.field.allowedProviders",
       type: "entities",
       reference: {
         target: "providers",
@@ -98,7 +103,7 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     },
     {
       name: "denied_providers",
-      label: "Denied providers",
+      labelKey: "resource.apiKeys.field.deniedProviders",
       type: "entities",
       reference: {
         target: "providers",
@@ -113,13 +118,13 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     // exposes no organizations/users list endpoint, so they stay free text
     // rather than being force-mapped to an entity source (mirrors the
     // policies.ts organization_ids decision from #341; #340).
-    { name: "organization_id", label: "Organization ID", type: "text" },
+    { name: "organization_id", labelKey: "resource.apiKeys.field.organizationId", type: "text" },
     {
       // #340: project_id / workspace_id are first-class rows the key is scoped
       // to, so they now use the shared single-entity pickers. Submitted values
       // are unchanged (the canonical `id`).
       name: "project_id",
-      label: "Project",
+      labelKey: "resource.apiKeys.field.project",
       type: "entity",
       reference: {
         target: "projects",
@@ -130,7 +135,7 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     },
     {
       name: "workspace_id",
-      label: "Workspace",
+      labelKey: "resource.apiKeys.field.workspace",
       type: "entity",
       reference: {
         target: "workspaces",
@@ -139,11 +144,11 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         secondaryLabelKeys: ["slug", "project_id"],
       },
     },
-    { name: "user_id", label: "User ID", type: "text" },
-    { name: "monthly_token_budget", label: "Monthly token budget", type: "number" },
-    { name: "request_limit_per_minute", label: "Requests per minute", type: "number" },
-    { name: "expires_at_unix", label: "Expires at (unix seconds)", type: "number" },
-    { name: "log_bodies", label: "Log request/response bodies", type: "boolean" },
-    { name: "cache_enabled", label: "Cache enabled", type: "boolean" },
+    { name: "user_id", labelKey: "resource.apiKeys.field.userId", type: "text" },
+    { name: "monthly_token_budget", labelKey: "resource.apiKeys.field.monthlyTokenBudget", type: "number" },
+    { name: "request_limit_per_minute", labelKey: "resource.apiKeys.field.requestLimitPerMinute", type: "number" },
+    { name: "expires_at_unix", labelKey: "resource.apiKeys.field.expiresAt", type: "number" },
+    { name: "log_bodies", labelKey: "resource.apiKeys.field.logBodies", type: "boolean" },
+    { name: "cache_enabled", labelKey: "resource.apiKeys.field.cacheEnabled", type: "boolean" },
   ],
 };
