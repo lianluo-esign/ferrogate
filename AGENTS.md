@@ -277,6 +277,16 @@ Do not treat broad epics as single-turn promises. Close only the slice that is
 actually implemented and keep the parent issue open with a progress comment
 until all acceptance criteria are satisfied.
 
+When the workflow is run as an **autonomous, parallel multi-agent loop** (fan
+work out across worktree-isolated subagents and keep iterating), follow the
+binding constraints in `docs/autonomous-dev-loop.md`: advance Project-board
+sub-issues only up to **In review & Test** (never to Done — a separate test
+agent owns that lane); read the Projects GraphQL API (`gh project ...`) only at
+key nodes and cache the board dump to protect the limited Projects quota; cap
+code-developing subagents at **3 in parallel**; pick maximally file-separated
+slices; integrate by cherry-pick + re-verify-combined + push + status-move; and
+**delete each worktree the moment its slice is integrated** to bound disk use.
+
 ## AI Gateway Standards
 
 For AI gateway changes, verify these surfaces deliberately:
