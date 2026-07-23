@@ -380,6 +380,25 @@ pub(crate) struct X402ReconcilerConfig {
     /// deadline (its money may still confirm). Default 900s (15 min).
     #[serde(default = "default_x402_reconciler_confirmation_deadline_secs")]
     pub(crate) confirmation_deadline_secs: i64,
+    /// Operator-declared TTL (seconds) of the wallet hold a paid-egress attempt
+    /// reserves at settlement-open time (`X402SettlementLoop::open` sets the
+    /// hold's `expires_at = opened_at + hold_ttl_secs`). This exists here so the
+    /// money-safety invariant below can be enforced at config load (issue #400):
+    /// the wallet primitive REFUSES to capture (settle) a hold past its TTL and
+    /// auto-releases it, so if the hold expires before the reconciler can capture
+    /// a payment that IS confirmed on-chain, the stablecoin is delivered but the
+    /// wallet is never charged -- a silent money loss. `validate()` therefore
+    /// rejects (when `enabled = true`) any config where `hold_ttl_secs` does not
+    /// strictly outlive the window `confirmation_deadline_secs` plus
+    /// `reconcile_check_delay_secs` plus one reconciler tick of slack. Default
+    /// 3600s (1h), which comfortably outlives the default 900+60+30 = 990s window.
+    ///
+    /// NOTE: the settlement open path currently receives the hold TTL as a
+    /// call-site runtime parameter (`X402NegotiationContext.hold_ttl_secs`); the
+    /// egress-path wiring that sources it FROM this field is remaining work,
+    /// tracked alongside the deferred capture-past-TTL wallet change on #400.
+    #[serde(default = "default_x402_reconciler_hold_ttl_secs")]
+    pub(crate) hold_ttl_secs: i64,
 }
 
 fn default_x402_reconciler_tick_interval_secs() -> u64 {
@@ -398,6 +417,10 @@ fn default_x402_reconciler_confirmation_deadline_secs() -> i64 {
     900
 }
 
+fn default_x402_reconciler_hold_ttl_secs() -> i64 {
+    3600
+}
+
 impl Default for X402ReconcilerConfig {
     fn default() -> Self {
         Self {
@@ -406,6 +429,7 @@ impl Default for X402ReconcilerConfig {
             max_reconciles_per_tick: default_x402_reconciler_max_reconciles_per_tick(),
             reconcile_check_delay_secs: default_x402_reconciler_check_delay_secs(),
             confirmation_deadline_secs: default_x402_reconciler_confirmation_deadline_secs(),
+            hold_ttl_secs: default_x402_reconciler_hold_ttl_secs(),
         }
     }
 }

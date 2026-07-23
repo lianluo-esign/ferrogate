@@ -172,6 +172,10 @@ fn reconciler_config(
         max_reconciles_per_tick,
         reconcile_check_delay_secs,
         confirmation_deadline_secs,
+        // The wallet hold TTL must outlive the confirmation window (#400); this
+        // fixture mirrors that operational contract with a hold that far exceeds
+        // any deadline the reconcile tests exercise.
+        hold_ttl_secs: HOLD_TTL_SECS,
     }
 }
 

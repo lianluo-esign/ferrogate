@@ -3823,3 +3823,143 @@ cors_allowed_origin = "https://admin.example.test"
     assert_eq!(defaults.admin_api.gateway_url, "http://127.0.0.1:8080");
     defaults.validate().expect("defaults must validate");
 }
+
+// --------------------------------------------------------------------------
+// #400: x402 wallet hold TTL must outlive the settlement confirmation window.
+// The wallet primitive refuses to capture a hold past its TTL and auto-releases
+// it, so a confirmed-on-chain payment whose hold already expired can no longer
+// charge the wallet -- money delivered, not captured. `validate()` rejects such
+// a money-losing config at load time (only when the reconciler is enabled).
+// --------------------------------------------------------------------------
+
+#[test]
+fn rejects_x402_hold_ttl_not_outliving_confirmation_window() {
+    // window = confirmation_deadline(900) + check_delay(60) + tick(30) = 990.
+    // hold_ttl 990 is not STRICTLY greater than the window, so it must fail.
+    let config = Config {
+        x402_reconciler: X402ReconcilerConfig {
+            enabled: true,
+            tick_interval_secs: 30,
+            max_reconciles_per_tick: 100,
+            reconcile_check_delay_secs: 60,
+            confirmation_deadline_secs: 900,
+            hold_ttl_secs: 990,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field x402_reconciler.hold_ttl_secs"),
+        "error should name the offending field: {error}"
+    );
+    // The structured error names both operands and the derived window.
+    assert!(
+        error.contains("990s"),
+        "error should name the window/hold: {error}"
+    );
+    assert!(
+        error.contains("900s"),
+        "error should name the deadline: {error}"
+    );
+    assert!(
+        error.contains("60s"),
+        "error should name the check delay: {error}"
+    );
+}
+
+#[test]
+fn rejects_x402_hold_ttl_shorter_than_confirmation_deadline_alone() {
+    // A blatantly money-losing case: the hold expires before the deadline even
+    // fires, let alone the reconcile slack.
+    let config = Config {
+        x402_reconciler: X402ReconcilerConfig {
+            enabled: true,
+            tick_interval_secs: 30,
+            max_reconciles_per_tick: 100,
+            reconcile_check_delay_secs: 60,
+            confirmation_deadline_secs: 900,
+            hold_ttl_secs: 300,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field x402_reconciler.hold_ttl_secs"),
+        "error should name the offending field: {error}"
+    );
+}
+
+#[test]
+fn accepts_x402_hold_ttl_comfortably_outliving_confirmation_window() {
+    // hold_ttl 3600 comfortably outlives 900 + 60 + 30 = 990.
+    let config = Config {
+        x402_reconciler: X402ReconcilerConfig {
+            enabled: true,
+            tick_interval_secs: 30,
+            max_reconciles_per_tick: 100,
+            reconcile_check_delay_secs: 60,
+            confirmation_deadline_secs: 900,
+            hold_ttl_secs: 3600,
+        },
+        ..Config::default()
+    };
+
+    config
+        .validate()
+        .expect("a hold TTL that outlives the confirmation window must validate");
+}
+
+#[test]
+fn accepts_x402_hold_ttl_one_second_above_the_window() {
+    // Boundary: window = 990, hold_ttl = 991 (strictly greater) must pass.
+    let config = Config {
+        x402_reconciler: X402ReconcilerConfig {
+            enabled: true,
+            tick_interval_secs: 30,
+            max_reconciles_per_tick: 100,
+            reconcile_check_delay_secs: 60,
+            confirmation_deadline_secs: 900,
+            hold_ttl_secs: 991,
+        },
+        ..Config::default()
+    };
+
+    config
+        .validate()
+        .expect("hold TTL one second above the window must validate");
+}
+
+#[test]
+fn ignores_x402_hold_ttl_invariant_when_reconciler_disabled() {
+    // Even a money-losing hold_ttl passes while the reconciler is disabled: it
+    // never captures a submitted attempt on this path, so there is nothing to
+    // lose. This guards against erroring on an all-off config.
+    let config = Config {
+        x402_reconciler: X402ReconcilerConfig {
+            enabled: false,
+            tick_interval_secs: 30,
+            max_reconciles_per_tick: 100,
+            reconcile_check_delay_secs: 60,
+            confirmation_deadline_secs: 900,
+            hold_ttl_secs: 1,
+        },
+        ..Config::default()
+    };
+
+    config
+        .validate()
+        .expect("a disabled reconciler must not trigger the hold-TTL invariant");
+}
+
+#[test]
+fn default_config_passes_x402_hold_ttl_invariant() {
+    // The default reconciler is disabled with hold_ttl 3600 vs a 990s window;
+    // the shipped default must always validate.
+    let config = Config::default();
+    assert!(!config.x402_reconciler.enabled);
+    config
+        .validate()
+        .expect("default config must validate the x402 hold-TTL invariant");
+}

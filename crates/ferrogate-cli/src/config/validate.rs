@@ -127,6 +127,61 @@ impl Config {
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
         self.validate_asset_bucket()?;
+        self.validate_x402_reconciler()?;
+        Ok(())
+    }
+
+    /// Money-safety invariant for the x402 settlement reconciler (issue #400).
+    ///
+    /// The wallet primitive REFUSES to capture (settle) a hold once it is past
+    /// its TTL and auto-releases it. The reconciler only resolves a `submitted`
+    /// attempt after it has queried the chain: an attempt is not even eligible
+    /// for a re-check until `reconcile_check_delay_secs` have elapsed, an absent
+    /// transfer is not declared FAIL until `confirmation_deadline_secs` after
+    /// submission, and the reconciler runs on a `tick_interval_secs` cadence so
+    /// it may take up to one more tick to actually notice a now-due attempt.
+    /// So the wallet hold MUST outlive
+    ///   `confirmation_deadline_secs + reconcile_check_delay_secs + one tick`
+    /// or a payment that IS confirmed on-chain can no longer charge the wallet
+    /// (the hold has already auto-released) -- the stablecoin is delivered but
+    /// never captured, a silent money loss. We fail such a config at load time
+    /// so an operator can never deploy a money-losing combination.
+    ///
+    /// Only enforced when `x402_reconciler.enabled = true`: a disabled reconciler
+    /// (the default) never captures a submitted attempt on this path, so the
+    /// default all-off config always passes.
+    fn validate_x402_reconciler(&self) -> AnyResult<()> {
+        let reconciler = &self.x402_reconciler;
+        if !reconciler.enabled {
+            return Ok(());
+        }
+
+        // Slack margin: one reconciler tick. After an attempt's confirmation
+        // deadline elapses the reconciler can take up to a full `tick_interval`
+        // before its next scan drives the capture, so the hold must survive that
+        // extra tick too.
+        let slack_secs = i64::try_from(reconciler.tick_interval_secs).unwrap_or(i64::MAX);
+        let confirmation_window = reconciler
+            .confirmation_deadline_secs
+            .saturating_add(reconciler.reconcile_check_delay_secs)
+            .saturating_add(slack_secs);
+
+        if reconciler.hold_ttl_secs <= confirmation_window {
+            bail!(
+                "field x402_reconciler.hold_ttl_secs: the wallet hold TTL ({hold}s) must strictly \
+                 outlive the settlement confirmation window (confirmation_deadline_secs {deadline}s \
+                 + reconcile_check_delay_secs {delay}s + one reconciler tick of slack \
+                 tick_interval_secs {slack}s = {window}s); otherwise a payment confirmed on-chain \
+                 can no longer capture the wallet hold (it has already auto-released past its TTL), \
+                 delivering the stablecoin without ever charging the wallet -- raise hold_ttl_secs \
+                 above {window}s or shrink the confirmation window",
+                hold = reconciler.hold_ttl_secs,
+                deadline = reconciler.confirmation_deadline_secs,
+                delay = reconciler.reconcile_check_delay_secs,
+                slack = slack_secs,
+                window = confirmation_window,
+            );
+        }
         Ok(())
     }
 
