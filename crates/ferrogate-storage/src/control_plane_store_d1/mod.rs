@@ -142,6 +142,18 @@
 //!   `list_guardrail_policy_revisions`, `get_guardrail_policy_binding`,
 //!   `list_guardrail_policy_bindings`. Account-global guardrail configuration
 //!   (like plans/RBAC), so the CONTROL database owns them.
+//! - Guardrail binding CAS transitions (#454, control database, proxy Worker):
+//!   `activate_guardrail_policy_revision`, `archive_guardrail_policy_revision`,
+//!   `restore_guardrail_policy_binding` -- the generation-guarded
+//!   compare-and-swaps on the single mutable `guardrail_policy_bindings` row.
+//!   Each routes through the proxy-Worker `/d1/query` binding as one guarded
+//!   `UPDATE`/`INSERT`/`DELETE ... RETURNING policy_id`; an empty `RETURNING`
+//!   set is the lost-update signal (the REST query API cannot express it) and
+//!   maps to the typed CAS `Conflict`. Account-global, so the proxy's control-DB
+//!   binding serves them with no per-tenant binding; they reuse the SAME pure
+//!   next-binding planners the Postgres backend uses, so the computed transition
+//!   is row-for-row identical across backends. Fail closed (typed
+//!   unimplemented-surface) when no proxy Worker is bound.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -165,17 +177,31 @@
 //! `tenants`), never fanned out over tenant databases — admin identities span
 //! tenants, and quota lookups carry no tenant context.
 //!
-//! Still erroring (typed `unimplemented-backend-surface`, awaiting the
-//! proxy-Worker path or a later slice):
+//! Still erroring (typed `unimplemented-backend-surface`, awaiting a later
+//! slice). The proxy-Worker `/d1/batch` + `/d1/query` binding (issue #450) has
+//! landed and now serves the control-DB atomic families
+//! (`append_billing_event_with_outbox_enqueue`, issue #150; the guardrail
+//! activate/archive/restore CAS, issue #454). What remains erroring is the
+//! atomic families that DON'T mirror cleanly onto the control-DB-only binding:
 //!
-//! - Atomic-transition families that need the transaction semantics the D1 HTTP
-//!   query API lacks (no multi-statement-with-params transaction, no
-//!   `... RETURNING`): wallets + wallet reservations, payment methods/attempts,
-//!   workflow run budgets, and the CAS members of families otherwise landed
-//!   here — `append_billing_event_with_outbox_enqueue` (metering write + outbox
-//!   enqueue must commit together, issue #150) and the generation-guarded
-//!   guardrail activate/archive/restore transitions. BLOCKED on the
-//!   proxy-Worker D1 binding.
+//! - Wallets + wallet reservations (reserve/settle/release/sweep/adjust,
+//!   `settle_wallet_balance`) and payment methods/attempts
+//!   (`transition_payment_attempt` CAS): these are per-tenant FINANCIAL state.
+//!   Their tables are not in the D1 schema yet, and — unlike the account-global
+//!   billing/guardrail families — a faithful database-per-tenant topology would
+//!   place a tenant's wallet in that tenant's D1 database, which the proxy
+//!   Worker does not bind (it binds only the CONTROL database). Wiring them
+//!   needs the per-tenant proxy binding (an enumerated #450 follow-up); the
+//!   reserve-no-oversell and the x402 `payment_attempts.hold_id` sweep guard
+//!   also couple the two families into one larger unit.
+//! - Workflow run budgets (`open`/`debit`/`topup`): the idempotent `open`
+//!   mirrors the billing insert-then-reload pattern cleanly, but `debit`/`topup`
+//!   are read-modify-writes the Postgres backend serializes with
+//!   `SELECT ... FOR UPDATE`. D1/SQLite has no row lock, so a faithful mirror
+//!   needs either an optimistic-CAS guard (which would surface a `Conflict` the
+//!   `WorkflowBudgetDebit` caller is not written to handle) or a server-side
+//!   retry loop — a concurrency-contract change deferred rather than landed
+//!   silently. Also needs a new control-DB table + the per-tenant routing call.
 //! - assets/channels/retention, deferred as a whole family: its coordination
 //!   ops (`create_asset_within_quota`, `move_asset_channel_if_resolvable`,
 //!   `set_asset_version_yank`, `delete_asset_variant_if_unreferenced`,
@@ -986,13 +1012,19 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         block_on_sync_bridge(self.config_documents_async())
     }
 
-    // --- Guardrail policy revisions + bindings (control DB, issue #449) ---
+    // --- Guardrail policy revisions + bindings (control DB, issue #449/#454) ---
     //
     // insert/get/list revisions and get/list bindings are IMPLEMENTED: each is
     // a single-statement document read/write bridged into the async helpers
     // like the config-document methods. The generation-guarded
-    // activate/archive/restore CAS transitions below stay UNIMPLEMENTED -- they
-    // need the compare-and-swap transaction the D1 HTTP query API lacks.
+    // activate/archive/restore CAS transitions below are IMPLEMENTED over the
+    // proxy-Worker `/d1/query` binding (issue #454): each is one guarded
+    // `UPDATE`/`INSERT`/`DELETE ... RETURNING policy_id` whose presence/absence
+    // of a `RETURNING` row is the success/conflict signal the REST query API
+    // cannot give. Guardrail configuration is account-global, so the proxy's
+    // control-DB binding serves them directly (no per-tenant binding needed).
+    // They fail closed with the typed unimplemented-surface error when no proxy
+    // Worker is bound. See `guardrail.rs` for the CAS helpers.
 
     fn insert_guardrail_policy_revision(
         &self,
@@ -1031,32 +1063,47 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     fn activate_guardrail_policy_revision(
         &self,
-        _policy_id: &str,
-        _revision: u32,
-        _updated_by: &str,
-        _updated_at_unix: u64,
-        _rollback_only: bool,
+        policy_id: &str,
+        revision: u32,
+        updated_by: &str,
+        updated_at_unix: u64,
+        rollback_only: bool,
     ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
-        Err(unimplemented_surface("activate_guardrail_policy_revision"))
+        block_on_sync_bridge(self.activate_guardrail_policy_revision_async(
+            policy_id,
+            revision,
+            updated_by,
+            updated_at_unix,
+            rollback_only,
+        ))
     }
 
     fn archive_guardrail_policy_revision(
         &self,
-        _policy_id: &str,
-        _revision: u32,
-        _updated_by: &str,
-        _updated_at_unix: u64,
+        policy_id: &str,
+        revision: u32,
+        updated_by: &str,
+        updated_at_unix: u64,
     ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
-        Err(unimplemented_surface("archive_guardrail_policy_revision"))
+        block_on_sync_bridge(self.archive_guardrail_policy_revision_async(
+            policy_id,
+            revision,
+            updated_by,
+            updated_at_unix,
+        ))
     }
 
     fn restore_guardrail_policy_binding(
         &self,
-        _policy_id: &str,
-        _expected_generation: Option<u64>,
-        _binding: Option<StoredGuardrailPolicyBinding>,
+        policy_id: &str,
+        expected_generation: Option<u64>,
+        binding: Option<StoredGuardrailPolicyBinding>,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("restore_guardrail_policy_binding"))
+        block_on_sync_bridge(self.restore_guardrail_policy_binding_async(
+            policy_id,
+            expected_generation,
+            binding,
+        ))
     }
 
     // --- Snapshot replay floors (IMPLEMENTED, control database, issue #447) ---

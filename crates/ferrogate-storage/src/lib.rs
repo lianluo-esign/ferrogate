@@ -581,7 +581,7 @@ const GUARDRAIL_POLICY_BINDING_UPDATE_CAS_SQL: &str = "UPDATE guardrail_policy_b
      WHERE policy_id = $1 AND generation = $7";
 const GUARDRAIL_POLICY_BINDING_DELETE_CAS_SQL: &str =
     "DELETE FROM guardrail_policy_bindings WHERE policy_id = $1 AND generation = $2";
-const GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE: &str =
+pub(crate) const GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE: &str =
     "guardrail policy binding changed concurrently";
 const PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY: &str =
     "SELECT source_attribute.attname, target_namespace.nspname = current_schema(), \
@@ -10300,13 +10300,13 @@ fn guardrail_binding_generation_i64(generation: u64) -> Result<i64, StorageError
     })
 }
 
-fn next_guardrail_binding_generation(generation: u64) -> Result<u64, StorageError> {
+pub(crate) fn next_guardrail_binding_generation(generation: u64) -> Result<u64, StorageError> {
     generation.checked_add(1).ok_or_else(|| {
         StorageError::Serialization("guardrail policy binding generation is exhausted".into())
     })
 }
 
-fn next_guardrail_activation_binding(
+pub(crate) fn next_guardrail_activation_binding(
     previous: Option<&StoredGuardrailPolicyBinding>,
     policy_id: &str,
     revision: u32,
@@ -10349,7 +10349,7 @@ fn next_guardrail_activation_binding(
     })
 }
 
-fn next_guardrail_archive_binding(
+pub(crate) fn next_guardrail_archive_binding(
     previous: Option<&StoredGuardrailPolicyBinding>,
     policy_id: &str,
     revision: u32,

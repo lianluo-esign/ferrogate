@@ -21,11 +21,12 @@ use ferrogate_core::TenantContext;
 
 use crate::control_plane_store::ControlPlaneStore;
 use crate::{
-    api_key_tenant_context, is_unimplemented_backend_surface, CloudflareD1StorageOptions,
-    D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
-    ReplayDeadLetterOutcome, RuntimeStorageRepositories, StorageError, StoredAdminUser,
-    StoredAdminUserRefreshToken, StoredAgentRun, StoredAgentRunEvent, StoredApiKey,
-    StoredAuditEvent, StoredBudgetAlertNotification, StoredGuardrailPolicyRevision,
+    api_key_tenant_context, is_guardrail_policy_binding_cas_conflict,
+    is_unimplemented_backend_surface, CloudflareD1StorageOptions, D1ControlPlaneStore,
+    D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind, ReplayDeadLetterOutcome,
+    RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
+    StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAuditEvent,
+    StoredBudgetAlertNotification, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
     StoredManagedWorkerTemplate, StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog,
     StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
     StoredTenantAccount, StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID,
@@ -173,6 +174,23 @@ fn proxy_batch_ok(statements: Vec<serde_json::Value>) -> HttpResponse {
             "errors": [],
             "messages": [],
             "result": statements
+        })
+        .to_string(),
+    )
+}
+
+/// A Cloudflare-style envelope wrapping the proxy Worker's SINGLE-statement
+/// `/d1/query` result (the `result` field is one object, not an array). `rows`
+/// are the `RETURNING` rows a CAS statement yields; an empty array is the
+/// guard-missed / conflict signal.
+fn proxy_query_ok(rows: serde_json::Value, changes: u64) -> HttpResponse {
+    response(
+        200,
+        serde_json::json!({
+            "success": true,
+            "errors": [],
+            "messages": [],
+            "result": proxy_statement_result(rows, changes)
         })
         .to_string(),
     )
@@ -2039,6 +2057,303 @@ fn append_billing_event_with_outbox_enqueue_without_proxy_is_unimplemented() {
     assert!(
         transport.recorded().is_empty(),
         "the unimplemented path must not hit the network"
+    );
+}
+
+// --- Guardrail binding CAS transitions over the proxy /d1/query binding
+// (issue #454) ---
+
+fn sample_guardrail_binding(
+    active_revision: Option<u32>,
+    archived_revisions: Vec<u32>,
+    generation: u64,
+) -> StoredGuardrailPolicyBinding {
+    StoredGuardrailPolicyBinding {
+        policy_id: "policy-1".into(),
+        active_revision,
+        archived_revisions,
+        updated_at_unix: 1_753_000_050,
+        updated_by: "admin".into(),
+        generation,
+    }
+}
+
+/// The `binding_json` param a CAS statement carries, decoded back into a
+/// binding (the read path's `binding_json AS document_json` round trip).
+fn statement_binding_json(
+    statement: &serde_json::Value,
+    index: usize,
+) -> StoredGuardrailPolicyBinding {
+    let params = statement_params(statement);
+    serde_json::from_str(&params[index]).expect("binding_json param should decode")
+}
+
+/// A FIRST activation (no prior binding) builds the INSERT-branch guarded CAS
+/// (`ON CONFLICT (policy_id) DO NOTHING RETURNING policy_id`) over the proxy
+/// `/d1/query` binding, NOT the REST query API, and returns the computed
+/// transition when the RETURNING row proves the write landed.
+#[test]
+fn activate_guardrail_policy_revision_first_activation_builds_insert_cas() {
+    let revision_doc = serde_json::to_string(&sample_guardrail_revision()).unwrap();
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        // REST #1: the revision-exists check. REST #2: the no-prior-binding read.
+        vec![
+            query_ok(serde_json::json!([{ "document_json": revision_doc }]), 0),
+            query_ok(serde_json::json!([]), 0),
+        ],
+        // Proxy: the guarded INSERT returns its policy_id -> the write landed.
+        vec![proxy_query_ok(
+            serde_json::json!([{ "policy_id": "policy-1" }]),
+            1,
+        )],
+    );
+
+    let transition = store
+        .activate_guardrail_policy_revision("policy-1", 1, "admin", 1_753_000_100, false)
+        .expect("first activation should land");
+    assert!(transition.previous.is_none());
+    assert_eq!(transition.current.active_revision, Some(1));
+    assert_eq!(transition.current.generation, 1);
+    assert!(transition.current.archived_revisions.is_empty());
+    assert_eq!(transition.current.updated_by, "admin");
+
+    // The CAS went to the proxy `/d1/query`, never the REST query API.
+    let proxy_requests = proxy_transport.recorded();
+    assert_eq!(proxy_requests.len(), 1);
+    assert!(proxy_requests[0].url.ends_with("/d1/query"));
+    assert_eq!(proxy_requests[0].bearer_token, "plaintext-proxy-token");
+    let statement = body_json(&proxy_requests[0]);
+    let sql = statement["sql"].as_str().unwrap();
+    assert!(sql.starts_with("INSERT INTO guardrail_policy_bindings"));
+    assert!(sql.contains("ON CONFLICT (policy_id) DO NOTHING"));
+    assert!(sql.contains("RETURNING policy_id"));
+    let params = statement_params(&statement);
+    assert_eq!(params[0], "policy-1");
+    assert_eq!(params[1], "1"); // active_revision bound as string, NULLIF-guarded
+    assert_eq!(params[3], "1"); // generation
+    assert_eq!(
+        statement_binding_json(&statement, 4).active_revision,
+        Some(1)
+    );
+
+    // The two REST calls were the non-atomic reads only (no REST CAS).
+    assert_eq!(rest_transport.recorded().len(), 2);
+}
+
+/// Activating over an EXISTING binding builds the UPDATE-branch guarded CAS
+/// (`WHERE policy_id = ? AND generation = ? RETURNING policy_id`), guarding on
+/// the previous generation, and archives the displaced active revision.
+#[test]
+fn activate_guardrail_policy_revision_over_existing_builds_update_cas() {
+    let revision_doc = serde_json::to_string(&sample_guardrail_revision()).unwrap();
+    let binding_doc = serde_json::to_string(&sample_guardrail_binding(Some(2), vec![], 3)).unwrap();
+    let (store, _rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([{ "document_json": revision_doc }]), 0),
+            query_ok(serde_json::json!([{ "document_json": binding_doc }]), 0),
+        ],
+        vec![proxy_query_ok(
+            serde_json::json!([{ "policy_id": "policy-1" }]),
+            1,
+        )],
+    );
+
+    let transition = store
+        .activate_guardrail_policy_revision("policy-1", 1, "ops", 1_753_000_200, false)
+        .expect("activation over an existing binding should land");
+    assert_eq!(transition.previous.map(|b| b.generation), Some(3));
+    assert_eq!(transition.current.active_revision, Some(1));
+    assert_eq!(transition.current.generation, 4); // previous 3 + 1
+    assert_eq!(transition.current.archived_revisions, vec![2]); // displaced active
+
+    let statement = body_json(&proxy_transport.recorded()[0]);
+    let sql = statement["sql"].as_str().unwrap();
+    assert!(sql.starts_with("UPDATE guardrail_policy_bindings"));
+    assert!(sql.contains("WHERE policy_id = ? AND generation = ?"));
+    assert!(sql.contains("RETURNING policy_id"));
+    let params = statement_params(&statement);
+    // [active_revision, updated_at_unix, generation, binding_json, policy_id, expected_gen]
+    assert_eq!(params[0], "1");
+    assert_eq!(params[2], "4"); // new generation
+    assert_eq!(params[4], "policy-1");
+    assert_eq!(params[5], "3"); // expected (previous) generation is the CAS guard
+}
+
+/// An empty `RETURNING` set is the lost-update signal (the guard missed): it
+/// maps to the typed guardrail CAS `Conflict`.
+#[test]
+fn activate_guardrail_policy_revision_cas_conflict_is_typed() {
+    let revision_doc = serde_json::to_string(&sample_guardrail_revision()).unwrap();
+    let binding_doc = serde_json::to_string(&sample_guardrail_binding(Some(2), vec![], 3)).unwrap();
+    let (store, _rest_transport, _proxy_transport) = store_with_proxy(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([{ "document_json": revision_doc }]), 0),
+            query_ok(serde_json::json!([{ "document_json": binding_doc }]), 0),
+        ],
+        // The guarded UPDATE matched no row -> empty RETURNING -> conflict.
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+
+    let error = store
+        .activate_guardrail_policy_revision("policy-1", 1, "ops", 1_753_000_200, false)
+        .expect_err("a lost-update CAS must surface a conflict");
+    assert!(
+        is_guardrail_policy_binding_cas_conflict(&error),
+        "{error:?}"
+    );
+}
+
+/// Activating an unknown revision is `NotFound` and never reaches the CAS proxy.
+#[test]
+fn activate_guardrail_policy_revision_missing_revision_is_not_found() {
+    let (store, _rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        // The revision-exists check comes back empty.
+        vec![query_ok(serde_json::json!([]), 0)],
+        Vec::new(),
+    );
+
+    let error = store
+        .activate_guardrail_policy_revision("policy-1", 9, "ops", 1_753_000_200, false)
+        .expect_err("an unknown revision cannot be activated");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(
+        proxy_transport.recorded().is_empty(),
+        "a missing revision must not reach the CAS proxy"
+    );
+}
+
+/// Archiving a non-active revision builds the UPDATE-branch guarded CAS and adds
+/// the revision to `archived_revisions` while leaving the active one in place.
+#[test]
+fn archive_guardrail_policy_revision_builds_update_cas() {
+    let revision_doc = serde_json::to_string(&sample_guardrail_revision()).unwrap();
+    let binding_doc = serde_json::to_string(&sample_guardrail_binding(Some(1), vec![], 2)).unwrap();
+    let (store, _rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([{ "document_json": revision_doc }]), 0),
+            query_ok(serde_json::json!([{ "document_json": binding_doc }]), 0),
+        ],
+        vec![proxy_query_ok(
+            serde_json::json!([{ "policy_id": "policy-1" }]),
+            1,
+        )],
+    );
+
+    let transition = store
+        .archive_guardrail_policy_revision("policy-1", 2, "ops", 1_753_000_300)
+        .expect("archiving a non-active revision should land");
+    assert_eq!(transition.current.active_revision, Some(1)); // active unchanged
+    assert_eq!(transition.current.archived_revisions, vec![2]);
+    assert_eq!(transition.current.generation, 3);
+
+    let sql = body_json(&proxy_transport.recorded()[0])["sql"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(sql.starts_with("UPDATE guardrail_policy_bindings"));
+    assert!(sql.contains("WHERE policy_id = ? AND generation = ?"));
+}
+
+/// Restoring back to "no binding" (rollback of a first activation) builds the
+/// DELETE-branch guarded CAS over the proxy; an empty RETURNING set conflicts.
+#[test]
+fn restore_guardrail_policy_binding_delete_branch_builds_delete_cas() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([{ "policy_id": "policy-1" }]),
+            1,
+        )],
+    );
+
+    store
+        .restore_guardrail_policy_binding("policy-1", Some(5), None)
+        .expect("delete-branch restore should land");
+
+    // No REST reads: restore is given its target generation directly.
+    assert!(rest_transport.recorded().is_empty());
+    let statement = body_json(&proxy_transport.recorded()[0]);
+    let sql = statement["sql"].as_str().unwrap();
+    assert!(sql.starts_with("DELETE FROM guardrail_policy_bindings"));
+    assert!(sql.contains("WHERE policy_id = ? AND generation = ?"));
+    assert!(sql.contains("RETURNING policy_id"));
+    let params = statement_params(&statement);
+    assert_eq!(params, vec!["policy-1".to_string(), "5".to_string()]);
+
+    // The same guarded DELETE against a moved generation is a typed conflict.
+    let (conflict_store, _rest, _proxy) = store_with_proxy(
+        control_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let error = conflict_store
+        .restore_guardrail_policy_binding("policy-1", Some(5), None)
+        .expect_err("a guard miss must conflict");
+    assert!(
+        is_guardrail_policy_binding_cas_conflict(&error),
+        "{error:?}"
+    );
+}
+
+/// Restoring a captured binding uses the generation-guarded UPDATE branch under
+/// `next_generation(expected)`.
+#[test]
+fn restore_guardrail_policy_binding_restore_branch_builds_update_cas() {
+    let (store, _rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([{ "policy_id": "policy-1" }]),
+            1,
+        )],
+    );
+
+    let restored = sample_guardrail_binding(Some(1), vec![2], 4);
+    store
+        .restore_guardrail_policy_binding("policy-1", Some(4), Some(restored))
+        .expect("restore-branch should land");
+
+    let statement = body_json(&proxy_transport.recorded()[0]);
+    let sql = statement["sql"].as_str().unwrap();
+    assert!(sql.starts_with("UPDATE guardrail_policy_bindings"));
+    let params = statement_params(&statement);
+    // generation is bumped to next(expected) = 5; the guard is the expected 4.
+    assert_eq!(params[2], "5");
+    assert_eq!(params[5], "4");
+    assert_eq!(statement_binding_json(&statement, 3).generation, 5);
+}
+
+/// Every guardrail CAS transition fails closed with the typed
+/// unimplemented-surface error on a REST-only backend and never hits the
+/// network — exactly like the billing keystone without a bound proxy.
+#[test]
+fn guardrail_cas_without_proxy_is_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(control_registry(), Vec::new());
+
+    let activate = store
+        .activate_guardrail_policy_revision("policy-1", 1, "ops", 1, false)
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&activate), "{activate:?}");
+
+    let archive = store
+        .archive_guardrail_policy_revision("policy-1", 1, "ops", 1)
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&archive), "{archive:?}");
+
+    let restore = store
+        .restore_guardrail_policy_binding("policy-1", Some(1), None)
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&restore), "{restore:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented CAS path must not hit the network"
     );
 }
 

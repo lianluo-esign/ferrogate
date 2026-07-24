@@ -11,7 +11,9 @@ revisions/bindings, and managed + self-hosted worker stores landed (issue #449).
 The **proxy-Worker D1 binding** (`workers/d1-proxy/`) + its Rust client
 (`ferrogate_cloudflare::d1_proxy`) + the FIRST atomic-transition op routed
 through it (`append_billing_event_with_outbox_enqueue`) landed as the keystone
-slice (issue #450). Builds on the shared Cloudflare client (#405), the
+slice (issue #450); the guardrail binding CAS transitions
+(`activate`/`archive`/`restore`) were wired through the same proxy `/d1/query`
+binding next (issue #454). Builds on the shared Cloudflare client (#405), the
 `ControlPlaneStore` trait extraction (#419), and the #425 dispatch consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
@@ -28,6 +30,7 @@ row-level isolation (`tenant_id` columns + RLS).
 | **Proxy Worker (native D1 binding, bearer HTTP API)** | `workers/d1-proxy/` (`src/index.ts`, `src/auth.ts`, `wrangler.toml`) |
 | Backend (`D1ControlPlaneStore`, registry, provisioning) | `crates/ferrogate-storage/src/control_plane_store_d1/` |
 | Atomic op wired through the proxy (`append_billing_event_with_outbox_enqueue`) | `crates/ferrogate-storage/src/control_plane_store_d1/billing.rs` |
+| Guardrail binding CAS wired through the proxy (`activate`/`archive`/`restore`, #454) | `crates/ferrogate-storage/src/control_plane_store_d1/guardrail.rs` |
 | SQLite-dialect core schema | `sql/d1/001_init_d1.sql` |
 | Mocked-transport tests + portability matrix | `crates/ferrogate-storage/src/control_plane_store_d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_proxy_test.rs` |
 
@@ -248,11 +251,44 @@ row) the stored event's settlement is re-verified over the REST reload path
 (`billing_event_by_id`, a non-atomic single read), mirroring
 `append_billing_event`; a divergent replay is a typed `Conflict`.
 
-**Deferred (still erroring), to be wired through the same proxy in follow-ups:**
-wallets + wallet reservations, payment methods/attempts, workflow run budgets,
-and the guardrail activate/archive/restore CAS transitions. The per-tenant atomic
-families additionally need per-database bindings (or a routed binding lookup) —
-this slice's Worker binds only the control database.
+### Wired atomic op: guardrail binding CAS (`activate` / `archive` / `restore`, issue #454)
+
+The generation-guarded compare-and-swaps on the single mutable
+`guardrail_policy_bindings` row (in `control_plane_store_d1/guardrail.rs`). Each is
+one **single-statement** CAS through `/d1/query` — the companion to the billing
+keystone's `/d1/batch`:
+
+- `activate` / `archive`: read the current binding (a non-atomic REST point read),
+  compute the next binding with the SAME pure planners the Postgres backend uses
+  (`next_guardrail_activation_binding` / `next_guardrail_archive_binding`), then a
+  guarded write. When a prior binding exists it is an `UPDATE guardrail_policy_bindings
+  SET ... WHERE policy_id = ? AND generation = ? RETURNING policy_id` (the CAS guards
+  on the previous generation); the first write is an `INSERT ... ON CONFLICT (policy_id)
+  DO NOTHING RETURNING policy_id`. `activate`/`archive` also first verify the target
+  revision exists over REST (typed `NotFound` otherwise).
+- `restore` (rollback, issue #388): re-establish a captured binding under its expected
+  generation (the same guarded `UPDATE`), or `DELETE ... WHERE generation = ? RETURNING
+  policy_id` back to "no binding".
+
+In every case an **empty `RETURNING` set is the lost-update signal** — the guard did
+not match (a concurrent writer moved the generation, or raced the first insert) — which
+the REST query API cannot surface, and which maps to the typed CAS
+`Conflict` (`is_guardrail_policy_binding_cas_conflict`). The full binding is persisted as
+the `binding_json` document the read path deserializes, with
+`active_revision`/`updated_at_unix`/`generation` mirrored into the projection columns the
+guard and reads use. Guardrail configuration is **account-global** (like plans/RBAC), so
+the proxy's control-DB binding serves these directly — no per-tenant binding is required.
+
+**Deferred (still erroring), to be wired through the proxy in follow-ups:** wallets +
+wallet reservations, payment methods/attempts, and workflow run budgets. These are
+per-tenant financial/run state whose tables are not yet in the D1 schema; unlike the
+account-global billing/guardrail families, a faithful database-per-tenant topology places
+them in a tenant's own D1 database, which this slice's Worker does not bind (it binds only
+the control database) — so they need the **per-tenant proxy binding** (an enumerated #450
+follow-up). Workflow-budget `debit`/`topup` additionally rely on Postgres
+`SELECT ... FOR UPDATE`; D1/SQLite has no row lock, so a faithful mirror needs an
+optimistic-CAS guard or a server-side retry loop (a concurrency-contract change), rather
+than a silent divergence.
 
 ### Deploy / binding steps the gate runs live
 
