@@ -1,0 +1,110 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-24
+// description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+//! Gateway metrics snapshot data model: the counter/total structs every
+//! exporter renders from.
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GatewayMetricsSnapshot {
+    pub service_name: String,
+    pub request_log_total: u64,
+    pub request_error_total: u64,
+    pub request_status_totals: Vec<RequestStatusMetric>,
+    pub cache_hits_total: u64,
+    pub cache_misses_total: u64,
+    /// Subset of `cache_hits_total` served by the semantic vector-similarity
+    /// layer rather than an exact-match key (issue #273).
+    pub semantic_cache_hits_total: u64,
+    pub guardrail_match_total: u64,
+    pub guardrail_denial_total: u64,
+    pub guardrail_redaction_total: u64,
+    pub guardrail_detector_error_total: u64,
+    pub guardrail_evaluation_total: u64,
+    pub guardrail_evaluation_fail_total: u64,
+    pub guardrail_evaluation_error_total: u64,
+    pub guardrail_evaluation_shadow_total: u64,
+    pub guardrail_evidence_persistence_failure_total: u64,
+    pub guardrail_policy_cas_conflict_total: u64,
+    pub billing_event_total: u64,
+    /// Failures durably enqueueing a settled usage event for delivery to the
+    /// billing service (issue #151) — distinguishable from successful
+    /// enqueues so operators can alert on silently dropped reports.
+    pub billing_report_enqueue_failure_total: u64,
+    pub tool_call_total: u64,
+    pub tool_latency_ms_total: u64,
+    pub mcp_identity_resolution_total: u64,
+    pub mcp_identity_failure_total: u64,
+    pub mcp_identity_refresh_total: u64,
+    pub mcp_identity_revocation_total: u64,
+    pub mcp_refresh_response_deadline_total: u64,
+    pub mcp_refresh_storage_cancellation_total: u64,
+    pub mcp_refresh_storage_outcome_unknown_total: u64,
+    pub mcp_refresh_late_reconciliation_total: u64,
+    pub mcp_identity_error_audit_deadline_total: u64,
+    pub postgres_pool_acquire_total: u64,
+    pub postgres_pool_acquire_timeout_total: u64,
+    pub postgres_pool_acquire_wait_micros_total: u64,
+    /// #309 bounded background evidence writer: jobs accepted into the queue.
+    pub evidence_writer_enqueued_total: u64,
+    /// #309: jobs the writer thread finished persisting (enqueued minus
+    /// written = current queue depth).
+    pub evidence_writer_written_total: u64,
+    /// #309: evidence writes dropped because the queue stayed full past the
+    /// bounded enqueue timeout — the alertable overflow-loss signal (billing
+    /// events never route through the writer and cannot appear here).
+    pub evidence_writer_dropped_total: u64,
+    pub token_totals: TokenMetricTotals,
+    pub model_provider_totals: Vec<ModelProviderMetricTotal>,
+    /// Per-operation MCP ingress counts keyed by the `Mcp-Method`/`Mcp-Name`
+    /// routing headers (falling back to the JSON-RPC body), so operators can
+    /// route/alert per MCP method and tool without parsing bodies (issue #277).
+    pub mcp_method_totals: Vec<McpMethodMetricTotal>,
+    /// Requests rejected pre-authentication for not matching a configured
+    /// `network_access.ip_allowlist` (issue #166).
+    pub network_access_denied_total: u64,
+    /// Requests rejected pre-authentication for exceeding
+    /// `network_access.unauthenticated_rate_limit_per_minute` (issue #166).
+    pub network_access_rate_limited_total: u64,
+    /// Asset versions scanned by the lifecycle retention/GC sweeper (issue
+    /// #263).
+    pub asset_lifecycle_scanned_total: u64,
+    /// Asset versions + unreferenced blobs pruned/collected by the lifecycle
+    /// sweeper (issue #263). In `dry_run` mode this stays 0 (nothing deleted).
+    pub asset_lifecycle_pruned_total: u64,
+    /// Lifecycle prune/GC operations that failed (a bucket or registry delete
+    /// error), so an operator can alert on a stuck sweeper (issue #263).
+    pub asset_lifecycle_failed_total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestStatusMetric {
+    pub status_code: u16,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenMetricTotals {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProviderMetricTotal {
+    pub logical_model: String,
+    pub provider: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpMethodMetricTotal {
+    pub method: String,
+    /// Operation target (tool name for `tools/call`); empty for methods that
+    /// carry no name.
+    pub name: String,
+    pub requests: u64,
+}
