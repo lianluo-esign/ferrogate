@@ -4111,6 +4111,17 @@ impl PostgresControlPlaneStore {
     /// still has room, and the wrapping `WITH`/`SELECT` reports the definitive
     /// classification even when nothing is inserted.
     ///
+    /// Folding the guard and insert into one statement closes the *intra*-txn gap
+    /// but NOT the cross-transaction one: under READ COMMITTED two CONCURRENT
+    /// admissions for DIFFERENT asset ids can each read the same pre-commit usage
+    /// sum and both pass -- a classic write-skew oversell. So every admission first
+    /// takes a per-tenant `pg_advisory_xact_lock` (keyed on database:schema:tenant,
+    /// the migration-lock idiom) BEFORE the usage sum, fully serializing same-tenant
+    /// admissions: the lock loser reads the winner's already-committed bytes and is
+    /// correctly rejected. This is the same deterministic, no-retry serialization
+    /// the channel coordination transactions use, keyed per tenant so different
+    /// tenants never contend. See the advisory lock in the body below.
+    ///
     /// `$17` is the quota bound (NULL = unlimited: the quota guard is a no-op and
     /// only the create-if-absent immutability guard remains). The returned row
     /// yields (`id_exists`, `used_bytes`, `quota_ok`, `inserted`) so the caller
@@ -4155,12 +4166,41 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         let transaction = client.transaction().await.map_err(postgres_error)?;
-        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
-            transaction
-                .batch_execute(search_path_sql)
-                .await
-                .map_err(postgres_error)?;
-        }
+        // #371: pin `search_path` PLUS a bounded `lock_timeout`/`statement_timeout`
+        // (the shared coordination-session prefix) so the per-tenant advisory-lock
+        // wait taken next can never hang past the operation's own deadline.
+        transaction
+            .batch_execute(&self.coordination_session_sql())
+            .await
+            .map_err(postgres_error)?;
+        // #371: serialize concurrent admissions for the SAME tenant BEFORE the
+        // usage sum + quota guard. Folding the guard and insert into one statement
+        // only closes the intra-transaction read-then-write gap; under READ
+        // COMMITTED two concurrent transactions for DIFFERENT asset ids can still
+        // each read the same pre-commit usage and both pass -- a write-skew
+        // oversell. A per-tenant `pg_advisory_xact_lock` -- keyed on
+        // database:schema:tenant, mirroring the migration lock's key with a
+        // `stored_assets_quota` discriminator so it never contends with the
+        // migration lock or another tenant -- makes the lock loser read the
+        // winner's already-committed bytes, so it is correctly rejected with the
+        // typed OverQuota (no oversell). The xact lock releases automatically at
+        // commit/rollback; different tenants hash to different keys and never
+        // serialize on each other.
+        let configured_schema = self.async_pool.configured_schema().map(str::to_string);
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(\
+                    hashtextextended(\
+                        current_database() || ':' \
+                            || COALESCE($1, current_schema()) \
+                            || ':stored_assets_quota:' || $2, \
+                        0\
+                    )\
+                 )",
+                &[&configured_schema, &asset.tenant_id],
+            )
+            .await
+            .map_err(postgres_error)?;
         let row = match transaction
             .query_one(
                 Self::CREATE_ASSET_WITHIN_QUOTA_QUERY,
