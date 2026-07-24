@@ -38,6 +38,7 @@ pub mod d1;
 pub mod d1_proxy;
 mod envelope;
 mod error;
+pub mod r2;
 mod resolver;
 pub mod scopes;
 
@@ -49,6 +50,10 @@ pub use config::{default_ai_gateway_base_url, default_api_base_url, CloudflareCo
 pub use d1_proxy::{D1ProxyClient, D1ProxyStatement};
 pub use envelope::{CloudflareEnvelope, CloudflareMessage};
 pub use error::{CloudflareApiError, CloudflareError, AUTHENTICATION_CODES, MISSING_SCOPE_CODES};
+pub use r2::{
+    r2_bucket_name_for_tenant, R2Bucket, R2BucketCreation, R2BucketProvision,
+    R2CreateBucketRequest, R2_BUCKET_ALREADY_EXISTS_CODES,
+};
 pub use resolver::{EnvTokenResolver, ResolvedToken, TokenResolver};
 pub use scopes::{TokenPermissionGroup, REQUIRED_TOKEN_PERMISSION_GROUPS};
 
@@ -70,6 +75,9 @@ mod envelope_test;
 #[cfg(test)]
 #[path = "error_test.rs"]
 mod error_test;
+#[cfg(test)]
+#[path = "r2_test.rs"]
+mod r2_test;
 #[cfg(test)]
 #[path = "resolver_test.rs"]
 mod resolver_test;
