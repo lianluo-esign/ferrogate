@@ -34,6 +34,25 @@ class_name = "AgentGateway"
 tag = "v1"
 new_sqlite_classes = ["AgentGateway"]
 
+# --- Memory layers (issue #427) ---------------------------------------------
+# Governed memory routes (/memory/*) over the agent's per-instance layers:
+# synced state, embedded SQLite, chat history. See docs/cloudflare-agent-memory.md.
+[vars]
+# Semantic-memory pilot (Vectorize + Workers AI) — OPEN BETA, default OFF.
+# Flip to "true" AND uncomment the VECTORIZE/AI bindings below to pilot.
+MEMORY_SEMANTIC_ENABLED = "false"
+# Chat-history retention cap enforced by /memory/chat/prune (the pinned Agents
+# SDK 0.0.109 predates the SDK-side maxPersistedMessages option).
+MEMORY_MAX_PERSISTED_MESSAGES = "200"
+
+# Semantic pilot bindings (leave commented out while the pilot is off):
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "ferrogate-agent-memory"
+#
+# [ai]
+# binding = "AI"
+
 # --- Observability ----------------------------------------------------------
 [observability]
 enabled = true

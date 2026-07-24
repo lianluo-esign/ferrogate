@@ -9,6 +9,7 @@
 mod action_identity;
 mod agent;
 mod capability_boundary;
+mod cloudflare_agent_memory;
 mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
@@ -42,6 +43,12 @@ pub use capability_boundary::{
     CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence,
     CapabilityAuthorizationOutcome, CapabilityAuthorizer, CapabilityBoundaryError,
     CapabilityPolicy, CapabilityTargetGrant, ManagedCapabilityRequest, SimpleCapabilityAuthorizer,
+};
+pub use cloudflare_agent_memory::{
+    AgentChatHistory, AgentChatMessage, AgentChatPruneOutcome, AgentInstanceIdentity,
+    AgentMemoryClient, AgentMemoryError, AgentSemanticMatch, AgentSemanticMatches, AgentSqlOutcome,
+    AgentStateSnapshot, AGENT_INSTANCE_COMPONENT_MAX_LEN, AGENT_INSTANCE_NAME_PREFIX,
+    AGENT_INSTANCE_NAME_SEPARATOR,
 };
 pub use cloudflare_gateway_control::{
     BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface,

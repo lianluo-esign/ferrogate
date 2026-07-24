@@ -64,6 +64,27 @@ not a platform `getStatus`. See
 The Rust side (`crates/ferrogate-runtime/src/cloudflare_gateway_control.rs`)
 maps `CloudflareControlSurface` verbs onto exactly these routes.
 
+## Memory routes (issue #427)
+
+`src/memory.ts` adds a governed read/write/query surface over the agent's
+per-instance memory layers (synced JSON state, embedded SQLite, chat history),
+all POST + bearer-gated, with the instance name in the body:
+
+| Route | Body | Layer |
+|-------|------|-------|
+| `POST /memory/state/get`   | `{ instance }` | 1 — synced state read |
+| `POST /memory/state/set`   | `{ instance, state }` | 1 — validated whole-object replace (422 on violation) |
+| `POST /memory/sql/query`   | `{ instance, sql, params? }` | 2 — embedded SQLite (507 `sqlite_full` on SQLITE_FULL) |
+| `POST /memory/chat/get`    | `{ instance, limit? }` | 3 — chat history read |
+| `POST /memory/chat/prune`  | `{ instance, maxMessages? }` | 3 — eviction to the `MEMORY_MAX_PERSISTED_MESSAGES` cap |
+| `POST /memory/semantic/query` | `{ instance, query, topK? }` | Vectorize pilot — **beta, default OFF** (501 while disabled) |
+
+Instance names are minted by the Rust naming scheme
+(`fg.{tenant}.{session}.{run}`, see
+`crates/ferrogate-runtime/src/cloudflare_agent_memory.rs`), so per-instance DO
+isolation is tenant isolation. Full details:
+[`../../docs/cloudflare-agent-memory.md`](../../docs/cloudflare-agent-memory.md).
+
 ## Deploy
 
 ```sh

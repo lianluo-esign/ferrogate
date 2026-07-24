@@ -9,19 +9,43 @@
 
 import { Agent, routeAgentRequest, getAgentByName } from "agents";
 
+import { json, requireBearer } from "./auth";
+import {
+  handleMemory,
+  memoryChatHistoryGet,
+  memoryChatHistoryPrune,
+  memorySqlQuery,
+  memoryStateGet,
+  memoryStateSet,
+  persistedMessageCap,
+} from "./memory";
+import type { RawSqlResult, SqlBinding } from "./memory";
+
 /**
  * Worker bindings. `AGENT_GATEWAY` is the Durable Object namespace for the
  * {@link AgentGateway} agent class; `GATEWAY_CONTROL_TOKEN` is the DIY bearer
  * credential FerroGate presents (seeded via `wrangler secret put`).
+ *
+ * The memory-layer bindings (issue #427) are OPTIONAL: `VECTORIZE` + `AI`
+ * exist only when the default-off semantic-memory pilot is enabled, and the
+ * `MEMORY_*` vars tune the governed memory routes in `memory.ts`.
  */
 export interface Env {
   AGENT_GATEWAY: DurableObjectNamespace<AgentGateway>;
   /** DIY auth secret. Compared (constant-time) against the request bearer token. */
   GATEWAY_CONTROL_TOKEN: string;
+  /** Semantic-memory pilot flag (beta). The pilot runs ONLY when `"true"`. */
+  MEMORY_SEMANTIC_ENABLED?: string;
+  /** Chat-history retention cap; defaults to `DEFAULT_MAX_PERSISTED_MESSAGES`. */
+  MEMORY_MAX_PERSISTED_MESSAGES?: string;
+  /** Vectorize index for the semantic pilot (unbound unless piloting). */
+  VECTORIZE?: Vectorize;
+  /** Workers AI binding used for pilot embeddings (unbound unless piloting). */
+  AI?: Ai;
 }
 
 /** Lifecycle status vocabulary mirrored by the Rust `CloudflareRunStatus`. */
-type RunStatus =
+export type RunStatus =
   | "queued"
   | "running"
   | "completed"
@@ -60,7 +84,7 @@ interface RunProps {
  * survive hibernation) so a re-addressed, woken agent reads its already-chosen
  * runtime configuration from state without props being re-delivered.
  */
-interface AgentGatewayState {
+export interface AgentGatewayState {
   status: RunStatus;
   runId: string | null;
   sessionId: string | null;
@@ -162,14 +186,14 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
    * `locationHint` / `jurisdiction` are recorded for placement/compliance; a real
    * deployment would honor them when addressing sub-agents or storage.
    */
-  onStart(props: RunProps): void {
+  onStart(props?: RunProps): void {
     this.setState({
       ...this.state,
-      resolvedModel: props.model ?? this.state.resolvedModel,
-      resolvedTools: props.tools ?? this.state.resolvedTools,
-      resolvedSystemPrompt: props.systemPrompt ?? this.state.resolvedSystemPrompt,
-      resolvedLocationHint: props.locationHint ?? this.state.resolvedLocationHint,
-      resolvedJurisdiction: props.jurisdiction ?? this.state.resolvedJurisdiction,
+      resolvedModel: props?.model ?? this.state.resolvedModel,
+      resolvedTools: props?.tools ?? this.state.resolvedTools,
+      resolvedSystemPrompt: props?.systemPrompt ?? this.state.resolvedSystemPrompt,
+      resolvedLocationHint: props?.locationHint ?? this.state.resolvedLocationHint,
+      resolvedJurisdiction: props?.jurisdiction ?? this.state.resolvedJurisdiction,
       updatedAt: Date.now(),
     });
   }
@@ -232,8 +256,14 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     return { runRef: this.name, status: this.state.status };
   }
 
-  /** RPC: tear down the run's resources. Maps the Rust `cleanup_run`. */
-  async destroy(): Promise<{ runRef: string; status: RunStatus }> {
+  /**
+   * RPC: tear down the run's resources. Maps the Rust `cleanup_run`.
+   *
+   * Named `destroyRun` (not `destroy`) because the Agents SDK base class
+   * reserves `destroy(): Promise<void>`; this variant returns the status
+   * envelope the control route reports back to FerroGate.
+   */
+  async destroyRun(): Promise<{ runRef: string; status: RunStatus }> {
     this.setState({
       ...this.state,
       status: "cleaned_up",
@@ -243,6 +273,50 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     // Free the DO's stored rows; the instance may be evicted after this.
     await this.ctx.storage.deleteAll();
     return { runRef: this.name, status: "cleaned_up" };
+  }
+
+  // ---- Memory verbs (issue #427) ----------------------------------------
+  //
+  // Thin RPC delegates: the verb implementations live in `memory.ts` against
+  // the structural `AgentMemoryHost` seam so index.ts stays a routing shell
+  // (engineering standard #429). Each returns the RPC-safe `MemoryResult`
+  // envelope — DO RPC would strip a thrown error's class identity.
+
+  /** Layer 2 escape hatch used by the memory verbs: dynamic SqlStorage exec. */
+  rawSql(query: string, bindings: SqlBinding[]): RawSqlResult {
+    const cursor = this.ctx.storage.sql.exec(query, ...bindings);
+    const rows = cursor.toArray() as Record<string, unknown>[];
+    return { columns: cursor.columnNames, rows };
+  }
+
+  /** Chat-history retention cap for this deployment (layer 3 eviction). */
+  get maxPersistedMessages(): number {
+    return persistedMessageCap(this.env.MEMORY_MAX_PERSISTED_MESSAGES);
+  }
+
+  /** RPC: read the synced JSON state (memory layer 1). */
+  async memoryStateGet() {
+    return memoryStateGet(this);
+  }
+
+  /** RPC: validated whole-object state replace (memory layer 1). */
+  async memoryStateSet(candidate: unknown) {
+    return memoryStateSet(this, candidate);
+  }
+
+  /** RPC: query the embedded per-agent SQLite (memory layer 2). */
+  async memorySqlQuery(sql: string, params: SqlBinding[]) {
+    return memorySqlQuery(this, sql, params);
+  }
+
+  /** RPC: read persisted chat history (memory layer 3). */
+  async memoryChatHistoryGet(limit?: number) {
+    return memoryChatHistoryGet(this, limit);
+  }
+
+  /** RPC: prune chat history to the retention cap (memory layer 3). */
+  async memoryChatHistoryPrune(maxMessages?: number) {
+    return memoryChatHistoryPrune(this, maxMessages);
   }
 
   /**
@@ -255,52 +329,6 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     if (denied) return denied;
     return super.onRequest(request);
   }
-}
-
-/**
- * Constant-time-ish bearer check. Returns a 401/403 `Response` when the request
- * is NOT authorized, or `null` when it is.
- *
- * DIY auth is required: Cloudflare fronts the DO but does not authenticate the
- * caller for us. Bearer-token is the baseline; mTLS (client-cert on a custom
- * domain) and Cloudflare Access (JWT in `Cf-Access-Jwt-Assertion`) are the
- * documented stronger alternatives — swap the check below for those.
- */
-function requireBearer(request: Request, expected: string | undefined): Response | null {
-  if (!expected) {
-    return json({ error: "gateway misconfigured: no control token" }, 500);
-  }
-  const header = request.headers.get("authorization") ?? "";
-  const prefix = "Bearer ";
-  if (!header.startsWith(prefix)) {
-    return json({ error: "missing bearer token" }, 401);
-  }
-  const presented = header.slice(prefix.length);
-  if (!timingSafeEqual(presented, expected)) {
-    return json({ error: "invalid bearer token" }, 403);
-  }
-  return null;
-}
-
-/** Length-independent constant-time string comparison. */
-function timingSafeEqual(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const ab = enc.encode(a);
-  const bb = enc.encode(b);
-  // Fold length into the accumulator so mismatched lengths still run to the end.
-  let diff = ab.length ^ bb.length;
-  const max = Math.max(ab.length, bb.length);
-  for (let i = 0; i < max; i++) {
-    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
-  }
-  return diff === 0;
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
 }
 
 /**
@@ -335,28 +363,28 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
       case "start": {
         const body = (await request.json()) as StartRequest;
         // The run's agent instance is addressed by its runId.
-        const agent = await getAgentByName(env.AGENT_GATEWAY, body.runId);
+        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runId);
         return json(await agent.start(body));
       }
       case "invoke": {
         const body = (await request.json()) as InvokeRequest;
-        const agent = await getAgentByName(env.AGENT_GATEWAY, body.runRef);
+        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
         return json(await agent.invoke(body));
       }
       case "cancel": {
         const body = (await request.json()) as { runRef: string; reason?: string };
-        const agent = await getAgentByName(env.AGENT_GATEWAY, body.runRef);
+        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
         return json(await agent.cancel(body.reason ?? "unspecified"));
       }
       case "destroy": {
         const body = (await request.json()) as { runRef: string };
-        const agent = await getAgentByName(env.AGENT_GATEWAY, body.runRef);
-        return json(await agent.destroy());
+        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, body.runRef);
+        return json(await agent.destroyRun());
       }
       case "status": {
         const runRef = url.searchParams.get("runRef");
         if (!runRef) return json({ error: "missing runRef" }, 400);
-        const agent = await getAgentByName(env.AGENT_GATEWAY, runRef);
+        const agent = await getAgentByName<Env, AgentGateway>(env.AGENT_GATEWAY, runRef);
         return json(await agent.status());
       }
       default:
@@ -379,6 +407,12 @@ export default {
     // 1. Explicit control routes (RPC to a named agent). Auth checked inside.
     if (url.pathname.startsWith("/control/")) {
       return handleControl(request, env, url);
+    }
+
+    // 1b. Memory routes (issue #427): governed read/write/query over the
+    //     agent's per-instance memory layers. Auth checked inside.
+    if (url.pathname.startsWith("/memory/")) {
+      return handleMemory(request, env, url);
     }
 
     // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in
