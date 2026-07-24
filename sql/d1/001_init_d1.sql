@@ -945,6 +945,109 @@ CREATE TABLE IF NOT EXISTS workflow_run_budgets (
 CREATE INDEX IF NOT EXISTS idx_workflow_run_budgets_tenant
     ON workflow_run_budgets(tenant_id);
 
+-- --- Agent schedules + fire history (issue #460 / #246) ---
+--
+-- Time-based agent schedule triggers (#246): the control-plane schedule
+-- DEFINITIONS (cron/interval + firing target) plus the idempotent fire-history
+-- ledger. Like the wallet/usage/asset families above, these are TENANT-SCOPED: in
+-- the database-per-tenant topology a tenant's schedules and their fire log live
+-- in THAT tenant's own D1 database (never the control database), so the tables
+-- carry no routing FK to `tenants` (physical isolation). Ported column-for-column
+-- from the Postgres agent_schedules/agent_schedule_fires tables, with the
+-- documented SQLite divergences: BIGINT->INTEGER, BOOLEAN->INTEGER 0/1,
+-- JSONB->TEXT (target_json rides a plain TEXT column, validated as JSON app-side
+-- before the write like Postgres), and NO cross-table foreign key -- the Postgres
+-- fire-log ON DELETE CASCADE onto agent_schedules is dropped for physical
+-- isolation, so delete_agent_schedule cascades the fire rows itself as one atomic
+-- /d1/batch. The at-most-once fire
+-- gate is the `agent_schedule_fires` UNIQUE (schedule_id, scheduled_fire_at_unix)
+-- row + `ON CONFLICT DO NOTHING`, identical to Postgres. Writes route to / reads
+-- fan out over the tenant binding(s) through the proxy Worker (issue #450/#455); a
+-- REST-only deployment leaves them fail-closed.
+CREATE TABLE IF NOT EXISTS agent_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    spec_kind TEXT NOT NULL,
+    cron_expr TEXT,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    interval_secs INTEGER,
+    target_kind TEXT NOT NULL,
+    target_json TEXT NOT NULL DEFAULT '{}',
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    catchup_policy TEXT NOT NULL DEFAULT 'skip_missed',
+    jitter_secs INTEGER NOT NULL DEFAULT 0,
+    next_fire_at_unix INTEGER,
+    last_fire_at_unix INTEGER,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1
+);
+
+-- Due-schedule scan: enabled rows whose next_fire_at has arrived, cheapest first.
+-- Partial index keeps the hot path off disabled/unscheduled rows.
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_due
+    ON agent_schedules(next_fire_at_unix ASC)
+    WHERE enabled = 1 AND next_fire_at_unix IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_tenant
+    ON agent_schedules(tenant_id, workspace_id, name);
+
+-- Durable fire history + idempotency ledger. One row per (schedule, slot); the
+-- UNIQUE constraint + ON CONFLICT DO NOTHING makes a slot fire at most once across
+-- every gateway instance racing the same tenant database.
+CREATE TABLE IF NOT EXISTS agent_schedule_fires (
+    fire_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    scheduled_fire_at_unix INTEGER NOT NULL,
+    fired_at_unix INTEGER NOT NULL,
+    node_id TEXT,
+    outcome TEXT NOT NULL,
+    dispatch_id TEXT,
+    run_id TEXT,
+    detail TEXT,
+    UNIQUE (schedule_id, scheduled_fire_at_unix)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_schedule_fires_history
+    ON agent_schedule_fires(schedule_id, scheduled_fire_at_unix DESC);
+
+-- --- Observed-agent presence (issue #460 / #357) ---
+--
+-- Durable, coalesced observed-agent presence (#357): ONE short conditional upsert
+-- per (tenant_id, api_key_id) recording the MAX last-seen timestamp and a
+-- coalesced request count, so a burst of touches for one virtual key never grows
+-- the table. TENANT-SCOPED like the families above -- a tenant's presence rows
+-- live in THAT tenant's own D1 database (no routing FK; physical isolation).
+-- Ported column-for-column from the Postgres observed_agent_presence table
+-- (BIGINT->INTEGER). The coalescing upsert uses SQLite's scalar `max(x,y)` /
+-- `min(x,y)` (SQLite has NO GREATEST/LEAST) over the `excluded.*` column values
+-- (already INTEGER-affinity, so NO CAST -- contrast the arithmetic wallet guards),
+-- keeping last-seen monotonic and first-seen minimal even under a delayed touch;
+-- the window read is served straight from the tenant-scoped index. Routed to /
+-- fanned out over the tenant binding(s) through the proxy Worker; a REST-only
+-- deployment leaves them fail-closed.
+CREATE TABLE IF NOT EXISTS observed_agent_presence (
+    tenant_id TEXT NOT NULL,
+    api_key_id TEXT NOT NULL,
+    first_seen_at_unix INTEGER NOT NULL,
+    last_seen_at_unix INTEGER NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    updated_at_unix INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, api_key_id)
+);
+
+-- Tenant-scoped window read (recent presence, newest first) served straight from
+-- the index; also the target of the coalescing upsert.
+CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_tenant_last_seen
+    ON observed_agent_presence(tenant_id, last_seen_at_unix DESC);
+
+-- Platform-operator cross-tenant window read.
+CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_last_seen
+    ON observed_agent_presence(last_seen_at_unix DESC);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

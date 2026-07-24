@@ -236,6 +236,36 @@
 //!   INTEGER)` guards every bound numeric param in the debit fit-arithmetic (the
 //!   #455 lesson). Fail closed (typed unimplemented-surface) on `debit`/`topup`
 //!   with no proxy; see `workflow_budget.rs`.
+//! - Agent schedules + fire history (#460/#246, TENANT databases, proxy Worker):
+//!   the time-based schedule DEFINITIONS + the idempotent fire-history ledger.
+//!   `upsert_agent_schedule`/`list_agent_schedules` route by tenant (`upsert` is a
+//!   write, so an unprovisioned tenant is `NotFound`; `list` is opt-in empty);
+//!   `list_all_agent_schedules` fans out + re-sorts to the Postgres
+//!   tenant/workspace/name order; `list_due_agent_schedules` fans out with a
+//!   per-binding `LIMIT` then re-sorts by next-fire-ascending and truncates to a
+//!   GLOBAL `limit`; `get`/`delete`/`insert_agent_schedule_fire`/
+//!   `list_agent_schedule_fires` carry only an id, so they fan out to locate the
+//!   tenant DB holding the schedule. `delete` cascades the fire rows itself as one
+//!   `/d1/batch` (the FK-free D1 dialect drops the Postgres `ON DELETE CASCADE`);
+//!   `insert_agent_schedule_fire` locates the schedule's DB then runs the
+//!   at-most-once `ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING
+//!   RETURNING fire_id` gate (empty RETURNING = a concurrent instance already
+//!   recorded the slot), returning `NotFound` for an unknown schedule. No CAST is
+//!   needed (no bound param enters an arithmetic expression). Fail closed with no
+//!   proxy; see `agent_schedule.rs`.
+//! - Observed-agent presence (#460/#357, TENANT databases, proxy Worker): the
+//!   durable coalesced presence signal. `touch_observed_agent_presence` routes to
+//!   the tenant binding as ONE conditional upsert mirroring the Postgres coalesced
+//!   `#357` clause with SQLite's scalar `max(x,y)`/`min(x,y)` (SQLite has NO
+//!   `GREATEST`/`LEAST`) over the `excluded.*` columns (already INTEGER-affinity,
+//!   so no CAST) + `request_count += excluded.request_count` — so a burst of
+//!   touches stays a single-row hot write and a delayed touch never regresses the
+//!   row; an unprovisioned tenant is `NotFound`.
+//!   `list_observed_agent_presence_since(Some(tenant), ...)` is an opt-in
+//!   tenant-scoped window read (empty for an unprovisioned org) and
+//!   `(None, ...)` fans out over the provisioned tenant bindings, re-sorting the
+//!   union to the Postgres operator order. Fail closed with no proxy; see
+//!   `observed_presence.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -273,8 +303,8 @@
 //!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
 //!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
 //!   the (still-deferred) x402 payment_attempts family into one larger unit.
-//! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
-//!   observed agent presence, MCP identity.
+//! - MCP identity — the last remaining pre-#425 per-entity dispatch surface
+//!   (agent schedules + observed-agent presence landed in issue #460, below).
 //!
 //! RBAC, site domains, and the budget-alert idempotency ledger were
 //! implemented in issue #445; request/audit logs, agent runs/events, and
@@ -301,6 +331,7 @@ use ferrogate_cloudflare::{CloudflareError, D1ProxyClient, D1ProxyStatement};
 use super::control_plane_store::ControlPlaneStore;
 use super::*;
 
+mod agent_schedule;
 mod assets;
 mod auth_quota;
 mod billing;
@@ -310,6 +341,7 @@ mod config_documents;
 mod core_entities;
 mod guardrail;
 mod observability;
+mod observed_presence;
 mod provisioning;
 mod rbac_site_domain;
 mod rows;
@@ -1888,19 +1920,27 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             .await
     }
 
+    // --- Observed-agent presence (IMPLEMENTED, tenant-DB routed, issue #460/#357) ---
+    //
+    // The durable coalesced presence signal routed through the proxy binding onto
+    // per-tenant databases: `touch` is one conditional upsert with SQLite
+    // `max`/`min` (not GREATEST/LEAST); `list_since` routes for a tenant scope and
+    // fans out for the operator view. See `observed_presence.rs`.
+
     async fn touch_observed_agent_presence(
         &self,
-        _touch: ObservedAgentPresenceTouch,
+        touch: ObservedAgentPresenceTouch,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("touch_observed_agent_presence"))
+        self.touch_observed_agent_presence_d1_async(&touch).await
     }
 
     async fn list_observed_agent_presence_since(
         &self,
-        _tenant_scope: Option<&str>,
-        _since_unix: i64,
+        tenant_scope: Option<&str>,
+        since_unix: i64,
     ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
-        Err(unimplemented_surface("list_observed_agent_presence_since"))
+        self.list_observed_agent_presence_since_d1_async(tenant_scope, since_unix)
+            .await
     }
 
     // --- Budget alert idempotency ledger (IMPLEMENTED, control database,
@@ -2070,57 +2110,70 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.unbind_tenant_role_async(tenant_id, role_id).await
     }
 
+    // --- Agent schedules + fires (IMPLEMENTED, tenant-DB routed, issue #460/#246) ---
+    //
+    // The time-based schedule definitions + idempotent fire-history ledger routed
+    // through the proxy binding onto per-tenant databases. `upsert`/`list` route by
+    // tenant; `list_all`/`list_due` fan out and re-merge; `get`/`delete`/
+    // `insert_fire`/`list_fires` fan out by id to locate the holding tenant DB.
+    // `delete` cascades the fire log itself (the FK-free D1 dialect), and
+    // `insert_fire` keeps the at-most-once `ON CONFLICT DO NOTHING RETURNING` gate.
+    // See `agent_schedule.rs`.
+
     async fn upsert_agent_schedule(
         &self,
-        _schedule: StoredAgentSchedule,
+        schedule: StoredAgentSchedule,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_agent_schedule"))
+        self.upsert_agent_schedule_d1_async(&schedule).await
     }
 
     async fn get_agent_schedule(
         &self,
-        _schedule_id: &str,
+        schedule_id: &str,
     ) -> Result<Option<StoredAgentSchedule>, StorageError> {
-        Err(unimplemented_surface("get_agent_schedule"))
+        self.get_agent_schedule_d1_async(schedule_id).await
     }
 
     async fn list_agent_schedules(
         &self,
-        _tenant_id: &str,
-        _workspace_id: Option<&str>,
+        tenant_id: &str,
+        workspace_id: Option<&str>,
     ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        Err(unimplemented_surface("list_agent_schedules"))
+        self.list_agent_schedules_d1_async(tenant_id, workspace_id)
+            .await
     }
 
     async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        Err(unimplemented_surface("list_all_agent_schedules"))
+        self.list_all_agent_schedules_d1_async().await
     }
 
-    async fn delete_agent_schedule(&self, _schedule_id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_agent_schedule"))
+    async fn delete_agent_schedule(&self, schedule_id: &str) -> Result<bool, StorageError> {
+        self.delete_agent_schedule_d1_async(schedule_id).await
     }
 
     async fn list_due_agent_schedules(
         &self,
-        _now_unix: i64,
-        _limit: i64,
+        now_unix: i64,
+        limit: i64,
     ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        Err(unimplemented_surface("list_due_agent_schedules"))
+        self.list_due_agent_schedules_d1_async(now_unix, limit)
+            .await
     }
 
     async fn insert_agent_schedule_fire(
         &self,
-        _fire: StoredAgentScheduleFire,
+        fire: StoredAgentScheduleFire,
     ) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("insert_agent_schedule_fire"))
+        self.insert_agent_schedule_fire_d1_async(&fire).await
     }
 
     async fn list_agent_schedule_fires(
         &self,
-        _schedule_id: &str,
-        _limit: i64,
+        schedule_id: &str,
+        limit: i64,
     ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
-        Err(unimplemented_surface("list_agent_schedule_fires"))
+        self.list_agent_schedule_fires_d1_async(schedule_id, limit)
+            .await
     }
 
     async fn settle_wallet_balance(

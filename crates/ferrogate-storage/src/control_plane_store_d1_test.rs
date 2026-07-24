@@ -24,10 +24,12 @@ use crate::control_plane_store::ControlPlaneStore;
 use crate::{
     api_key_tenant_context, is_guardrail_policy_binding_cas_conflict,
     is_unimplemented_backend_surface, AssetPromotionTarget, AssetQuotaAdmission, AssetVisibility,
-    AssetVisibilityPromotionOutcome, ChannelMoveOutcome, CloudflareD1StorageOptions,
-    D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
-    ReplayDeadLetterOutcome, RuntimeStorageRepositories, StorageError, StoredAdminUser,
-    StoredAdminUserRefreshToken, StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAsset,
+    AssetVisibilityPromotionOutcome, CatchupPolicy, ChannelMoveOutcome, CloudflareD1StorageOptions,
+    D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome,
+    ObservedAgentPresenceTouch, OverlapPolicy, QuotaScopeKind, ReplayDeadLetterOutcome,
+    RuntimeStorageRepositories, ScheduleFireOutcome, ScheduleSpecKind, ScheduleTargetKind,
+    StorageError, StoredAdminUser, StoredAdminUserRefreshToken, StoredAgentRun,
+    StoredAgentRunEvent, StoredAgentSchedule, StoredAgentScheduleFire, StoredApiKey, StoredAsset,
     StoredAssetChannel, StoredAuditEvent, StoredBudgetAlertNotification,
     StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision, StoredManagedWorkerTemplate,
     StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog, StoredRetentionPolicy,
@@ -5138,6 +5140,810 @@ fn list_workflow_run_budgets_unprovisioned_is_empty() {
     );
 }
 
+// --- Tenant-scoped agent schedules + fire ledger (issue #460/#246) ---
+
+/// A cron schedule the store's tenant-DB writes route by `tenant_id`.
+fn sample_agent_schedule(
+    id: &str,
+    tenant: &str,
+    workspace: &str,
+    name: &str,
+) -> StoredAgentSchedule {
+    StoredAgentSchedule {
+        schedule_id: id.into(),
+        tenant_id: tenant.into(),
+        workspace_id: workspace.into(),
+        name: name.into(),
+        enabled: true,
+        spec_kind: ScheduleSpecKind::Cron,
+        cron_expr: Some("0 2 * * *".into()),
+        timezone: "UTC".into(),
+        interval_secs: None,
+        target_kind: ScheduleTargetKind::SelfHostedDispatch,
+        target_json: "{}".into(),
+        overlap_policy: OverlapPolicy::Skip,
+        catchup_policy: CatchupPolicy::SkipMissed,
+        jitter_secs: 0,
+        next_fire_at_unix: Some(2000),
+        last_fire_at_unix: None,
+        created_at_unix: 100,
+        updated_at_unix: 100,
+        revision: 1,
+    }
+}
+
+/// An `agent_schedules` row shaped as the proxy Worker serializes it (integer/
+/// boolean affinities as JSON numbers, nullable columns as null).
+fn schedule_row(
+    id: &str,
+    tenant: &str,
+    workspace: &str,
+    name: &str,
+    next_fire: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schedule_id": id,
+        "tenant_id": tenant,
+        "workspace_id": workspace,
+        "name": name,
+        "enabled": 1,
+        "spec_kind": "cron",
+        "cron_expr": "0 2 * * *",
+        "timezone": "UTC",
+        "interval_secs": null,
+        "target_kind": "self_hosted_dispatch",
+        "target_json": "{}",
+        "overlap_policy": "skip",
+        "catchup_policy": "skip_missed",
+        "jitter_secs": 0,
+        "next_fire_at_unix": next_fire,
+        "last_fire_at_unix": null,
+        "created_at_unix": 100,
+        "updated_at_unix": 100,
+        "revision": 1,
+    })
+}
+
+fn sample_fire(fire_id: &str, schedule_id: &str, slot: i64) -> StoredAgentScheduleFire {
+    StoredAgentScheduleFire {
+        fire_id: fire_id.into(),
+        schedule_id: schedule_id.into(),
+        scheduled_fire_at_unix: slot,
+        fired_at_unix: slot + 1,
+        node_id: Some("node-a".into()),
+        outcome: ScheduleFireOutcome::Dispatched,
+        dispatch_id: Some("disp-1".into()),
+        run_id: None,
+        detail: None,
+    }
+}
+
+/// An `agent_schedule_fires` row shaped as the proxy Worker serializes it.
+fn fire_row(fire_id: &str, schedule_id: &str, slot: i64) -> serde_json::Value {
+    serde_json::json!({
+        "fire_id": fire_id,
+        "schedule_id": schedule_id,
+        "scheduled_fire_at_unix": slot,
+        "fired_at_unix": slot + 1,
+        "node_id": "node-a",
+        "outcome": "dispatched",
+        "dispatch_id": "disp-1",
+        "run_id": null,
+        "detail": null,
+    })
+}
+
+/// `upsert_agent_schedule` routes the single-statement upsert onto the OWNING
+/// tenant binding — never the REST query API, never the control DB. Timestamps/
+/// counters are stored values (NO CAST); nullable columns ride `NULLIF(?, '')`.
+#[test]
+fn upsert_agent_schedule_routes_to_tenant_binding() {
+    let (store, rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 1)],
+    );
+
+    runtime()
+        .block_on(
+            store
+                .upsert_agent_schedule(sample_agent_schedule("sched-1", "acme", "ws-1", "nightly")),
+        )
+        .expect("upsert should route to the tenant DB");
+
+    assert!(
+        rest.recorded().is_empty(),
+        "a tenant-scoped schedule op must not touch the REST query API"
+    );
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 1);
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.starts_with("INSERT INTO agent_schedules"));
+    assert!(sql.contains("ON CONFLICT (schedule_id) DO UPDATE SET"));
+    assert!(
+        sql.contains("NULLIF(?, '')"),
+        "nullable cols map '' -> NULL"
+    );
+    assert!(
+        !sql.contains("CAST"),
+        "no bound param enters an arithmetic expression, so no CAST"
+    );
+    let params = statement_params(&body);
+    assert_eq!(params[0], "sched-1");
+    assert_eq!(params[1], "acme");
+    assert_eq!(params[4], "1", "enabled -> SQLite 0/1 affinity");
+    assert_eq!(params[5], "cron");
+    assert_eq!(params[6], "0 2 * * *");
+    assert_eq!(params[8], "", "interval_secs None -> '' -> SQL NULL");
+    assert_eq!(params[9], "self_hosted_dispatch");
+    assert_eq!(params[14], "2000", "next_fire_at_unix");
+    assert_eq!(params[15], "", "last_fire_at_unix None -> ''");
+}
+
+/// A malformed `target_json` is rejected up front (like Postgres), before any
+/// network round trip.
+#[test]
+fn upsert_agent_schedule_invalid_target_json_is_rejected() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let mut schedule = sample_agent_schedule("sched-1", "acme", "ws-1", "nightly");
+    schedule.target_json = "not json{".into();
+    let error = runtime()
+        .block_on(store.upsert_agent_schedule(schedule))
+        .expect_err("invalid target_json must be rejected");
+    assert!(matches!(error, StorageError::Runtime(_)), "{error:?}");
+    assert!(
+        proxy.recorded().is_empty(),
+        "validation fails before any round trip"
+    );
+}
+
+/// `upsert` is a tenant-DB WRITE, so an UNPROVISIONED tenant is a typed
+/// `NotFound` (the database-per-tenant divergence), offline.
+#[test]
+fn upsert_agent_schedule_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error =
+        runtime()
+            .block_on(store.upsert_agent_schedule(sample_agent_schedule(
+                "sched-1", "ghost", "ws-1", "nightly",
+            )))
+            .expect_err("unprovisioned tenant -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy.recorded().is_empty());
+}
+
+/// `get_agent_schedule` carries only an id, so it FANS OUT over the provisioned
+/// tenant bindings and returns the first match, decoding the enum/boolean
+/// columns back to the `Stored*` shape.
+#[test]
+fn get_agent_schedule_fans_out_and_decodes() {
+    let (store, _rest, proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            // acme has no such schedule; bravo holds it (fan-out is registry order).
+            proxy_query_ok(serde_json::json!([]), 0),
+            proxy_query_ok(
+                serde_json::json!([schedule_row("sched-1", "bravo", "ws-9", "nightly", 2000)]),
+                0,
+            ),
+        ],
+    );
+
+    let schedule = runtime()
+        .block_on(store.get_agent_schedule("sched-1"))
+        .expect("get should fan out")
+        .expect("schedule present in a tenant DB");
+    assert_eq!(schedule.tenant_id, "bravo");
+    assert_eq!(schedule.spec_kind, ScheduleSpecKind::Cron);
+    assert_eq!(schedule.target_kind, ScheduleTargetKind::SelfHostedDispatch);
+    assert_eq!(schedule.overlap_policy, OverlapPolicy::Skip);
+    assert!(schedule.enabled);
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "one locate read per provisioned tenant");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
+}
+
+/// `get` for an id no provisioned tenant holds is `Ok(None)`.
+#[test]
+fn get_agent_schedule_unknown_is_none() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let schedule = runtime()
+        .block_on(store.get_agent_schedule("ghost"))
+        .expect("unknown id is not an error");
+    assert!(schedule.is_none());
+}
+
+/// `list_agent_schedules` routes to the tenant binding and orders by name; the
+/// workspace variant adds the `workspace_id` predicate.
+#[test]
+fn list_agent_schedules_routes_and_orders() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([schedule_row("s1", "acme", "ws-1", "alpha", 2000)]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([schedule_row("s2", "acme", "ws-2", "beta", 2000)]),
+                0,
+            ),
+        ],
+    );
+
+    let all = runtime()
+        .block_on(store.list_agent_schedules("acme", None))
+        .expect("tenant list should route");
+    assert_eq!(all.len(), 1);
+    let scoped = runtime()
+        .block_on(store.list_agent_schedules("acme", Some("ws-2")))
+        .expect("workspace list should route");
+    assert_eq!(scoped.len(), 1);
+
+    let requests = proxy.recorded();
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    let all_sql = body_sql(&requests[0]);
+    assert!(all_sql.contains("WHERE tenant_id = ? ORDER BY name ASC"));
+    assert!(
+        !all_sql.contains("AND workspace_id = ?"),
+        "the unscoped list carries no workspace predicate"
+    );
+    let scoped_sql = body_sql(&requests[1]);
+    assert!(scoped_sql.contains("WHERE tenant_id = ? AND workspace_id = ? ORDER BY name ASC"));
+    assert_eq!(body_params(&requests[1]), vec!["acme", "ws-2"]);
+}
+
+/// `list_agent_schedules` for an UNPROVISIONED tenant is EMPTY (opt-in read),
+/// offline.
+#[test]
+fn list_agent_schedules_unprovisioned_is_empty() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let listed = runtime()
+        .block_on(store.list_agent_schedules("ghost", None))
+        .expect("unprovisioned list is not an error");
+    assert!(listed.is_empty());
+    assert!(proxy.recorded().is_empty());
+}
+
+/// `list_all_agent_schedules` fans out over every provisioned tenant DB and
+/// re-sorts the union to the Postgres `tenant_id, workspace_id, name` order.
+#[test]
+fn list_all_agent_schedules_fans_out_and_sorts() {
+    let (store, _rest, proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([
+                    schedule_row("s2", "acme", "ws-1", "zeta", 2000),
+                    schedule_row("s1", "acme", "ws-1", "alpha", 2000),
+                ]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([schedule_row("s3", "bravo", "ws-1", "beta", 2000)]),
+                0,
+            ),
+        ],
+    );
+
+    let all = runtime()
+        .block_on(store.list_all_agent_schedules())
+        .expect("list_all should fan out");
+    let order: Vec<(&str, &str)> = all
+        .iter()
+        .map(|s| (s.tenant_id.as_str(), s.name.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        vec![("acme", "alpha"), ("acme", "zeta"), ("bravo", "beta")],
+        "union re-sorted by tenant, workspace, name"
+    );
+    assert_eq!(proxy.recorded().len(), 2, "one read per provisioned tenant");
+}
+
+/// `list_due_agent_schedules` fans out with a per-binding `LIMIT`, then re-sorts
+/// the union next-fire-ascending and truncates to a GLOBAL `limit` — the same
+/// top-`limit` cheapest set Postgres's single-table `ORDER BY ... LIMIT` yields.
+#[test]
+fn list_due_agent_schedules_fans_out_and_truncates() {
+    let (store, _rest, proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([
+                    schedule_row("s1", "acme", "ws-1", "a", 120),
+                    schedule_row("s3", "acme", "ws-1", "c", 140),
+                ]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([schedule_row("s2", "bravo", "ws-1", "b", 130)]),
+                0,
+            ),
+        ],
+    );
+
+    let due = runtime()
+        .block_on(store.list_due_agent_schedules(200, 2))
+        .expect("due scan should fan out");
+    let fires: Vec<i64> = due.iter().map(|s| s.next_fire_at_unix.unwrap()).collect();
+    assert_eq!(fires, vec![120, 130], "cheapest two across the union");
+
+    let sql = body_sql(&proxy.recorded()[0]);
+    assert!(sql.contains("WHERE enabled = 1 AND next_fire_at_unix IS NOT NULL"));
+    assert!(sql.contains("next_fire_at_unix <= ? ORDER BY next_fire_at_unix ASC LIMIT 2"));
+    assert!(
+        !sql.contains("CAST"),
+        "column-vs-param compare needs no CAST"
+    );
+}
+
+/// `delete_agent_schedule` locates the holding tenant DB, then deletes the fire
+/// rows AND the schedule as ONE atomic batch (replacing the Postgres
+/// `ON DELETE CASCADE` the FK-free D1 dialect drops). `RETURNING` reports it
+/// existed.
+#[test]
+fn delete_agent_schedule_cascades_fires_over_located_binding() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            // Locate: acme holds the schedule.
+            proxy_query_ok(
+                serde_json::json!([schedule_row("sched-1", "acme", "ws-1", "nightly", 2000)]),
+                0,
+            ),
+            // Delete batch: S0 fires delete (no RETURNING), S1 schedule delete
+            // RETURNING the id it removed.
+            proxy_batch_ok(vec![
+                proxy_statement_result(serde_json::json!([]), 3),
+                proxy_statement_result(serde_json::json!([{ "schedule_id": "sched-1" }]), 1),
+            ]),
+        ],
+    );
+
+    let deleted = runtime()
+        .block_on(store.delete_agent_schedule("sched-1"))
+        .expect("delete should succeed");
+    assert!(deleted, "RETURNING a row means the schedule existed");
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "locate + delete batch");
+    assert!(requests[0].url.ends_with("/d1/query"));
+    assert!(requests[1].url.ends_with("/d1/batch"));
+    let batch = body_json(&requests[1]);
+    assert_eq!(batch["database"], "TENANT_DB_ACME");
+    let statements = batch["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 2, "cascade fires + delete schedule");
+    assert!(statements[0]["sql"]
+        .as_str()
+        .unwrap()
+        .starts_with("DELETE FROM agent_schedule_fires WHERE schedule_id = ?"));
+    let schedule_delete = statements[1]["sql"].as_str().unwrap();
+    assert!(schedule_delete.starts_with("DELETE FROM agent_schedules WHERE schedule_id = ?"));
+    assert!(schedule_delete.contains("RETURNING schedule_id"));
+}
+
+/// `delete` for an id no tenant holds is `Ok(false)` (the fan-out found nothing).
+#[test]
+fn delete_agent_schedule_unknown_is_false() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let deleted = runtime()
+        .block_on(store.delete_agent_schedule("ghost"))
+        .expect("unknown delete is not an error");
+    assert!(!deleted);
+}
+
+/// `insert_agent_schedule_fire` locates the schedule's tenant DB, then runs the
+/// at-most-once `ON CONFLICT DO NOTHING RETURNING` gate: a RETURNING row means
+/// THIS caller won the slot (`true`).
+#[test]
+fn insert_agent_schedule_fire_locates_and_wins_slot() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            // Locate the schedule.
+            proxy_query_ok(
+                serde_json::json!([schedule_row("sched-1", "acme", "ws-1", "nightly", 2000)]),
+                0,
+            ),
+            // Guarded insert RETURNING the fire id -> won the slot.
+            proxy_query_ok(serde_json::json!([{ "fire_id": "fire-1" }]), 1),
+        ],
+    );
+
+    let won = runtime()
+        .block_on(store.insert_agent_schedule_fire(sample_fire("fire-1", "sched-1", 1500)))
+        .expect("insert fire should succeed");
+    assert!(won, "RETURNING a row means this caller recorded the slot");
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "locate + guarded insert");
+    let insert = body_json(&requests[1]);
+    assert_eq!(insert["database"], "TENANT_DB_ACME");
+    let sql = insert["sql"].as_str().unwrap();
+    assert!(sql.starts_with("INSERT INTO agent_schedule_fires"));
+    assert!(sql.contains("ON CONFLICT (schedule_id, scheduled_fire_at_unix) DO NOTHING"));
+    assert!(sql.contains("RETURNING fire_id"));
+    assert!(!sql.contains("CAST"), "no arithmetic on a bound param");
+    let params = statement_params(&insert);
+    assert_eq!(params[0], "fire-1");
+    assert_eq!(params[1], "sched-1");
+    assert_eq!(params[2], "1500", "scheduled_fire_at_unix");
+    assert_eq!(params[4], "node-a");
+    assert_eq!(params[5], "dispatched");
+    assert_eq!(params[7], "", "run_id None -> '' -> SQL NULL");
+}
+
+/// A losing racer (the slot already recorded) gets an EMPTY `RETURNING` -> the
+/// idempotent `false`, so the slot never double-fires.
+#[test]
+fn insert_agent_schedule_fire_conflict_is_false() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([schedule_row("sched-1", "acme", "ws-1", "nightly", 2000)]),
+                0,
+            ),
+            proxy_query_ok(serde_json::json!([]), 0), // DO NOTHING -> no RETURNING row
+        ],
+    );
+
+    let won = runtime()
+        .block_on(store.insert_agent_schedule_fire(sample_fire("fire-1", "sched-1", 1500)))
+        .expect("a conflict is an Ok(false), not an error");
+    assert!(!won, "a concurrent instance already recorded the slot");
+}
+
+/// A fire for an unknown schedule is `NotFound` (no tenant DB to route it into —
+/// the write divergence), after the locate fan-out finds nothing.
+#[test]
+fn insert_agent_schedule_fire_unknown_schedule_is_not_found() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let error = runtime()
+        .block_on(store.insert_agent_schedule_fire(sample_fire("fire-1", "ghost", 1500)))
+        .expect_err("unknown schedule -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert_eq!(proxy.recorded().len(), 1, "locate only, no insert");
+}
+
+/// `list_agent_schedule_fires` fans out and re-merges to the Postgres
+/// `scheduled_fire_at_unix DESC` order, truncated to `limit`.
+#[test]
+fn list_agent_schedule_fires_fans_out_and_orders() {
+    let (store, _rest, proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            // acme holds this schedule's fires; bravo has none.
+            proxy_query_ok(
+                serde_json::json!([
+                    fire_row("f2", "sched-1", 200),
+                    fire_row("f1", "sched-1", 100),
+                ]),
+                0,
+            ),
+            proxy_query_ok(serde_json::json!([]), 0),
+        ],
+    );
+
+    let fires = runtime()
+        .block_on(store.list_agent_schedule_fires("sched-1", 10))
+        .expect("list fires should fan out");
+    let slots: Vec<i64> = fires.iter().map(|f| f.scheduled_fire_at_unix).collect();
+    assert_eq!(slots, vec![200, 100], "newest slot first");
+    assert_eq!(fires[0].outcome, ScheduleFireOutcome::Dispatched);
+
+    let sql = body_sql(&proxy.recorded()[0]);
+    assert!(sql.contains("WHERE schedule_id = ? ORDER BY scheduled_fire_at_unix DESC LIMIT 10"));
+}
+
+/// Without a bound proxy Worker the whole agent-schedule family fails closed with
+/// the typed unimplemented-surface error and never hits the network.
+#[test]
+fn agent_schedule_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let upsert = runtime()
+        .block_on(store.upsert_agent_schedule(sample_agent_schedule("s1", "acme", "ws-1", "n")))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&upsert), "{upsert:?}");
+
+    let get = runtime()
+        .block_on(store.get_agent_schedule("s1"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&get), "{get:?}");
+
+    let list = runtime()
+        .block_on(store.list_agent_schedules("acme", None))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list), "{list:?}");
+
+    let list_all = runtime()
+        .block_on(store.list_all_agent_schedules())
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list_all), "{list_all:?}");
+
+    let due = runtime()
+        .block_on(store.list_due_agent_schedules(100, 10))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&due), "{due:?}");
+
+    let delete = runtime()
+        .block_on(store.delete_agent_schedule("s1"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&delete), "{delete:?}");
+
+    let fire = runtime()
+        .block_on(store.insert_agent_schedule_fire(sample_fire("f1", "s1", 100)))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&fire), "{fire:?}");
+
+    let fires = runtime()
+        .block_on(store.list_agent_schedule_fires("s1", 10))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&fires), "{fires:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented schedule path must not hit the network"
+    );
+}
+
+// --- Tenant-scoped observed-agent presence (issue #460/#357) ---
+
+/// An `observed_agent_presence` row shaped as the proxy Worker serializes it.
+fn presence_row(tenant: &str, api_key: &str, last_seen: i64, count: i64) -> serde_json::Value {
+    serde_json::json!({
+        "tenant_id": tenant,
+        "api_key_id": api_key,
+        "first_seen_at_unix": 100,
+        "last_seen_at_unix": last_seen,
+        "request_count": count,
+        "updated_at_unix": last_seen,
+    })
+}
+
+/// `touch_observed_agent_presence` routes the coalesced conditional upsert onto
+/// the tenant binding using SQLite's scalar `max`/`min` (NOT GREATEST/LEAST) over
+/// the `excluded.*` columns + `request_count += excluded.request_count` — and
+/// needs NO CAST (excluded columns already carry INTEGER affinity).
+#[test]
+fn touch_observed_agent_presence_coalesces_over_tenant_binding() {
+    let (store, rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 1)],
+    );
+
+    runtime()
+        .block_on(
+            store.touch_observed_agent_presence(ObservedAgentPresenceTouch {
+                tenant_id: "acme".into(),
+                api_key_id: "vk-1".into(),
+                seen_at_unix: 500,
+            }),
+        )
+        .expect("touch should route to the tenant DB");
+
+    assert!(rest.recorded().is_empty());
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 1);
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.starts_with("INSERT INTO observed_agent_presence"));
+    assert!(sql.contains("ON CONFLICT (tenant_id, api_key_id) DO UPDATE SET"));
+    assert!(
+        sql.contains("max(observed_agent_presence.last_seen_at_unix, excluded.last_seen_at_unix)")
+    );
+    assert!(sql
+        .contains("min(observed_agent_presence.first_seen_at_unix, excluded.first_seen_at_unix)"));
+    assert!(sql.contains(
+        "request_count = observed_agent_presence.request_count + excluded.request_count"
+    ));
+    assert!(!sql.contains("GREATEST"), "SQLite has no GREATEST");
+    assert!(!sql.contains("LEAST"), "SQLite has no LEAST");
+    assert!(
+        !sql.contains("CAST"),
+        "excluded columns already INTEGER-affinity"
+    );
+    // VALUES seeds first=last=updated=seen, request_count literal 1.
+    let params = statement_params(&body);
+    assert_eq!(params, vec!["acme", "vk-1", "500", "500", "500"]);
+}
+
+/// A re-touch of the SAME key issues the SAME single-row coalescing upsert onto
+/// the same tenant binding (the durable max/min/+ merge is proven live) — never a
+/// second row, never a REST/control-DB write.
+#[test]
+fn touch_observed_agent_presence_retouch_repeats_coalescing_upsert() {
+    let (store, rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([]), 1),
+            proxy_query_ok(serde_json::json!([]), 1),
+        ],
+    );
+
+    for seen in [500, 400] {
+        runtime()
+            .block_on(
+                store.touch_observed_agent_presence(ObservedAgentPresenceTouch {
+                    tenant_id: "acme".into(),
+                    api_key_id: "vk-1".into(),
+                    seen_at_unix: seen,
+                }),
+            )
+            .expect("touch should route");
+    }
+
+    assert!(rest.recorded().is_empty());
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "each touch is one upsert");
+    for request in &requests {
+        let body = body_json(request);
+        assert_eq!(body["database"], "TENANT_DB_ACME");
+        assert!(body["sql"]
+            .as_str()
+            .unwrap()
+            .starts_with("INSERT INTO observed_agent_presence"));
+    }
+    // The delayed (older) touch still binds its own timestamp; the durable
+    // max/min keeps last-seen monotonic (asserted in the live probe).
+    assert_eq!(statement_params(&body_json(&requests[1]))[2], "400");
+}
+
+/// `touch` on an UNPROVISIONED tenant is a typed `NotFound` (the write
+/// divergence), offline.
+#[test]
+fn touch_observed_agent_presence_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(
+            store.touch_observed_agent_presence(ObservedAgentPresenceTouch {
+                tenant_id: "ghost".into(),
+                api_key_id: "vk-1".into(),
+                seen_at_unix: 500,
+            }),
+        )
+        .expect_err("unprovisioned tenant -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy.recorded().is_empty());
+}
+
+/// `list_observed_agent_presence_since(Some(tenant), ...)` routes the window read
+/// to that tenant's binding with the tenant-scoped ORDER BY.
+#[test]
+fn list_observed_agent_presence_since_scoped_routes_to_tenant() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([
+                presence_row("acme", "vk-2", 300, 5),
+                presence_row("acme", "vk-1", 200, 3),
+            ]),
+            0,
+        )],
+    );
+
+    let rows = runtime()
+        .block_on(store.list_observed_agent_presence_since(Some("acme"), 150))
+        .expect("scoped window read should route");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].api_key_id, "vk-2");
+    assert_eq!(rows[0].request_count, 5);
+
+    let body = body_json(&proxy.recorded()[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.contains("WHERE tenant_id = ? AND last_seen_at_unix >= ?"));
+    assert!(sql.contains("ORDER BY last_seen_at_unix DESC, api_key_id ASC"));
+    assert!(
+        !sql.contains("CAST"),
+        "column-vs-param compare needs no CAST"
+    );
+    assert_eq!(body_params(&proxy.recorded()[0]), vec!["acme", "150"]);
+}
+
+/// A scoped window read for an UNPROVISIONED org is EMPTY (opt-in), offline.
+#[test]
+fn list_observed_agent_presence_since_scoped_unprovisioned_is_empty() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let rows = runtime()
+        .block_on(store.list_observed_agent_presence_since(Some("ghost"), 150))
+        .expect("unprovisioned scoped read is not an error");
+    assert!(rows.is_empty());
+    assert!(proxy.recorded().is_empty());
+}
+
+/// The operator `None` view FANS OUT over every provisioned tenant DB and
+/// re-sorts the union to the Postgres `last_seen DESC, tenant ASC, api_key ASC`.
+#[test]
+fn list_observed_agent_presence_since_operator_view_fans_out() {
+    let (store, _rest, proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([presence_row("acme", "vk-1", 300, 2)]), 0),
+            proxy_query_ok(
+                serde_json::json!([presence_row("bravo", "vk-9", 500, 4)]),
+                0,
+            ),
+        ],
+    );
+
+    let rows = runtime()
+        .block_on(store.list_observed_agent_presence_since(None, 100))
+        .expect("operator view should fan out");
+    let order: Vec<(&str, i64)> = rows
+        .iter()
+        .map(|r| (r.tenant_id.as_str(), r.last_seen_at_unix))
+        .collect();
+    assert_eq!(
+        order,
+        vec![("bravo", 500), ("acme", 300)],
+        "newest last-seen first across the cross-tenant union"
+    );
+    assert_eq!(proxy.recorded().len(), 2, "one read per provisioned tenant");
+    let sql = body_sql(&proxy.recorded()[0]);
+    assert!(sql.contains("WHERE last_seen_at_unix >= ?"));
+    assert!(sql.contains("ORDER BY last_seen_at_unix DESC, tenant_id ASC, api_key_id ASC"));
+}
+
+/// Without a bound proxy Worker the observed-presence ops fail closed with the
+/// typed unimplemented-surface error and never hit the network.
+#[test]
+fn observed_presence_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let touch = runtime()
+        .block_on(
+            store.touch_observed_agent_presence(ObservedAgentPresenceTouch {
+                tenant_id: "acme".into(),
+                api_key_id: "vk-1".into(),
+                seen_at_unix: 500,
+            }),
+        )
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&touch), "{touch:?}");
+
+    let list = runtime()
+        .block_on(store.list_observed_agent_presence_since(None, 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list), "{list:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented presence path must not hit the network"
+    );
+}
+
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---
 
 mod portability {
@@ -5252,6 +6058,31 @@ mod portability {
             postgres_columns, d1_columns,
             "column set of workflow_run_budgets diverged between the Postgres and D1 dialects"
         );
+    }
+
+    /// The tenant-scoped agent-schedule families (issue #460/#246) expose EXACTLY
+    /// the columns their Postgres tables do, so the same upsert/read/fire SQL
+    /// compiles against either dialect's row shape.
+    #[test]
+    fn agent_schedule_columns_match_between_postgres_and_d1() {
+        let postgres = columns(POSTGRES_SQL);
+        let d1 = columns(D1_SQL);
+        for table in [
+            "agent_schedules",
+            "agent_schedule_fires",
+            "observed_agent_presence",
+        ] {
+            let postgres_columns = postgres
+                .get(table)
+                .unwrap_or_else(|| panic!("postgres migration should define {table}"));
+            let d1_columns = d1
+                .get(table)
+                .unwrap_or_else(|| panic!("d1 migration should define {table}"));
+            assert_eq!(
+                postgres_columns, d1_columns,
+                "column set of {table} diverged between the Postgres and D1 dialects"
+            );
+        }
     }
 
     /// The D1 dialect must carry NO RLS/GUC scaffolding (isolation is
