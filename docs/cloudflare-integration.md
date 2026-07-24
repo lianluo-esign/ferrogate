@@ -169,6 +169,24 @@ Three CF options for serving FerroGate-hosted static assets/sites.
   **custom domain** routed through a Worker/CDN for production.
 - Best fit for FerroGate because the asset path is already an S3-compatible
   bucket client (§10.2) — R2 is close to a drop-in endpoint/credential swap.
+- **Config:** point `[asset_bucket].endpoint` at the R2 host, set `region =
+  "auto"` (R2's fixed SigV4 region — a geographic region yields
+  `SignatureDoesNotMatch`), and supply the R2 Access Key ID / Secret through the
+  existing `access_key_id` + `secret_access_key_env` fields. The load-time
+  `validate_asset_bucket_r2` check (issue #410) enforces the host shape and the
+  `auto` region for any R2 endpoint. No backend switch is needed — R2 runs on
+  the default S3 backend.
+- **Public serving requires a custom domain.** R2 buckets are private by
+  default; the `r2.dev` subdomain is rate-limited/dev-only, so production public
+  hosting must attach a **custom domain** to the bucket. FerroGate's
+  presigned-GET path serves *private* objects without a public bucket.
+- **Live parity proof (gate-owned):** the env-gated test
+  `live_r2_round_trips_put_get_head_list_delete_and_presigned_put_get`
+  (`crates/ferrogate-cli/src/gateway/asset_bucket.rs`) exercises put/get/head/
+  list/delete + presigned PUT/GET against a real bucket. It SKIPS cleanly unless
+  the gate sets `FERROGATE_R2_ACCOUNT_ID` (or `FERROGATE_R2_ENDPOINT` for a
+  jurisdiction host), `FERROGATE_R2_BUCKET`, `FERROGATE_R2_ACCESS_KEY_ID` and
+  `FERROGATE_R2_SECRET_ACCESS_KEY`.
 
 ### Workers Static Assets
 

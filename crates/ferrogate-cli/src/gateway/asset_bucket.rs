@@ -1476,6 +1476,177 @@ mod tests {
         );
     }
 
+    // ---- #410 live-R2 parity proof (gate-owned) -----------------------------
+
+    /// The four env vars the gate sets to run the live-R2 parity proof. There
+    /// is no live Cloudflare R2 in the dev sandbox, so every local run of this
+    /// test SKIPS cleanly (see [`live_r2_env`]); the gate, which has a real R2
+    /// account, sets these and runs the full round trip against the actual R2
+    /// SigV4 surface:
+    ///
+    ///   * `FERROGATE_R2_ACCOUNT_ID`        — 32-hex R2 account id; the endpoint
+    ///     is derived as `https://<id>.r2.cloudflarestorage.com`.
+    ///   * `FERROGATE_R2_ENDPOINT`          — OPTIONAL full endpoint override for
+    ///     the `.eu.`/`.fedramp.` jurisdiction hosts; wins over the derived one.
+    ///   * `FERROGATE_R2_BUCKET`            — an existing R2 bucket to round-trip
+    ///     objects in (this test creates + deletes its own probe keys only).
+    ///   * `FERROGATE_R2_ACCESS_KEY_ID`     — R2 Access Key ID (S3 credential,
+    ///     *not* the account API bearer token).
+    ///   * `FERROGATE_R2_SECRET_ACCESS_KEY` — the matching R2 Secret Access Key.
+    struct LiveR2Env {
+        endpoint: String,
+        bucket: String,
+        access_key_id: String,
+        secret_access_key: String,
+    }
+
+    /// Reads the live-R2 creds, returning `None` (skip) unless every required
+    /// var is present and non-empty. `FERROGATE_R2_ENDPOINT` overrides the
+    /// account-id-derived host so the same test can target a jurisdiction host.
+    fn live_r2_env() -> Option<LiveR2Env> {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let endpoint = var("FERROGATE_R2_ENDPOINT").or_else(|| {
+            var("FERROGATE_R2_ACCOUNT_ID")
+                .map(|account_id| format!("https://{account_id}.{R2_ENDPOINT_SUFFIX}"))
+        })?;
+        Some(LiveR2Env {
+            endpoint,
+            bucket: var("FERROGATE_R2_BUCKET")?,
+            access_key_id: var("FERROGATE_R2_ACCESS_KEY_ID")?,
+            secret_access_key: var("FERROGATE_R2_SECRET_ACCESS_KEY")?,
+        })
+    }
+
+    /// The full live round trip, factored out so the caller can ALWAYS clean up
+    /// both probe keys (operator directive: no lingering R2 objects) before
+    /// surfacing any failure — mirrors the D1 live probes' cleanup-then-assert
+    /// shape.
+    async fn live_r2_exercise(
+        bucket: &AssetBucketClient,
+        key: &str,
+        presign_key: &str,
+        body: &[u8],
+    ) -> anyhow::Result<()> {
+        // 1. Signed PUT (region `auto`, path-style, real payload hash), then
+        //    HEAD + GET the exact bytes back.
+        bucket
+            .put_object(key, body, "application/octet-stream")
+            .await?;
+        let size = bucket.head_object(key).await?;
+        anyhow::ensure!(
+            size == Some(body.len() as u64),
+            "HEAD size mismatch: {size:?} != {}",
+            body.len()
+        );
+        let fetched = bucket.get_object(key).await?;
+        anyhow::ensure!(fetched == body, "GET bytes must match the PUT bytes");
+
+        // 2. Signed ListObjectsV2 must observe the just-written key.
+        let listed = bucket.list_objects().await?;
+        anyhow::ensure!(
+            listed.iter().any(|object| object.key == key),
+            "LIST did not include the just-written key {key}"
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let http = reqwest::Client::new();
+
+        // 3. Presigned GET: an external holder downloads via the signed URL
+        //    alone (no bucket-private auth), proving R2 accepts the query-signed
+        //    credential scope.
+        let get_url = bucket.presign_get(key, 900, now)?;
+        let response = http.get(&get_url).send().await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "presigned GET failed: HTTP {}",
+            response.status()
+        );
+        let presigned_bytes = response.bytes().await?.to_vec();
+        anyhow::ensure!(presigned_bytes == body, "presigned GET bytes must match");
+
+        // 4. Bound presigned PUT (#368): the holder uploads directly and MUST
+        //    send `required_headers` verbatim. `content-length` is derived from
+        //    the body by the HTTP client (exactly as a real uploader does), so
+        //    only the remaining signed header(s) are attached explicitly.
+        let sha = ferrogate_storage::sha256_hex(body);
+        let upload = bucket.presign_put(presign_key, 900, now, body.len() as u64, &sha)?;
+        let mut request = http.put(&upload.url).body(body.to_vec());
+        for (name, value) in upload
+            .required_headers
+            .iter()
+            .filter(|(name, _)| *name != "content-length")
+        {
+            request = request.header(*name, value);
+        }
+        let put_response = request.send().await?;
+        anyhow::ensure!(
+            put_response.status().is_success(),
+            "presigned PUT failed: HTTP {} ({})",
+            put_response.status(),
+            put_response.text().await.unwrap_or_default()
+        );
+        let round_tripped = bucket.get_object(presign_key).await?;
+        anyhow::ensure!(
+            round_tripped == body,
+            "presigned-PUT object bytes must match the declared payload"
+        );
+
+        // 5. DELETE removes the object; a follow-up GET sees it gone.
+        bucket.delete_object(key).await?;
+        anyhow::ensure!(
+            bucket.get_object_if_present(key).await?.is_none(),
+            "object must be gone after DELETE"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_r2_round_trips_put_get_head_list_delete_and_presigned_put_get() {
+        let Some(env) = live_r2_env() else {
+            eprintln!(
+                "skipping live_r2_round_trips_put_get_head_list_delete_and_presigned_put_get: set \
+                 FERROGATE_R2_ACCOUNT_ID (or FERROGATE_R2_ENDPOINT), FERROGATE_R2_BUCKET, \
+                 FERROGATE_R2_ACCESS_KEY_ID and FERROGATE_R2_SECRET_ACCESS_KEY to run the live R2 \
+                 parity proof (gate-owned; no live R2 in the dev sandbox)"
+            );
+            return;
+        };
+        // The gate must hand us a well-formed R2 host: this proves parity
+        // against the REAL R2 SigV4 surface (region `auto`, real payload hash,
+        // path-style addressing), not some other S3 endpoint.
+        assert!(
+            parse_r2_endpoint(&env.endpoint).is_some(),
+            "live R2 endpoint {} is not a well-formed R2 host",
+            env.endpoint
+        );
+
+        let bucket = AssetBucketClient::new(AssetBucketConfig {
+            endpoint: env.endpoint.clone(),
+            bucket: env.bucket.clone(),
+            region: R2_REGION.into(),
+            access_key_id: env.access_key_id.clone(),
+            secret_access_key: env.secret_access_key.clone(),
+        });
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let key = format!("ferrogate-r2-live-probe/{stamp}-a");
+        let presign_key = format!("ferrogate-r2-live-probe/{stamp}-b");
+        let body = format!("ferrogate r2 live parity body {stamp}").into_bytes();
+
+        let result = live_r2_exercise(&bucket, &key, &presign_key, &body).await;
+        // Best-effort cleanup of BOTH probe keys regardless of outcome
+        // (delete treats a 404 as success), then surface any failure.
+        let _ = bucket.delete_object(&key).await;
+        let _ = bucket.delete_object(&presign_key).await;
+        result.unwrap();
+    }
+
     // ---- #411 AssetObjectStore trait extraction (S3/R2 behind the trait) ----
 
     #[tokio::test]
