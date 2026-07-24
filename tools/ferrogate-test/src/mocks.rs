@@ -294,14 +294,27 @@ fn provider_matrix_response(request: &str) -> Option<ProviderMockResponse> {
     Some(response)
 }
 
-pub(crate) fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>)> {
+pub(crate) fn spawn_mock_mcp_server(
+    stop: Arc<AtomicBool>,
+) -> Result<(String, JoinHandle<Vec<String>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?.to_string();
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(5) {
+        // Serve for the whole harness lifetime: accept until the harness signals
+        // teardown on `Drop`. The safety cap below only backstops a leaked
+        // harness -- it is NOT a window the scenario races against. The previous
+        // fixed 5s wall-clock lifetime dropped the listener mid-scenario: under
+        // load the gateway-api MCP section (tools/list discovery + tools/call,
+        // each on a fresh `Connection: close` socket) is reached after 5s, so the
+        // gateway dialed a closed port and intermittently lost `http-search` from
+        // tools/list or failed a call with "failed to connect MCP endpoint"
+        // (issue #431). Binding already makes the port ready before the addr is
+        // handed to the gateway config, so readiness is deterministic; only the
+        // lifetime needed tying to the harness.
+        while !stop.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(300) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let request = match read_http_request(&mut stream) {

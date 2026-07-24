@@ -348,6 +348,7 @@ pub(crate) struct LocalHarness {
     provider: Option<JoinHandle<Vec<String>>>,
     provider_stop: Arc<AtomicBool>,
     mcp_server: Option<JoinHandle<Vec<String>>>,
+    mcp_stop: Arc<AtomicBool>,
     agent_server: Option<JoinHandle<Vec<String>>>,
     agent_addr: Option<String>,
     billing: Option<MockBillingServer>,
@@ -432,7 +433,12 @@ impl LocalHarness {
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests, provider_stop.clone())
                 .context("start provider")?;
-        let (mcp_addr, mcp_server) = spawn_mock_mcp_server().context("start mcp provider")?;
+        // The MCP mock serves for the whole harness lifetime and is torn down
+        // deterministically on `Drop` via this stop flag (issue #431), instead of
+        // a fixed wall-clock lifetime the long gateway-api MCP section could race.
+        let mcp_stop = Arc::new(AtomicBool::new(false));
+        let (mcp_addr, mcp_server) =
+            spawn_mock_mcp_server(mcp_stop.clone()).context("start mcp provider")?;
         let (agent_addr, agent_server) = if include_agent {
             let (addr, server) = spawn_mock_agent_server().context("start agent provider")?;
             (Some(addr), Some(server))
@@ -499,6 +505,7 @@ impl LocalHarness {
             provider: Some(provider),
             provider_stop,
             mcp_server: Some(mcp_server),
+            mcp_stop,
             agent_server,
             agent_addr,
             billing,
@@ -790,6 +797,9 @@ impl Drop for LocalHarness {
             let _ = provider.join();
         }
         if let Some(mcp_server) = self.mcp_server.take() {
+            // Signal the MCP mock to stop accepting so teardown does not block on
+            // its safety cap; the listener stays alive until exactly here (#431).
+            self.mcp_stop.store(true, Ordering::Relaxed);
             let _ = mcp_server.join();
         }
         if let Some(agent_server) = self.agent_server.take() {
