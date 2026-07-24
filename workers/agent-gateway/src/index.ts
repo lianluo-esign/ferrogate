@@ -31,6 +31,13 @@ import {
 import type { ScheduleKind } from "./schedule";
 import { handleContainer } from "./container";
 
+// Container/sandbox class for the CONTAINER_SANDBOX binding (issue #415).
+// Deploy-time enablement (test gate, live validation): re-export the
+// `@cloudflare/sandbox` Sandbox class under the name wrangler.toml registers;
+// the prebuilt docker.io/cloudflare/sandbox image backs it, so no local Docker
+// build is needed. Absent the binding, /container/* stays fail-closed (501).
+export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
+
 /**
  * Worker bindings. `AGENT_GATEWAY` is the Durable Object namespace for the
  * {@link AgentGateway} agent class; `GATEWAY_CONTROL_TOKEN` is the DIY bearer

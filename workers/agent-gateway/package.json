@@ -12,11 +12,12 @@
     "teardown": "wrangler delete"
   },
   "dependencies": {
+    "@cloudflare/sandbox": "^0.12.4",
     "agents": "0.0.109"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20250620.0",
     "typescript": "5.5.4",
-    "wrangler": "4.20.5"
+    "wrangler": "^4.114.0"
   }
 }
