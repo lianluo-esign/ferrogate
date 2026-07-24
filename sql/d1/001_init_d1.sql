@@ -815,6 +815,86 @@ CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
 CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
     ON usage_metadata_rollups(organization_id, metadata_key, period_month);
 
+-- --- Assets + channels + retention (issue #456) ---
+--
+-- Tenant-scoped hosted-asset storage + the mutable channel pointers + the
+-- generalizable retention rules (issues #176/#260/#263/#366/#371). Like the
+-- wallet/usage families above, these are TENANT-SCOPED: in the
+-- database-per-tenant topology a tenant's assets, its channels, and its
+-- retention policies live in THAT tenant's own D1 database (never the control
+-- database), so the tables carry no routing FK to `tenants` (physical
+-- isolation). Ported column-for-column from the Postgres
+-- stored_assets/asset_channels/retention_policies tables, with the documented
+-- SQLite divergences: BIGINT->INTEGER, BOOLEAN->INTEGER 0/1, no cross-table FK,
+-- the Postgres `size_bytes` CHECK is enforced app-side, and inline BYTEA
+-- `content` becomes a base64 TEXT column (the proxy binds params as TEXT, so
+-- the bytes round-trip base64-encoded and are decoded on read). The atomic
+-- coordination transitions (create-within-quota, channel move-if-resolvable,
+-- yank/unyank, variant delete, visibility promotion) run through the
+-- proxy-Worker `/d1/batch` + `/d1/query` binding (issue #450) selected onto the
+-- tenant database (issue #455); a REST-only deployment leaves them fail-closed.
+CREATE TABLE IF NOT EXISTS stored_assets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT,
+    asset_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    storage_uri TEXT,
+    variant TEXT NOT NULL DEFAULT '',
+    yanked INTEGER NOT NULL DEFAULT 0,
+    visibility TEXT NOT NULL DEFAULT 'visible',
+    UNIQUE (tenant_id, asset_type, name, version, variant)
+);
+
+-- Leftmost-prefix index covering both "list everything for a tenant" and
+-- "list one asset_type for a tenant", and the ORDER BY name, version listing.
+CREATE INDEX IF NOT EXISTS idx_stored_assets_tenant_type_name
+    ON stored_assets(tenant_id, asset_type, name, version);
+
+-- Mutable channel pointers (latest/stable/canary + free-form tags) resolved to
+-- a concrete version at pull time (issue #260). The deterministic id equals
+-- `{tenant}:{asset_type}:{name}:{channel}`, so the id PK and the composite
+-- UNIQUE encode the same logical channel; a move is an upsert by id.
+CREATE TABLE IF NOT EXISTS asset_channels (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    version TEXT NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    UNIQUE (tenant_id, asset_type, name, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_channels_lookup
+    ON asset_channels(tenant_id, asset_type, name);
+
+-- Generalizable retention rules (issue #263): keep the newest keep_last_n
+-- and/or anything younger than max_age_secs, never touching anything younger
+-- than min_age_secs (the safety grace window). All-NULL size/age dimensions =
+-- a pure no-op.
+CREATE TABLE IF NOT EXISTS retention_policies (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '*',
+    keep_last_n INTEGER,
+    max_age_secs INTEGER,
+    min_age_secs INTEGER NOT NULL DEFAULT 0,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_retention_policies_tenant_resource
+    ON retention_policies(tenant_id, resource_type);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

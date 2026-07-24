@@ -17,6 +17,7 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 croner.workspace = true

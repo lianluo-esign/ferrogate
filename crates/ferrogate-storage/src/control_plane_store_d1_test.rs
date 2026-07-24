@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use ferrogate_cloudflare::d1::D1Client;
 use ferrogate_cloudflare::{
     Clock, CloudflareClient, CloudflareConfig, CloudflareError, D1ProxyClient, EnvTokenResolver,
@@ -22,15 +23,18 @@ use ferrogate_core::TenantContext;
 use crate::control_plane_store::ControlPlaneStore;
 use crate::{
     api_key_tenant_context, is_guardrail_policy_binding_cas_conflict,
-    is_unimplemented_backend_surface, CloudflareD1StorageOptions, D1ControlPlaneStore,
-    D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind, ReplayDeadLetterOutcome,
-    RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
-    StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAuditEvent,
-    StoredBudgetAlertNotification, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
-    StoredManagedWorkerTemplate, StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog,
+    is_unimplemented_backend_surface, AssetPromotionTarget, AssetQuotaAdmission, AssetVisibility,
+    AssetVisibilityPromotionOutcome, ChannelMoveOutcome, CloudflareD1StorageOptions,
+    D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
+    ReplayDeadLetterOutcome, RuntimeStorageRepositories, StorageError, StoredAdminUser,
+    StoredAdminUserRefreshToken, StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAsset,
+    StoredAssetChannel, StoredAuditEvent, StoredBudgetAlertNotification,
+    StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision, StoredManagedWorkerTemplate,
+    StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog, StoredRetentionPolicy,
     StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
     StoredTenantAccount, StoredTenantRoleBinding, StoredUsageAggregate, StoredWallet, TokenUsage,
-    WalletReservationResult, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    VariantDeleteOutcome, VersionYankOutcome, WalletReservationResult,
+    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -3575,6 +3579,904 @@ fn usage_rollup_ops_without_proxy_are_unimplemented_and_offline() {
     assert!(
         transport.recorded().is_empty(),
         "the unimplemented usage path must not hit the network"
+    );
+}
+
+// --- Tenant-scoped assets + channels + retention family (issue #456) ---
+
+/// Base64 the proxy content round trip uses (invariant 4).
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A `StoredAsset` whose inline `content` is always `b"hello"` (5 bytes) but
+/// whose declared `size_bytes` is caller-chosen, so the quota guard can be
+/// exercised independently of the actual blob.
+fn sample_asset(id: &str, tenant: &str, size: u64) -> StoredAsset {
+    StoredAsset {
+        id: id.to_string(),
+        tenant_id: tenant.to_string(),
+        project_id: None,
+        asset_type: "skill".to_string(),
+        name: "greeter".to_string(),
+        version: "1.0.0".to_string(),
+        content_type: "application/octet-stream".to_string(),
+        content_hash: "sha".to_string(),
+        size_bytes: size,
+        content: b"hello".to_vec(),
+        storage_uri: None,
+        variant: String::new(),
+        yanked: false,
+        visibility: AssetVisibility::Visible,
+        created_at_unix: 100,
+        updated_at_unix: 100,
+    }
+}
+
+/// A `stored_assets` row shaped as the proxy Worker serializes it (integer
+/// affinities as JSON numbers, `content` base64, NULLs as JSON null).
+#[allow(clippy::too_many_arguments)]
+fn asset_row(
+    id: &str,
+    tenant: &str,
+    asset_type: &str,
+    name: &str,
+    version: &str,
+    size: i64,
+    content: &[u8],
+    yanked: i64,
+    visibility: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "tenant_id": tenant,
+        "project_id": null,
+        "asset_type": asset_type,
+        "name": name,
+        "version": version,
+        "content_type": "application/octet-stream",
+        "content_hash": "sha",
+        "size_bytes": size,
+        "content": b64(content),
+        "created_at_unix": 100,
+        "updated_at_unix": 100,
+        "storage_uri": null,
+        "variant": "",
+        "yanked": yanked,
+        "visibility": visibility,
+    })
+}
+
+fn channel_row(
+    id: &str,
+    tenant: &str,
+    asset_type: &str,
+    name: &str,
+    channel: &str,
+    version: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "tenant_id": tenant,
+        "asset_type": asset_type,
+        "name": name,
+        "channel": channel,
+        "version": version,
+        "updated_at_unix": 100,
+    })
+}
+
+/// A Cloudflare-style proxy error envelope (the shape the Worker emits for a
+/// rolled-back D1 execution failure; code 5001 maps to a plain API error).
+fn proxy_error(status: u16, code: u32, message: &str) -> HttpResponse {
+    response(
+        status,
+        serde_json::json!({
+            "success": false,
+            "errors": [{ "code": code, "message": message }],
+            "messages": [],
+            "result": null
+        })
+        .to_string(),
+    )
+}
+
+/// The #456/#455 keystone for assets: `create_asset_within_quota` builds the
+/// pre-state + guarded-insert atomic batch onto the TENANT binding, and the
+/// quota arithmetic CASTs the size/bound param to INTEGER (the #455 TEXT-vs-
+/// INTEGER lesson) so the guard actually admits.
+#[test]
+fn create_asset_within_quota_admits_with_cast_guard_on_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // S0 pre-state: fresh id, no tuple, 100 bytes already used.
+            proxy_statement_result(
+                serde_json::json!([{ "id_exists": 0, "tuple_exists": 0, "used_bytes": 100 }]),
+                0,
+            ),
+            // S1 guarded insert: RETURNING a row -> admitted.
+            proxy_statement_result(serde_json::json!([{ "1": 1 }]), 1),
+        ])],
+    );
+
+    let admission = runtime()
+        .block_on(store.create_asset_within_quota(
+            sample_asset("acme:skill:greeter:1.0.0", "acme", 500),
+            Some(10_000),
+        ))
+        .expect("admit under quota");
+    assert_eq!(admission, AssetQuotaAdmission::Admitted);
+
+    assert!(
+        rest_transport.recorded().is_empty(),
+        "a tenant-scoped asset op must not touch the REST query API"
+    );
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/batch"));
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let statements = body["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 2, "pre-state read + guarded insert");
+    let guard = statements[1]["sql"].as_str().unwrap();
+    assert!(guard.starts_with("INSERT INTO stored_assets"));
+    // The size + bound enter arithmetic against the INTEGER size_bytes column;
+    // the proxy binds TEXT, so both MUST be CAST or the guard never admits.
+    assert!(guard.contains("+ CAST(? AS INTEGER)"), "{guard}");
+    assert!(guard.contains("<= CAST(? AS INTEGER)"), "{guard}");
+    // Bare ON CONFLICT DO NOTHING suppresses BOTH unique constraints (#369).
+    assert!(guard.contains("ON CONFLICT DO NOTHING"), "{guard}");
+    assert!(guard.contains("RETURNING 1"), "{guard}");
+    // The inline content round-trips base64 (invariant 4) as insert param #9.
+    let params = statement_params(&statements[1]);
+    assert_eq!(params[9], b64(b"hello"));
+    assert_eq!(params[8], "500", "size_bytes bind");
+}
+
+/// A fresh id whose bytes would overshoot the tenant quota is a definitive,
+/// pre-write `OverQuota` — nothing inserted.
+#[test]
+fn create_asset_within_quota_over_quota_is_typed() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(
+                serde_json::json!([{ "id_exists": 0, "tuple_exists": 0, "used_bytes": 9_800 }]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([]), 0), // guard did NOT admit
+        ])],
+    );
+
+    let admission = runtime()
+        .block_on(store.create_asset_within_quota(
+            sample_asset("acme:skill:greeter:1.0.0", "acme", 500),
+            Some(10_000),
+        ))
+        .expect("over-quota is an Ok outcome");
+    match admission {
+        AssetQuotaAdmission::OverQuota {
+            used_bytes,
+            attempted_bytes,
+            quota_bytes,
+        } => {
+            assert_eq!(used_bytes, 9_800);
+            assert_eq!(attempted_bytes, 500);
+            assert_eq!(quota_bytes, 10_000);
+        }
+        other => panic!("expected OverQuota, got {other:?}"),
+    }
+}
+
+/// An id/composite that already exists (the #369 dual-unique first-push loser)
+/// is a typed `AlreadyExists`, never a raw error, even though the guard did not
+/// insert — classified from the pre-state read.
+#[test]
+fn create_asset_within_quota_existing_is_already_exists() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // tuple already present under a rival id; guard blocks the insert.
+            proxy_statement_result(
+                serde_json::json!([{ "id_exists": 0, "tuple_exists": 1, "used_bytes": 100 }]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([]), 0),
+        ])],
+    );
+
+    let admission = runtime()
+        .block_on(store.create_asset_within_quota(
+            sample_asset("acme:skill:greeter:1.0.0", "acme", 500),
+            Some(10_000),
+        ))
+        .expect("already-exists is an Ok outcome");
+    assert_eq!(admission, AssetQuotaAdmission::AlreadyExists);
+}
+
+/// Defense in depth: even a SURFACED SQLite `UNIQUE constraint failed` (the D1
+/// proxy equivalent of Postgres 23505) is mapped to `AlreadyExists`, never a
+/// raw `StorageError` the gateway would turn into a 503.
+#[test]
+fn create_asset_within_quota_surfaced_unique_violation_is_already_exists() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_error(
+            502,
+            5001,
+            "d1 batch failed (rolled back): UNIQUE constraint failed: \
+             stored_assets.tenant_id, stored_assets.asset_type",
+        )],
+    );
+
+    let admission =
+        runtime()
+            .block_on(store.create_asset_within_quota(
+                sample_asset("acme:skill:greeter:1.0.0", "acme", 500),
+                None,
+            ))
+            .expect("a surfaced unique violation is the AlreadyExists loser");
+    assert_eq!(admission, AssetQuotaAdmission::AlreadyExists);
+}
+
+/// `create_asset_if_absent` is a single guarded `INSERT ... ON CONFLICT DO
+/// NOTHING RETURNING id`: a RETURNING row -> `true`; empty -> the idempotent
+/// loser `false`.
+#[test]
+fn create_asset_if_absent_returns_true_then_false() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([{ "id": "acme:skill:greeter:1.0.0" }]), 1),
+            proxy_query_ok(serde_json::json!([]), 0),
+        ],
+    );
+
+    let inserted = runtime()
+        .block_on(store.create_asset_if_absent(sample_asset("acme:skill:greeter:1.0.0", "acme", 5)))
+        .expect("first push inserts");
+    assert!(inserted);
+    let loser = runtime()
+        .block_on(store.create_asset_if_absent(sample_asset("acme:skill:greeter:1.0.0", "acme", 5)))
+        .expect("second push is the idempotent loser");
+    assert!(!loser);
+
+    let sql = body_json(&proxy_transport.recorded()[0])["sql"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(sql.contains("ON CONFLICT DO NOTHING"), "{sql}");
+    assert!(sql.contains("RETURNING id"), "{sql}");
+    assert_eq!(
+        body_json(&proxy_transport.recorded()[0])["database"],
+        "TENANT_DB_ACME"
+    );
+}
+
+/// A surfaced UNIQUE violation on `create_asset_if_absent` is the idempotent
+/// `Ok(false)` loser, not a raw error.
+#[test]
+fn create_asset_if_absent_surfaced_unique_violation_is_false() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_error(
+            502,
+            5001,
+            "d1 query failed: UNIQUE constraint failed: stored_assets.tenant_id",
+        )],
+    );
+
+    let loser = runtime()
+        .block_on(store.create_asset_if_absent(sample_asset("acme:skill:greeter:1.0.0", "acme", 5)))
+        .expect("surfaced unique violation -> Ok(false)");
+    assert!(!loser);
+}
+
+/// `get_asset` carries no tenant, so it fans out over the provisioned tenant
+/// bindings and decodes the base64 inline content byte-for-byte (invariant 4).
+#[test]
+fn get_asset_fans_out_and_decodes_inline_content() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            // acme's DB: not here.
+            proxy_query_ok(serde_json::json!([]), 0),
+            // bravo's DB: found, content base64("hello world").
+            proxy_query_ok(
+                serde_json::json!([asset_row(
+                    "bravo:skill:greeter:1.0.0",
+                    "bravo",
+                    "skill",
+                    "greeter",
+                    "1.0.0",
+                    11,
+                    b"hello world",
+                    0,
+                    "visible"
+                )]),
+                0,
+            ),
+        ],
+    );
+
+    let asset = runtime()
+        .block_on(store.get_asset("bravo:skill:greeter:1.0.0"))
+        .expect("fan-out read")
+        .expect("found in bravo's DB");
+    assert_eq!(asset.id, "bravo:skill:greeter:1.0.0");
+    assert_eq!(asset.content, b"hello world");
+    assert_eq!(asset.size_bytes, 11);
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2, "fan out over acme then bravo");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
+}
+
+/// `list_assets` routes to the tenant binding and orders `name, version` (the
+/// Postgres order) when filtered by asset_type.
+#[test]
+fn list_assets_routes_to_tenant_binding_and_orders() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([asset_row(
+                "acme:skill:greeter:1.0.0",
+                "acme",
+                "skill",
+                "greeter",
+                "1.0.0",
+                5,
+                b"hello",
+                0,
+                "visible"
+            )]),
+            0,
+        )],
+    );
+
+    let assets = runtime()
+        .block_on(store.list_assets("acme", Some("skill")))
+        .expect("list");
+    assert_eq!(assets.len(), 1);
+    let request = &proxy_transport.recorded()[0];
+    assert_eq!(body_json(request)["database"], "TENANT_DB_ACME");
+    let sql = body_sql(request);
+    assert!(
+        sql.contains("WHERE tenant_id = ? AND asset_type = ?"),
+        "{sql}"
+    );
+    assert!(sql.contains("ORDER BY name ASC, version ASC"), "{sql}");
+}
+
+/// `list_withheld_assets` server-side filters to the non-`visible` rows.
+#[test]
+fn list_withheld_assets_filters_non_visible() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([asset_row(
+                "acme:skill:greeter:2.0.0",
+                "acme",
+                "skill",
+                "greeter",
+                "2.0.0",
+                5,
+                b"hello",
+                0,
+                "pending_scan"
+            )]),
+            0,
+        )],
+    );
+
+    let withheld = runtime()
+        .block_on(store.list_withheld_assets("acme", None))
+        .expect("list withheld");
+    assert_eq!(withheld.len(), 1);
+    assert_eq!(withheld[0].visibility, AssetVisibility::PendingScan);
+    let sql = body_sql(&proxy_transport.recorded()[0]);
+    assert!(sql.contains("visibility <> 'visible'"), "{sql}");
+}
+
+/// An unprovisioned tenant has no database, so the opt-in list is EMPTY (not an
+/// error) and never hits the network.
+#[test]
+fn list_assets_unprovisioned_tenant_is_empty() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let assets = runtime()
+        .block_on(store.list_assets("ghost", None))
+        .expect("unprovisioned -> empty");
+    assert!(assets.is_empty());
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `delete_asset` fans out and reports the change from the binding that held it.
+#[test]
+fn delete_asset_fans_out_and_reports_change() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([]), 0), // acme: nothing deleted
+            proxy_query_ok(serde_json::json!([]), 1), // bravo: one row deleted
+        ],
+    );
+    let deleted = runtime()
+        .block_on(store.delete_asset("bravo:skill:greeter:1.0.0"))
+        .expect("delete");
+    assert!(deleted);
+    assert_eq!(proxy_transport.recorded().len(), 2);
+}
+
+/// `list_all_assets` fans out over every provisioned tenant DB and re-sorts the
+/// union to the Postgres `tenant_id, asset_type, name, version` order.
+#[test]
+fn list_all_assets_fans_out_and_sorts() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([asset_row(
+                    "acme:skill:zeta:1.0.0",
+                    "acme",
+                    "skill",
+                    "zeta",
+                    "1.0.0",
+                    5,
+                    b"hello",
+                    0,
+                    "visible"
+                )]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([asset_row(
+                    "bravo:skill:alpha:1.0.0",
+                    "bravo",
+                    "skill",
+                    "alpha",
+                    "1.0.0",
+                    5,
+                    b"hello",
+                    0,
+                    "visible"
+                )]),
+                0,
+            ),
+        ],
+    );
+    let all = runtime()
+        .block_on(store.list_all_assets())
+        .expect("list all");
+    assert_eq!(all.len(), 2);
+    // acme < bravo by tenant_id, regardless of per-DB fetch order.
+    assert_eq!(all[0].tenant_id, "acme");
+    assert_eq!(all[1].tenant_id, "bravo");
+}
+
+/// The #367 keystone: `move_asset_channel_if_resolvable` builds a single-batch
+/// guarded upsert whose resolvability check (`EXISTS(version) AND NOT
+/// EXISTS(yanked variant)`) and the channel write share one transaction, so a
+/// concurrent yank/delete can never strand the channel. A RETURNING row is the
+/// durable move; S0 carries the prior target for audit.
+#[test]
+fn move_asset_channel_if_resolvable_guards_and_moves() {
+    let channel = StoredAssetChannel {
+        id: "acme:skill:greeter:stable".to_string(),
+        tenant_id: "acme".to_string(),
+        asset_type: "skill".to_string(),
+        name: "greeter".to_string(),
+        channel: "stable".to_string(),
+        version: "2.0.0".to_string(),
+        updated_at_unix: 200,
+    };
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // S0 prior target: the channel pointed at 1.0.0.
+            proxy_statement_result(serde_json::json!([{ "version": "1.0.0" }]), 0),
+            // S1 guarded upsert: resolvable -> RETURNING the new version.
+            proxy_statement_result(serde_json::json!([{ "version": "2.0.0" }]), 1),
+        ])],
+    );
+
+    let outcome = runtime()
+        .block_on(store.move_asset_channel_if_resolvable(channel))
+        .expect("move");
+    match outcome {
+        ChannelMoveOutcome::Moved { prior_version } => {
+            assert_eq!(prior_version.as_deref(), Some("1.0.0"));
+        }
+        other => panic!("expected Moved, got {other:?}"),
+    }
+    let body = body_json(&proxy_transport.recorded()[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let guard = body["statements"][1]["sql"].as_str().unwrap();
+    assert!(
+        guard.contains("WHERE EXISTS(SELECT 1 FROM stored_assets"),
+        "{guard}"
+    );
+    assert!(guard.contains("AND version = ? AND yanked = 1"), "{guard}");
+    assert!(guard.contains("RETURNING version"), "{guard}");
+}
+
+/// A move whose target version is absent/yanked yields an empty RETURNING set →
+/// the typed `TargetNotResolvable`, nothing written.
+#[test]
+fn move_asset_channel_target_not_resolvable_is_typed() {
+    let channel = StoredAssetChannel {
+        id: "acme:skill:greeter:stable".to_string(),
+        tenant_id: "acme".to_string(),
+        asset_type: "skill".to_string(),
+        name: "greeter".to_string(),
+        channel: "stable".to_string(),
+        version: "9.9.9".to_string(),
+        updated_at_unix: 200,
+    };
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0), // not resolvable
+        ])],
+    );
+    let outcome = runtime()
+        .block_on(store.move_asset_channel_if_resolvable(channel))
+        .expect("move");
+    assert_eq!(outcome, ChannelMoveOutcome::TargetNotResolvable);
+}
+
+/// Yanking a channel-referenced version is fail-closed: rejected with
+/// `ReferencedByChannel`, classified from the atomic state read.
+#[test]
+fn set_asset_version_yank_rejected_when_referenced() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(
+                serde_json::json!([{ "variant_count": 2, "referenced_count": 1 }]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([]), 0), // guard blocked the update
+        ])],
+    );
+    let outcome = runtime()
+        .block_on(store.set_asset_version_yank("acme", "skill", "greeter", "1.0.0", true, 300))
+        .expect("yank");
+    assert_eq!(outcome, VersionYankOutcome::ReferencedByChannel);
+}
+
+/// An unreferenced yank applies to every variant; the S1 guard carries the
+/// `? = '0'` short-circuit so an UNyank skips the reference check entirely.
+#[test]
+fn set_asset_version_yank_applies_over_tenant_binding() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(
+                serde_json::json!([{ "variant_count": 2, "referenced_count": 0 }]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([{ "id": "a" }, { "id": "b" }]), 2),
+        ])],
+    );
+    let outcome = runtime()
+        .block_on(store.set_asset_version_yank("acme", "skill", "greeter", "1.0.0", true, 300))
+        .expect("yank");
+    assert_eq!(outcome, VersionYankOutcome::Applied { variants: 2 });
+    let guard = body_json(&proxy_transport.recorded()[0])["statements"][1]["sql"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        guard.contains("? = '0' OR NOT EXISTS(SELECT 1 FROM asset_channels"),
+        "{guard}"
+    );
+}
+
+/// Deleting the LAST resolvable variant of a channel-referenced version is
+/// rejected with `BlockedByChannel` (the #367 invariant from the delete side).
+#[test]
+fn delete_asset_variant_blocked_when_last_resolvable_and_referenced() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(
+                serde_json::json!([{
+                    "id_present": 1, "other_resolvable": 0, "referenced_count": 1
+                }]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([]), 0),
+        ])],
+    );
+    let outcome = runtime()
+        .block_on(store.delete_asset_variant_if_unreferenced(
+            "acme:skill:greeter:1.0.0",
+            "acme",
+            "skill",
+            "greeter",
+            "1.0.0",
+        ))
+        .expect("variant delete");
+    assert_eq!(outcome, VariantDeleteOutcome::BlockedByChannel);
+}
+
+/// `promote_pending_asset_visibility` locates the holding tenant DB (fan-out
+/// probe), then runs the guarded CAS: a RETURNING row is the durable promotion.
+#[test]
+fn promote_pending_asset_visibility_promotes_over_located_binding() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            // locate probe: found in acme's DB.
+            proxy_query_ok(serde_json::json!([{ "id": "acme:skill:greeter:1.0.0" }]), 0),
+            // CAS batch: S0 RETURNING the new state, S1 unused.
+            proxy_batch_ok(vec![
+                proxy_statement_result(serde_json::json!([{ "visibility": "visible" }]), 1),
+                proxy_statement_result(serde_json::json!([{ "visibility": "visible" }]), 0),
+            ]),
+        ],
+    );
+    let outcome = runtime()
+        .block_on(store.promote_pending_asset_visibility(
+            "acme:skill:greeter:1.0.0",
+            AssetPromotionTarget::Visible,
+            400,
+        ))
+        .expect("promote");
+    assert_eq!(
+        outcome,
+        AssetVisibilityPromotionOutcome::Promoted {
+            to: AssetVisibility::Visible
+        }
+    );
+    let cas = body_json(&proxy_transport.recorded()[1]);
+    let sql = cas["statements"][0]["sql"].as_str().unwrap();
+    assert!(
+        sql.contains("WHERE id = ? AND visibility = 'pending_scan'"),
+        "{sql}"
+    );
+    assert!(sql.contains("RETURNING visibility"), "{sql}");
+}
+
+/// A promote for an id no provisioned tenant DB holds is `NotFound` (the CAS
+/// batch is never issued).
+#[test]
+fn promote_pending_asset_visibility_absent_is_not_found() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)], // locate probe: not found
+    );
+    let outcome = runtime()
+        .block_on(store.promote_pending_asset_visibility(
+            "ghost:skill:x:1.0.0",
+            AssetPromotionTarget::Visible,
+            400,
+        ))
+        .expect("promote absent");
+    assert_eq!(outcome, AssetVisibilityPromotionOutcome::NotFound);
+    assert_eq!(
+        proxy_transport.recorded().len(),
+        1,
+        "only the locate probe, no CAS"
+    );
+}
+
+/// Fail-closed (#366/#378): a terminal row whose persisted visibility token is
+/// unknown resolves to `Quarantined`, never silently downloadable.
+#[test]
+fn promote_fail_closed_unknown_token_is_quarantined() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([{ "id": "acme:skill:greeter:1.0.0" }]), 0),
+            proxy_batch_ok(vec![
+                // CAS did not fire (row is terminal, not pending_scan).
+                proxy_statement_result(serde_json::json!([]), 0),
+                // ... and its persisted token is corrupt/unknown -> Quarantined.
+                proxy_statement_result(serde_json::json!([{ "visibility": "corrupted" }]), 0),
+            ]),
+        ],
+    );
+    let outcome = runtime()
+        .block_on(store.promote_pending_asset_visibility(
+            "acme:skill:greeter:1.0.0",
+            AssetPromotionTarget::Visible,
+            400,
+        ))
+        .expect("promote terminal");
+    assert_eq!(
+        outcome,
+        AssetVisibilityPromotionOutcome::NotPending {
+            current: AssetVisibility::Quarantined
+        }
+    );
+}
+
+/// `list_retention_policies` routes to the tenant binding and orders by scope.
+#[test]
+fn list_retention_policies_routes_and_orders() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([{
+                "id": "acme:asset:*",
+                "tenant_id": "acme",
+                "resource_type": "asset",
+                "scope": "*",
+                "keep_last_n": 5,
+                "max_age_secs": null,
+                "min_age_secs": 3600,
+                "created_at_unix": 100,
+                "updated_at_unix": 100,
+            }]),
+            0,
+        )],
+    );
+    let policies: Vec<StoredRetentionPolicy> = runtime()
+        .block_on(store.list_retention_policies("acme", "asset"))
+        .expect("list retention");
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].keep_last_n, Some(5));
+    assert_eq!(policies[0].max_age_secs, None);
+    assert_eq!(policies[0].min_age_secs, 3600);
+    let request = &proxy_transport.recorded()[0];
+    assert_eq!(body_json(request)["database"], "TENANT_DB_ACME");
+    assert!(
+        body_sql(request).contains("ORDER BY scope ASC"),
+        "{}",
+        body_sql(request)
+    );
+}
+
+/// `upsert_asset_channel` routes to the channel's tenant binding as a
+/// move-by-upsert on the id.
+#[test]
+fn upsert_asset_channel_routes_to_tenant_binding() {
+    let channel = StoredAssetChannel {
+        id: "acme:skill:greeter:latest".to_string(),
+        tenant_id: "acme".to_string(),
+        asset_type: "skill".to_string(),
+        name: "greeter".to_string(),
+        channel: "latest".to_string(),
+        version: "1.0.0".to_string(),
+        updated_at_unix: 100,
+    };
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 1)],
+    );
+    runtime()
+        .block_on(store.upsert_asset_channel(channel))
+        .expect("upsert channel");
+    let request = &proxy_transport.recorded()[0];
+    assert_eq!(body_json(request)["database"], "TENANT_DB_ACME");
+    let sql = body_sql(request);
+    assert!(sql.starts_with("INSERT INTO asset_channels"), "{sql}");
+    assert!(sql.contains("ON CONFLICT (id) DO UPDATE SET"), "{sql}");
+}
+
+/// `list_all_asset_channels` fans out and re-sorts to the Postgres order.
+#[test]
+fn list_all_asset_channels_fans_out_and_sorts() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([channel_row(
+                    "acme:skill:greeter:latest",
+                    "acme",
+                    "skill",
+                    "greeter",
+                    "latest",
+                    "1.0.0"
+                )]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([channel_row(
+                    "bravo:skill:greeter:latest",
+                    "bravo",
+                    "skill",
+                    "greeter",
+                    "latest",
+                    "2.0.0"
+                )]),
+                0,
+            ),
+        ],
+    );
+    let channels = runtime()
+        .block_on(store.list_all_asset_channels())
+        .expect("list all channels");
+    assert_eq!(channels.len(), 2);
+    assert_eq!(channels[0].tenant_id, "acme");
+    assert_eq!(channels[1].tenant_id, "bravo");
+}
+
+/// Without a bound proxy Worker the whole atomic asset family fails closed with
+/// the typed unimplemented-surface error and never touches the network — exactly
+/// like the wallet/usage families on a REST-only deployment.
+#[test]
+fn asset_family_without_proxy_is_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let create =
+        runtime()
+            .block_on(store.create_asset_within_quota(
+                sample_asset("acme:skill:greeter:1.0.0", "acme", 5),
+                None,
+            ))
+            .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&create), "{create:?}");
+
+    let get = runtime()
+        .block_on(store.get_asset("acme:skill:greeter:1.0.0"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&get), "{get:?}");
+
+    let list = runtime()
+        .block_on(store.list_assets("acme", None))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list), "{list:?}");
+
+    let mv = runtime()
+        .block_on(store.move_asset_channel_if_resolvable(StoredAssetChannel {
+            id: "acme:skill:greeter:stable".to_string(),
+            tenant_id: "acme".to_string(),
+            asset_type: "skill".to_string(),
+            name: "greeter".to_string(),
+            channel: "stable".to_string(),
+            version: "1.0.0".to_string(),
+            updated_at_unix: 100,
+        }))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&mv), "{mv:?}");
+
+    let promote = runtime()
+        .block_on(store.promote_pending_asset_visibility(
+            "acme:skill:greeter:1.0.0",
+            AssetPromotionTarget::Visible,
+            1,
+        ))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&promote), "{promote:?}");
+
+    let retention = runtime()
+        .block_on(store.list_retention_policies("acme", "asset"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(
+        is_unimplemented_backend_surface(&retention),
+        "{retention:?}"
+    );
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented asset path must not hit the network"
     );
 }
 

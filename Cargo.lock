@@ -1419,6 +1419,7 @@ name = "ferrogate-storage"
 version = "2026.7.9"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "chrono-tz",
  "croner",

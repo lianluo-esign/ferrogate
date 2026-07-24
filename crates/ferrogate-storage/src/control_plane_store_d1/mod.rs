@@ -195,6 +195,25 @@
 //!   database-per-tenant divergence). The process-local `usage_aggregates` mirror
 //!   below stays the read-of-record for `usage_aggregates`/committed-token sum.
 //!   Fail closed (typed unimplemented-surface) with no proxy; see `usage.rs`.
+//! - Assets + channels + retention (#456, TENANT databases, proxy Worker): the
+//!   hosted-asset storage family (issues #176/#260/#263/#366/#371). Tenant-routed
+//!   writes/reads (`upsert_asset`, `create_asset_within_quota`/`_if_absent`,
+//!   `list_assets`/`list_withheld_assets`, `tenant_asset_storage_bytes_used`,
+//!   channel + retention upserts/lists); id-only reads/deletes (`get_asset`,
+//!   `delete_asset`, `delete_asset_channel`, `promote_pending_asset_visibility`)
+//!   fan out to locate the owning tenant DB; the operator cross-tenant lists
+//!   (`list_all_assets`/`list_all_asset_channels`) fan out + re-sort to the
+//!   Postgres order. `create_asset_within_quota` mirrors the wallet reserve —
+//!   a `CAST(? AS INTEGER)` quota guard admitting only the fitting set, with a
+//!   bare `ON CONFLICT DO NOTHING` mapping a dual-unique-constraint first-push
+//!   loser to `AlreadyExists`/`Ok(false)` (the #369 fix) not a raw error. The
+//!   #367 coordination ops (`move_asset_channel_if_resolvable`,
+//!   `set_asset_version_yank`, `delete_asset_variant_if_unreferenced`) replicate
+//!   the Postgres `FOR UPDATE` cross-table transitions as guarded single-batch
+//!   statements (the resolvability/reference guard and the write share one
+//!   implicit SQLite transaction). Inline BYTEA `content` rides a base64 TEXT
+//!   column; `promote` fails closed to `Quarantined` on an unknown token. Fail
+//!   closed (typed unimplemented-surface) with no proxy; see `assets.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -240,12 +259,6 @@
 //!   `WorkflowBudgetDebit` caller is not written to handle) or a server-side
 //!   retry loop — a concurrency-contract change deferred rather than landed
 //!   silently. Also needs a new control-DB table + the per-tenant routing call.
-//! - assets/channels/retention, deferred as a whole family: its coordination
-//!   ops (`create_asset_within_quota`, `move_asset_channel_if_resolvable`,
-//!   `set_asset_version_yank`, `delete_asset_variant_if_unreferenced`,
-//!   `promote_pending_asset_visibility`) are atomic `FOR UPDATE` cross-table
-//!   transitions (write-skew close-out) — the same transaction gap that blocks
-//!   wallets — plus inline BYTEA content the document pattern serves poorly.
 //! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
 //!   observed agent presence, MCP identity.
 //!
@@ -274,6 +287,7 @@ use ferrogate_cloudflare::{CloudflareError, D1ProxyClient, D1ProxyStatement};
 use super::control_plane_store::ControlPlaneStore;
 use super::*;
 
+mod assets;
 mod auth_quota;
 mod billing;
 mod client;
@@ -751,132 +765,148 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         self.list_plans_async().await
     }
 
-    // --- Assets (UNIMPLEMENTED) ---
+    // --- Assets + channels + retention (IMPLEMENTED, tenant-DB routed,
+    // issue #456) ---
+    //
+    // The hosted-asset storage family routed through the proxy binding onto
+    // per-tenant databases (tenant-routed writes/reads; id-only reads/deletes +
+    // the operator cross-tenant lists fan out). The #367 coordination ops
+    // (create-within-quota, move-if-resolvable, yank/unyank, variant delete,
+    // visibility promotion) mirror the Postgres `FOR UPDATE` transactions as
+    // guarded single-`/d1/batch` transitions; inline BYTEA `content` rides a
+    // base64 TEXT column. See `assets.rs`.
 
-    async fn upsert_asset(&self, _asset: StoredAsset) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_asset"))
+    async fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
+        self.upsert_asset_d1_async(&asset).await
     }
 
-    async fn create_asset_if_absent(&self, _asset: StoredAsset) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("create_asset_if_absent"))
+    async fn create_asset_if_absent(&self, asset: StoredAsset) -> Result<bool, StorageError> {
+        self.create_asset_if_absent_d1_async(&asset).await
     }
 
     async fn create_asset_within_quota(
         &self,
-        _asset: StoredAsset,
-        _quota_bytes: Option<u64>,
+        asset: StoredAsset,
+        quota_bytes: Option<u64>,
     ) -> Result<AssetQuotaAdmission, StorageError> {
-        Err(unimplemented_surface("create_asset_within_quota"))
+        self.create_asset_within_quota_d1_async(&asset, quota_bytes)
+            .await
     }
 
-    async fn get_asset(&self, _id: &str) -> Result<Option<StoredAsset>, StorageError> {
-        Err(unimplemented_surface("get_asset"))
+    async fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        self.get_asset_d1_async(id).await
     }
 
     async fn list_assets(
         &self,
-        _tenant_id: &str,
-        _asset_type: Option<&str>,
+        tenant_id: &str,
+        asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
-        Err(unimplemented_surface("list_assets"))
+        self.list_assets_d1_async(tenant_id, asset_type).await
     }
 
     async fn list_withheld_assets(
         &self,
-        _tenant_id: &str,
-        _asset_type: Option<&str>,
+        tenant_id: &str,
+        asset_type: Option<&str>,
     ) -> Result<Vec<StoredAsset>, StorageError> {
-        Err(unimplemented_surface("list_withheld_assets"))
+        self.list_withheld_assets_d1_async(tenant_id, asset_type)
+            .await
     }
 
-    async fn tenant_asset_storage_bytes_used(&self, _tenant_id: &str) -> Result<u64, StorageError> {
-        Err(unimplemented_surface("tenant_asset_storage_bytes_used"))
+    async fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> Result<u64, StorageError> {
+        self.tenant_asset_storage_bytes_used_d1_async(tenant_id)
+            .await
     }
 
-    async fn delete_asset(&self, _id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_asset"))
+    async fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_asset_d1_async(id).await
     }
 
-    async fn upsert_asset_channel(&self, _channel: StoredAssetChannel) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_asset_channel"))
+    async fn upsert_asset_channel(&self, channel: StoredAssetChannel) -> Result<(), StorageError> {
+        self.upsert_asset_channel_d1_async(&channel).await
     }
 
     async fn list_asset_channels(
         &self,
-        _tenant_id: &str,
-        _asset_type: &str,
-        _name: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
     ) -> Result<Vec<StoredAssetChannel>, StorageError> {
-        Err(unimplemented_surface("list_asset_channels"))
+        self.list_asset_channels_d1_async(tenant_id, asset_type, name)
+            .await
     }
 
-    async fn delete_asset_channel(&self, _id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_asset_channel"))
+    async fn delete_asset_channel(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_asset_channel_d1_async(id).await
     }
 
     async fn move_asset_channel_if_resolvable(
         &self,
-        _channel: StoredAssetChannel,
+        channel: StoredAssetChannel,
     ) -> Result<ChannelMoveOutcome, StorageError> {
-        Err(unimplemented_surface("move_asset_channel_if_resolvable"))
+        self.move_asset_channel_if_resolvable_d1_async(&channel)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn set_asset_version_yank(
         &self,
-        _tenant_id: &str,
-        _asset_type: &str,
-        _name: &str,
-        _version: &str,
-        _yanked: bool,
-        _now_unix: i64,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+        yanked: bool,
+        now_unix: i64,
     ) -> Result<VersionYankOutcome, StorageError> {
-        Err(unimplemented_surface("set_asset_version_yank"))
+        self.set_asset_version_yank_d1_async(tenant_id, asset_type, name, version, yanked, now_unix)
+            .await
     }
 
     async fn delete_asset_variant_if_unreferenced(
         &self,
-        _id: &str,
-        _tenant_id: &str,
-        _asset_type: &str,
-        _name: &str,
-        _version: &str,
+        id: &str,
+        tenant_id: &str,
+        asset_type: &str,
+        name: &str,
+        version: &str,
     ) -> Result<VariantDeleteOutcome, StorageError> {
-        Err(unimplemented_surface(
-            "delete_asset_variant_if_unreferenced",
-        ))
+        self.delete_asset_variant_if_unreferenced_d1_async(id, tenant_id, asset_type, name, version)
+            .await
     }
 
     async fn promote_pending_asset_visibility(
         &self,
-        _id: &str,
-        _target: AssetPromotionTarget,
-        _now_unix: i64,
+        id: &str,
+        target: AssetPromotionTarget,
+        now_unix: i64,
     ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
-        Err(unimplemented_surface("promote_pending_asset_visibility"))
+        self.promote_pending_asset_visibility_d1_async(id, target, now_unix)
+            .await
     }
 
     async fn upsert_retention_policy(
         &self,
-        _policy: StoredRetentionPolicy,
+        policy: StoredRetentionPolicy,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_retention_policy"))
+        self.upsert_retention_policy_d1_async(&policy).await
     }
 
     async fn list_retention_policies(
         &self,
-        _tenant_id: &str,
-        _resource_type: &str,
+        tenant_id: &str,
+        resource_type: &str,
     ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
-        Err(unimplemented_surface("list_retention_policies"))
+        self.list_retention_policies_d1_async(tenant_id, resource_type)
+            .await
     }
 
     async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
-        Err(unimplemented_surface("list_all_assets"))
+        self.list_all_assets_d1_async().await
     }
 
     async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
-        Err(unimplemented_surface("list_all_asset_channels"))
+        self.list_all_asset_channels_d1_async().await
     }
 
     // --- Usage rollups (IMPLEMENTED, tenant-DB routed, issue #456) ---
