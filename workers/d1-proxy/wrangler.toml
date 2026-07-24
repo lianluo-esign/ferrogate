@@ -29,6 +29,28 @@ binding = "DB"
 database_name = "ferrogate-control"
 database_id = "REPLACE_WITH_CONTROL_DATABASE_UUID"
 
+# --- Per-tenant D1 bindings (issue #455) ------------------------------------
+# The database-per-tenant topology keeps a tenant's financial state (wallets +
+# reservations) in that tenant's OWN D1 database. The Workers runtime can reach
+# a D1 database ONLY through a statically-declared binding (there is no runtime
+# "open database by id" API), so each tenant database is bound below under a
+# name the Rust side derives from the tenant id: `TENANT_DB_<TENANT_ID>`, with
+# `-` folded to `_` and uppercased (see `tenant_database_binding` in
+# crates/ferrogate-storage/.../control_plane_store_d1/mod.rs). A tenant-scoped
+# request sets `{ "database": "TENANT_DB_ACME", ... }`; the Worker resolves
+# env["TENANT_DB_ACME"]. Omitting `database` (or "DB") targets the control DB.
+#
+# ONBOARDING A TENANT therefore requires adding its binding here + redeploying
+# (`wrangler deploy`) — the same per-binding, redeploy-to-onboard model the #423
+# Secrets-Store bindings use. The gate fills `database_id` LIVE from the uuid the
+# provisioner recorded in the tenant->database registry. Example (commented; the
+# gate uncomments + fills one block per provisioned tenant):
+#
+# [[d1_databases]]
+# binding = "TENANT_DB_ACME"
+# database_name = "ferrogate-tenant-acme"
+# database_id = "REPLACE_WITH_TENANT_ACME_DATABASE_UUID"
+
 # --- Observability ----------------------------------------------------------
 [observability]
 enabled = true

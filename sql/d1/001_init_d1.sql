@@ -659,6 +659,67 @@ CREATE TABLE IF NOT EXISTS self_hosted_run_dispatches (
 CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatches_queued
     ON self_hosted_run_dispatches(queued_at_unix, dispatch_id);
 
+-- --- Wallets + reservations + settlements (issue #455) ---
+--
+-- Per-tenant prepaid-credit FINANCIAL state (issues #169/#281). Unlike the
+-- account-global billing/guardrail families above, these are TENANT-SCOPED: in
+-- the database-per-tenant topology a tenant's wallet, its live holds, and its
+-- settlement ledger live in THAT tenant's own D1 database (never the control
+-- database), so the tables carry no routing FK to `tenants` (physical
+-- isolation). Balances are integer credits (no float drift). Ported column-for-
+-- column from the Postgres wallets/wallet_reservations/wallet_settlements tables
+-- (SQLite divergences: BIGINT->INTEGER, BOOLEAN->INTEGER 0/1, no cross-table FK)
+-- because the reserve-no-oversell guard does real SQL arithmetic on
+-- balance_credits and SUM(amount_credits), which a `*_json` document could not
+-- serve. The atomic reserve/settle/release transitions run through the
+-- proxy-Worker `/d1/batch` + `/d1/query` binding (issue #450) selected onto the
+-- tenant database (issue #455); a REST-only deployment leaves them fail-closed.
+CREATE TABLE IF NOT EXISTS wallets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL UNIQUE,
+    balance_credits INTEGER NOT NULL DEFAULT 0,
+    auto_recharge_threshold_credits INTEGER,
+    auto_recharge_amount_credits INTEGER,
+    dunning INTEGER NOT NULL DEFAULT 0,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+-- One durable row per hold. `settlement_id` (equal to the hold id) is set when
+-- the hold captures, linking the ledger charge back to its originating hold.
+-- The active/unexpired holds are summed against `balance_credits` to compute
+-- AVAILABLE balance for the no-oversell reserve guard.
+CREATE TABLE IF NOT EXISTS wallet_reservations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    amount_credits INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at_unix INTEGER NOT NULL,
+    settlement_id TEXT,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_tenant_status
+    ON wallet_reservations(tenant_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_active_expiry
+    ON wallet_reservations(expires_at_unix);
+
+-- One durable row per settled debit/credit. Claiming this id and moving the
+-- balance commit together (one atomic /d1/batch), so replay returns the first
+-- outcome instead of debiting twice (idempotent through the primary key).
+CREATE TABLE IF NOT EXISTS wallet_settlements (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    delta_credits INTEGER NOT NULL,
+    balance_after_credits INTEGER,
+    created_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_settlements_tenant_time
+    ON wallet_settlements(tenant_id, created_at_unix DESC);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

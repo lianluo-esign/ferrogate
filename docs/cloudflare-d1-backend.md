@@ -13,8 +13,11 @@ The **proxy-Worker D1 binding** (`workers/d1-proxy/`) + its Rust client
 through it (`append_billing_event_with_outbox_enqueue`) landed as the keystone
 slice (issue #450); the guardrail binding CAS transitions
 (`activate`/`archive`/`restore`) were wired through the same proxy `/d1/query`
-binding next (issue #454). Builds on the shared Cloudflare client (#405), the
-`ControlPlaneStore` trait extraction (#419), and the #425 dispatch consolidation.
+binding next (issue #454); and the FIRST **tenant-scoped** atomic family —
+prepaid-credit wallets (`reserve`/`settle`/`release` + wallet CRUD) — landed over
+**per-tenant proxy bindings** (issue #455). Builds on the shared Cloudflare client
+(#405), the `ControlPlaneStore` trait extraction (#419), and the #425 dispatch
+consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
 entities in **per-tenant Cloudflare D1 databases** driven over the D1 REST
@@ -31,6 +34,7 @@ row-level isolation (`tenant_id` columns + RLS).
 | Backend (`D1ControlPlaneStore`, registry, provisioning) | `crates/ferrogate-storage/src/control_plane_store_d1/` |
 | Atomic op wired through the proxy (`append_billing_event_with_outbox_enqueue`) | `crates/ferrogate-storage/src/control_plane_store_d1/billing.rs` |
 | Guardrail binding CAS wired through the proxy (`activate`/`archive`/`restore`, #454) | `crates/ferrogate-storage/src/control_plane_store_d1/guardrail.rs` |
+| Tenant-scoped wallets/reservations over per-tenant proxy bindings (#455) | `crates/ferrogate-storage/src/control_plane_store_d1/wallet.rs` |
 | SQLite-dialect core schema | `sql/d1/001_init_d1.sql` |
 | Mocked-transport tests + portability matrix | `crates/ferrogate-storage/src/control_plane_store_d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_proxy_test.rs` |
 
@@ -279,13 +283,61 @@ the `binding_json` document the read path deserializes, with
 guard and reads use. Guardrail configuration is **account-global** (like plans/RBAC), so
 the proxy's control-DB binding serves these directly — no per-tenant binding is required.
 
-**Deferred (still erroring), to be wired through the proxy in follow-ups:** wallets +
-wallet reservations, payment methods/attempts, and workflow run budgets. These are
-per-tenant financial/run state whose tables are not yet in the D1 schema; unlike the
-account-global billing/guardrail families, a faithful database-per-tenant topology places
-them in a tenant's own D1 database, which this slice's Worker does not bind (it binds only
-the control database) — so they need the **per-tenant proxy binding** (an enumerated #450
-follow-up). Workflow-budget `debit`/`topup` additionally rely on Postgres
+### Wired atomic family: tenant-scoped wallets + reservations (issue #455)
+
+The FIRST **tenant-scoped** atomic family (in `control_plane_store_d1/wallet.rs`).
+Unlike the account-global billing/guardrail families, a tenant's wallet, its live holds,
+and its settlement ledger live in **that tenant's own D1 database** in the
+database-per-tenant topology — so the proxy must run these against a *selected* database,
+not the fixed control `env.DB`.
+
+**Per-tenant routing mechanism (binding-name map).** The Workers runtime can reach a D1
+database **only through a statically-declared binding** — there is no runtime
+"open a database by id" API (verified against `@cloudflare/workers-types`' `D1Database`,
+which exposes only `prepare`/`batch`/`exec`/`withSession`, and the D1 Worker API docs). So
+the proxy Worker binds each tenant database under its own name and the request selects it
+by **name**: `POST /d1/batch` / `/d1/query` now accept an optional `database` field
+(`{ "database": "TENANT_DB_ACME", ... }`); the Worker resolves `env[name]`, duck-typing it
+back to a `D1Database` (so a caller can never coerce a non-D1 binding such as the
+`D1_PROXY_TOKEN` string into a database handle). An omitted/empty `database` (or `"DB"`)
+targets the control database, so the #450/#454 control-DB path is byte-for-byte unchanged.
+The Rust side derives the binding name deterministically from the tenant id —
+`tenant_database_binding("acme") = "TENANT_DB_ACME"` (uppercased, `-`→`_`, prefixed so it
+is a valid wrangler identifier that cannot collide with `DB`/`D1_PROXY_TOKEN`). The
+**request-param-carries-a-database-id** alternative was rejected: the runtime has no
+select-by-id, and a uuid is not a valid binding identifier.
+
+**Onboarding a tenant therefore requires adding its `[[d1_databases]]` binding to
+`workers/d1-proxy/wrangler.toml` and redeploying** — the same per-binding,
+redeploy-to-onboard reality the #423 Secrets-Store bindings have. `provisioned_tenant_bindings`
+reads the tenant→database registry (#440) to know which bindings should exist.
+
+- `reserve_wallet_credits` (the no-oversell proof) mirrors the Postgres `SELECT ... FOR
+  UPDATE` + sum-live-holds + conditional insert as **one atomic `/d1/batch`** on the tenant
+  binding: an idempotency probe, a guarded `INSERT ... SELECT ... WHERE amount <= balance -
+  SUM(active unexpired holds) ... ON CONFLICT (id) DO NOTHING RETURNING id`, and a
+  wallet-state read. D1 has no row lock, but a batch is one implicit transaction and SQLite
+  serializes writers per database, so N parallel reserves against a balance affording N-1
+  admit exactly N-1 — no oversell. RETURNING-empty on the guarded insert = not admitted; the
+  sibling state read splits `NoWallet` (no wallet row) from `Insufficient` (available balance
+  reported).
+- `settle_wallet_reservation` / `release_wallet_reservation` carry only a hold id in their
+  trait signature, so they **fan out** over the provisioned tenant bindings to locate the
+  database holding the hold (the established id-only-read fan-out), then run the guarded
+  transition: `settle` captures the hold as one atomic batch (debit wallet + insert ledger row
+  + `active→settled` flip, every statement guarded on the hold still being `active`, so a
+  concurrent settle can never double-debit); `release` is a single guarded
+  `UPDATE ... WHERE status = 'active' RETURNING` CAS.
+- `upsert_wallet`/`get_wallet`/`list_wallet_reservations` route the same way (get/list answer
+  empty for an unprovisioned tenant — opt-in). Every op fails closed with the typed
+  unimplemented-surface error when no proxy Worker is bound.
+
+**Deferred (still erroring), to be wired through the proxy in follow-ups:** the remaining
+wallet surface (`settle_wallet_balance`, `adjust_wallet_balance`, `set_wallet_dunning`,
+`list_wallets`, `sweep_expired_wallet_reservations`), payment methods/attempts, and workflow
+run budgets. `sweep`'s money-safety guard reads `payment_attempts.hold_id`, coupling wallets
+to the (deferred) x402 payment_attempts family; the others are the same tenant-DB pattern and
+land with the payments slice. Workflow-budget `debit`/`topup` additionally rely on Postgres
 `SELECT ... FOR UPDATE`; D1/SQLite has no row lock, so a faithful mirror needs an
 optimistic-CAS guard or a server-side retry loop (a concurrency-contract change), rather
 than a silent divergence.
@@ -306,6 +358,12 @@ than a silent divergence.
 5. Point the Rust `D1ProxyClient` at the deployed Worker origin
    (`https://ferrogate-d1-proxy.<subdomain>.workers.dev`) and construct the store
    with `with_proxy_client`.
+6. **Per tenant (issue #455):** after `provision_tenant_database(tenant_id)` records
+   the tenant's D1 uuid in the registry, add a `[[d1_databases]]` block to
+   `workers/d1-proxy/wrangler.toml` with `binding = "TENANT_DB_<TENANT_ID>"`
+   (`tenant_database_binding` derivation) and that uuid, then `wrangler deploy`.
+   Only after this redeploy can the tenant's wallet `reserve`/`settle`/`release`
+   resolve `env["TENANT_DB_<TENANT_ID>"]`.
 
 ## Implemented vs erroring trait surface (first slice)
 

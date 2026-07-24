@@ -161,6 +161,77 @@ fn query_posts_single_statement_and_decodes_returning_rows() {
 }
 
 #[test]
+fn batch_on_carries_the_selected_database_binding() {
+    // A tenant-scoped batch (issue #455) tags the body with the target binding
+    // NAME; the control-DB default (`None`) omits it.
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{"success":true,"errors":[],"result":[{"results":[],"success":true,"meta":{}}]}"#,
+        ),
+        ok(
+            200,
+            r#"{"success":true,"errors":[],"result":[{"results":[],"success":true,"meta":{}}]}"#,
+        ),
+    ]));
+    let client = proxy_client(transport.clone());
+    let statements = vec![D1ProxyStatement::new(
+        "INSERT INTO wallet_reservations DEFAULT VALUES",
+    )];
+
+    runtime()
+        .block_on(client.batch_on(Some("TENANT_DB_ACME"), &statements))
+        .expect("tenant batch should decode");
+    runtime()
+        .block_on(client.batch_on(None, &statements))
+        .expect("control batch should decode");
+
+    let requests = transport.recorded();
+    // The tenant batch names the binding.
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    // The control-DB batch omits `database` entirely (unchanged #450 wire shape).
+    assert!(body_json(&requests[1]).get("database").is_none());
+    assert!(body_json(&requests[1])["statements"].is_array());
+}
+
+#[test]
+fn query_on_carries_the_selected_database_binding() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{"success":true,"errors":[],"result":{"results":[],"success":true,"meta":{}}}"#,
+        ),
+        ok(
+            200,
+            r#"{"success":true,"errors":[],"result":{"results":[],"success":true,"meta":{}}}"#,
+        ),
+    ]));
+    let client = proxy_client(transport.clone());
+    let statement = D1ProxyStatement::with_params(
+        "UPDATE wallet_reservations SET status = ? WHERE id = ? RETURNING id",
+        vec!["released".to_string(), "hold-1".to_string()],
+    );
+
+    runtime()
+        .block_on(client.query_on(Some("TENANT_DB_ACME"), &statement))
+        .expect("tenant query should decode");
+    runtime()
+        .block_on(client.query_on(None, &statement))
+        .expect("control query should decode");
+
+    let requests = transport.recorded();
+    // The tenant query flattens the statement AND names the binding.
+    let tenant = body_json(&requests[0]);
+    assert_eq!(tenant["database"], "TENANT_DB_ACME");
+    assert_eq!(tenant["params"][1], "hold-1");
+    assert!(tenant["sql"].as_str().unwrap().contains("RETURNING"));
+    // The control query omits `database`; the body is the bare `{ sql, params }`.
+    let control = body_json(&requests[1]);
+    assert!(control.get("database").is_none());
+    assert_eq!(control["params"][0], "released");
+}
+
+#[test]
 fn proxy_bearer_rejection_maps_to_unauthorized() {
     // The Worker's fail-closed 403 (invalid bearer) — even as a bare `{error}`
     // body — maps through the shared envelope path to a typed Unauthorized.

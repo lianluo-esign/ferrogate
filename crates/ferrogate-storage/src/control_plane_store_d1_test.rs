@@ -29,8 +29,8 @@ use crate::{
     StoredBudgetAlertNotification, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
     StoredManagedWorkerTemplate, StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog,
     StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
-    StoredTenantAccount, StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID,
-    D1_TENANT_DATABASE_REGISTRY_KIND,
+    StoredTenantAccount, StoredTenantRoleBinding, StoredWallet, WalletReservationResult,
+    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -2354,6 +2354,447 @@ fn guardrail_cas_without_proxy_is_unimplemented_and_offline() {
     assert!(
         transport.recorded().is_empty(),
         "the unimplemented CAS path must not hit the network"
+    );
+}
+
+// --- Tenant-scoped wallet family over the proxy binding (issue #455) ---
+
+/// A registry with the control DB plus one PROVISIONED tenant ("acme"), whose
+/// derived proxy binding name is `TENANT_DB_ACME`.
+fn tenant_registry() -> D1TenantDatabaseRegistry {
+    let mut registry = D1TenantDatabaseRegistry::with_control_database("control-db");
+    registry
+        .tenant_databases
+        .insert("acme".to_string(), "tenant-acme-db".to_string());
+    registry
+}
+
+/// A `wallet_reservations` row shaped as the proxy Worker serializes it (integer
+/// affinities as JSON numbers, `settlement_id` as null/string).
+fn reservation_row(
+    id: &str,
+    amount: i64,
+    status: &str,
+    expires_at: i64,
+    settlement_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "tenant_id": "acme",
+        "amount_credits": amount,
+        "status": status,
+        "expires_at_unix": expires_at,
+        "settlement_id": settlement_id,
+        "created_at_unix": 100,
+        "updated_at_unix": 100,
+    })
+}
+
+/// The #455 keystone proof: `reserve_wallet_credits` builds the no-oversell
+/// guarded 3-statement atomic batch and routes it onto the TENANT binding
+/// (`TENANT_DB_ACME`), never the REST query API and never the control DB.
+#[test]
+fn reserve_wallet_credits_builds_atomic_batch_on_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // S0 probe: no existing hold for this id.
+            proxy_statement_result(serde_json::json!([]), 0),
+            // S1 guarded insert: RETURNING id -> the guard admitted the hold.
+            proxy_statement_result(serde_json::json!([{ "id": "hold-1" }]), 1),
+            // S2 wallet-state (unused on success).
+            proxy_statement_result(
+                serde_json::json!([{ "balance_credits": 1000, "outstanding_credits": 0 }]),
+                0,
+            ),
+        ])],
+    );
+
+    let result = runtime()
+        .block_on(store.reserve_wallet_credits("hold-1", "acme", 500, 2000, 100))
+        .expect("reserve should succeed");
+    match result {
+        WalletReservationResult::Reserved(hold) => {
+            assert_eq!(hold.id, "hold-1");
+            assert_eq!(hold.tenant_id, "acme");
+            assert_eq!(hold.amount_credits, 500);
+            assert_eq!(hold.status, "active");
+            assert_eq!(hold.expires_at_unix, 2000);
+        }
+        other => panic!("expected Reserved, got {other:?}"),
+    }
+
+    assert!(
+        rest_transport.recorded().is_empty(),
+        "a tenant-scoped wallet op must not touch the REST query API"
+    );
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/batch"));
+    assert_eq!(requests[0].bearer_token, "plaintext-proxy-token");
+    let body = body_json(&requests[0]);
+    // The keystone: the atomic batch is selected onto the TENANT binding.
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let statements = body["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 3, "probe + guarded insert + state read");
+    // S1 carries the reserve-no-oversell guard translated from Postgres
+    // `FOR UPDATE` + SUM(live holds): an available-balance predicate + RETURNING.
+    let guard = statements[1]["sql"].as_str().unwrap();
+    assert!(guard.starts_with("INSERT INTO wallet_reservations"));
+    assert!(guard.contains("<= w.balance_credits - COALESCE("));
+    assert!(guard.contains("status = 'active' AND r.expires_at_unix > ?"));
+    assert!(guard.contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(guard.contains("RETURNING id"));
+    let guard_params = statement_params(&statements[1]);
+    assert_eq!(guard_params[0], "hold-1");
+    assert_eq!(guard_params[1], "acme");
+    assert_eq!(guard_params[2], "500");
+    assert_eq!(guard_params[3], "2000"); // expires_at_unix
+}
+
+/// RETURNING-empty on the guarded insert, with a wallet-state row present, is the
+/// insufficient-balance signal → the typed `Insufficient` outcome carrying the
+/// computed available balance.
+#[test]
+fn reserve_wallet_credits_insufficient_is_typed_result() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0), // no existing
+            proxy_statement_result(serde_json::json!([]), 0), // guard did NOT admit
+            proxy_statement_result(
+                serde_json::json!([{ "balance_credits": 300, "outstanding_credits": 100 }]),
+                0,
+            ),
+        ])],
+    );
+
+    let result = runtime()
+        .block_on(store.reserve_wallet_credits("hold-2", "acme", 500, 2000, 100))
+        .expect("insufficient is an Ok outcome, not an error");
+    match result {
+        WalletReservationResult::Insufficient {
+            available_credits,
+            requested_credits,
+        } => {
+            assert_eq!(available_credits, 200); // balance 300 - 100 outstanding
+            assert_eq!(requested_credits, 500);
+        }
+        other => panic!("expected Insufficient, got {other:?}"),
+    }
+}
+
+/// RETURNING-empty with NO wallet-state row (the tenant never opened a wallet) is
+/// the opt-in `NoWallet` outcome, not an error (issue #169 opt-in wallets).
+#[test]
+fn reserve_wallet_credits_without_wallet_is_no_wallet() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0), // no wallet row
+        ])],
+    );
+
+    let result = runtime()
+        .block_on(store.reserve_wallet_credits("hold-3", "acme", 500, 2000, 100))
+        .expect("no wallet is an Ok outcome");
+    assert!(matches!(result, WalletReservationResult::NoWallet));
+}
+
+/// Re-reserving the same id (the probe hits) returns the existing hold
+/// (idempotent), without consuming the guarded-insert path.
+#[test]
+fn reserve_wallet_credits_idempotent_replay_returns_existing() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(
+                serde_json::json!([reservation_row("hold-1", 500, "active", 2000, None)]),
+                0,
+            ),
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0),
+        ])],
+    );
+
+    let result = runtime()
+        .block_on(store.reserve_wallet_credits("hold-1", "acme", 500, 2000, 100))
+        .expect("replay should return the existing hold");
+    match result {
+        WalletReservationResult::Reserved(hold) => assert_eq!(hold.id, "hold-1"),
+        other => panic!("expected Reserved(existing), got {other:?}"),
+    }
+}
+
+/// `settle_wallet_reservation` locates the holding tenant DB (fan-out read) then
+/// captures the hold as one atomic batch — both routed onto the tenant binding.
+#[test]
+fn settle_wallet_reservation_captures_over_tenant_binding() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            // locate: the fan-out read finds the active hold in acme's DB.
+            proxy_query_ok(
+                serde_json::json!([reservation_row("hold-1", 500, "active", 5000, None)]),
+                0,
+            ),
+            // capture batch: S0 debit (no RETURNING), S1 ledger RETURNING the
+            // post-debit balance, S2 flip active->settled RETURNING the hold.
+            proxy_batch_ok(vec![
+                proxy_statement_result(serde_json::json!([]), 1),
+                proxy_statement_result(serde_json::json!([{ "balance_after_credits": 500 }]), 1),
+                proxy_statement_result(
+                    serde_json::json!([reservation_row(
+                        "hold-1",
+                        500,
+                        "settled",
+                        5000,
+                        Some("hold-1")
+                    )]),
+                    1,
+                ),
+            ]),
+        ],
+    );
+
+    let settlement = runtime()
+        .block_on(store.settle_wallet_reservation("hold-1", 1000))
+        .expect("settle should capture the hold");
+    assert!(settlement.newly_applied);
+    assert_eq!(settlement.settlement.id, "hold-1");
+    assert_eq!(settlement.settlement.delta_credits, -500);
+    assert_eq!(settlement.settlement.balance_after_credits, Some(500));
+    assert_eq!(settlement.reservation.status, "settled");
+
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].url.ends_with("/d1/query"));
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    let capture = body_json(&requests[1]);
+    assert!(requests[1].url.ends_with("/d1/batch"));
+    assert_eq!(capture["database"], "TENANT_DB_ACME");
+    let statements = capture["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 3);
+    // The final CAS flips only from the active state (concurrent-settle safe).
+    let flip = statements[2]["sql"].as_str().unwrap();
+    assert!(flip.contains("SET status = 'settled'"));
+    assert!(flip.contains("WHERE id = ? AND status = 'active'"));
+    assert!(flip.contains("RETURNING"));
+}
+
+/// Replaying an already-settled hold returns the first durable settlement
+/// (`newly_applied = false`) — the locate read short-circuits before any batch.
+#[test]
+fn settle_wallet_reservation_replay_returns_first_settlement() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([reservation_row(
+                    "hold-1",
+                    500,
+                    "settled",
+                    5000,
+                    Some("hold-1")
+                )]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([{
+                    "id": "hold-1", "tenant_id": "acme", "delta_credits": -500,
+                    "balance_after_credits": 500, "created_at_unix": 100
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    let settlement = runtime()
+        .block_on(store.settle_wallet_reservation("hold-1", 1000))
+        .expect("settled replay is not an error");
+    assert!(!settlement.newly_applied);
+    assert_eq!(settlement.settlement.delta_credits, -500);
+    // Two reads (locate + settlement load), NO capture batch.
+    assert_eq!(proxy_transport.recorded().len(), 2);
+    assert!(proxy_transport.recorded()[1].url.ends_with("/d1/query"));
+}
+
+/// `release_wallet_reservation` locates the holding DB then runs the guarded
+/// `active -> released` CAS on the tenant binding.
+#[test]
+fn release_wallet_reservation_cas_over_tenant_binding() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([reservation_row("hold-1", 500, "active", 5000, None)]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([reservation_row("hold-1", 500, "released", 5000, None)]),
+                1,
+            ),
+        ],
+    );
+
+    let released = runtime()
+        .block_on(store.release_wallet_reservation("hold-1", 1000))
+        .expect("release should cancel the hold");
+    assert_eq!(released.status, "released");
+
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2);
+    let cas = body_json(&requests[1]);
+    assert_eq!(cas["database"], "TENANT_DB_ACME");
+    let sql = cas["sql"].as_str().unwrap();
+    assert!(sql.contains("SET status = 'released'"));
+    assert!(sql.contains("WHERE id = ? AND status = 'active' RETURNING"));
+}
+
+/// Releasing a settled hold is a typed `Conflict` (a captured spend is
+/// irreversible) — detected on the locate read, no CAS attempted.
+#[test]
+fn release_wallet_reservation_on_settled_is_conflict() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([reservation_row(
+                "hold-1",
+                500,
+                "settled",
+                5000,
+                Some("hold-1")
+            )]),
+            0,
+        )],
+    );
+
+    let error = runtime()
+        .block_on(store.release_wallet_reservation("hold-1", 1000))
+        .expect_err("cannot release a settled hold");
+    assert!(matches!(error, StorageError::Conflict(_)), "{error:?}");
+    assert_eq!(
+        proxy_transport.recorded().len(),
+        1,
+        "only the locate read ran"
+    );
+}
+
+/// `upsert_wallet` + `get_wallet` both route to the tenant binding; `dunning`'s
+/// SQLite 0/1 affinity decodes back to bool.
+#[test]
+fn wallet_crud_routes_to_the_tenant_binding() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([]), 1), // upsert
+            proxy_query_ok(
+                serde_json::json!([{
+                    "id": "acme", "tenant_id": "acme", "balance_credits": 1000,
+                    "auto_recharge_threshold_credits": null, "auto_recharge_amount_credits": null,
+                    "dunning": 0, "created_at_unix": 100, "updated_at_unix": 100
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    let wallet = StoredWallet {
+        id: "acme".into(),
+        tenant_id: "acme".into(),
+        balance_credits: 1000,
+        auto_recharge_threshold_credits: None,
+        auto_recharge_amount_credits: None,
+        dunning: false,
+        created_at_unix: 100,
+        updated_at_unix: 100,
+    };
+    runtime()
+        .block_on(store.upsert_wallet(wallet))
+        .expect("upsert should route to the tenant DB");
+    let loaded = runtime()
+        .block_on(store.get_wallet("acme"))
+        .expect("get should route")
+        .expect("wallet present");
+    assert_eq!(loaded.balance_credits, 1000);
+    assert!(!loaded.dunning);
+
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2);
+    let upsert = body_json(&requests[0]);
+    assert_eq!(upsert["database"], "TENANT_DB_ACME");
+    assert!(upsert["sql"]
+        .as_str()
+        .unwrap()
+        .starts_with("INSERT INTO wallets"));
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_ACME");
+}
+
+/// `get_wallet` for an UNPROVISIONED tenant is `Ok(None)` (opt-in), and makes no
+/// network round trip.
+#[test]
+fn get_wallet_unprovisioned_tenant_is_none() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let loaded = runtime()
+        .block_on(store.get_wallet("ghost"))
+        .expect("get on an unprovisioned tenant is not an error");
+    assert!(loaded.is_none());
+    assert!(
+        proxy_transport.recorded().is_empty(),
+        "an unprovisioned read makes no round trip"
+    );
+}
+
+/// Reserving for an UNPROVISIONED tenant (no tenant DB to hold the wallet) is a
+/// typed `NotFound` — a database-per-tenant divergence from Postgres's NoWallet.
+#[test]
+fn reserve_wallet_credits_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.reserve_wallet_credits("hold-1", "ghost", 500, 2000, 100))
+        .expect_err("cannot reserve against an unprovisioned tenant");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// Without a bound proxy Worker the whole reserve/settle/release trio fails
+/// closed with the typed unimplemented-surface error and never hits the network,
+/// exactly like the still-deferred atomic families.
+#[test]
+fn wallet_atomic_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let reserve = runtime()
+        .block_on(store.reserve_wallet_credits("hold-1", "acme", 500, 2000, 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&reserve), "{reserve:?}");
+
+    let settle = runtime()
+        .block_on(store.settle_wallet_reservation("hold-1", 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&settle), "{settle:?}");
+
+    let release = runtime()
+        .block_on(store.release_wallet_reservation("hold-1", 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&release), "{release:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented wallet path must not hit the network"
     );
 }
 

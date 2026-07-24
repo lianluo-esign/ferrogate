@@ -47,6 +47,52 @@ impl D1ControlPlaneStore {
             })
     }
 
+    /// The proxy-Worker binding NAME for a tenant's own D1 database when the
+    /// tenant is PROVISIONED (present in the registry, so a binding was added +
+    /// redeployed for it), else `None`. Validates the tenant id first. Used by
+    /// opt-in reads (`get_wallet`, `list_wallet_reservations`) that answer
+    /// empty for an unprovisioned tenant rather than erroring.
+    pub(super) fn tenant_proxy_binding_optional(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        validate_tenant_id(tenant_id)?;
+        let registry = self.registry.lock().map_err(|_| poisoned_registry_lock())?;
+        Ok(registry
+            .tenant_databases
+            .contains_key(tenant_id)
+            .then(|| tenant_database_binding(tenant_id)))
+    }
+
+    /// The proxy-Worker binding NAME for a tenant's own D1 database (issue #455
+    /// tenant-scoped atomic routing), REQUIRING the tenant to be provisioned. A
+    /// tenant with no provisioned database is a typed `NotFound`, mirroring
+    /// [`database_for_tenant`](Self::database_for_tenant).
+    pub(super) fn tenant_proxy_binding(&self, tenant_id: &str) -> Result<String, StorageError> {
+        self.tenant_proxy_binding_optional(tenant_id)?
+            .ok_or_else(|| {
+                StorageError::NotFound(format!(
+                    "no provisioned D1 database for tenant {tenant_id} \
+                     (call provision_tenant_database first)"
+                ))
+            })
+    }
+
+    /// Every provisioned tenant's `(tenant_id, proxy binding name)` in registry
+    /// order — the fan-out set for a tenant-scoped op whose trait signature
+    /// carries only an entity id (e.g. `settle`/`release` by reservation id),
+    /// which must locate which tenant database holds the row.
+    pub(super) fn provisioned_tenant_bindings(
+        &self,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let registry = self.registry.lock().map_err(|_| poisoned_registry_lock())?;
+        Ok(registry
+            .tenant_databases
+            .keys()
+            .map(|tenant_id| (tenant_id.clone(), tenant_database_binding(tenant_id)))
+            .collect())
+    }
+
     /// Control database first, then every tenant database in registry order —
     /// the fan-out set for id-only reads and unfiltered lists.
     pub(super) fn fan_out_database_ids(&self) -> Result<Vec<String>, StorageError> {

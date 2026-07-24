@@ -18,22 +18,84 @@ import { json, requireBearer } from "./auth";
  * Worker bindings.
  *
  * `DB` is the NATIVE D1 binding this Worker fronts — bound in wrangler.toml to
- * the FerroGate CONTROL database (the atomic families wired in this slice —
- * billing metering + outbox — are all account-global control-plane data that
- * routes to the control database, exactly like the #447/#449 REST families).
- * Per-tenant atomic families (wallets/payments) will need either additional
- * per-database bindings or a routed binding lookup; that is the enumerated
- * follow-up, out of scope for this keystone.
+ * the FerroGate CONTROL database (the account-global atomic families — billing
+ * metering + outbox, guardrail-binding CAS — all route to the control database,
+ * exactly like the #447/#449 REST families).
+ *
+ * PER-TENANT bindings (issue #455): the database-per-tenant topology places a
+ * tenant's financial state (wallets/reservations) in that tenant's OWN D1
+ * database. The Workers runtime can ONLY reach a D1 database through a
+ * statically-declared binding (there is no runtime "open database by id" API —
+ * verified against `@cloudflare/workers-types`' `D1Database` and the D1 Worker
+ * API docs), so each tenant database is bound here under its own name (by
+ * convention `TENANT_DB_<TENANT_ID>`, `-` folded to `_`, uppercased) and a
+ * request selects it by NAME via the optional `database` field
+ * (see [`resolveDatabase`]). Onboarding a tenant therefore requires adding its
+ * `[[d1_databases]]` binding to wrangler.toml and redeploying — the same
+ * per-binding, redeploy-to-onboard reality the #423 Secrets-Store bindings have.
+ * A request with no `database` (or `database == "DB"`) targets the control
+ * database, so the #450 control-DB path is unchanged.
  *
  * `D1_PROXY_TOKEN` is the DIY bearer credential FerroGate presents (seeded via
  * `wrangler secret put D1_PROXY_TOKEN`; the Rust side resolves the same secret
  * through the #405/#417 credential seam).
+ *
+ * The index signature carries the per-tenant `TENANT_DB_*` D1 bindings, which
+ * vary per deployment and so cannot be named statically here; [`resolveDatabase`]
+ * duck-types each resolved value back to a `D1Database` before use, so a request
+ * can never coerce a non-D1 binding (e.g. the `D1_PROXY_TOKEN` string) into a
+ * database handle.
  */
 export interface Env {
   /** Native D1 binding (the control database). Runs prepare/bind/batch/RETURNING. */
   DB: D1Database;
   /** DIY auth secret. Compared (constant-time) against the request bearer token. */
   D1_PROXY_TOKEN: string;
+  /** Per-tenant `TENANT_DB_*` D1 bindings + any other deployment-specific binding. */
+  [binding: string]: D1Database | string | undefined;
+}
+
+/** The binding name of the control database (the #450 default target). */
+const CONTROL_DATABASE_BINDING = "DB";
+
+/**
+ * Resolve the request's target D1 binding to a native `D1Database`, or return a
+ * rejection string (fail-closed 400) when the named binding is unknown or is not
+ * a D1 database.
+ *
+ * An omitted/empty `database`, or the literal control binding name, targets
+ * `env.DB` — keeping the #450 control-DB path byte-for-byte unchanged. Any other
+ * value names a per-tenant `[[d1_databases]]` binding (there is no runtime
+ * select-by-id API; a database is reachable only through a declared binding).
+ * The resolved value is duck-typed back to a `D1Database` so a caller cannot
+ * name a non-database binding (e.g. `D1_PROXY_TOKEN`) and have it used as one.
+ */
+function resolveDatabase(env: Env, database: unknown): D1Database | string {
+  if (database === undefined || database === null || database === "") {
+    return env.DB;
+  }
+  if (typeof database !== "string") {
+    return "`database` must be a string binding name";
+  }
+  if (database === CONTROL_DATABASE_BINDING) {
+    return env.DB;
+  }
+  const candidate = env[database];
+  if (!isD1Database(candidate)) {
+    return `unknown D1 database binding ${JSON.stringify(database)} \
+(add its [[d1_databases]] binding to the Worker and redeploy)`;
+  }
+  return candidate;
+}
+
+/** Structural check that `value` is a native `D1Database` binding. */
+function isD1Database(value: unknown): value is D1Database {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as D1Database).prepare === "function" &&
+    typeof (value as D1Database).batch === "function"
+  );
 }
 
 /**
@@ -52,7 +114,18 @@ interface ProxyStatement {
 
 /** Request body of `POST /d1/batch`. */
 interface BatchRequestBody {
+  /** Target D1 binding name (issue #455); omitted/`"DB"` = control database. */
+  database?: unknown;
   statements?: unknown;
+}
+
+/**
+ * Request body of `POST /d1/query`: the single statement (`sql` + `params`),
+ * plus the optional `database` binding selector (issue #455). `prepareStatement`
+ * ignores the extra `database` field, so the control-DB body shape is unchanged.
+ */
+interface QueryRequestBody {
+  database?: unknown;
 }
 
 // D1 documented limits this Worker guards up front (a 400 is cheaper than a
@@ -126,6 +199,12 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   } catch {
     return errEnvelope(400, "invalid JSON body", 400);
   }
+  // Select the target database (tenant binding or the control default) BEFORE
+  // preparing statements: a batch is one atomic unit against ONE database.
+  const db = resolveDatabase(env, body.database);
+  if (typeof db === "string") {
+    return errEnvelope(400, db, 400);
+  }
   const rawStatements = body.statements;
   if (!Array.isArray(rawStatements) || rawStatements.length === 0) {
     return errEnvelope(400, "batch requires a non-empty `statements` array", 400);
@@ -139,7 +218,7 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   }
   const prepared: D1PreparedStatement[] = [];
   for (const raw of rawStatements) {
-    const stmt = prepareStatement(env.DB, raw);
+    const stmt = prepareStatement(db, raw);
     if (typeof stmt === "string") {
       return errEnvelope(400, stmt, 400);
     }
@@ -147,7 +226,7 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   }
   try {
     // The atomic unit: all-or-nothing. Returns one D1Result per statement.
-    const results = await env.DB.batch(prepared);
+    const results = await db.batch(prepared);
     return okEnvelope(results.map(serializeResult));
   } catch (err) {
     // A failed statement rolled the WHOLE batch back — nothing was committed.
@@ -171,7 +250,13 @@ async function handleQuery(request: Request, env: Env): Promise<Response> {
   } catch {
     return errEnvelope(400, "invalid JSON body", 400);
   }
-  const stmt = prepareStatement(env.DB, raw);
+  // The optional `database` selector rides alongside the statement fields;
+  // `prepareStatement` reads only `sql`/`params`, so it ignores it.
+  const db = resolveDatabase(env, (raw as QueryRequestBody | null)?.database);
+  if (typeof db === "string") {
+    return errEnvelope(400, db, 400);
+  }
+  const stmt = prepareStatement(db, raw);
   if (typeof stmt === "string") {
     return errEnvelope(400, stmt, 400);
   }

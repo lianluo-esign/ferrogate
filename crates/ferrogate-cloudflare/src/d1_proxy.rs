@@ -86,9 +86,28 @@ impl D1ProxyStatement {
 }
 
 /// Request body for `POST /d1/batch`.
+///
+/// `database` names the target D1 binding (issue #455). It is
+/// `skip_serializing_if = "Option::is_none"`, so a control-database batch (the
+/// #450 default) serializes to the unchanged `{ statements: [...] }` shape and a
+/// tenant-scoped batch adds `"database": "<binding>"`.
 #[derive(Serialize)]
 struct BatchRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database: Option<&'a str>,
     statements: &'a [D1ProxyStatement],
+}
+
+/// Request body for `POST /d1/query`: the single statement flattened to the
+/// top level (`sql` + `params`) plus the optional `database` binding selector
+/// (issue #455). With `database == None` the flattened body is byte-for-byte the
+/// pre-#455 `{ sql, params }` shape.
+#[derive(Serialize)]
+struct QueryRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database: Option<&'a str>,
+    #[serde(flatten)]
+    statement: &'a D1ProxyStatement,
 }
 
 /// Thin client over the d1-proxy Worker's HTTP API.
@@ -141,7 +160,8 @@ impl D1ProxyClient {
         &self.base_url
     }
 
-    /// Run an **atomic** multi-statement batch (`env.DB.batch([...])`).
+    /// Run an **atomic** multi-statement batch against the CONTROL database
+    /// (`env.DB.batch([...])`) — the #450 default target.
     ///
     /// Every statement commits together or the whole batch rolls back — the
     /// guarantee the REST query API cannot give. Returns one [`D1QueryResult`]
@@ -150,20 +170,56 @@ impl D1ProxyClient {
         &self,
         statements: &[D1ProxyStatement],
     ) -> Result<Vec<D1QueryResult>, CloudflareError> {
-        let body = serde_json::to_vec(&BatchRequest { statements }).map_err(|error| {
+        self.batch_on(None, statements).await
+    }
+
+    /// Run an **atomic** batch against a SELECTED D1 binding (issue #455).
+    ///
+    /// `database` is the Worker binding name of the target database
+    /// (`Some("TENANT_DB_ACME")` for a tenant's own database, `None` for the
+    /// control database). The Worker runs the whole batch as one atomic unit on
+    /// that database; there is no runtime select-by-id, so the binding must exist
+    /// in the Worker's wrangler config (an unknown binding fails closed at the
+    /// Worker with a 400 the client maps to a typed API error).
+    pub async fn batch_on(
+        &self,
+        database: Option<&str>,
+        statements: &[D1ProxyStatement],
+    ) -> Result<Vec<D1QueryResult>, CloudflareError> {
+        let body = serde_json::to_vec(&BatchRequest {
+            database,
+            statements,
+        })
+        .map_err(|error| {
             CloudflareError::Config(format!("failed to encode D1 proxy batch request: {error}"))
         })?;
         self.post_enveloped("d1/batch", body).await
     }
 
-    /// Run one `prepare().bind(...).all()` statement, `RETURNING` included — the
-    /// single-statement companion to [`batch`](Self::batch) for CAS ops
-    /// expressible as one `UPDATE ... RETURNING` / `INSERT ... RETURNING`.
+    /// Run one `prepare().bind(...).all()` statement against the CONTROL database,
+    /// `RETURNING` included — the single-statement companion to
+    /// [`batch`](Self::batch) for CAS ops expressible as one `UPDATE ...
+    /// RETURNING` / `INSERT ... RETURNING`.
     pub async fn query(
         &self,
         statement: &D1ProxyStatement,
     ) -> Result<D1QueryResult, CloudflareError> {
-        let body = serde_json::to_vec(statement).map_err(|error| {
+        self.query_on(None, statement).await
+    }
+
+    /// Run one statement against a SELECTED D1 binding (issue #455). `database`
+    /// is the target binding name (`None` = control database); see
+    /// [`batch_on`](Self::batch_on) for the binding-resolution contract.
+    pub async fn query_on(
+        &self,
+        database: Option<&str>,
+        statement: &D1ProxyStatement,
+    ) -> Result<D1QueryResult, CloudflareError> {
+        let body = serde_json::to_vec(&QueryRequest {
+            database,
+            statement,
+        })
+        .map_err(|error| {
             CloudflareError::Config(format!("failed to encode D1 proxy query request: {error}"))
         })?;
         self.post_enveloped("d1/query", body).await

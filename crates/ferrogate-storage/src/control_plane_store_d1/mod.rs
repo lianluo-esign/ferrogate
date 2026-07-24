@@ -154,6 +154,22 @@
 //!   next-binding planners the Postgres backend uses, so the computed transition
 //!   is row-for-row identical across backends. Fail closed (typed
 //!   unimplemented-surface) when no proxy Worker is bound.
+//! - Wallets + reservations (#455, TENANT databases, proxy Worker): the FIRST
+//!   tenant-scoped atomic family. `reserve_wallet_credits` (the no-oversell
+//!   guarded conditional insert), `settle_wallet_reservation`,
+//!   `release_wallet_reservation`, plus `upsert_wallet`/`get_wallet`/
+//!   `list_wallet_reservations`. Unlike the account-global families above, a
+//!   tenant's wallet/holds/settlements live in THAT tenant's own D1 database, so
+//!   each op selects `tenant_database_binding(tenant_id)` onto the proxy
+//!   `/d1/batch` + `/d1/query` calls (issue #455 per-tenant routing; there is no
+//!   runtime select-a-database-by-id, so the binding must be declared +
+//!   redeployed per tenant). `reserve` mirrors the Postgres `FOR UPDATE` +
+//!   sum-live-holds as one atomic batch (RETURNING-empty on the guarded insert =
+//!   not admitted; a sibling state read splits NoWallet from Insufficient);
+//!   `settle`/`release`, whose signatures carry only a hold id, fan out over the
+//!   provisioned tenant bindings to locate the holding database, then run the
+//!   guarded transition on it. Fail closed (typed unimplemented-surface) with no
+//!   proxy; see `wallet.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -184,16 +200,15 @@
 //! activate/archive/restore CAS, issue #454). What remains erroring is the
 //! atomic families that DON'T mirror cleanly onto the control-DB-only binding:
 //!
-//! - Wallets + wallet reservations (reserve/settle/release/sweep/adjust,
-//!   `settle_wallet_balance`) and payment methods/attempts
-//!   (`transition_payment_attempt` CAS): these are per-tenant FINANCIAL state.
-//!   Their tables are not in the D1 schema yet, and — unlike the account-global
-//!   billing/guardrail families — a faithful database-per-tenant topology would
-//!   place a tenant's wallet in that tenant's D1 database, which the proxy
-//!   Worker does not bind (it binds only the CONTROL database). Wiring them
-//!   needs the per-tenant proxy binding (an enumerated #450 follow-up); the
-//!   reserve-no-oversell and the x402 `payment_attempts.hold_id` sweep guard
-//!   also couple the two families into one larger unit.
+//! - The REMAINING wallet/payment surface (the reserve/settle/release trio +
+//!   wallet CRUD landed in #455, above): `settle_wallet_balance`,
+//!   `adjust_wallet_balance`, `set_wallet_dunning`, `list_wallets` (cross-tenant
+//!   fan-out), `sweep_expired_wallet_reservations`, and payment methods/attempts
+//!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
+//!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
+//!   the (still-deferred) x402 payment_attempts family into one larger unit;
+//!   `settle_wallet_balance`/`adjust`/`dunning`/`list_wallets` are the same
+//!   tenant-DB pattern and land with the payments slice.
 //! - Workflow run budgets (`open`/`debit`/`topup`): the idempotent `open`
 //!   mirrors the billing insert-then-reload pattern cleanly, but `debit`/`topup`
 //!   are read-modify-writes the Postgres backend serializes with
@@ -253,6 +268,7 @@ mod observability;
 mod provisioning;
 mod rbac_site_domain;
 mod rows;
+mod wallet;
 mod worker_stores;
 
 pub use client_config::CloudflareD1StorageOptions;
@@ -398,6 +414,35 @@ fn validate_tenant_id(tenant_id: &str) -> Result<(), StorageError> {
         )));
     }
     Ok(())
+}
+
+/// The wrangler `[[d1_databases]]` binding name the proxy Worker resolves for a
+/// tenant's own D1 database (issue #455 per-tenant routing).
+///
+/// Derived deterministically from the tenant id: uppercased, every character
+/// outside `[A-Z0-9_]` folded to `_`, then prefixed `TENANT_DB_`. The prefix +
+/// fold guarantee a valid JS/wrangler binding identifier (`^[A-Z_][A-Z0-9_]*$`)
+/// that can never collide with the control `DB` binding or the `D1_PROXY_TOKEN`
+/// secret. The Workers runtime has NO select-a-database-by-id API (D1 is reached
+/// only through a declared binding), so the Rust side sends this NAME and the
+/// Worker resolves `env[name]`; onboarding a tenant means adding a matching
+/// `[[d1_databases]]` binding + redeploying (the #423 per-binding reality).
+///
+/// Collision constraint: `-` and `_` both fold to `_` and case is erased, so two
+/// tenant ids that differ only by those (e.g. `a-b` vs `a_b`) would share a
+/// binding. Provisioned tenant ids are distinct slugs/uuids in practice; the
+/// registry's live-deploy binding table is the operator's collision guard.
+pub(super) fn tenant_database_binding(tenant_id: &str) -> String {
+    let mut sanitized = String::with_capacity(tenant_id.len() + "TENANT_DB_".len());
+    sanitized.push_str("TENANT_DB_");
+    for character in tenant_id.chars() {
+        if character.is_ascii_alphanumeric() {
+            sanitized.push(character.to_ascii_uppercase());
+        } else {
+            sanitized.push('_');
+        }
+    }
+    sanitized
 }
 
 /// The migration file with `--` comment lines stripped, ready to send as one
@@ -1996,12 +2041,12 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("settle_wallet_balance"))
     }
 
-    async fn upsert_wallet(&self, _wallet: StoredWallet) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_wallet"))
+    async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
+        self.upsert_wallet_d1_async(&wallet).await
     }
 
-    async fn get_wallet(&self, _tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
-        Err(unimplemented_surface("get_wallet"))
+    async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+        self.get_wallet_d1_async(tenant_id).await
     }
 
     async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
@@ -2028,29 +2073,38 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn reserve_wallet_credits(
         &self,
-        _reservation_id: &str,
-        _tenant_id: &str,
-        _amount_credits: i64,
-        _expires_at_unix: i64,
-        _now_unix: i64,
+        reservation_id: &str,
+        tenant_id: &str,
+        amount_credits: i64,
+        expires_at_unix: i64,
+        now_unix: i64,
     ) -> Result<WalletReservationResult, StorageError> {
-        Err(unimplemented_surface("reserve_wallet_credits"))
+        self.reserve_wallet_credits_d1_async(
+            reservation_id,
+            tenant_id,
+            amount_credits,
+            expires_at_unix,
+            now_unix,
+        )
+        .await
     }
 
     async fn settle_wallet_reservation(
         &self,
-        _reservation_id: &str,
-        _now_unix: i64,
+        reservation_id: &str,
+        now_unix: i64,
     ) -> Result<WalletReservationSettlement, StorageError> {
-        Err(unimplemented_surface("settle_wallet_reservation"))
+        self.settle_wallet_reservation_d1_async(reservation_id, now_unix)
+            .await
     }
 
     async fn release_wallet_reservation(
         &self,
-        _reservation_id: &str,
-        _now_unix: i64,
+        reservation_id: &str,
+        now_unix: i64,
     ) -> Result<StoredWalletReservation, StorageError> {
-        Err(unimplemented_surface("release_wallet_reservation"))
+        self.release_wallet_reservation_d1_async(reservation_id, now_unix)
+            .await
     }
 
     async fn sweep_expired_wallet_reservations(
@@ -2062,9 +2116,9 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn list_wallet_reservations(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
     ) -> Result<Vec<StoredWalletReservation>, StorageError> {
-        Err(unimplemented_surface("list_wallet_reservations"))
+        self.list_wallet_reservations_d1_async(tenant_id).await
     }
 
     async fn upsert_payment_method(
