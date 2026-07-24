@@ -301,7 +301,7 @@ impl D1ControlPlaneStore {
                  SELECT ?, ?, ?, 'active', ?, NULL, ?, ? \
                  FROM wallets w \
                  WHERE w.tenant_id = ? \
-                   AND ? <= w.balance_credits - COALESCE(( \
+                   AND CAST(? AS INTEGER) <= w.balance_credits - COALESCE(( \
                        SELECT SUM(r.amount_credits) FROM wallet_reservations r \
                        WHERE r.tenant_id = ? AND r.status = 'active' AND r.expires_at_unix > ? \
                    ), 0) \

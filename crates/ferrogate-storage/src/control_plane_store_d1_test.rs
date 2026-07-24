@@ -2442,7 +2442,11 @@ fn reserve_wallet_credits_builds_atomic_batch_on_tenant_binding() {
     // `FOR UPDATE` + SUM(live holds): an available-balance predicate + RETURNING.
     let guard = statements[1]["sql"].as_str().unwrap();
     assert!(guard.starts_with("INSERT INTO wallet_reservations"));
-    assert!(guard.contains("<= w.balance_credits - COALESCE("));
+    // The amount param MUST be CAST to INTEGER: D1's proxy binds ALL params as
+    // TEXT, and this guard compares the bound `?` against an arithmetic
+    // expression (no column affinity), so without the CAST SQLite ranks TEXT
+    // above every INTEGER and the no-oversell guard NEVER admits (issue #455).
+    assert!(guard.contains("AND CAST(? AS INTEGER) <= w.balance_credits - COALESCE("));
     assert!(guard.contains("status = 'active' AND r.expires_at_unix > ?"));
     assert!(guard.contains("ON CONFLICT (id) DO NOTHING"));
     assert!(guard.contains("RETURNING id"));
