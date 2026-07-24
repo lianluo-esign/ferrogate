@@ -98,7 +98,7 @@ class ModuleLayoutTests(unittest.TestCase):
         # ferrogate-secrets after #423 and ferrogate-mcp after #432).
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            self.write_crate(root, "ferrogate-guardrails", 500)
+            self.write_crate(root, "ferrogate-storage", 500)
             result = self.run_checker("--root", str(root))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("stale and should be removed", result.stdout)

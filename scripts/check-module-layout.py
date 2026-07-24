@@ -27,8 +27,6 @@ ENTRY_FILES = ("lib.rs", "main.rs")
 # (#419/#425/#433 follow-ups) land; never raise one or add one to make new
 # growth fit.
 BASELINE_MAX_LINES = {
-    "crates/ferrogate-guardrails/src/lib.rs": 1_100,  # 1,055 on 2026-07-24
-    "crates/ferrogate-observability/src/lib.rs": 1_550,  # 1,489 on 2026-07-24
     "crates/ferrogate-storage/src/lib.rs": 18_600,  # 18,493 after #425 (was 21,146)
 }
 
