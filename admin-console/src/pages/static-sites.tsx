@@ -116,6 +116,10 @@ import {
   gatewayGet,
   gatewayGetBinary,
   gatewayPut,
+  type HeaderParamsFor,
+  type OpFor,
+  type PathParamsFor,
+  resolveAdminPath,
 } from "@/lib/gateway-client";
 import { validateSiteDomainHostname } from "@/lib/hostname";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
@@ -211,18 +215,19 @@ interface SiteManifest {
   updated_at_unix: number;
 }
 
-/** Publish response body the gateway returns for a `static_site` ZIP push. */
-interface StaticSitePublishResponse {
-  object: "static_site";
-  tenant: string;
-  site: string;
-  bundle_version: string;
-  public: boolean;
-  spa_fallback: boolean;
-  file_count: number;
-  size_bytes: number;
-  files: string[];
-}
+/** Publish response body the gateway returns for a `static_site` ZIP push.
+ * Sourced from the generated OpenAPI contract (#446) rather than hand-declared,
+ * so it stays pinned to the gateway's actual response shape. */
+type StaticSitePublishResponse = AdminSchema<"StaticSitePublishResponse">;
+
+/** The generated `putAsset` operation the gateway routes static-site publishes
+ * through: a `static_site` `asset_type` whose body is a ZIP archive branches
+ * into the bundle-publish path (there is no separate gateway route). The publish
+ * call below derives its URL, path params, and `x-site-*`/visibility header
+ * NAMES from this typed operation instead of hand-encoding them (#446, #338). */
+const PUBLISH_PATH = "/v1/assets/{asset_type}/{name}/{version}" as const;
+type PublishOp = OpFor<typeof PUBLISH_PATH, "put">;
+type PublishHeaders = HeaderParamsFor<PublishOp>;
 
 /** One published site's fully-joined row (list + manifest + bound domains). */
 interface SiteRow {
@@ -1288,18 +1293,30 @@ export default function StaticSitesPage() {
   const publishMutation = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error(t("page.staticSites.validation.bundleRequired"));
-      const path = `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site.trim())}/${encodeURIComponent(version.trim())}`;
+      // Derive the target URL + header NAMES from the generated `putAsset`
+      // operation (the enforced OpenAPI client, #446) instead of hand-encoding
+      // them: `resolveAdminPath` substitutes the typed path params (the same
+      // encodeURIComponent the typed `admin*` helpers use), and the `x-site-*` /
+      // visibility keys are checked against the operation's header parameters.
+      // The XHR transport itself is retained ONLY for byte-level upload progress
+      // (`fetch` exposes no upload-progress event) — see putBundleWithProgress.
+      const path = resolveAdminPath(PUBLISH_PATH, {
+        asset_type: STATIC_SITE_TYPE,
+        name: site.trim(),
+        version: version.trim(),
+      } satisfies PathParamsFor<PublishOp>);
+      const publishHeaders: Record<string, string | undefined> = {
+        "x-site-public": isPublic ? "true" : undefined,
+        "x-site-spa-fallback": spaFallback ? "true" : undefined,
+        "x-site-cache-control": cacheControl.trim() || undefined,
+        "x-asset-visibility": isPublic ? "public" : undefined,
+      } satisfies Partial<Record<keyof PublishHeaders, string | undefined>>;
       return putBundleWithProgress<StaticSitePublishResponse>(
         apiKey,
         path,
         file,
         file.type || "application/zip",
-        {
-          "x-site-public": isPublic ? "true" : undefined,
-          "x-site-spa-fallback": spaFallback ? "true" : undefined,
-          "x-site-cache-control": cacheControl.trim() || undefined,
-          "x-asset-visibility": isPublic ? "public" : undefined,
-        },
+        publishHeaders,
         (loaded, total) => setUploadProgress({ loaded, total }),
       );
     },

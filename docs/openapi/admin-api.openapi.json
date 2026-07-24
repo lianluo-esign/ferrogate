@@ -10018,7 +10018,7 @@
           "gateway"
         ],
         "summary": "Publish a small tenant asset inline.",
-        "description": "Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission.",
+        "description": "Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission. Special case: pushing a static_site asset_type whose body is a ZIP archive publishes a multi-file static-site bundle (unpacked into per-file objects plus a stored manifest and served under /sites/{tenant}/{site}/). Such a publish reads the x-site-public, x-site-spa-fallback, and x-site-cache-control headers for its serving policy and returns a StaticSitePublishResponse body instead of the AssetMutationResponse envelope.",
         "x-ferrogate-contract": {
           "visibility": "public",
           "auth": {
@@ -10174,6 +10174,30 @@
             "name": "x-asset-approval-id",
             "in": "header",
             "description": "Durable tool-approval record used for cross-tenant publication.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-site-public",
+            "in": "header",
+            "description": "static_site bundle publish only: opt the served site into public (unauthenticated) access. Truthy values are 'true', '1', or 'yes' (case-insensitive); any other value or an absent header keeps the site tenant-private.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-site-spa-fallback",
+            "in": "header",
+            "description": "static_site bundle publish only: serve index.html for unmatched paths (single-page-app history fallback). Same truthy encoding as x-site-public; absent or non-truthy disables the fallback.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-site-cache-control",
+            "in": "header",
+            "description": "static_site bundle publish only: override the Cache-Control header the gateway emits when serving this bundle's files. Absent or empty falls back to the default 'public, max-age=300'.",
             "schema": {
               "type": "string"
             }
@@ -24365,6 +24389,65 @@
         "required": [
           "object",
           "asset"
+        ]
+      },
+      "StaticSitePublishResponse": {
+        "description": "Body returned when a static_site asset is pushed as a ZIP archive and published as a multi-file bundle (PUT /v1/assets/static_site/{site}/{version}). Distinct from the AssetMutationResponse envelope a single-blob asset push returns.",
+        "type": "object",
+        "properties": {
+          "object": {
+            "const": "static_site"
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Owning tenant id."
+          },
+          "site": {
+            "type": "string",
+            "description": "Site slug (the asset name segment of the publish path)."
+          },
+          "bundle_version": {
+            "type": "string",
+            "description": "Immutable, retained bundle version (the version segment of the publish path)."
+          },
+          "public": {
+            "type": "boolean",
+            "description": "Whether the published site is served with public (unauthenticated) access, resolved from x-site-public."
+          },
+          "spa_fallback": {
+            "type": "boolean",
+            "description": "Whether index.html is served for unmatched paths, resolved from x-site-spa-fallback."
+          },
+          "file_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of files unpacked from the bundle."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Total unpacked byte count across every file in the bundle."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Bundle-relative paths of every published file."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "tenant",
+          "site",
+          "bundle_version",
+          "public",
+          "spa_fallback",
+          "file_count",
+          "size_bytes",
+          "files"
         ]
       },
       "AdminPermission": {

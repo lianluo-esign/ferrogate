@@ -2374,7 +2374,7 @@ export interface paths {
         get: operations["getAsset"];
         /**
          * Publish a small tenant asset inline.
-         * @description Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission.
+         * @description Buffers at most inline_upload_max_bytes from the storage summary, computes the SHA-256 checksum, validates the declared Content-Type and supply-chain policy, and publishes an immutable version. Larger objects must use upload intent -> direct PUT -> commit. Asset hosting requires the tenant plan flag or the assets.host permission. Special case: pushing a static_site asset_type whose body is a ZIP archive publishes a multi-file static-site bundle (unpacked into per-file objects plus a stored manifest and served under /sites/{tenant}/{site}/). Such a publish reads the x-site-public, x-site-spa-fallback, and x-site-cache-control headers for its serving policy and returns a StaticSitePublishResponse body instead of the AssetMutationResponse envelope.
          */
         put: operations["putAsset"];
         post?: never;
@@ -5652,6 +5652,30 @@ export interface components {
             /** @constant */
             object: "asset";
             asset: components["schemas"]["AssetSummary"];
+        };
+        /** @description Body returned when a static_site asset is pushed as a ZIP archive and published as a multi-file bundle (PUT /v1/assets/static_site/{site}/{version}). Distinct from the AssetMutationResponse envelope a single-blob asset push returns. */
+        StaticSitePublishResponse: {
+            /** @constant */
+            object: "static_site";
+            /** @description Owning tenant id. */
+            tenant: string;
+            /** @description Site slug (the asset name segment of the publish path). */
+            site: string;
+            /** @description Immutable, retained bundle version (the version segment of the publish path). */
+            bundle_version: string;
+            /** @description Whether the published site is served with public (unauthenticated) access, resolved from x-site-public. */
+            public: boolean;
+            /** @description Whether index.html is served for unmatched paths, resolved from x-site-spa-fallback. */
+            spa_fallback: boolean;
+            /** @description Number of files unpacked from the bundle. */
+            file_count: number;
+            /**
+             * Format: int64
+             * @description Total unpacked byte count across every file in the bundle.
+             */
+            size_bytes: number;
+            /** @description Bundle-relative paths of every published file. */
+            files: string[];
         };
         AdminPermission: {
             id: string;
@@ -11645,6 +11669,12 @@ export interface operations {
                 "x-asset-visibility"?: "private" | "tenant" | "tenant_private" | "shared" | "cross_tenant" | "cross_tenant_shared" | "public";
                 /** @description Durable tool-approval record used for cross-tenant publication. */
                 "x-asset-approval-id"?: string;
+                /** @description static_site bundle publish only: opt the served site into public (unauthenticated) access. Truthy values are 'true', '1', or 'yes' (case-insensitive); any other value or an absent header keeps the site tenant-private. */
+                "x-site-public"?: string;
+                /** @description static_site bundle publish only: serve index.html for unmatched paths (single-page-app history fallback). Same truthy encoding as x-site-public; absent or non-truthy disables the fallback. */
+                "x-site-spa-fallback"?: string;
+                /** @description static_site bundle publish only: override the Cache-Control header the gateway emits when serving this bundle's files. Absent or empty falls back to the default 'public, max-age=300'. */
+                "x-site-cache-control"?: string;
             };
             path: {
                 /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */

@@ -35,7 +35,7 @@ export type AdminPathWith<M extends HttpMethod> = {
   [P in keyof paths]: paths[P] extends Record<M, unknown> ? P : never;
 }[keyof paths];
 
-type OpFor<P extends keyof paths, M extends HttpMethod> =
+export type OpFor<P extends keyof paths, M extends HttpMethod> =
   paths[P] extends Record<M, infer Op> ? Op : never;
 
 type SuccessCode = 200 | 201 | 202 | 204;
@@ -60,10 +60,18 @@ type JsonRequestBody<Op> = Op extends {
     ? B | undefined
     : never;
 
-type PathParamsFor<Op> = Op extends { parameters: { path: infer PP } }
+export type PathParamsFor<Op> = Op extends { parameters: { path: infer PP } }
   ? PP extends Record<string, string | number>
     ? PP
     : never
+  : never;
+
+/** Typed header parameters an operation declares (all optional in the contract),
+ * with the surrounding optionality stripped so callers can name them exactly. */
+export type HeaderParamsFor<Op> = Op extends {
+  parameters: { header?: infer H };
+}
+  ? NonNullable<H>
   : never;
 
 type QueryFor<Op> = Op extends { parameters: { query?: infer Q } }
@@ -91,6 +99,22 @@ function resolvePathTemplate(
     }
     return encodeURIComponent(String(value));
   });
+}
+
+/**
+ * Resolves a typed contract path template into a request path, applying the
+ * same `encodeURIComponent` substitution the `admin*` helpers use. Intended for
+ * the rare caller that must run its OWN transport — e.g. an XHR upload-progress
+ * shim, since `fetch` exposes no upload-progress event — yet should still derive
+ * its URL from the generated contract (a `keyof paths` literal) rather than a
+ * hand-built string. Annotate the `params` argument with `PathParamsFor<Op>` at
+ * the call site to have the placeholder names checked against the contract.
+ */
+export function resolveAdminPath(
+  path: keyof paths & string,
+  params: Record<string, string | number>,
+): string {
+  return resolvePathTemplate(path, params);
 }
 
 function typedRequest<P extends keyof paths & string, M extends HttpMethod>(
