@@ -29,6 +29,7 @@ import {
   scheduledTaskCap,
 } from "./schedule";
 import type { ScheduleKind } from "./schedule";
+import { handleContainer } from "./container";
 
 /**
  * Worker bindings. `AGENT_GATEWAY` is the Durable Object namespace for the
@@ -53,6 +54,16 @@ export interface Env {
   VECTORIZE?: Vectorize;
   /** Workers AI binding used for pilot embeddings (unbound unless piloting). */
   AI?: Ai;
+  /**
+   * Container/sandbox isolation binding (issue #415): the Durable Object
+   * namespace for a Cloudflare `Container` or `@cloudflare/sandbox` class. The
+   * `/container/*` routes address a per-tenant instance BY NAME through it.
+   * OPTIONAL — absent it, every container verb fails closed with
+   * `container_unbound` (HTTP 501). Bind it in wrangler.toml to enable the tier.
+   */
+  CONTAINER_SANDBOX?: DurableObjectNamespace;
+  /** Cap on captured container stdout/stderr bytes; defaults to 1_000_000. */
+  CONTAINER_MAX_OUTPUT_BYTES?: string;
 }
 
 /** Lifecycle status vocabulary mirrored by the Rust `CloudflareRunStatus`. */
@@ -471,6 +482,17 @@ export default {
     //     is the sole path FerroGate schedules future agent work through.
     if (url.pathname.startsWith("/schedule/")) {
       return handleSchedule(request, env, url);
+    }
+
+    // 1d. Container/sandbox routes (issue #415): governed
+    //     prepare/start/exec/stop/logs/artifacts/cleanup over a per-tenant
+    //     Cloudflare Container or @cloudflare/sandbox instance. Auth checked
+    //     inside. Cloudflare exposes NO public container lifecycle REST API, so
+    //     this is the sole tethered path FerroGate drives the isolation tier
+    //     through — egress deny-by-default (enableInternet=false unless a
+    //     governed allowlist is provided).
+    if (url.pathname.startsWith("/container/")) {
+      return handleContainer(request, env, url);
     }
 
     // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in

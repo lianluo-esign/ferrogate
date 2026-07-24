@@ -32,7 +32,7 @@ fn backend_registry_reports_firecracker_ready_only_from_configured_bundle() {
     // Firecracker is the implemented backend and leads the registry; the
     // other kinds are registered behind the same contract so the gateway
     // can see the full replaceable set.
-    assert_eq!(backends.len(), 5);
+    assert_eq!(backends.len(), 6);
     assert_eq!(backends[0].backend_name, "firecracker");
     assert_eq!(backends[0].kind, "firecracker_micro_vm");
     assert_eq!(backends[0].host_lifecycle_owner, "agent-worker");
@@ -86,12 +86,18 @@ fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplem
     clear_firecracker_env();
     env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
     env::remove_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND");
+    env::remove_var("AGENT_WORKER_ENABLE_CF_CONTAINER_BACKEND");
 
     let backends = isolation_backends();
 
-    // Every registered backend speaks the same contract: the worker owns
-    // the host lifecycle and the gateway never controls it directly.
-    for backend in &backends {
+    // Every HOST-OWNED backend speaks the same contract: the worker owns the
+    // host lifecycle and the gateway never controls it directly. The Cloudflare
+    // container tier (issue #415) is the sole exception — it is gateway-driven,
+    // asserted explicitly below.
+    for backend in backends
+        .iter()
+        .filter(|backend| backend.kind != "cloudflare_container")
+    {
         assert_eq!(backend.host_lifecycle_owner, "agent-worker");
         assert!(!backend.gateway_controls_backend);
     }
@@ -108,8 +114,24 @@ fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplem
             "gvisor",
             "rootless_docker",
             "local_process",
+            "cloudflare_container",
         ]
     );
+
+    // The Cloudflare container backend is gateway-driven and opt-in: registered
+    // for the replaceable contract, advertised as gateway-controlled, and
+    // failing closed (not ready) until an operator enables + configures it.
+    let cloudflare = backends
+        .iter()
+        .find(|backend| backend.kind == "cloudflare_container")
+        .expect("cloudflare container backend registered");
+    assert_eq!(cloudflare.host_lifecycle_owner, "cloudflare-agent-gateway");
+    assert!(cloudflare.gateway_controls_backend);
+    assert_eq!(cloudflare.backend_version, "disabled");
+    assert!(cloudflare
+        .readiness_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("not enabled")));
 
     // Every non-Firecracker backend fails closed here: the two unimplemented
     // kinds because they have no host lifecycle, and Docker because it is a
@@ -159,6 +181,7 @@ fn selectable_backends_exclude_unimplemented_and_unconfigured_firecracker() {
     clear_firecracker_env();
     env::remove_var("AGENT_WORKER_ENABLE_DOCKER_BACKEND");
     env::remove_var("AGENT_WORKER_ENABLE_LOCAL_PROCESS_BACKEND");
+    env::remove_var("AGENT_WORKER_ENABLE_CF_CONTAINER_BACKEND");
 
     // With no Firecracker bundle configured and Docker not enabled, nothing
     // is selectable: the registry fails closed rather than handing back an

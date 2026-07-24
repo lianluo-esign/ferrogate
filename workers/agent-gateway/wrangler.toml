@@ -49,6 +49,31 @@ MEMORY_MAX_PERSISTED_MESSAGES = "200"
 # (cf_agents_schedules rows, single-alarm multiplexed; survive hibernation).
 # Per-instance cap on concurrent schedule rows (alarm-row hygiene).
 SCHEDULE_MAX_TASKS_PER_INSTANCE = "100"
+# --- Container / Sandbox isolation (issue #415) ------------------------------
+# Governed /container/* routes over a per-tenant Cloudflare Container or
+# @cloudflare/sandbox instance ("just another sandbox"; egress deny-by-default).
+# See docs/cloudflare-container-isolation.md. Cap on captured stdout/stderr bytes.
+CONTAINER_MAX_OUTPUT_BYTES = "1000000"
+
+# Container/sandbox binding (Workers PAID only; leave commented out until you
+# ship a Container/Sandbox class + image). Absent this binding, every
+# /container/* verb fails closed with `container_unbound` (HTTP 501).
+#
+#   1. Add the class (e.g. `@cloudflare/sandbox`'s Sandbox, or your own
+#      `class AgentSandbox extends Container`) and register it as a SQLite DO:
+# [[durable_objects.bindings]]
+# name = "CONTAINER_SANDBOX"
+# class_name = "AgentSandbox"
+#
+# [[migrations]]
+# tag = "v2"
+# new_sqlite_classes = ["AgentSandbox"]
+#
+#   2. Point the container at its image (Wrangler builds/pushes it):
+# [[containers]]
+# class_name = "AgentSandbox"
+# image = "./Dockerfile"
+# instance_type = "standard-1"   # lite | basic | standard-1..4 (≤4 vCPU/12 GiB)
 
 # Semantic pilot bindings (leave commented out while the pilot is off):
 # [[vectorize]]

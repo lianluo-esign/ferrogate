@@ -58,6 +58,13 @@ enum IsolationBackendImplementation {
     /// Registered for the replaceable isolation contract but not implemented in
     /// this build. Always fails closed.
     NotYetImplemented,
+    /// Implemented, but the lifecycle is driven REMOTELY through the fronting
+    /// agent-gateway Worker rather than owned by this host (issue #415: the
+    /// Cloudflare Containers/Sandbox tier). It is advertised in the wire report
+    /// so the gateway/control plane sees the replaceable contract, but the
+    /// ON-HOST provisioning path never selects it — the worker cannot
+    /// provision a Cloudflare container locally; it drives one remotely.
+    GatewayDriven,
 }
 
 /// One backend in the worker's replaceable isolation registry. Every entry
@@ -72,8 +79,11 @@ struct RegisteredIsolationBackend {
 }
 
 impl RegisteredIsolationBackend {
-    /// A backend may be selected for a real workload only when the worker owns
-    /// its host lifecycle and the host is configured and ready.
+    /// A backend may be selected for a real ON-HOST workload only when the
+    /// worker owns its host lifecycle and the host is configured and ready.
+    /// Gateway-driven backends (issue #415) are deliberately excluded here:
+    /// their lifecycle runs through the fronting Worker, not this host, so the
+    /// on-host provisioning path must never pick them (fail-closed).
     fn is_selectable(&self) -> bool {
         matches!(
             self.implementation,
@@ -100,6 +110,7 @@ pub(crate) fn isolation_backend_kind_wire(kind: &IsolationBackendKind) -> &'stat
         IsolationBackendKind::KataContainers => "kata_containers",
         IsolationBackendKind::Gvisor => "gvisor",
         IsolationBackendKind::RootlessDocker => "rootless_docker",
+        IsolationBackendKind::CloudflareContainer => "cloudflare_container",
         IsolationBackendKind::LocalProcess => "local_process",
     }
 }
@@ -114,7 +125,48 @@ fn registered_isolation_backends() -> Vec<RegisteredIsolationBackend> {
         unimplemented_registered_backend("gvisor", IsolationBackendKind::Gvisor),
         docker_registered_backend(),
         local_process_registered_backend(),
+        cloudflare_container_registered_backend(),
     ]
+}
+
+/// The Cloudflare Containers/Sandbox backend (issue #415) — the FIRST
+/// gateway-driven tier. Its lifecycle runs through the fronting agent-gateway
+/// Worker's `/container/*` routes (Cloudflare exposes no public container
+/// lifecycle REST API), so it is registered `GatewayDriven`: advertised in the
+/// wire report with real capabilities and readiness, but never picked by the
+/// ON-HOST provisioning path. Readiness means "configured" (the fronting-Worker
+/// URL and control token are present); no network call is made here, exactly
+/// like the Docker/Firecracker preflights. Opt-in via the
+/// `AGENT_WORKER_ENABLE_CF_CONTAINER_BACKEND=1` environment flag.
+fn cloudflare_container_registered_backend() -> RegisteredIsolationBackend {
+    use ferrogate_runtime::cloudflare_container_descriptor;
+    if !crate::cloudflare_container_backend::cloudflare_container_backend_enabled() {
+        return RegisteredIsolationBackend {
+            descriptor: cloudflare_container_descriptor("disabled"),
+            implementation: IsolationBackendImplementation::GatewayDriven,
+            ready: false,
+            readiness_reason: Some(
+                "cloudflare container backend is not enabled; set \
+                 AGENT_WORKER_ENABLE_CF_CONTAINER_BACKEND=1 to allow the Cloudflare \
+                 Containers/Sandbox isolation tier"
+                    .to_string(),
+            ),
+        };
+    }
+    match crate::cloudflare_container_backend::cloudflare_container_backend_readiness() {
+        Ok((version, reason)) => RegisteredIsolationBackend {
+            descriptor: cloudflare_container_descriptor(&version),
+            implementation: IsolationBackendImplementation::GatewayDriven,
+            ready: true,
+            readiness_reason: Some(reason),
+        },
+        Err(reason) => RegisteredIsolationBackend {
+            descriptor: cloudflare_container_descriptor("unknown"),
+            implementation: IsolationBackendImplementation::GatewayDriven,
+            ready: false,
+            readiness_reason: Some(reason),
+        },
+    }
 }
 
 /// The local-process (Linux namespace) backend is a third real host

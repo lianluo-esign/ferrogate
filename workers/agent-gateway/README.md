@@ -120,6 +120,50 @@ The Rust side (`crates/ferrogate-runtime/src/cloudflare_agent_schedule.rs`,
 `AgentScheduleClient`) maps `schedule_create` / `schedule_list` /
 `schedule_cancel` onto exactly these routes.
 
+## Container / Sandbox routes (issue #415)
+
+`src/container.ts` adds the **Cloudflare Containers / Sandbox isolation tier** —
+"just another sandbox", per-tenant isolated, for agent runs that must execute
+arbitrary / untrusted code. Cloudflare exposes **no public container lifecycle
+REST API** (`this.ctx.container.start/exec/signal/monitor/destroy`, or the
+`@cloudflare/sandbox` `getSandbox(...).exec/runCode/…`, are only reachable from
+Worker code), so these routes are the sole tethered path FerroGate drives the
+tier through. All POST + bearer-gated, instance name in the body:
+
+| Route | Body | Effect |
+|-------|------|--------|
+| `POST /container/prepare`   | `{ instance, container: { image, tier, workspacePath? } }` | validate + pin image/tier (create is lazy); 422 `invalid_spec` |
+| `POST /container/start`     | `{ instance, entrypoint?, env?, enableInternet?, egressAllowlist? }` | launch; **egress deny-by-default** |
+| `POST /container/exec`      | `{ instance, step: { mode: "command"\|"code", command?/language?+source?, timeoutMillis? } }` | run a command or code step, capture stdout/stderr/exit |
+| `POST /container/stop`      | `{ instance, signal }` | SIGTERM/SIGKILL |
+| `POST /container/logs`      | `{ instance, tail? }` | recent instance logs |
+| `POST /container/artifacts` | `{ instance, path? }` | list files under the workspace |
+| `POST /container/cleanup`   | `{ instance }` | destroy the instance |
+
+Key decisions (see
+[`../../docs/cloudflare-container-isolation.md`](../../docs/cloudflare-container-isolation.md)):
+
+- **Egress deny-by-default** — `enableInternet` starts `false`; a request with
+  `enableInternet=true` and an EMPTY `egressAllowlist` is rejected (422). The
+  Rust client blocks it client-side too; the Worker re-enforces (defense in
+  depth). This mirrors the #117 function-egress broker.
+- **Optional binding, fail closed** — the `CONTAINER_SANDBOX` DO binding is
+  OPTIONAL (like the semantic-memory pilot's VECTORIZE/AI). Absent it, every
+  verb returns `container_unbound` (HTTP 501). The low-level SDK surface is
+  declared **structurally** in `container.ts`, so `tsc` needs neither
+  `@cloudflare/sandbox` nor `@cloudflare/containers` as a build dependency.
+- **Workers Paid only**; instances scale to zero; tiers `lite`→`standard-4`
+  (≤ 4 vCPU / 12 GiB). `CONTAINER_MAX_OUTPUT_BYTES` (wrangler var, default
+  1 MB) caps captured stdout/stderr.
+
+The Rust side (`crates/ferrogate-runtime/src/cloudflare_container.rs`,
+`ContainerControlClient`) maps `prepare` / `start` / `exec` / `stop` /
+`collect_logs` / `collect_artifacts` / `cleanup` onto exactly these routes; the
+agent-worker `IsolationBackendLifecycle` backend
+(`crates/agent-worker/src/cloudflare_container_backend.rs`) drives that client.
+The **live sandbox round-trip** (run a code step, capture stdout/exit) needs a
+real `CONTAINER_SANDBOX` binding + network and is the test gate's to prove.
+
 ## Deploy
 
 ```sh

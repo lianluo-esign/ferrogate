@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 mod backends;
+mod cloudflare_container_backend;
 mod docker_backend;
 mod events;
 mod external_actions;

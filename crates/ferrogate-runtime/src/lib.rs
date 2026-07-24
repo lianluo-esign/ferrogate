@@ -11,6 +11,7 @@ mod agent;
 mod capability_boundary;
 mod cloudflare_agent_memory;
 mod cloudflare_agent_schedule;
+mod cloudflare_container;
 mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
@@ -58,9 +59,21 @@ pub use cloudflare_agent_schedule::{
     AgentScheduleListCriteria, AgentScheduleRecord, AgentScheduleTaskSpec, AgentScheduleWhen,
     SCHEDULE_TASK_ID_MAX_LEN,
 };
+pub use cloudflare_container::{
+    cloudflare_container_capabilities, cloudflare_container_descriptor, ContainerArtifactEntry,
+    ContainerArtifacts, ContainerCleaned, ContainerControlClient, ContainerControlError,
+    ContainerExecKind, ContainerExecOutput, ContainerExecSpec, ContainerInstanceTier,
+    ContainerLogs, ContainerPrepareSpec, ContainerPrepared, ContainerSignal, ContainerStartSpec,
+    ContainerStarted, ContainerStopped, CLOUDFLARE_CONTAINER_BACKEND_NAME,
+    CLOUDFLARE_CONTAINER_HOST_LIFECYCLE_OWNER,
+};
 pub use cloudflare_gateway_control::{
     BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface,
 };
+// Re-export the Cloudflare HTTP transport types so the `GatewayControlTransport`
+// seam (and the container/memory/schedule clients built on it) is implementable
+// from other crates — notably the agent-worker Cloudflare container backend
+// (#415) — without a direct `ferrogate-cloudflare` dependency.
 pub use cloudflare_gateway_deploy::{
     GatewayDeployOutcome, GatewayWorkerDeployer, GatewayWorkerSpec, DEFAULT_AGENT_DO_BINDING,
     DEFAULT_AGENT_DO_CLASS, DEFAULT_GATEWAY_SCRIPT_NAME, GATEWAY_MULTIPART_BOUNDARY,
@@ -78,6 +91,7 @@ pub use cloudflare_worker_target::{
     CloudflareWorkerTargetError, PreparedWorkerInvocation, WorkerBrokerError,
     WorkerInvocationRequest, DEFAULT_WORKER_INVOCATION_TIMEOUT_MILLIS, WORKER_FUNCTION_CAPABILITY,
 };
+pub use ferrogate_cloudflare::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 pub use framework_adapter::{
     authorize_framework_capability, self_hosted_framework_capability_report, FrameworkAdapter,
     FrameworkAdapterArtifact, FrameworkAdapterArtifactRequest, FrameworkAdapterArtifacts,

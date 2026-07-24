@@ -21,6 +21,15 @@ pub enum IsolationBackendKind {
     KataContainers,
     Gvisor,
     RootlessDocker,
+    /// Cloudflare Containers / Sandbox tier (issue #415): a per-tenant isolated
+    /// instance (a Durable Object–backed `Container`, or a `@cloudflare/sandbox`
+    /// sandbox for untrusted agent-generated code). Its host lifecycle is NOT
+    /// owned by the local `agent-worker`; it is driven REMOTELY through the
+    /// fronting agent-gateway Worker (Cloudflare exposes no public container
+    /// lifecycle REST API). Isolation is stronger than a namespaced local
+    /// process, so it ranks above [`Self::LocalProcess`] but below the
+    /// host-owned micro-VM / container tiers.
+    CloudflareContainer,
     /// Namespaced local host process (unshare user/mount/pid/net + rlimits).
     /// Weakest sanctioned tier: sandbox/CI substitute where no daemon or
     /// hypervisor is available. Always ranked last for selection.
@@ -249,7 +258,8 @@ fn isolation_preference_rank(kind: &IsolationBackendKind) -> u8 {
         IsolationBackendKind::KataContainers => 1,
         IsolationBackendKind::Gvisor => 2,
         IsolationBackendKind::RootlessDocker => 3,
-        IsolationBackendKind::LocalProcess => 4,
+        IsolationBackendKind::CloudflareContainer => 4,
+        IsolationBackendKind::LocalProcess => 5,
     }
 }
 
