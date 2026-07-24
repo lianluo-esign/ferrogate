@@ -1953,6 +1953,16 @@ pub(crate) struct StorageConfig {
     pub(crate) postgres_schema: Option<String>,
     #[serde(default)]
     pub(crate) postgres_search_path: Vec<String>,
+    /// D1 control-database uuid for `provider = "cloudflare_d1"` (issue #445):
+    /// the database holding `tenants`, config documents, and the account-global
+    /// families. Absent/empty means "not provisioned yet" -- the backend rejects
+    /// control-plane access until `provision_control_database` seeds it.
+    #[serde(default)]
+    pub(crate) d1_control_database_id: Option<String>,
+    /// Pre-seeded `tenant_id -> D1 database uuid` registry entries (issue #445),
+    /// for a deployment resuming against already-provisioned tenant databases.
+    #[serde(default)]
+    pub(crate) d1_tenant_databases: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_storage_migration_mode")]
     pub(crate) migration_mode: StorageMigrationMode,
     #[serde(default = "default_admin_list_limit")]
@@ -2611,6 +2621,8 @@ impl Default for StorageConfig {
             postgres_statement_timeout_millis: default_postgres_statement_timeout_millis(),
             postgres_schema: None,
             postgres_search_path: Vec::new(),
+            d1_control_database_id: None,
+            d1_tenant_databases: std::collections::BTreeMap::new(),
             migration_mode: default_storage_migration_mode(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),

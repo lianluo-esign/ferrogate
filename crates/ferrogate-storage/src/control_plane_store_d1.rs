@@ -90,6 +90,15 @@
 //!   `get_config_document`, `list_config_documents`,
 //!   `list_config_resource_documents`, `replace_config_documents`,
 //!   `control_plane_snapshot`, `config_documents`.
+//! - RBAC (#445, control database): `upsert_permission`, `get_permission`,
+//!   `list_permissions`, `delete_permission`, `upsert_role`, `get_role`,
+//!   `list_roles`, `delete_role`, `bind_tenant_role`,
+//!   `list_tenant_role_bindings`, `unbind_tenant_role`.
+//! - Site domains (#445, control database): `upsert_site_domain`,
+//!   `get_site_domain`, `list_site_domains`, `delete_site_domain`.
+//! - Budget alert idempotency ledger (#445, control database):
+//!   `record_budget_alert_notification`, `budget_alert_already_notified`,
+//!   `list_budget_alert_notifications`.
 //! - Process-local (backend-independent semantics, mirrors Memory/Postgres):
 //!   `set_retention_limits` (no-op like Postgres), `next_audit_event_id`,
 //!   `upsert_usage_aggregate_local`, `store_usage_aggregate_local`,
@@ -105,10 +114,11 @@
 //! monthly + metadata rollups, billing ledger/outbox, billing events,
 //! `persist_usage_aggregate` (durable half), guardrail policy
 //! revisions/bindings, snapshot replay floors, request/audit logs, agent
-//! runs/events, managed + self-hosted worker stores, and the pre-#425
-//! per-entity dispatch surfaces (wallets, payment attempts, RBAC, agent
-//! schedules, site domains, budget alerts, workflow budgets, observed agent
-//! presence, MCP identity).
+//! runs/events, managed + self-hosted worker stores, and the remaining
+//! pre-#425 per-entity dispatch surfaces (wallets, payment attempts, agent
+//! schedules, workflow budgets, observed agent presence, MCP identity). RBAC,
+//! site domains, and the budget-alert idempotency ledger from that group are
+//! now implemented (issue #445, see above).
 //!
 //! Everything erroring returns the typed `unimplemented-backend-surface` error
 //! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
@@ -675,6 +685,146 @@ impl PlanRow {
         })
     }
 }
+
+// --- Row DTOs: account-global admin/config entities (issue #445) ---
+//
+// RBAC (permissions/roles/tenant_role_bindings), site domains, and the budget
+// alert idempotency ledger are account-scoped configuration (not per-request
+// tenant data), so each routes to the CONTROL database like the #440 families;
+// the DTOs decode the SQLite row shape (JSONB -> TEXT, SMALLINT -> INTEGER)
+// back into the `Stored*` struct the trait exposes.
+
+#[derive(Deserialize)]
+struct PermissionRow {
+    id: String,
+    key: String,
+    name: String,
+    description: String,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+}
+
+impl From<PermissionRow> for StoredPermission {
+    fn from(row: PermissionRow) -> Self {
+        Self {
+            id: row.id,
+            key: row.key,
+            name: row.name,
+            description: row.description,
+            created_at_unix: row.created_at_unix,
+            updated_at_unix: row.updated_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RoleRow {
+    id: String,
+    name: String,
+    slug: String,
+    description: String,
+    permission_keys_json: String,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+}
+
+impl RoleRow {
+    fn into_stored(self) -> Result<StoredRole, StorageError> {
+        Ok(StoredRole {
+            id: self.id,
+            name: self.name,
+            slug: self.slug,
+            description: self.description,
+            permission_keys: deserialize_storage_document(&self.permission_keys_json)?,
+            created_at_unix: self.created_at_unix,
+            updated_at_unix: self.updated_at_unix,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct TenantRoleBindingRow {
+    id: String,
+    tenant_id: String,
+    role_id: String,
+    created_at_unix: i64,
+}
+
+impl From<TenantRoleBindingRow> for StoredTenantRoleBinding {
+    fn from(row: TenantRoleBindingRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            role_id: row.role_id,
+            created_at_unix: row.created_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SiteDomainRow {
+    hostname: String,
+    tenant_id: String,
+    site: String,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+}
+
+impl From<SiteDomainRow> for StoredSiteDomain {
+    fn from(row: SiteDomainRow) -> Self {
+        Self {
+            hostname: row.hostname,
+            tenant_id: row.tenant_id,
+            site: row.site,
+            created_at_unix: row.created_at_unix,
+            updated_at_unix: row.updated_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct BudgetAlertNotificationRow {
+    id: String,
+    scope_type: String,
+    scope_id: String,
+    period_month: String,
+    threshold_pct: i64,
+    notified_at_unix: i64,
+}
+
+impl BudgetAlertNotificationRow {
+    fn into_stored(self) -> Result<StoredBudgetAlertNotification, StorageError> {
+        let scope_type = QuotaScopeKind::from_str_opt(&self.scope_type).ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "cloudflare d1: unknown budget_alert_notifications.scope_type {}",
+                self.scope_type
+            ))
+        })?;
+        Ok(StoredBudgetAlertNotification {
+            id: self.id,
+            scope_type,
+            scope_id: self.scope_id,
+            period_month: self.period_month,
+            threshold_pct: self.threshold_pct.clamp(0, i64::from(u8::MAX)) as u8,
+            notified_at_unix: self.notified_at_unix,
+        })
+    }
+}
+
+const SELECT_PERMISSION_COLUMNS: &str = "SELECT id, key, name, description, created_at_unix, \
+     updated_at_unix FROM permissions";
+
+const SELECT_ROLE_COLUMNS: &str = "SELECT id, name, slug, description, permission_keys_json, \
+     created_at_unix, updated_at_unix FROM roles";
+
+const SELECT_TENANT_ROLE_BINDING_COLUMNS: &str = "SELECT id, tenant_id, role_id, created_at_unix \
+     FROM tenant_role_bindings";
+
+const SELECT_SITE_DOMAIN_COLUMNS: &str = "SELECT hostname, tenant_id, site, created_at_unix, \
+     updated_at_unix FROM site_domains";
+
+const SELECT_BUDGET_ALERT_NOTIFICATION_COLUMNS: &str = "SELECT id, scope_type, scope_id, \
+     period_month, threshold_pct, notified_at_unix FROM budget_alert_notifications";
 
 const SELECT_ADMIN_USER_COLUMNS: &str = "SELECT id, email, password_hash, display_name, \
      superadmin, created_at_unix, updated_at_unix, last_login_at_unix, disabled_at_unix \
@@ -2980,26 +3130,77 @@ impl ControlPlaneStore for D1ControlPlaneStore {
     // returns the typed `unimplemented-backend-surface` error a proxy-Worker
     // impl will later replace. Same contract as the erroring surfaces above.
 
-    async fn upsert_site_domain(&self, _domain: StoredSiteDomain) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_site_domain"))
+    // --- Site domains (IMPLEMENTED, control database, issue #445) ---
+    //
+    // hostname is the natural key; serve-path lookups carry no tenant context,
+    // so these route to the control database rather than fanning out.
+
+    async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
+        self.execute_control(
+            "INSERT INTO site_domains \
+             (hostname, tenant_id, site, created_at_unix, updated_at_unix) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (hostname) DO UPDATE SET \
+             tenant_id = excluded.tenant_id, site = excluded.site, \
+             updated_at_unix = excluded.updated_at_unix",
+            vec![
+                domain.hostname,
+                domain.tenant_id,
+                domain.site,
+                domain.created_at_unix.to_string(),
+                domain.updated_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn get_site_domain(
         &self,
-        _hostname: &str,
+        hostname: &str,
     ) -> Result<Option<StoredSiteDomain>, StorageError> {
-        Err(unimplemented_surface("get_site_domain"))
+        let row: Option<SiteDomainRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_SITE_DOMAIN_COLUMNS} WHERE hostname = ?"),
+                vec![hostname.to_string()],
+            )
+            .await?;
+        Ok(row.map(StoredSiteDomain::from))
     }
 
     async fn list_site_domains(
         &self,
-        _tenant_id: Option<&str>,
+        tenant_id: Option<&str>,
     ) -> Result<Vec<StoredSiteDomain>, StorageError> {
-        Err(unimplemented_surface("list_site_domains"))
+        let rows: Vec<SiteDomainRow> = match tenant_id {
+            Some(tenant_id) => {
+                self.fetch_control_rows(
+                    &format!(
+                        "{SELECT_SITE_DOMAIN_COLUMNS} WHERE tenant_id = ? ORDER BY hostname ASC"
+                    ),
+                    vec![tenant_id.to_string()],
+                )
+                .await?
+            }
+            None => {
+                self.fetch_control_rows(
+                    &format!("{SELECT_SITE_DOMAIN_COLUMNS} ORDER BY hostname ASC"),
+                    Vec::new(),
+                )
+                .await?
+            }
+        };
+        Ok(rows.into_iter().map(StoredSiteDomain::from).collect())
     }
 
-    async fn delete_site_domain(&self, _hostname: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_site_domain"))
+    async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError> {
+        let result = self
+            .execute_control(
+                "DELETE FROM site_domains WHERE hostname = ?",
+                vec![hostname.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
     }
 
     async fn list_usage_metadata_rollups(
@@ -3025,24 +3226,67 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_observed_agent_presence_since"))
     }
 
+    // --- Budget alert idempotency ledger (IMPLEMENTED, control database,
+    // issue #445) ---
+    //
+    // Scope-keyed, once-per-period-per-tier records: account-global alerting
+    // state with no tenant-database routing, so the control database owns them.
+
     async fn record_budget_alert_notification(
         &self,
-        _notification: StoredBudgetAlertNotification,
+        notification: StoredBudgetAlertNotification,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("record_budget_alert_notification"))
+        self.execute_control(
+            "INSERT INTO budget_alert_notifications \
+             (id, scope_type, scope_id, period_month, threshold_pct, notified_at_unix) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                notification.id,
+                notification.scope_type.as_str().to_string(),
+                notification.scope_id,
+                notification.period_month,
+                i64::from(notification.threshold_pct).to_string(),
+                notification.notified_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn budget_alert_already_notified(&self, _id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("budget_alert_already_notified"))
+    async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
+        let row: Option<BudgetAlertNotificationRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_BUDGET_ALERT_NOTIFICATION_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        Ok(row.is_some())
     }
 
     async fn list_budget_alert_notifications(
         &self,
-        _scope_type: QuotaScopeKind,
-        _scope_id: &str,
-        _period_month: &str,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
     ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
-        Err(unimplemented_surface("list_budget_alert_notifications"))
+        let rows: Vec<BudgetAlertNotificationRow> = self
+            .fetch_control_rows(
+                &format!(
+                    "{SELECT_BUDGET_ALERT_NOTIFICATION_COLUMNS} \
+                     WHERE scope_type = ? AND scope_id = ? AND period_month = ? \
+                     ORDER BY threshold_pct ASC"
+                ),
+                vec![
+                    scope_type.as_str().to_string(),
+                    scope_id.to_string(),
+                    period_month.to_string(),
+                ],
+            )
+            .await?;
+        rows.into_iter()
+            .map(BudgetAlertNotificationRow::into_stored)
+            .collect()
     }
 
     async fn open_workflow_run_budget(
@@ -3094,58 +3338,161 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_workflow_run_budgets"))
     }
 
-    async fn upsert_permission(&self, _permission: StoredPermission) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_permission"))
+    // --- RBAC: permissions / roles / tenant role bindings (IMPLEMENTED,
+    // control database, issue #445) ---
+    //
+    // Permissions and roles are shared/global (like plans); tenant role
+    // bindings are account-level admin config keyed by a deterministic
+    // `tenant_id:role_id` id. All account-global, so the control database owns
+    // them -- never fanned out over tenant databases.
+
+    async fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError> {
+        self.execute_control(
+            "INSERT INTO permissions \
+             (id, key, name, description, created_at_unix, updated_at_unix) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             key = excluded.key, name = excluded.name, description = excluded.description, \
+             updated_at_unix = excluded.updated_at_unix",
+            vec![
+                permission.id,
+                permission.key,
+                permission.name,
+                permission.description,
+                permission.created_at_unix.to_string(),
+                permission.updated_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn get_permission(&self, _id: &str) -> Result<Option<StoredPermission>, StorageError> {
-        Err(unimplemented_surface("get_permission"))
+    async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+        let row: Option<PermissionRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_PERMISSION_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        Ok(row.map(StoredPermission::from))
     }
 
     async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
-        Err(unimplemented_surface("list_permissions"))
+        let rows: Vec<PermissionRow> = self
+            .fetch_control_rows(
+                &format!("{SELECT_PERMISSION_COLUMNS} ORDER BY key ASC"),
+                Vec::new(),
+            )
+            .await?;
+        Ok(rows.into_iter().map(StoredPermission::from).collect())
     }
 
-    async fn delete_permission(&self, _id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_permission"))
+    async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+        let result = self
+            .execute_control("DELETE FROM permissions WHERE id = ?", vec![id.to_string()])
+            .await?;
+        Ok(result.changes() > 0)
     }
 
-    async fn upsert_role(&self, _role: StoredRole) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_role"))
+    async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
+        let permission_keys_json = serialize_storage_document(&role.permission_keys)?;
+        self.execute_control(
+            "INSERT INTO roles \
+             (id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             name = excluded.name, slug = excluded.slug, description = excluded.description, \
+             permission_keys_json = excluded.permission_keys_json, \
+             updated_at_unix = excluded.updated_at_unix",
+            vec![
+                role.id,
+                role.name,
+                role.slug,
+                role.description,
+                permission_keys_json,
+                role.created_at_unix.to_string(),
+                role.updated_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn get_role(&self, _id: &str) -> Result<Option<StoredRole>, StorageError> {
-        Err(unimplemented_surface("get_role"))
+    async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+        let row: Option<RoleRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_ROLE_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(RoleRow::into_stored).transpose()
     }
 
     async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
-        Err(unimplemented_surface("list_roles"))
+        let rows: Vec<RoleRow> = self
+            .fetch_control_rows(
+                &format!("{SELECT_ROLE_COLUMNS} ORDER BY slug ASC"),
+                Vec::new(),
+            )
+            .await?;
+        rows.into_iter().map(RoleRow::into_stored).collect()
     }
 
-    async fn delete_role(&self, _id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_role"))
+    async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+        let result = self
+            .execute_control("DELETE FROM roles WHERE id = ?", vec![id.to_string()])
+            .await?;
+        Ok(result.changes() > 0)
     }
 
-    async fn bind_tenant_role(
-        &self,
-        _binding: StoredTenantRoleBinding,
-    ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("bind_tenant_role"))
+    async fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError> {
+        self.execute_control(
+            "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                binding.id,
+                binding.tenant_id,
+                binding.role_id,
+                binding.created_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn list_tenant_role_bindings(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
     ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
-        Err(unimplemented_surface("list_tenant_role_bindings"))
+        let rows: Vec<TenantRoleBindingRow> = self
+            .fetch_control_rows(
+                &format!(
+                    "{SELECT_TENANT_ROLE_BINDING_COLUMNS} WHERE tenant_id = ? ORDER BY role_id ASC"
+                ),
+                vec![tenant_id.to_string()],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(StoredTenantRoleBinding::from)
+            .collect())
     }
 
     async fn unbind_tenant_role(
         &self,
-        _tenant_id: &str,
-        _role_id: &str,
+        tenant_id: &str,
+        role_id: &str,
     ) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("unbind_tenant_role"))
+        // tenant_role_bindings carries UNIQUE (tenant_id, role_id), so deleting
+        // by the natural key pair is equivalent to the Postgres delete-by-id.
+        let result = self
+            .execute_control(
+                "DELETE FROM tenant_role_bindings WHERE tenant_id = ? AND role_id = ?",
+                vec![tenant_id.to_string(), role_id.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
     }
 
     async fn upsert_agent_schedule(

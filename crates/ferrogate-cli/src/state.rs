@@ -1654,6 +1654,38 @@ pub(crate) fn runtime_storage_repositories(
         );
         return Ok(repositories);
     }
+    if storage.provider == ferrogate_storage::StorageProviderKind::CloudflareD1 {
+        // The storage crate stays transport-free: the CLI owns the transport,
+        // builds the D1 REST client from the `[cloudflare]` block (#405/#430),
+        // and seeds the tenant->database registry from config (#440). Registry
+        // bootstrap (provisioning the control database on first run) stays an
+        // explicit admin step, not a startup side effect.
+        let cloudflare = config.cloudflare.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "storage.provider = cloudflare_d1 requires a [cloudflare] block for the D1 client"
+            )
+        })?;
+        let resolver = Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env());
+        let cloudflare_client =
+            CloudflareClient::new(cloudflare.clone(), resolver).map_err(|error| {
+                anyhow::anyhow!(
+                    "storage.provider = cloudflare_d1: failed to build Cloudflare client: {error}"
+                )
+            })?;
+        let d1_client = ferrogate_cloudflare::d1::D1Client::new(Arc::new(cloudflare_client));
+        let options = ferrogate_storage::CloudflareD1StorageOptions {
+            control_database_id: storage.d1_control_database_id.clone().unwrap_or_default(),
+            tenant_databases: storage.d1_tenant_databases.clone(),
+            audit_event_retention_records: config.analytics.audit_event_retention_records,
+        };
+        let repositories =
+            RuntimeStorageRepositories::cloudflare_d1_from_client(d1_client, options)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+        repositories.set_guardrail_evaluation_retention_records(
+            config.analytics.guardrail_evaluation_retention_records,
+        );
+        return Ok(repositories);
+    }
     if storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
         let dsn = storage_postgres_dsn(storage)?;
         let repositories = RuntimeStorageRepositories::postgres(

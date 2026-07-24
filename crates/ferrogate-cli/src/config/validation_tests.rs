@@ -4202,6 +4202,39 @@ fn rejects_cloudflare_ai_gateway_provider_without_cloudflare_block() {
 }
 
 #[test]
+fn accepts_cloudflare_d1_storage_provider_with_cloudflare_block() {
+    let config = Config {
+        cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::CloudflareD1,
+            d1_control_database_id: Some("control-db".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config
+        .validate()
+        .expect("cloudflare_d1 storage with a [cloudflare] block must validate");
+}
+
+#[test]
+fn rejects_cloudflare_d1_storage_provider_without_cloudflare_block() {
+    let config = Config {
+        cloudflare: None,
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::CloudflareD1,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("storage.provider") && error.contains("[cloudflare]"),
+        "was: {error}"
+    );
+}
+
+#[test]
 fn rejects_cloudflare_ai_gateway_provider_with_empty_gateway_id() {
     let config = Config {
         cloudflare: Some(CloudflareConfig::new("acct-123", "env://CF_API_TOKEN")),

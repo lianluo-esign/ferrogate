@@ -1014,6 +1014,14 @@ impl Config {
             }
             self.validate_postgres_wire_storage("storage.postgres")?;
         }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::CloudflareD1
+            && self.cloudflare.is_none()
+        {
+            bail!(
+                "field storage.provider: cloudflare_d1 requires a [cloudflare] block to build the \
+                 D1 REST client"
+            );
+        }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
         }

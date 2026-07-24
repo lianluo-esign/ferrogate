@@ -268,6 +268,85 @@ INSERT OR IGNORE INTO plans
      default_monthly_egress_bytes_budget)
 VALUES ('free', 'Free', 'free', 0, 0, 1, 1, 10485760, 104857600);
 
+-- --- Account-global admin/config families (issue #445) ---
+--
+-- Like the issue #440 families above, these are account-scoped control-plane
+-- configuration (not per-request tenant data), so the backend only ever
+-- reads/writes them against the CONTROL database; they are never fanned out
+-- over tenant databases. Ported from sql/001_init_postgres.sql with the same
+-- SQLite dialect divergences: BOOLEAN -> INTEGER 0/1, JSONB -> TEXT, BIGINT/
+-- SMALLINT -> INTEGER, no cross-table FOREIGN KEYs (the tenants/roles rows a
+-- binding references live in the control database; referential integrity is
+-- enforced in Rust), and CHECK constraints on enumerations dropped (validated
+-- in Rust before write).
+
+-- Tenant-level RBAC entitlements (issue #182): a dynamically-definable,
+-- finest-grained capability unit. Global, like plans -- control database only.
+CREATE TABLE IF NOT EXISTS permissions (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- A named, horizontally-extensible bundle of permission keys (issue #182).
+-- permission_keys_json is a plain JSON string list (JSONB -> TEXT).
+CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    permission_keys_json TEXT NOT NULL DEFAULT '[]',
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- Many-to-many tenant<->role edges (issue #182). The Postgres FKs to
+-- tenants(id)/roles(id) are dropped here; a binding's tenants/roles rows live
+-- in the control database, so intra-database FKs cannot resolve. Deterministic
+-- id (tenant_id:role_id) keeps binding idempotent; UNIQUE mirrors Postgres.
+CREATE TABLE IF NOT EXISTS tenant_role_bindings (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (tenant_id, role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_role_bindings_tenant
+    ON tenant_role_bindings(tenant_id);
+
+-- Custom-domain bindings for hosted static sites (issue #265): one exact
+-- hostname -> {tenant}/{site}. hostname is the natural key; serve-path lookups
+-- carry no tenant context, so this lives in the control database (like
+-- quota_policies) rather than being routed per tenant.
+CREATE TABLE IF NOT EXISTS site_domains (
+    hostname TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_site_domains_tenant
+    ON site_domains(tenant_id);
+
+-- Idempotency ledger for proactive budget-threshold alerting (issue #170):
+-- exactly one row per (scope, period, tier). The Postgres CHECK on scope_type
+-- is dropped (QuotaScopeKind is validated in Rust); threshold_pct is a small
+-- integer (SMALLINT -> INTEGER).
+CREATE TABLE IF NOT EXISTS budget_alert_notifications (
+    id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    period_month TEXT NOT NULL,
+    threshold_pct INTEGER NOT NULL,
+    notified_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (scope_type, scope_id, period_month, threshold_pct)
+);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

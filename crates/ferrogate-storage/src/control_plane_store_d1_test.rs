@@ -22,8 +22,9 @@ use crate::{
     api_key_tenant_context, is_unimplemented_backend_surface, CloudflareD1StorageOptions,
     D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
     RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
-    StoredApiKey, StoredPlan, StoredQuotaPolicy, StoredSsoProviderConfig, StoredTenantAccount,
-    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    StoredApiKey, StoredBudgetAlertNotification, StoredPermission, StoredPlan, StoredQuotaPolicy,
+    StoredRole, StoredSiteDomain, StoredSsoProviderConfig, StoredTenantAccount,
+    StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -552,12 +553,15 @@ fn per_entity_dispatch_arms_error_with_the_typed_contract() {
         "{wallet_error:?}"
     );
 
-    let rbac_error = runtime()
-        .block_on(repositories.list_permissions())
+    // A still-erroring per-entity family (agent schedules) keeps the typed
+    // contract; RBAC/site-domains/budget-alerts are implemented (issue #445)
+    // and covered by their own round-trip tests below.
+    let schedule_error = runtime()
+        .block_on(repositories.get_agent_schedule("s1"))
         .unwrap_err();
     assert!(
-        is_unimplemented_backend_surface(&rbac_error),
-        "{rbac_error:?}"
+        is_unimplemented_backend_surface(&schedule_error),
+        "{schedule_error:?}"
     );
 }
 
@@ -887,6 +891,239 @@ fn plan_round_trips_through_the_control_database() {
         .expect("plan should decode");
     assert_eq!(fetched, plan);
     assert!(body_sql(&transport.recorded()[0]).starts_with("INSERT INTO plans"));
+}
+
+// --- Account-global admin/config families (issue #445): RBAC / site domains /
+// budget alert idempotency ledger ---
+
+#[test]
+fn permission_round_trips_through_the_control_database() {
+    let permission = StoredPermission {
+        id: "perm-1".into(),
+        key: "assets.publish".into(),
+        name: "Publish assets".into(),
+        description: "Allows publishing assets".into(),
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+    };
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "perm-1", "key": "assets.publish", "name": "Publish assets",
+                    "description": "Allows publishing assets",
+                    "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_permission(permission.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_permission("perm-1"))
+        .unwrap()
+        .expect("permission should decode");
+    assert_eq!(fetched, permission);
+
+    let requests = transport.recorded();
+    // RBAC is account-global: writes route to the control database.
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    assert!(body_sql(&requests[0]).starts_with("INSERT INTO permissions"));
+    assert!(body_sql(&requests[1]).contains("WHERE id = ?"));
+}
+
+#[test]
+fn role_round_trips_with_permission_keys_json() {
+    let role = StoredRole {
+        id: "role-1".into(),
+        name: "Publisher".into(),
+        slug: "publisher".into(),
+        description: "Can publish".into(),
+        permission_keys: vec!["assets.publish".into(), "assets.read".into()],
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+    };
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "role-1", "name": "Publisher", "slug": "publisher",
+                    "description": "Can publish",
+                    "permission_keys_json": "[\"assets.publish\",\"assets.read\"]",
+                    "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_role(role.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_role("role-1"))
+        .unwrap()
+        .expect("role should decode");
+    assert_eq!(fetched, role);
+
+    let params = body_params(&transport.recorded()[0]);
+    assert_eq!(
+        params[4], "[\"assets.publish\",\"assets.read\"]",
+        "permission_keys bind as JSON text (JSONB -> TEXT)"
+    );
+    assert!(body_sql(&transport.recorded()[0]).starts_with("INSERT INTO roles"));
+}
+
+#[test]
+fn tenant_role_binding_binds_lists_and_unbinds() {
+    let binding = StoredTenantRoleBinding {
+        id: "acme:role-1".into(),
+        tenant_id: "acme".into(),
+        role_id: "role-1".into(),
+        created_at_unix: 1_753_000_000,
+    };
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "acme:role-1", "tenant_id": "acme", "role_id": "role-1",
+                    "created_at_unix": 1_753_000_000_i64
+                }]),
+                0,
+            ),
+            query_ok(serde_json::json!([]), 1),
+        ],
+    );
+
+    runtime()
+        .block_on(store.bind_tenant_role(binding.clone()))
+        .expect("bind should succeed");
+    let listed = runtime()
+        .block_on(store.list_tenant_role_bindings("acme"))
+        .unwrap();
+    assert_eq!(listed, vec![binding]);
+    let unbound = runtime()
+        .block_on(store.unbind_tenant_role("acme", "role-1"))
+        .unwrap();
+    assert!(unbound);
+
+    let requests = transport.recorded();
+    // Binding is idempotent on the deterministic id.
+    assert!(body_sql(&requests[0]).contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(body_sql(&requests[1]).contains("WHERE tenant_id = ?"));
+    let unbind_sql = body_sql(&requests[2]);
+    assert!(unbind_sql.starts_with("DELETE FROM tenant_role_bindings"));
+    assert!(unbind_sql.contains("tenant_id = ? AND role_id = ?"));
+}
+
+#[test]
+fn site_domain_round_trips_and_filters_by_tenant() {
+    let domain = StoredSiteDomain {
+        hostname: "docs.example.com".into(),
+        tenant_id: "acme".into(),
+        site: "handbook".into(),
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+    };
+    let row = serde_json::json!([{
+        "hostname": "docs.example.com", "tenant_id": "acme", "site": "handbook",
+        "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64
+    }]);
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(row.clone(), 0),
+            query_ok(row.clone(), 0),
+            query_ok(row, 0),
+            query_ok(serde_json::json!([]), 1),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_site_domain(domain.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_site_domain("docs.example.com"))
+        .unwrap()
+        .expect("domain should decode");
+    assert_eq!(fetched, domain);
+    let by_tenant = runtime()
+        .block_on(store.list_site_domains(Some("acme")))
+        .unwrap();
+    assert_eq!(by_tenant, vec![domain.clone()]);
+    let all = runtime().block_on(store.list_site_domains(None)).unwrap();
+    assert_eq!(all, vec![domain]);
+    let deleted = runtime()
+        .block_on(store.delete_site_domain("docs.example.com"))
+        .unwrap();
+    assert!(deleted);
+
+    let requests = transport.recorded();
+    // hostname lookups carry no tenant context, so this family lives in the
+    // control database rather than fanning out over tenant databases.
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    assert!(body_sql(&requests[0]).starts_with("INSERT INTO site_domains"));
+    assert!(body_sql(&requests[2]).contains("WHERE tenant_id = ?"));
+    assert!(
+        !body_sql(&requests[3]).contains("WHERE tenant_id"),
+        "the None tenant filter lists every hostname"
+    );
+}
+
+#[test]
+fn budget_alert_notification_ledger_round_trips() {
+    let notification = StoredBudgetAlertNotification {
+        id: "tenant:acme:2026-07:90".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "acme".into(),
+        period_month: "2026-07".into(),
+        threshold_pct: 90,
+        notified_at_unix: 1_753_000_000,
+    };
+    let row = serde_json::json!([{
+        "id": "tenant:acme:2026-07:90", "scope_type": "tenant", "scope_id": "acme",
+        "period_month": "2026-07", "threshold_pct": 90, "notified_at_unix": 1_753_000_000_i64
+    }]);
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(row.clone(), 0),
+            query_ok(row, 0),
+        ],
+    );
+
+    runtime()
+        .block_on(store.record_budget_alert_notification(notification.clone()))
+        .expect("record should succeed");
+    let already = runtime()
+        .block_on(store.budget_alert_already_notified("tenant:acme:2026-07:90"))
+        .unwrap();
+    assert!(already, "the recorded tier reads back as already notified");
+    let listed = runtime()
+        .block_on(store.list_budget_alert_notifications(QuotaScopeKind::Tenant, "acme", "2026-07"))
+        .unwrap();
+    assert_eq!(listed, vec![notification]);
+
+    let requests = transport.recorded();
+    let record_sql = body_sql(&requests[0]);
+    assert!(record_sql.starts_with("INSERT INTO budget_alert_notifications"));
+    // Idempotency ledger: exactly one row per (scope, period, tier).
+    assert!(record_sql.contains("ON CONFLICT (id) DO NOTHING"));
+    let params = body_params(&requests[0]);
+    assert_eq!(params[1], "tenant", "scope_type binds its enum string");
+    assert_eq!(params[4], "90", "threshold_pct binds as an integer string");
+    assert!(body_sql(&requests[2]).contains("ORDER BY threshold_pct ASC"));
 }
 
 // --- Config construction route (issue #440) ---

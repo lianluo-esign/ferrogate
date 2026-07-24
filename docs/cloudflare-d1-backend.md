@@ -1,9 +1,12 @@
 # Cloudflare D1 control-plane backend (per-tenant databases)
 
 Status: first slice landed (issue #420); auth/quota entity families + the
-config-driven construction route + `list_databases` pagination landed (issue
-#440). Builds on the shared Cloudflare client (#405), the `ControlPlaneStore`
-trait extraction (#419), and the #425 dispatch consolidation.
+storage-side config-driven construction route + `list_databases` pagination
+landed (issue #440); the ferrogate-cli construction hook (config fields +
+`state.rs` branch) + the RBAC / site-domain / budget-alert-ledger entity
+families landed (issue #445). Builds on the shared Cloudflare client (#405), the
+`ControlPlaneStore` trait extraction (#419), and the #425 dispatch
+consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
 entities in **per-tenant Cloudflare D1 databases** driven over the D1 REST
@@ -39,9 +42,13 @@ already provides.
   tenant→database registry document, and every **account-global** family
   (issue #440): `admin_users`, `admin_user_tenant_memberships`,
   `admin_user_refresh_tokens`, `sso_provider_configs`, `sso_pending_flows`,
-  `quota_policies`, and `plans`. These are account-scoped configuration, not
-  per-request tenant data — admin identities span tenants and quota lookups
-  carry no tenant context — so they are never fanned out over tenant databases.
+  `quota_policies`, and `plans`; plus the issue #445 admin/config families:
+  `permissions`, `roles`, `tenant_role_bindings` (RBAC), `site_domains`, and
+  `budget_alert_notifications` (the alert idempotency ledger). These are
+  account-scoped configuration, not per-request tenant data — admin identities
+  span tenants, quota lookups carry no tenant context, and site-domain lookups
+  resolve by hostname with no tenant context — so they are never fanned out over
+  tenant databases.
 - **Tenant databases** (`ferrogate-tenant-<tenant_id>`, one per tenant):
   that tenant's `projects`, `workspaces`, and `api_keys` rows.
 - Writes route on the entity's `tenant_id`. An empty `tenant_id` routes to
@@ -148,6 +155,22 @@ Implemented against D1:
   `delete_quota_policy`, `upsert_plan`, `get_plan`, `list_plans`. The
   migration seeds the default `free` plan (`INSERT OR IGNORE`), mirroring the
   Postgres migration and the in-memory `default_free_plan()`.
+- **RBAC** (issue #445, control database): `upsert_permission`,
+  `get_permission`, `list_permissions`, `delete_permission`, `upsert_role`,
+  `get_role`, `list_roles`, `delete_role`, `bind_tenant_role`,
+  `list_tenant_role_bindings`, `unbind_tenant_role`. Permissions/roles are
+  shared/global (like plans); the `tenant_role_bindings` FKs to `tenants`/
+  `roles` are dropped (physical isolation) and `unbind` deletes by the natural
+  `(tenant_id, role_id)` key.
+- **Site domains** (issue #445, control database): `upsert_site_domain`,
+  `get_site_domain`, `list_site_domains`, `delete_site_domain`. `hostname` is
+  the natural key and serve-path lookups carry no tenant context, so this
+  family lives in the control database like `quota_policies`.
+- **Budget alert idempotency ledger** (issue #445, control database):
+  `record_budget_alert_notification`, `budget_alert_already_notified`,
+  `list_budget_alert_notifications`. The Postgres `CHECK` on `scope_type` is
+  dropped (validated in Rust); `record` is `INSERT ... ON CONFLICT (id) DO
+  NOTHING` for once-per-period-per-tier idempotency.
 - **Config documents** (generic kind-keyed, control database):
   `upsert_config_document`, `delete_config_document`,
   `get_config_document`, `list_config_documents`,
@@ -163,13 +186,14 @@ Everything else — assets/channels/retention, usage monthly + metadata
 rollups, billing ledger/outbox, guardrail policy revisions/bindings, snapshot
 replay floors, request/audit logs, billing events, `persist_usage_aggregate`
 (the durable half), agent runs/events, managed/self-hosted worker stores, and
-the pre-#425 per-entity dispatch surfaces (wallets, payment attempts, RBAC,
-agent schedules, site domains, budget alerts, workflow budgets, observed agent
-presence, guardrail evidence, MCP identity) — returns the **typed
-`unimplemented-backend-surface` error** (`is_unimplemented_backend_surface`
-matches it) wherever the signature carries a `Result`, and logs a warning +
-returns an empty/default value where it cannot (the append/analytics
-getters). Nothing fails silently; tests pin the contract.
+the remaining pre-#425 per-entity dispatch surfaces (wallets, payment attempts,
+agent schedules, workflow budgets, observed agent presence, guardrail evidence,
+MCP identity) — returns the **typed `unimplemented-backend-surface` error**
+(`is_unimplemented_backend_surface` matches it) wherever the signature carries a
+`Result`, and logs a warning + returns an empty/default value where it cannot
+(the append/analytics getters). Nothing fails silently; tests pin the contract.
+(RBAC, site domains, and the budget-alert ledger from that group are now
+implemented — issue #445, see above.)
 
 ## Config-driven construction (issue #440)
 
@@ -183,30 +207,30 @@ transport (it builds the `CloudflareClient`/`D1Client` from the `[cloudflare]`
 block), so `ferrogate-storage` stays transport-free and unit-testable against a
 scripted transport.
 
-**Remaining CLI hook (follow-up, not landed here — `crates/ferrogate-cli` is
-out of scope for #440).** In `crates/ferrogate-cli/src/state.rs`,
-`runtime_storage_repositories` needs a branch, before the in-memory fallback:
+## CLI construction hook (issue #445)
 
-```rust
-if storage.provider == StorageProviderKind::CloudflareD1 {
-    let cloudflare = config.cloudflare.as_ref()
-        .ok_or_else(|| anyhow!("storage.provider = cloudflare_d1 requires a [cloudflare] block"))?;
-    let client = D1Client::new(Arc::new(build_cloudflare_client(Some(cloudflare))?));
-    let options = CloudflareD1StorageOptions {
-        control_database_id: /* new storage.d1_control_database_id config field */,
-        tenant_databases: /* optional storage.d1_tenant_databases map */,
-        audit_event_retention_records: config.analytics.audit_event_retention_records,
-    };
-    return RuntimeStorageRepositories::cloudflare_d1_from_client(client, options)
-        .map_err(|error| anyhow!("{error}"));
-}
-```
+`crates/ferrogate-cli` now constructs the D1 backend from config.
+`runtime_storage_repositories` (`crates/ferrogate-cli/src/state.rs`) branches on
+`storage.provider = "cloudflare_d1"` before the in-memory fallback: it reads the
+`[cloudflare]` block (erroring if absent — also caught by config validation),
+builds a `CloudflareClient` (`CloudflareClient::new` + `EnvTokenResolver`) and
+wraps it in a `D1Client`, then assembles `CloudflareD1StorageOptions` from two
+new `[storage]` config fields and hands it to
+`RuntimeStorageRepositories::cloudflare_d1_from_client`:
 
-That requires two small config fields (`storage.d1_control_database_id` and an
-optional `storage.d1_tenant_databases` map) and reusing the existing
-`build_cloudflare_client` helper. Registry bootstrap (provisioning the control
-database on first run) stays an explicit admin step via
+- **`storage.d1_control_database_id`** (optional string) → the control-database
+  uuid. Absent/empty means "not provisioned yet"; the backend rejects
+  control-plane access until `provision_control_database` seeds it.
+- **`storage.d1_tenant_databases`** (optional `{ tenant_id = "db-uuid" }` map) →
+  pre-seeds the tenant→database registry for a deployment resuming against
+  already-provisioned tenant databases.
+
+`audit_event_retention_records` is threaded from `[analytics]` exactly as for
+the other backends. Registry bootstrap (provisioning the control database on
+first run) stays an explicit admin step via
 `D1ControlPlaneStore::provision_control_database`, not a startup side effect.
+Absent config selects nothing — the backend is opt-in (`storage.provider`
+defaults to `memory`).
 
 ## Remaining scope (follow-ups)
 
