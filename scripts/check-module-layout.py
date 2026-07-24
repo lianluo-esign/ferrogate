@@ -3,9 +3,9 @@
 # Developed by the commercial cloud service company represented by https://token4ai.cloud.
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-07-24
-# description: Enforce the thin-lib.rs modular layout standard for
-# Cloudflare-scope crates (docs/engineering-standards.md, issue #429).
-"""Flag oversized lib.rs/main.rs entry files in Cloudflare-scope crates."""
+# description: Enforce the thin-lib.rs modular layout standard repo-wide
+# (docs/engineering-standards.md, issues #429/#433).
+"""Flag oversized lib.rs/main.rs entry files in every workspace crate."""
 
 from __future__ import annotations
 
@@ -20,25 +20,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # in docs/engineering-standards.md). Split modules before reaching it.
 DEFAULT_THRESHOLD = 800
 
-# Crates in scope for the issue #429 standard: ferrogate-cloudflare plus every
-# crate that hosts a Cloudflare backend (secrets/assets/runtime/storage/mcp/
-# providers). Missing crates are skipped so synthetic --root trees stay small.
-SCOPED_CRATES = (
-    "ferrogate-cli",
-    "ferrogate-cloudflare",
-    "ferrogate-mcp",
-    "ferrogate-providers",
-    "ferrogate-runtime",
-    "ferrogate-secrets",
-    "ferrogate-storage",
-)
-
 ENTRY_FILES = ("lib.rs", "main.rs")
 
-# Pre-existing offenders, frozen slightly above their 2026-07-24 line counts.
-# This is a ratchet: lower or delete entries as refactors (#419/#425) land;
-# never raise one or add one to make new growth fit.
+# Pre-existing offenders, frozen slightly above their line counts on the
+# date noted. This is a ratchet: lower or delete entries as refactors
+# (#419/#425/#433 follow-ups) land; never raise one or add one to make new
+# growth fit.
 BASELINE_MAX_LINES = {
+    "crates/ferrogate-guardrails/src/lib.rs": 1_100,  # 1,055 on 2026-07-24
+    "crates/ferrogate-observability/src/lib.rs": 1_550,  # 1,489 on 2026-07-24
     "crates/ferrogate-storage/src/lib.rs": 18_600,  # 18,493 after #425 (was 21,146)
 }
 
@@ -60,14 +50,21 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def crate_directories(root: pathlib.Path) -> list[pathlib.Path]:
+    crates = root / "crates"
+    if not crates.is_dir():
+        return []
+    return sorted(path for path in crates.iterdir() if path.is_dir())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     root = args.root.resolve()
     failures: list[str] = []
     checked = 0
-    for crate in SCOPED_CRATES:
+    for crate in crate_directories(root):
         for entry in ENTRY_FILES:
-            path = root / "crates" / crate / "src" / entry
+            path = crate / "src" / entry
             if not path.is_file():
                 continue
             checked += 1
@@ -78,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(
                     f"{relative}: {lines} lines exceeds the {limit}-line cap; "
                     "split concerns into sibling modules "
-                    "(docs/engineering-standards.md, issue #429)"
+                    "(docs/engineering-standards.md, issues #429/#433)"
                 )
             elif relative in BASELINE_MAX_LINES and lines <= args.threshold:
                 print(
@@ -87,8 +84,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
     if failures:
         print(
-            "Cloudflare-scope crate entry files must stay thin "
-            "(docs/engineering-standards.md, issue #429):",
+            "Crate entry files must stay thin "
+            "(docs/engineering-standards.md, issues #429/#433):",
             file=sys.stderr,
         )
         for failure in failures:
