@@ -230,6 +230,11 @@ Future work should push toward:
   must enter through explicit traits, repository contracts, provider adapters,
   or narrow service boundaries instead of hardwiring one vendor, protocol,
   product decision, or deployment topology into the gateway core.
+- Follow the modular file layout standard in `docs/engineering-standards.md`
+  (issue #429) for `ferrogate-cloudflare` and every Cloudflare backend inside
+  existing crates: `lib.rs` stays thin (mod/pub use/wiring only), one concern
+  per module file, split before ~500-800 lines, keep the public API stable via
+  re-exports. Gate locally with `python3 scripts/check-module-layout.py`.
 - Keep provider behavior adapter-local. Do not leak one provider's quirks into
   the core gateway model unless the abstraction genuinely belongs there.
 - Treat streaming as a correctness surface, not a formatting detail. SSE,
