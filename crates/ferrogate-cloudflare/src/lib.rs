@@ -39,6 +39,7 @@ pub mod d1_proxy;
 mod envelope;
 mod error;
 pub mod r2;
+pub mod r2_token;
 mod resolver;
 pub mod scopes;
 
@@ -53,6 +54,11 @@ pub use error::{CloudflareApiError, CloudflareError, AUTHENTICATION_CODES, MISSI
 pub use r2::{
     r2_bucket_name_for_tenant, R2Bucket, R2BucketCreation, R2BucketProvision,
     R2CreateBucketRequest, R2_BUCKET_ALREADY_EXISTS_CODES,
+};
+pub use r2_token::{
+    R2CredentialProvision, R2ScopedToken, R2ScopedTokenRequest, R2TokenAccess,
+    R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID, R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID,
+    R2_DEFAULT_JURISDICTION,
 };
 pub use resolver::{EnvTokenResolver, ResolvedToken, TokenResolver};
 pub use scopes::{TokenPermissionGroup, REQUIRED_TOKEN_PERMISSION_GROUPS};
@@ -78,6 +84,9 @@ mod error_test;
 #[cfg(test)]
 #[path = "r2_test.rs"]
 mod r2_test;
+#[cfg(test)]
+#[path = "r2_token_test.rs"]
+mod r2_token_test;
 #[cfg(test)]
 #[path = "resolver_test.rs"]
 mod resolver_test;
