@@ -121,7 +121,41 @@ fn list_databases_decodes_descriptor_array() {
     let databases = runtime().block_on(d1.list_databases()).unwrap();
     assert_eq!(databases.len(), 2);
     assert_eq!(databases[1].uuid.as_deref(), Some("db-2"));
-    assert!(transport.recorded()[0].url.contains("per_page=1000"));
+    let recorded = transport.recorded();
+    // A short first page (2 < per_page) stops after a single request.
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].url.contains("per_page=1000"));
+    assert!(recorded[0].url.contains("page=1"));
+}
+
+#[test]
+fn list_databases_follows_pagination_past_the_first_page() {
+    // A full first page (exactly per_page rows) forces a second request; the
+    // short second page ends the walk. Both pages' rows are concatenated.
+    let full_page: String = (0..1000)
+        .map(|index| format!(r#"{{ "uuid": "db-{index}", "name": "n{index}" }}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            &format!(r#"{{ "success": true, "errors": [], "result": [{full_page}] }}"#),
+        ),
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": [
+                { "uuid": "db-tail", "name": "tail" } ] }"#,
+        ),
+    ]));
+    let d1 = d1_client(transport.clone());
+
+    let databases = runtime().block_on(d1.list_databases()).unwrap();
+    assert_eq!(databases.len(), 1001);
+    assert_eq!(databases[1000].uuid.as_deref(), Some("db-tail"));
+    let recorded = transport.recorded();
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded[0].url.contains("page=1"));
+    assert!(recorded[1].url.contains("page=2"));
 }
 
 #[test]

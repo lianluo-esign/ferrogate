@@ -35,8 +35,8 @@ mod control_plane_store_memory;
 mod control_plane_store_postgres;
 use control_plane_store::MemoryControlPlaneStore;
 pub use control_plane_store_d1::{
-    is_unimplemented_backend_surface, D1ControlPlaneStore, D1TenantDatabaseRegistry,
-    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    is_unimplemented_backend_surface, CloudflareD1StorageOptions, D1ControlPlaneStore,
+    D1TenantDatabaseRegistry, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 mod rbac;
@@ -302,6 +302,9 @@ pub enum StorageProviderKind {
     TursoLibsql,
     Postgres,
     Mysql,
+    /// Per-tenant Cloudflare D1 control-plane backend (issues #420/#440),
+    /// selected via `storage.provider = "cloudflare_d1"`.
+    CloudflareD1,
 }
 
 impl StorageProviderKind {
@@ -312,6 +315,7 @@ impl StorageProviderKind {
             StorageProviderKind::TursoLibsql => "turso_libsql",
             StorageProviderKind::Postgres => "postgres",
             StorageProviderKind::Mysql => "mysql",
+            StorageProviderKind::CloudflareD1 => "cloudflare_d1",
         }
     }
 
@@ -325,6 +329,7 @@ impl StorageProviderKind {
             StorageProviderKind::Memory
                 | StorageProviderKind::Supabase
                 | StorageProviderKind::Postgres
+                | StorageProviderKind::CloudflareD1
         )
     }
 }

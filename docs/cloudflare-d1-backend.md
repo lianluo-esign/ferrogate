@@ -1,8 +1,9 @@
 # Cloudflare D1 control-plane backend (per-tenant databases)
 
-Status: first slice landed (issue #420). Builds on the shared Cloudflare
-client (#405), the `ControlPlaneStore` trait extraction (#419), and the #425
-dispatch consolidation.
+Status: first slice landed (issue #420); auth/quota entity families + the
+config-driven construction route + `list_databases` pagination landed (issue
+#440). Builds on the shared Cloudflare client (#405), the `ControlPlaneStore`
+trait extraction (#419), and the #425 dispatch consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
 entities in **per-tenant Cloudflare D1 databases** driven over the D1 REST
@@ -34,8 +35,13 @@ already provides.
 ## Topology
 
 - **Control database** (`ferrogate-control`): the `tenants` table, the
-  generic kind-keyed `control_plane_resources` config-document table, and the
-  tenant→database registry document.
+  generic kind-keyed `control_plane_resources` config-document table, the
+  tenant→database registry document, and every **account-global** family
+  (issue #440): `admin_users`, `admin_user_tenant_memberships`,
+  `admin_user_refresh_tokens`, `sso_provider_configs`, `sso_pending_flows`,
+  `quota_policies`, and `plans`. These are account-scoped configuration, not
+  per-request tenant data — admin identities span tenants and quota lookups
+  carry no tenant context — so they are never fanned out over tenant databases.
 - **Tenant databases** (`ferrogate-tenant-<tenant_id>`, one per tenant):
   that tenant's `projects`, `workspaces`, and `api_keys` rows.
 - Writes route on the entity's `tenant_id`. An empty `tenant_id` routes to
@@ -124,6 +130,24 @@ Implemented against D1:
 - **Workspaces**: `upsert_workspace`, `get_workspace`, `list_workspaces`,
   `delete_workspace`, `delete_workspace_if_unreferenced`,
   `resolve_workspace_scope`.
+- **Admin users / memberships / refresh tokens** (issue #440, control
+  database): `upsert_admin_user`, `get_admin_user_by_id`,
+  `get_admin_user_by_email`, `upsert_admin_user_membership`,
+  `list_admin_user_memberships_by_user`,
+  `list_admin_user_memberships_by_tenant`, `delete_admin_user_membership`,
+  `upsert_admin_user_refresh_token`, `get_admin_user_refresh_token_by_hash`,
+  `revoke_all_admin_user_refresh_tokens`,
+  `revoke_admin_user_refresh_tokens_for_tenant`.
+- **SSO** (issue #440, control database): `upsert_sso_provider_config`,
+  `get_sso_provider_config`, `delete_sso_provider_config`,
+  `insert_sso_pending_flow`, `take_sso_pending_flow`. The D1 HTTP query API
+  has no `DELETE ... RETURNING`, so `take_sso_pending_flow` reads the row and
+  then deletes it (plus prunes expired rows) in a follow-up statement.
+- **Quota policies + plans** (issue #440, control database):
+  `upsert_quota_policy`, `get_quota_policy`, `list_quota_policies`,
+  `delete_quota_policy`, `upsert_plan`, `get_plan`, `list_plans`. The
+  migration seeds the default `free` plan (`INSERT OR IGNORE`), mirroring the
+  Postgres migration and the in-memory `default_free_plan()`.
 - **Config documents** (generic kind-keyed, control database):
   `upsert_config_document`, `delete_config_document`,
   `get_config_document`, `list_config_documents`,
@@ -135,29 +159,70 @@ Implemented against D1:
   `usage_aggregates` (process-local view), `sum_api_key_committed_tokens`
   (process-local view).
 
-Everything else — admin users, SSO, refresh tokens, quota policies, plans,
-assets/channels/retention, usage monthly rollups, billing ledger/outbox,
-guardrail policy revisions/bindings, snapshot replay floors, request/audit
-logs, billing events, `persist_usage_aggregate` (the durable half), agent
-runs/events, managed/self-hosted worker stores, and the pre-#425 per-entity
-dispatch surfaces (wallets, payment attempts, RBAC, agent schedules, site
-domains, budget alerts, workflow budgets, observed agent presence, usage
-metadata rollups, guardrail evidence, MCP identity) — returns the **typed
+Everything else — assets/channels/retention, usage monthly + metadata
+rollups, billing ledger/outbox, guardrail policy revisions/bindings, snapshot
+replay floors, request/audit logs, billing events, `persist_usage_aggregate`
+(the durable half), agent runs/events, managed/self-hosted worker stores, and
+the pre-#425 per-entity dispatch surfaces (wallets, payment attempts, RBAC,
+agent schedules, site domains, budget alerts, workflow budgets, observed agent
+presence, guardrail evidence, MCP identity) — returns the **typed
 `unimplemented-backend-surface` error** (`is_unimplemented_backend_surface`
 matches it) wherever the signature carries a `Result`, and logs a warning +
 returns an empty/default value where it cannot (the append/analytics
 getters). Nothing fails silently; tests pin the contract.
 
+## Config-driven construction (issue #440)
+
+`StorageProviderKind::CloudflareD1` (`storage.provider = "cloudflare_d1"`)
+selects the backend; absent config selects nothing (opt-in).
+`RuntimeStorageRepositories::cloudflare_d1_from_client(client, options)` is the
+storage half: it seeds the tenant→database registry from
+`CloudflareD1StorageOptions { control_database_id, tenant_databases,
+audit_event_retention_records }` and wraps the store. The caller owns the
+transport (it builds the `CloudflareClient`/`D1Client` from the `[cloudflare]`
+block), so `ferrogate-storage` stays transport-free and unit-testable against a
+scripted transport.
+
+**Remaining CLI hook (follow-up, not landed here — `crates/ferrogate-cli` is
+out of scope for #440).** In `crates/ferrogate-cli/src/state.rs`,
+`runtime_storage_repositories` needs a branch, before the in-memory fallback:
+
+```rust
+if storage.provider == StorageProviderKind::CloudflareD1 {
+    let cloudflare = config.cloudflare.as_ref()
+        .ok_or_else(|| anyhow!("storage.provider = cloudflare_d1 requires a [cloudflare] block"))?;
+    let client = D1Client::new(Arc::new(build_cloudflare_client(Some(cloudflare))?));
+    let options = CloudflareD1StorageOptions {
+        control_database_id: /* new storage.d1_control_database_id config field */,
+        tenant_databases: /* optional storage.d1_tenant_databases map */,
+        audit_event_retention_records: config.analytics.audit_event_retention_records,
+    };
+    return RuntimeStorageRepositories::cloudflare_d1_from_client(client, options)
+        .map_err(|error| anyhow!("{error}"));
+}
+```
+
+That requires two small config fields (`storage.d1_control_database_id` and an
+optional `storage.d1_tenant_databases` map) and reusing the existing
+`build_cloudflare_client` helper. Registry bootstrap (provisioning the control
+database on first run) stays an explicit admin step via
+`D1ControlPlaneStore::provision_control_database`, not a startup side effect.
+
 ## Remaining scope (follow-ups)
 
-1. Proxy-Worker D1 binding path for the high-write surface (request logs,
+1. **Proxy-Worker D1 binding path** for the high-write surface (request logs,
    audit events, billing events, usage aggregates) and per-request reads.
-2. Remaining entity families on the trait (admin users/SSO first — they are
-   plain CRUD; then quota policies/plans, assets).
-3. Wiring a config/CLI construction path (`RuntimeStorageRepositories::
-   cloudflare_d1` exists; a `storage.provider = cloudflare_d1` config route
-   and registry bootstrap/preflight do not yet).
-4. D1 list pagination beyond the first 1,000 databases; `/raw` query variant
-   and `batch` request shape if bulk import ever needs them.
+   Deferred — still typed `unimplemented-backend-surface`. This is the
+   `prepare().bind()` / `batch()` / `withSession()` binding path; it belongs
+   in a Worker (`workers/**`, out of scope for #440) rather than the raw REST
+   client, exactly as the rate-limit split dictates.
+2. The CLI hook above (config fields + `state.rs` branch) — storage side is
+   ready; only `crates/ferrogate-cli` wiring remains.
+3. Remaining entity families still erroring (assets, billing ledger/outbox,
+   agent runs, worker stores, wallets/RBAC/schedules and the other per-entity
+   surfaces).
+4. `/raw` query variant and `batch` request shape if bulk import ever needs
+   them. (Entity `SELECT`s already return their full result set in one query
+   response; `list_databases` now follows REST pagination past 1,000 rows.)
 5. Live-Cloudflare integration test (gated on account credentials), mirror
    of `supabase_roundtrip.rs`.

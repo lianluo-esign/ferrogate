@@ -47,9 +47,20 @@
 //! which is exactly why the high-write trait surface below is typed as
 //! unimplemented instead of being routed over raw HTTP.
 //!
-//! ## Implemented vs erroring trait surface (first slice)
+//! ## Config-driven construction (issue #440)
 //!
-//! Implemented against D1:
+//! [`RuntimeStorageRepositories::cloudflare_d1_from_client`] is the storage
+//! half of the `storage.provider = "cloudflare_d1"` route: it seeds the
+//! tenant->database registry from [`CloudflareD1StorageOptions`] (the
+//! operator's `control_database_id` + any resumed tenant databases) and wraps
+//! the store. The caller owns the transport — it builds the
+//! `CloudflareClient`/[`D1Client`] from the `[cloudflare]` block and passes it
+//! in — so this crate stays transport-free and unit-testable. Absent config
+//! selects nothing; the backend is opt-in.
+//!
+//! ## Implemented vs erroring trait surface
+//!
+//! Implemented against D1 (issue #420 core + #440 auth/quota families):
 //! - API keys: `upsert_api_key_record`, `get_api_key_record`,
 //!   `list_api_key_records`, `find_api_key_records_by_prefix`.
 //! - Tenant accounts: `upsert_tenant_account`, `get_tenant_account`,
@@ -59,6 +70,21 @@
 //! - Workspaces: `upsert_workspace`, `get_workspace`, `list_workspaces`,
 //!   `delete_workspace`, `delete_workspace_if_unreferenced`,
 //!   `resolve_workspace_scope`.
+//! - Admin users (#440, control database): `upsert_admin_user`,
+//!   `get_admin_user_by_id`, `get_admin_user_by_email`,
+//!   `upsert_admin_user_membership`, `list_admin_user_memberships_by_user`,
+//!   `list_admin_user_memberships_by_tenant`, `delete_admin_user_membership`.
+//! - Admin refresh tokens (#440, control database):
+//!   `upsert_admin_user_refresh_token`, `get_admin_user_refresh_token_by_hash`,
+//!   `revoke_all_admin_user_refresh_tokens`,
+//!   `revoke_admin_user_refresh_tokens_for_tenant`.
+//! - SSO (#440, control database): `upsert_sso_provider_config`,
+//!   `get_sso_provider_config`, `delete_sso_provider_config`,
+//!   `insert_sso_pending_flow`, `take_sso_pending_flow` (read-then-delete,
+//!   since the HTTP query API has no `DELETE ... RETURNING`).
+//! - Quota policies + plans (#440, control database): `upsert_quota_policy`,
+//!   `get_quota_policy`, `list_quota_policies`, `delete_quota_policy`,
+//!   `upsert_plan`, `get_plan`, `list_plans`.
 //! - Config documents (generic, kind-keyed, control database):
 //!   `upsert_config_document`, `delete_config_document`,
 //!   `get_config_document`, `list_config_documents`,
@@ -69,7 +95,22 @@
 //!   `upsert_usage_aggregate_local`, `store_usage_aggregate_local`,
 //!   `usage_aggregates`, `sum_api_key_committed_tokens` (process-local view).
 //!
-//! Everything else returns the typed `unimplemented-backend-surface` error
+//! The #440 auth/quota/plan families are all **account-global control-plane
+//! configuration** and therefore route to the CONTROL database (like
+//! `tenants`), never fanned out over tenant databases — admin identities span
+//! tenants, and quota lookups carry no tenant context.
+//!
+//! Still erroring (typed `unimplemented-backend-surface`, awaiting the
+//! proxy-Worker path or a later slice): assets/channels/retention, usage
+//! monthly + metadata rollups, billing ledger/outbox, billing events,
+//! `persist_usage_aggregate` (durable half), guardrail policy
+//! revisions/bindings, snapshot replay floors, request/audit logs, agent
+//! runs/events, managed + self-hosted worker stores, and the pre-#425
+//! per-entity dispatch surfaces (wallets, payment attempts, RBAC, agent
+//! schedules, site domains, budget alerts, workflow budgets, observed agent
+//! presence, MCP identity).
+//!
+//! Everything erroring returns the typed `unimplemented-backend-surface` error
 //! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
 //! logs a warning + returns an empty/default value when its signature cannot
 //! carry an error (the append/analytics getters). Nothing fails silently.
@@ -206,6 +247,11 @@ fn poisoned_registry_lock() -> StorageError {
 /// documented all-strings REST contract.
 fn optional_number_param<T: ToString>(value: Option<T>) -> String {
     value.map(|number| number.to_string()).unwrap_or_default()
+}
+
+/// Bind a SQL boolean as SQLite's `"1"`/`"0"` integer affinity string.
+fn bool_param(value: bool) -> String {
+    if value { "1" } else { "0" }.to_string()
 }
 
 // --- Row DTOs (D1 returns rows as JSON objects keyed by column name) ---
@@ -375,6 +421,293 @@ struct WorkspaceReferenceCountRow {
     present: i64,
     virtual_keys: i64,
 }
+
+// --- Row DTOs: account-global control-plane entities (issue #440) ---
+//
+// SQLite booleans arrive as 0/1 integers and JSONB columns as TEXT; each DTO
+// decodes those back into the `Stored*` shape the trait exposes, mirroring
+// the Postgres `*_from_row` helpers column-for-column.
+
+#[derive(Deserialize)]
+struct AdminUserRow {
+    id: String,
+    email: String,
+    password_hash: String,
+    display_name: String,
+    superadmin: i64,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+    last_login_at_unix: Option<i64>,
+    disabled_at_unix: Option<i64>,
+}
+
+impl From<AdminUserRow> for StoredAdminUser {
+    fn from(row: AdminUserRow) -> Self {
+        Self {
+            id: row.id,
+            email: row.email,
+            password_hash: row.password_hash,
+            display_name: row.display_name,
+            superadmin: row.superadmin != 0,
+            created_at_unix: row.created_at_unix,
+            updated_at_unix: row.updated_at_unix,
+            last_login_at_unix: row.last_login_at_unix,
+            disabled_at_unix: row.disabled_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminUserMembershipRow {
+    id: String,
+    user_id: String,
+    tenant_id: String,
+    role: String,
+    created_at_unix: i64,
+}
+
+impl From<AdminUserMembershipRow> for StoredAdminUserMembership {
+    fn from(row: AdminUserMembershipRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            tenant_id: row.tenant_id,
+            role: row.role,
+            created_at_unix: row.created_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminUserRefreshTokenRow {
+    id: String,
+    user_id: String,
+    token_hash: String,
+    tenant_id: Option<String>,
+    role: Option<String>,
+    created_at_unix: i64,
+    expires_at_unix: i64,
+    revoked_at_unix: Option<i64>,
+}
+
+impl From<AdminUserRefreshTokenRow> for StoredAdminUserRefreshToken {
+    fn from(row: AdminUserRefreshTokenRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            token_hash: row.token_hash,
+            tenant_id: row.tenant_id,
+            role: row.role,
+            created_at_unix: row.created_at_unix,
+            expires_at_unix: row.expires_at_unix,
+            revoked_at_unix: row.revoked_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct SsoProviderConfigRow {
+    tenant_id: String,
+    provider_kind: String,
+    default_role: String,
+    group_role_mapping_json: String,
+    oidc_issuer: Option<String>,
+    oidc_client_id: Option<String>,
+    oidc_client_secret_ref: Option<String>,
+    oidc_redirect_uri: Option<String>,
+    oidc_group_claim: Option<String>,
+    saml_idp_entity_id: Option<String>,
+    saml_idp_sso_url: Option<String>,
+    saml_idp_certificate: Option<String>,
+    saml_sp_entity_id: Option<String>,
+    saml_acs_url: Option<String>,
+    saml_email_attribute: Option<String>,
+    saml_name_attribute: Option<String>,
+    saml_groups_attribute: Option<String>,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+}
+
+impl SsoProviderConfigRow {
+    fn into_stored(self) -> Result<StoredSsoProviderConfig, StorageError> {
+        Ok(StoredSsoProviderConfig {
+            tenant_id: self.tenant_id,
+            provider_kind: self.provider_kind,
+            default_role: self.default_role,
+            group_role_mapping: deserialize_storage_document(&self.group_role_mapping_json)?,
+            oidc_issuer: self.oidc_issuer,
+            oidc_client_id: self.oidc_client_id,
+            oidc_client_secret_ref: self.oidc_client_secret_ref,
+            oidc_redirect_uri: self.oidc_redirect_uri,
+            oidc_group_claim: self.oidc_group_claim,
+            saml_idp_entity_id: self.saml_idp_entity_id,
+            saml_idp_sso_url: self.saml_idp_sso_url,
+            saml_idp_certificate: self.saml_idp_certificate,
+            saml_sp_entity_id: self.saml_sp_entity_id,
+            saml_acs_url: self.saml_acs_url,
+            saml_email_attribute: self.saml_email_attribute,
+            saml_name_attribute: self.saml_name_attribute,
+            saml_groups_attribute: self.saml_groups_attribute,
+            created_at_unix: self.created_at_unix,
+            updated_at_unix: self.updated_at_unix,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct SsoPendingFlowRow {
+    state: String,
+    tenant_id: String,
+    provider_kind: String,
+    code_verifier: Option<String>,
+    request_id: Option<String>,
+    created_at_unix: i64,
+    expires_at_unix: i64,
+}
+
+impl From<SsoPendingFlowRow> for StoredSsoPendingFlow {
+    fn from(row: SsoPendingFlowRow) -> Self {
+        Self {
+            state: row.state,
+            tenant_id: row.tenant_id,
+            provider_kind: row.provider_kind,
+            code_verifier: row.code_verifier,
+            request_id: row.request_id,
+            created_at_unix: row.created_at_unix,
+            expires_at_unix: row.expires_at_unix,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct QuotaPolicyRow {
+    id: String,
+    scope_type: String,
+    scope_id: String,
+    model_allowlist_json: String,
+    rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
+    monthly_budget_usd: Option<f64>,
+    enabled: i64,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+    alert_threshold_pcts_json: String,
+    asset_storage_quota_bytes: Option<i64>,
+    monthly_egress_bytes_budget: Option<i64>,
+    download_rpm_limit: Option<i64>,
+}
+
+impl QuotaPolicyRow {
+    fn into_stored(self) -> Result<StoredQuotaPolicy, StorageError> {
+        let scope_type = QuotaScopeKind::from_str_opt(&self.scope_type).ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "cloudflare d1: unknown quota_policies.scope_type {}",
+                self.scope_type
+            ))
+        })?;
+        Ok(StoredQuotaPolicy {
+            id: self.id,
+            scope_type,
+            scope_id: self.scope_id,
+            model_allowlist: deserialize_storage_document(&self.model_allowlist_json)?,
+            rpm_limit: self.rpm_limit.map(nonnegative_u64),
+            tpm_limit: self.tpm_limit.map(nonnegative_u64),
+            monthly_budget_usd: self.monthly_budget_usd,
+            asset_storage_quota_bytes: self.asset_storage_quota_bytes.map(nonnegative_u64),
+            alert_threshold_pcts: deserialize_storage_document(&self.alert_threshold_pcts_json)?,
+            enabled: self.enabled != 0,
+            created_at_unix: self.created_at_unix,
+            updated_at_unix: self.updated_at_unix,
+            monthly_egress_bytes_budget: self.monthly_egress_bytes_budget.map(nonnegative_u64),
+            download_rpm_limit: self.download_rpm_limit.map(nonnegative_u64),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct PlanRow {
+    id: String,
+    name: String,
+    slug: String,
+    mcp_enabled: i64,
+    self_hosted_workers_enabled: i64,
+    admin_console_seats: Option<i64>,
+    default_model_allowlist_json: String,
+    default_rpm_limit: Option<i64>,
+    default_tpm_limit: Option<i64>,
+    default_monthly_budget_usd: Option<f64>,
+    created_at_unix: i64,
+    updated_at_unix: i64,
+    asset_hosting_enabled: i64,
+    default_asset_storage_quota_bytes: Option<i64>,
+    extension_tools_enabled: i64,
+    default_monthly_egress_bytes_budget: Option<i64>,
+    default_download_rpm_limit: Option<i64>,
+}
+
+impl PlanRow {
+    fn into_stored(self) -> Result<StoredPlan, StorageError> {
+        Ok(StoredPlan {
+            id: self.id,
+            name: self.name,
+            slug: self.slug,
+            mcp_enabled: self.mcp_enabled != 0,
+            self_hosted_workers_enabled: self.self_hosted_workers_enabled != 0,
+            admin_console_seats: self.admin_console_seats.map(nonnegative_u32),
+            default_model_allowlist: deserialize_storage_document(
+                &self.default_model_allowlist_json,
+            )?,
+            default_rpm_limit: self.default_rpm_limit.map(nonnegative_u64),
+            default_tpm_limit: self.default_tpm_limit.map(nonnegative_u64),
+            default_monthly_budget_usd: self.default_monthly_budget_usd,
+            created_at_unix: self.created_at_unix,
+            updated_at_unix: self.updated_at_unix,
+            asset_hosting_enabled: self.asset_hosting_enabled != 0,
+            default_asset_storage_quota_bytes: self
+                .default_asset_storage_quota_bytes
+                .map(nonnegative_u64),
+            default_monthly_egress_bytes_budget: self
+                .default_monthly_egress_bytes_budget
+                .map(nonnegative_u64),
+            default_download_rpm_limit: self.default_download_rpm_limit.map(nonnegative_u64),
+            extension_tools_enabled: self.extension_tools_enabled != 0,
+        })
+    }
+}
+
+const SELECT_ADMIN_USER_COLUMNS: &str = "SELECT id, email, password_hash, display_name, \
+     superadmin, created_at_unix, updated_at_unix, last_login_at_unix, disabled_at_unix \
+     FROM admin_users";
+
+const SELECT_ADMIN_USER_MEMBERSHIP_COLUMNS: &str = "SELECT id, user_id, tenant_id, role, \
+     created_at_unix FROM admin_user_tenant_memberships";
+
+const SELECT_ADMIN_USER_REFRESH_TOKEN_COLUMNS: &str = "SELECT id, user_id, token_hash, \
+     tenant_id, role, created_at_unix, expires_at_unix, revoked_at_unix \
+     FROM admin_user_refresh_tokens";
+
+const SELECT_SSO_PROVIDER_CONFIG_COLUMNS: &str = "SELECT tenant_id, provider_kind, default_role, \
+     group_role_mapping_json, oidc_issuer, oidc_client_id, oidc_client_secret_ref, \
+     oidc_redirect_uri, oidc_group_claim, saml_idp_entity_id, saml_idp_sso_url, \
+     saml_idp_certificate, saml_sp_entity_id, saml_acs_url, saml_email_attribute, \
+     saml_name_attribute, saml_groups_attribute, created_at_unix, updated_at_unix \
+     FROM sso_provider_configs";
+
+const SELECT_SSO_PENDING_FLOW_COLUMNS: &str = "SELECT state, tenant_id, provider_kind, \
+     code_verifier, request_id, created_at_unix, expires_at_unix FROM sso_pending_flows";
+
+const SELECT_QUOTA_POLICY_COLUMNS: &str = "SELECT id, scope_type, scope_id, model_allowlist_json, \
+     rpm_limit, tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
+     alert_threshold_pcts_json, asset_storage_quota_bytes, monthly_egress_bytes_budget, \
+     download_rpm_limit FROM quota_policies";
+
+const SELECT_PLAN_COLUMNS: &str = "SELECT id, name, slug, mcp_enabled, \
+     self_hosted_workers_enabled, admin_console_seats, default_model_allowlist_json, \
+     default_rpm_limit, default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
+     updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
+     extension_tools_enabled, default_monthly_egress_bytes_budget, default_download_rpm_limit \
+     FROM plans";
 
 const SELECT_TENANT_COLUMNS: &str =
     "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix FROM tenants";
@@ -767,6 +1100,40 @@ impl D1ControlPlaneStore {
                 .await?,
         })
     }
+
+    // --- Account-global entities: read a single control-database row ---
+    //
+    // Admin identity, SSO, quota policies, and plans are account-scoped
+    // control-plane configuration (issue #440); every one routes to the
+    // control database, so these thin helpers factor out the shared
+    // `control_database_id()` lookup.
+
+    async fn fetch_control_optional<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+        params: Vec<String>,
+    ) -> Result<Option<T>, StorageError> {
+        let database_id = self.control_database_id()?;
+        self.fetch_optional_row(&database_id, sql, params).await
+    }
+
+    async fn fetch_control_rows<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+        params: Vec<String>,
+    ) -> Result<Vec<T>, StorageError> {
+        let database_id = self.control_database_id()?;
+        self.fetch_rows(&database_id, sql, params).await
+    }
+
+    async fn execute_control(
+        &self,
+        sql: &str,
+        params: Vec<String>,
+    ) -> Result<D1QueryResult, StorageError> {
+        let database_id = self.control_database_id()?;
+        self.execute(&database_id, sql, params).await
+    }
 }
 
 fn validate_tenant_id(tenant_id: &str) -> Result<(), StorageError> {
@@ -833,6 +1200,61 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
+        }
+    }
+
+    /// The config-driven construction route (issue #440): build the D1
+    /// control-plane backend from an already-assembled [`D1Client`] plus the
+    /// operator-supplied [`CloudflareD1StorageOptions`], seeding the
+    /// tenant->database registry from config so the backend is usable without
+    /// a separate runtime bootstrap call.
+    ///
+    /// This is the storage half of the `storage.provider = "cloudflare_d1"`
+    /// route. The caller (the CLI) owns the transport, so it builds the
+    /// `CloudflareClient`/`D1Client` from the `[cloudflare]` block and passes
+    /// it here — keeping this crate free of any HTTP/transport dependency and
+    /// unit-testable against a scripted transport. See the module docs and
+    /// `docs/cloudflare-d1-backend.md` for the exact CLI hook.
+    pub fn cloudflare_d1_from_client(
+        client: D1Client,
+        options: CloudflareD1StorageOptions,
+    ) -> Result<Self, StorageError> {
+        let store = D1ControlPlaneStore::new(client, options.registry());
+        Ok(Self::cloudflare_d1(
+            store,
+            options.audit_event_retention_records,
+        ))
+    }
+}
+
+/// Operator-supplied configuration for the config-driven D1 construction
+/// route (issue #440). Seeds the tenant->database registry from config so a
+/// deployment resuming against already-provisioned databases boots without a
+/// live provisioning round trip; a control database that has not been
+/// provisioned yet is expressed as an empty [`control_database_id`], which the
+/// backend rejects on first control-plane access until
+/// [`D1ControlPlaneStore::provision_control_database`] seeds it.
+///
+/// [`control_database_id`]: CloudflareD1StorageOptions::control_database_id
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloudflareD1StorageOptions {
+    /// D1 uuid of the control database (tenants + config documents + the
+    /// registry document). Empty means "not provisioned yet".
+    pub control_database_id: String,
+    /// Pre-seeded `tenant_id -> D1 database uuid` registry entries, for a
+    /// deployment resuming against existing tenant databases.
+    pub tenant_databases: BTreeMap<String, String>,
+    /// Retention bound for the in-memory guardrail-evidence repository, matching
+    /// the other backends' `audit_event_retention_records`.
+    pub audit_event_retention_records: usize,
+}
+
+impl CloudflareD1StorageOptions {
+    /// Assemble the [`D1TenantDatabaseRegistry`] this config describes.
+    fn registry(&self) -> D1TenantDatabaseRegistry {
+        D1TenantDatabaseRegistry {
+            control_database_id: self.control_database_id.clone(),
+            tenant_databases: self.tenant_databases.clone(),
         }
     }
 }
@@ -935,125 +1357,338 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Ok(api_keys)
     }
 
-    // --- Admin users / SSO / refresh tokens (UNIMPLEMENTED) ---
+    // --- Admin users / SSO / refresh tokens (IMPLEMENTED, control database) ---
 
-    async fn upsert_admin_user(&self, _user: StoredAdminUser) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_admin_user"))
+    async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+        self.execute_control(
+            "INSERT INTO admin_users \
+             (id, email, password_hash, display_name, superadmin, created_at_unix, \
+              updated_at_unix, last_login_at_unix, disabled_at_unix) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, '')) \
+             ON CONFLICT (id) DO UPDATE SET \
+             email = excluded.email, password_hash = excluded.password_hash, \
+             display_name = excluded.display_name, superadmin = excluded.superadmin, \
+             updated_at_unix = excluded.updated_at_unix, \
+             last_login_at_unix = excluded.last_login_at_unix, \
+             disabled_at_unix = excluded.disabled_at_unix",
+            vec![
+                user.id,
+                user.email,
+                user.password_hash,
+                user.display_name,
+                bool_param(user.superadmin),
+                user.created_at_unix.to_string(),
+                user.updated_at_unix.to_string(),
+                optional_number_param(user.last_login_at_unix),
+                optional_number_param(user.disabled_at_unix),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn get_admin_user_by_id(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
-        Err(unimplemented_surface("get_admin_user_by_id"))
+        let row: Option<AdminUserRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_ADMIN_USER_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        Ok(row.map(StoredAdminUser::from))
     }
 
     async fn get_admin_user_by_email(
         &self,
-        _email: &str,
+        email: &str,
     ) -> Result<Option<StoredAdminUser>, StorageError> {
-        Err(unimplemented_surface("get_admin_user_by_email"))
+        let row: Option<AdminUserRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_ADMIN_USER_COLUMNS} WHERE email = ?"),
+                vec![email.to_string()],
+            )
+            .await?;
+        Ok(row.map(StoredAdminUser::from))
     }
 
     async fn upsert_admin_user_membership(
         &self,
-        _membership: StoredAdminUserMembership,
+        membership: StoredAdminUserMembership,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_admin_user_membership"))
+        self.execute_control(
+            "INSERT INTO admin_user_tenant_memberships \
+             (id, user_id, tenant_id, role, created_at_unix) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (user_id, tenant_id) DO UPDATE SET role = excluded.role",
+            vec![
+                membership.id,
+                membership.user_id,
+                membership.tenant_id,
+                membership.role,
+                membership.created_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn list_admin_user_memberships_by_user(
         &self,
-        _user_id: &str,
+        user_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        Err(unimplemented_surface("list_admin_user_memberships_by_user"))
+        let rows: Vec<AdminUserMembershipRow> = self
+            .fetch_control_rows(
+                &format!(
+                    "{SELECT_ADMIN_USER_MEMBERSHIP_COLUMNS} WHERE user_id = ? ORDER BY id ASC"
+                ),
+                vec![user_id.to_string()],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(StoredAdminUserMembership::from)
+            .collect())
     }
 
     async fn list_admin_user_memberships_by_tenant(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
     ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
-        Err(unimplemented_surface(
-            "list_admin_user_memberships_by_tenant",
-        ))
+        let rows: Vec<AdminUserMembershipRow> = self
+            .fetch_control_rows(
+                &format!(
+                    "{SELECT_ADMIN_USER_MEMBERSHIP_COLUMNS} WHERE tenant_id = ? ORDER BY id ASC"
+                ),
+                vec![tenant_id.to_string()],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(StoredAdminUserMembership::from)
+            .collect())
     }
 
     async fn delete_admin_user_membership(
         &self,
-        _user_id: &str,
-        _tenant_id: &str,
+        user_id: &str,
+        tenant_id: &str,
     ) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_admin_user_membership"))
+        let result = self
+            .execute_control(
+                "DELETE FROM admin_user_tenant_memberships \
+                 WHERE user_id = ? AND tenant_id = ?",
+                vec![user_id.to_string(), tenant_id.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
     }
 
     async fn upsert_sso_provider_config(
         &self,
-        _config: StoredSsoProviderConfig,
+        config: StoredSsoProviderConfig,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_sso_provider_config"))
+        let group_role_mapping_json = serialize_storage_document(&config.group_role_mapping)?;
+        self.execute_control(
+            "INSERT INTO sso_provider_configs \
+             (tenant_id, provider_kind, default_role, group_role_mapping_json, oidc_issuer, \
+              oidc_client_id, oidc_client_secret_ref, oidc_redirect_uri, oidc_group_claim, \
+              saml_idp_entity_id, saml_idp_sso_url, saml_idp_certificate, saml_sp_entity_id, \
+              saml_acs_url, saml_email_attribute, saml_name_attribute, saml_groups_attribute, \
+              created_at_unix, updated_at_unix) \
+             VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), \
+              NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), \
+              NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?) \
+             ON CONFLICT (tenant_id) DO UPDATE SET \
+             provider_kind = excluded.provider_kind, default_role = excluded.default_role, \
+             group_role_mapping_json = excluded.group_role_mapping_json, \
+             oidc_issuer = excluded.oidc_issuer, oidc_client_id = excluded.oidc_client_id, \
+             oidc_client_secret_ref = excluded.oidc_client_secret_ref, \
+             oidc_redirect_uri = excluded.oidc_redirect_uri, \
+             oidc_group_claim = excluded.oidc_group_claim, \
+             saml_idp_entity_id = excluded.saml_idp_entity_id, \
+             saml_idp_sso_url = excluded.saml_idp_sso_url, \
+             saml_idp_certificate = excluded.saml_idp_certificate, \
+             saml_sp_entity_id = excluded.saml_sp_entity_id, \
+             saml_acs_url = excluded.saml_acs_url, \
+             saml_email_attribute = excluded.saml_email_attribute, \
+             saml_name_attribute = excluded.saml_name_attribute, \
+             saml_groups_attribute = excluded.saml_groups_attribute, \
+             updated_at_unix = excluded.updated_at_unix",
+            vec![
+                config.tenant_id,
+                config.provider_kind,
+                config.default_role,
+                group_role_mapping_json,
+                config.oidc_issuer.unwrap_or_default(),
+                config.oidc_client_id.unwrap_or_default(),
+                config.oidc_client_secret_ref.unwrap_or_default(),
+                config.oidc_redirect_uri.unwrap_or_default(),
+                config.oidc_group_claim.unwrap_or_default(),
+                config.saml_idp_entity_id.unwrap_or_default(),
+                config.saml_idp_sso_url.unwrap_or_default(),
+                config.saml_idp_certificate.unwrap_or_default(),
+                config.saml_sp_entity_id.unwrap_or_default(),
+                config.saml_acs_url.unwrap_or_default(),
+                config.saml_email_attribute.unwrap_or_default(),
+                config.saml_name_attribute.unwrap_or_default(),
+                config.saml_groups_attribute.unwrap_or_default(),
+                config.created_at_unix.to_string(),
+                config.updated_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn get_sso_provider_config(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
     ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
-        Err(unimplemented_surface("get_sso_provider_config"))
+        let row: Option<SsoProviderConfigRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_SSO_PROVIDER_CONFIG_COLUMNS} WHERE tenant_id = ?"),
+                vec![tenant_id.to_string()],
+            )
+            .await?;
+        row.map(SsoProviderConfigRow::into_stored).transpose()
     }
 
-    async fn delete_sso_provider_config(&self, _tenant_id: &str) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_sso_provider_config"))
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        let result = self
+            .execute_control(
+                "DELETE FROM sso_provider_configs WHERE tenant_id = ?",
+                vec![tenant_id.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
     }
 
     async fn insert_sso_pending_flow(
         &self,
-        _flow: StoredSsoPendingFlow,
+        flow: StoredSsoPendingFlow,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("insert_sso_pending_flow"))
+        self.execute_control(
+            "INSERT INTO sso_pending_flows \
+             (state, tenant_id, provider_kind, code_verifier, request_id, created_at_unix, \
+              expires_at_unix) \
+             VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?) \
+             ON CONFLICT (state) DO NOTHING",
+            vec![
+                flow.state,
+                flow.tenant_id,
+                flow.provider_kind,
+                flow.code_verifier.unwrap_or_default(),
+                flow.request_id.unwrap_or_default(),
+                flow.created_at_unix.to_string(),
+                flow.expires_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn take_sso_pending_flow(
         &self,
-        _state: &str,
-        _now_unix: i64,
+        state: &str,
+        now_unix: i64,
     ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
-        Err(unimplemented_surface("take_sso_pending_flow"))
+        // The D1 HTTP query API exposes neither DELETE ... RETURNING nor a
+        // multi-statement-with-params batch, so this reads the row and then
+        // deletes it (plus prunes expired rows) in a follow-up statement,
+        // rather than as one atomic delete-returning like the Postgres backend.
+        // The two calls are not transactional: a rare concurrent double
+        // callback for the same `state` could observe the row twice. That is an
+        // accepted divergence on this admin/low-volume path (single-use state
+        // tokens make the collision improbable, and the callback still
+        // re-validates downstream); it is called out in the module docs.
+        let row: Option<SsoPendingFlowRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_SSO_PENDING_FLOW_COLUMNS} WHERE state = ?"),
+                vec![state.to_string()],
+            )
+            .await?;
+        self.execute_control(
+            "DELETE FROM sso_pending_flows WHERE state = ? OR expires_at_unix <= ?",
+            vec![state.to_string(), now_unix.to_string()],
+        )
+        .await?;
+        let flow = row.map(StoredSsoPendingFlow::from);
+        Ok(flow.filter(|flow| flow.expires_at_unix > now_unix))
     }
 
     async fn upsert_admin_user_refresh_token(
         &self,
-        _token: StoredAdminUserRefreshToken,
+        token: StoredAdminUserRefreshToken,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_admin_user_refresh_token"))
+        self.execute_control(
+            "INSERT INTO admin_user_refresh_tokens \
+             (id, user_id, token_hash, tenant_id, role, created_at_unix, expires_at_unix, \
+              revoked_at_unix) \
+             VALUES (?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, '')) \
+             ON CONFLICT (id) DO UPDATE SET revoked_at_unix = excluded.revoked_at_unix",
+            vec![
+                token.id,
+                token.user_id,
+                token.token_hash,
+                token.tenant_id.unwrap_or_default(),
+                token.role.unwrap_or_default(),
+                token.created_at_unix.to_string(),
+                token.expires_at_unix.to_string(),
+                optional_number_param(token.revoked_at_unix),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn get_admin_user_refresh_token_by_hash(
         &self,
-        _token_hash: &str,
+        token_hash: &str,
     ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
-        Err(unimplemented_surface(
-            "get_admin_user_refresh_token_by_hash",
-        ))
+        let row: Option<AdminUserRefreshTokenRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_ADMIN_USER_REFRESH_TOKEN_COLUMNS} WHERE token_hash = ?"),
+                vec![token_hash.to_string()],
+            )
+            .await?;
+        Ok(row.map(StoredAdminUserRefreshToken::from))
     }
 
     async fn revoke_all_admin_user_refresh_tokens(
         &self,
-        _user_id: &str,
-        _revoked_at_unix: i64,
+        user_id: &str,
+        revoked_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        Err(unimplemented_surface(
-            "revoke_all_admin_user_refresh_tokens",
-        ))
+        let result = self
+            .execute_control(
+                "UPDATE admin_user_refresh_tokens SET revoked_at_unix = ? \
+                 WHERE user_id = ? AND revoked_at_unix IS NULL",
+                vec![revoked_at_unix.to_string(), user_id.to_string()],
+            )
+            .await?;
+        Ok(result.changes())
     }
 
     async fn revoke_admin_user_refresh_tokens_for_tenant(
         &self,
-        _user_id: &str,
-        _tenant_id: &str,
-        _revoked_at_unix: i64,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        Err(unimplemented_surface(
-            "revoke_admin_user_refresh_tokens_for_tenant",
-        ))
+        let result = self
+            .execute_control(
+                "UPDATE admin_user_refresh_tokens SET revoked_at_unix = ? \
+                 WHERE user_id = ? AND tenant_id = ? AND revoked_at_unix IS NULL",
+                vec![
+                    revoked_at_unix.to_string(),
+                    user_id.to_string(),
+                    tenant_id.to_string(),
+                ],
+            )
+            .await?;
+        Ok(result.changes())
     }
 
     // --- Tenant accounts (IMPLEMENTED, control database) ---
@@ -1344,42 +1979,155 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Ok(None)
     }
 
-    // --- Quota policies / plans (UNIMPLEMENTED) ---
+    // --- Quota policies / plans (IMPLEMENTED, control database) ---
 
-    async fn upsert_quota_policy(&self, _policy: StoredQuotaPolicy) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_quota_policy"))
+    async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        let model_allowlist_json = serialize_storage_document(&policy.model_allowlist)?;
+        let alert_threshold_pcts_json = serialize_storage_document(&policy.alert_threshold_pcts)?;
+        self.execute_control(
+            "INSERT INTO quota_policies \
+             (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
+              monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
+              alert_threshold_pcts_json, asset_storage_quota_bytes, monthly_egress_bytes_budget, \
+              download_rpm_limit) \
+             VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, \
+              NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, '')) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
+             model_allowlist_json = excluded.model_allowlist_json, \
+             rpm_limit = excluded.rpm_limit, tpm_limit = excluded.tpm_limit, \
+             monthly_budget_usd = excluded.monthly_budget_usd, enabled = excluded.enabled, \
+             updated_at_unix = excluded.updated_at_unix, \
+             alert_threshold_pcts_json = excluded.alert_threshold_pcts_json, \
+             asset_storage_quota_bytes = excluded.asset_storage_quota_bytes, \
+             monthly_egress_bytes_budget = excluded.monthly_egress_bytes_budget, \
+             download_rpm_limit = excluded.download_rpm_limit",
+            vec![
+                policy.id,
+                policy.scope_type.as_str().to_string(),
+                policy.scope_id,
+                model_allowlist_json,
+                optional_number_param(policy.rpm_limit),
+                optional_number_param(policy.tpm_limit),
+                optional_number_param(policy.monthly_budget_usd),
+                bool_param(policy.enabled),
+                policy.created_at_unix.to_string(),
+                policy.updated_at_unix.to_string(),
+                alert_threshold_pcts_json,
+                optional_number_param(policy.asset_storage_quota_bytes),
+                optional_number_param(policy.monthly_egress_bytes_budget),
+                optional_number_param(policy.download_rpm_limit),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn get_quota_policy(
         &self,
-        _scope_type: QuotaScopeKind,
-        _scope_id: &str,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
     ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
-        Err(unimplemented_surface("get_quota_policy"))
+        let row: Option<QuotaPolicyRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_QUOTA_POLICY_COLUMNS} WHERE scope_type = ? AND scope_id = ?"),
+                vec![scope_type.as_str().to_string(), scope_id.to_string()],
+            )
+            .await?;
+        row.map(QuotaPolicyRow::into_stored).transpose()
     }
 
     async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
-        Err(unimplemented_surface("list_quota_policies"))
+        let rows: Vec<QuotaPolicyRow> = self
+            .fetch_control_rows(
+                &format!("{SELECT_QUOTA_POLICY_COLUMNS} ORDER BY id ASC"),
+                Vec::new(),
+            )
+            .await?;
+        rows.into_iter().map(QuotaPolicyRow::into_stored).collect()
     }
 
     async fn delete_quota_policy(
         &self,
-        _scope_type: QuotaScopeKind,
-        _scope_id: &str,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
     ) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("delete_quota_policy"))
+        let result = self
+            .execute_control(
+                "DELETE FROM quota_policies WHERE scope_type = ? AND scope_id = ?",
+                vec![scope_type.as_str().to_string(), scope_id.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
     }
 
-    async fn upsert_plan(&self, _plan: StoredPlan) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_plan"))
+    async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+        let default_model_allowlist_json =
+            serialize_storage_document(&plan.default_model_allowlist)?;
+        self.execute_control(
+            "INSERT INTO plans \
+             (id, name, slug, mcp_enabled, self_hosted_workers_enabled, admin_console_seats, \
+              default_model_allowlist_json, default_rpm_limit, default_tpm_limit, \
+              default_monthly_budget_usd, created_at_unix, updated_at_unix, asset_hosting_enabled, \
+              default_asset_storage_quota_bytes, extension_tools_enabled, \
+              default_monthly_egress_bytes_budget, default_download_rpm_limit) \
+             VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), \
+              NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, '')) \
+             ON CONFLICT (id) DO UPDATE SET \
+             name = excluded.name, slug = excluded.slug, mcp_enabled = excluded.mcp_enabled, \
+             self_hosted_workers_enabled = excluded.self_hosted_workers_enabled, \
+             admin_console_seats = excluded.admin_console_seats, \
+             default_model_allowlist_json = excluded.default_model_allowlist_json, \
+             default_rpm_limit = excluded.default_rpm_limit, \
+             default_tpm_limit = excluded.default_tpm_limit, \
+             default_monthly_budget_usd = excluded.default_monthly_budget_usd, \
+             updated_at_unix = excluded.updated_at_unix, \
+             asset_hosting_enabled = excluded.asset_hosting_enabled, \
+             default_asset_storage_quota_bytes = excluded.default_asset_storage_quota_bytes, \
+             extension_tools_enabled = excluded.extension_tools_enabled, \
+             default_monthly_egress_bytes_budget = excluded.default_monthly_egress_bytes_budget, \
+             default_download_rpm_limit = excluded.default_download_rpm_limit",
+            vec![
+                plan.id,
+                plan.name,
+                plan.slug,
+                bool_param(plan.mcp_enabled),
+                bool_param(plan.self_hosted_workers_enabled),
+                optional_number_param(plan.admin_console_seats),
+                default_model_allowlist_json,
+                optional_number_param(plan.default_rpm_limit),
+                optional_number_param(plan.default_tpm_limit),
+                optional_number_param(plan.default_monthly_budget_usd),
+                plan.created_at_unix.to_string(),
+                plan.updated_at_unix.to_string(),
+                bool_param(plan.asset_hosting_enabled),
+                optional_number_param(plan.default_asset_storage_quota_bytes),
+                bool_param(plan.extension_tools_enabled),
+                optional_number_param(plan.default_monthly_egress_bytes_budget),
+                optional_number_param(plan.default_download_rpm_limit),
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn get_plan(&self, _id: &str) -> Result<Option<StoredPlan>, StorageError> {
-        Err(unimplemented_surface("get_plan"))
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        let row: Option<PlanRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_PLAN_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(PlanRow::into_stored).transpose()
     }
 
     async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
-        Err(unimplemented_surface("list_plans"))
+        let rows: Vec<PlanRow> = self
+            .fetch_control_rows(
+                &format!("{SELECT_PLAN_COLUMNS} ORDER BY id ASC"),
+                Vec::new(),
+            )
+            .await?;
+        rows.into_iter().map(PlanRow::into_stored).collect()
     }
 
     // --- Assets (UNIMPLEMENTED) ---

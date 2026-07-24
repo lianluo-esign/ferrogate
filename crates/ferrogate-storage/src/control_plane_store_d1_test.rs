@@ -19,10 +19,11 @@ use ferrogate_cloudflare::{
 
 use crate::control_plane_store::ControlPlaneStore;
 use crate::{
-    api_key_tenant_context, is_unimplemented_backend_surface, D1ControlPlaneStore,
-    D1TenantDatabaseRegistry, DeleteProjectOutcome, RuntimeStorageRepositories, StorageError,
-    StoredApiKey, StoredTenantAccount, D1_TENANT_DATABASE_REGISTRY_ID,
-    D1_TENANT_DATABASE_REGISTRY_KIND,
+    api_key_tenant_context, is_unimplemented_backend_surface, CloudflareD1StorageOptions,
+    D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
+    RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
+    StoredApiKey, StoredPlan, StoredQuotaPolicy, StoredSsoProviderConfig, StoredTenantAccount,
+    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -512,18 +513,18 @@ fn d1_error_envelope_maps_to_typed_storage_error() {
 fn out_of_scope_trait_surface_errors_with_the_typed_contract() {
     let (store, transport) = store_with_transport(control_registry(), vec![]);
 
-    let admin_error = runtime()
-        .block_on(store.get_admin_user_by_id("u1"))
-        .unwrap_err();
+    let asset_error = runtime().block_on(store.get_asset("a1")).unwrap_err();
     assert!(
-        is_unimplemented_backend_surface(&admin_error),
-        "{admin_error:?}"
+        is_unimplemented_backend_surface(&asset_error),
+        "{asset_error:?}"
     );
 
-    let plan_error = runtime().block_on(store.get_plan("free")).unwrap_err();
+    let schedule_error = runtime()
+        .block_on(store.get_agent_schedule("s1"))
+        .unwrap_err();
     assert!(
-        is_unimplemented_backend_surface(&plan_error),
-        "{plan_error:?}"
+        is_unimplemented_backend_surface(&schedule_error),
+        "{schedule_error:?}"
     );
 
     let replay_error = store
@@ -558,6 +559,377 @@ fn per_entity_dispatch_arms_error_with_the_typed_contract() {
         is_unimplemented_backend_surface(&rbac_error),
         "{rbac_error:?}"
     );
+}
+
+// --- Account-global entities (issue #440): admin users / SSO / quota / plans ---
+
+fn sample_admin_user() -> StoredAdminUser {
+    StoredAdminUser {
+        id: "user-1".into(),
+        email: "admin@example.com".into(),
+        password_hash: "argon2$hash".into(),
+        display_name: "Admin".into(),
+        superadmin: true,
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+        last_login_at_unix: Some(1_753_000_500),
+        disabled_at_unix: None,
+    }
+}
+
+#[test]
+fn admin_user_round_trips_through_the_control_database() {
+    let user = sample_admin_user();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "user-1", "email": "admin@example.com",
+                    "password_hash": "argon2$hash", "display_name": "Admin",
+                    "superadmin": 1, "created_at_unix": 1_753_000_000_i64,
+                    "updated_at_unix": 1_753_000_001_i64,
+                    "last_login_at_unix": 1_753_000_500_i64, "disabled_at_unix": null
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_admin_user(user.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_admin_user_by_id("user-1"))
+        .unwrap()
+        .expect("admin user should decode");
+    assert_eq!(fetched, user);
+
+    let requests = transport.recorded();
+    // Admin identity is account-global: writes route to the control database.
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let upsert_sql = body_sql(&requests[0]);
+    assert!(upsert_sql.starts_with("INSERT INTO admin_users"));
+    let params = body_params(&requests[0]);
+    assert_eq!(params[4], "1", "superadmin binds as SQLite 0/1");
+    assert_eq!(params[7], "1753000500", "Some(last_login) binds its number");
+    assert_eq!(params[8], "", "None(disabled) binds '' collapsed by NULLIF");
+    assert!(body_sql(&requests[1]).contains("WHERE id = ?"));
+}
+
+#[test]
+fn admin_user_lookup_by_email_routes_to_control_database() {
+    let (store, transport) =
+        store_with_transport(control_registry(), vec![query_ok(serde_json::json!([]), 0)]);
+    let found = runtime()
+        .block_on(store.get_admin_user_by_email("missing@example.com"))
+        .unwrap();
+    assert!(found.is_none());
+    assert!(body_sql(&transport.recorded()[0]).contains("WHERE email = ?"));
+}
+
+#[test]
+fn admin_user_refresh_token_revoke_returns_change_count() {
+    let token = StoredAdminUserRefreshToken {
+        id: "tok-1".into(),
+        user_id: "user-1".into(),
+        token_hash: "hash".into(),
+        tenant_id: Some("acme".into()),
+        role: Some("owner".into()),
+        created_at_unix: 1_753_000_000,
+        expires_at_unix: 1_760_000_000,
+        revoked_at_unix: None,
+    };
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            // revoke_all reports two rows updated.
+            query_ok(serde_json::json!([]), 2),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_admin_user_refresh_token(token))
+        .expect("upsert should succeed");
+    let revoked = runtime()
+        .block_on(store.revoke_all_admin_user_refresh_tokens("user-1", 1_755_000_000))
+        .unwrap();
+    assert_eq!(revoked, 2);
+
+    let revoke_sql = body_sql(&transport.recorded()[1]);
+    assert!(revoke_sql.starts_with("UPDATE admin_user_refresh_tokens SET revoked_at_unix"));
+    assert!(revoke_sql.contains("revoked_at_unix IS NULL"));
+}
+
+#[test]
+fn sso_provider_config_round_trips_through_the_control_database() {
+    let mut config = StoredSsoProviderConfig {
+        tenant_id: "acme".into(),
+        provider_kind: "oidc".into(),
+        default_role: "member".into(),
+        group_role_mapping: Default::default(),
+        oidc_issuer: Some("https://idp.example.com".into()),
+        oidc_client_id: Some("client-123".into()),
+        oidc_client_secret_ref: Some("env://SSO_SECRET".into()),
+        oidc_redirect_uri: Some("https://gw.example.com/callback".into()),
+        oidc_group_claim: Some("groups".into()),
+        saml_idp_entity_id: None,
+        saml_idp_sso_url: None,
+        saml_idp_certificate: None,
+        saml_sp_entity_id: None,
+        saml_acs_url: None,
+        saml_email_attribute: None,
+        saml_name_attribute: None,
+        saml_groups_attribute: None,
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+    };
+    config
+        .group_role_mapping
+        .insert("admins".into(), "owner".into());
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "tenant_id": "acme", "provider_kind": "oidc", "default_role": "member",
+                    "group_role_mapping_json": "{\"admins\":\"owner\"}",
+                    "oidc_issuer": "https://idp.example.com", "oidc_client_id": "client-123",
+                    "oidc_client_secret_ref": "env://SSO_SECRET",
+                    "oidc_redirect_uri": "https://gw.example.com/callback",
+                    "oidc_group_claim": "groups", "saml_idp_entity_id": null,
+                    "saml_idp_sso_url": null, "saml_idp_certificate": null,
+                    "saml_sp_entity_id": null, "saml_acs_url": null,
+                    "saml_email_attribute": null, "saml_name_attribute": null,
+                    "saml_groups_attribute": null, "created_at_unix": 1_753_000_000_i64,
+                    "updated_at_unix": 1_753_000_001_i64
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_sso_provider_config(config.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_sso_provider_config("acme"))
+        .unwrap()
+        .expect("sso config should decode");
+    assert_eq!(fetched, config);
+    assert!(body_sql(&transport.recorded()[0]).starts_with("INSERT INTO sso_provider_configs"));
+}
+
+#[test]
+fn take_sso_pending_flow_consumes_once_and_honors_expiry() {
+    let flow_row = serde_json::json!([{
+        "state": "s1", "tenant_id": "acme", "provider_kind": "oidc",
+        "code_verifier": "verifier", "request_id": null,
+        "created_at_unix": 1_753_000_000_i64, "expires_at_unix": 1_753_000_600_i64
+    }]);
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            // SELECT the row, then the consume+prune DELETE.
+            query_ok(flow_row, 0),
+            query_ok(serde_json::json!([]), 1),
+        ],
+    );
+
+    let taken = runtime()
+        .block_on(store.take_sso_pending_flow("s1", 1_753_000_100))
+        .unwrap()
+        .expect("unexpired flow should be returned");
+    assert_eq!(taken.state, "s1");
+    assert_eq!(taken.code_verifier.as_deref(), Some("verifier"));
+
+    let requests = transport.recorded();
+    assert_eq!(requests.len(), 2);
+    assert!(body_sql(&requests[0]).contains("FROM sso_pending_flows"));
+    let delete_sql = body_sql(&requests[1]);
+    assert!(delete_sql.starts_with("DELETE FROM sso_pending_flows"));
+    assert!(delete_sql.contains("expires_at_unix <= ?"));
+
+    // An already-expired row is deleted but NOT returned to the caller.
+    let expired_row = serde_json::json!([{
+        "state": "s2", "tenant_id": "acme", "provider_kind": "oidc",
+        "code_verifier": null, "request_id": null,
+        "created_at_unix": 1_753_000_000_i64, "expires_at_unix": 1_753_000_050_i64
+    }]);
+    let (store, _transport) = store_with_transport(
+        control_registry(),
+        vec![query_ok(expired_row, 0), query_ok(serde_json::json!([]), 1)],
+    );
+    let none = runtime()
+        .block_on(store.take_sso_pending_flow("s2", 1_753_000_100))
+        .unwrap();
+    assert!(none.is_none(), "expired flow must not be handed back");
+}
+
+fn sample_quota_policy() -> StoredQuotaPolicy {
+    StoredQuotaPolicy {
+        id: "quota-tenant-acme".into(),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: "acme".into(),
+        model_allowlist: vec!["gpt-5".into()],
+        rpm_limit: Some(600),
+        tpm_limit: None,
+        monthly_budget_usd: Some(12.5),
+        asset_storage_quota_bytes: Some(1024),
+        alert_threshold_pcts: vec![75, 90],
+        enabled: true,
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: Some(30),
+    }
+}
+
+#[test]
+fn quota_policy_round_trips_with_dialect_mapping() {
+    let policy = sample_quota_policy();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "quota-tenant-acme", "scope_type": "tenant", "scope_id": "acme",
+                    "model_allowlist_json": "[\"gpt-5\"]", "rpm_limit": 600, "tpm_limit": null,
+                    "monthly_budget_usd": 12.5, "enabled": 1,
+                    "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64,
+                    "alert_threshold_pcts_json": "[75,90]", "asset_storage_quota_bytes": 1024,
+                    "monthly_egress_bytes_budget": null, "download_rpm_limit": 30
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_quota_policy(policy.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_quota_policy(QuotaScopeKind::Tenant, "acme"))
+        .unwrap()
+        .expect("quota policy should decode");
+    assert_eq!(fetched, policy);
+
+    let requests = transport.recorded();
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let params = body_params(&requests[0]);
+    assert_eq!(params[1], "tenant", "scope_type binds its enum string");
+    assert_eq!(
+        params[3], "[\"gpt-5\"]",
+        "model allowlist binds as JSON text"
+    );
+    assert_eq!(params[5], "", "None(tpm) binds '' collapsed by NULLIF");
+    assert_eq!(params[6], "12.5", "f64 budget binds as its decimal string");
+    assert_eq!(params[7], "1", "enabled binds as SQLite 0/1");
+    let get_sql = body_sql(&requests[1]);
+    assert!(get_sql.contains("WHERE scope_type = ? AND scope_id = ?"));
+}
+
+fn sample_plan() -> StoredPlan {
+    StoredPlan {
+        id: "pro".into(),
+        name: "Pro".into(),
+        slug: "pro".into(),
+        mcp_enabled: true,
+        self_hosted_workers_enabled: false,
+        admin_console_seats: Some(10),
+        default_model_allowlist: vec!["gpt-5".into()],
+        default_rpm_limit: Some(1000),
+        default_tpm_limit: None,
+        default_monthly_budget_usd: Some(100.0),
+        created_at_unix: 1_753_000_000,
+        updated_at_unix: 1_753_000_001,
+        asset_hosting_enabled: true,
+        default_asset_storage_quota_bytes: Some(10_485_760),
+        default_monthly_egress_bytes_budget: None,
+        default_download_rpm_limit: None,
+        extension_tools_enabled: false,
+    }
+}
+
+#[test]
+fn plan_round_trips_through_the_control_database() {
+    let plan = sample_plan();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "pro", "name": "Pro", "slug": "pro", "mcp_enabled": 1,
+                    "self_hosted_workers_enabled": 0, "admin_console_seats": 10,
+                    "default_model_allowlist_json": "[\"gpt-5\"]", "default_rpm_limit": 1000,
+                    "default_tpm_limit": null, "default_monthly_budget_usd": 100.0,
+                    "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64,
+                    "asset_hosting_enabled": 1, "default_asset_storage_quota_bytes": 10_485_760_i64,
+                    "extension_tools_enabled": 0, "default_monthly_egress_bytes_budget": null,
+                    "default_download_rpm_limit": null
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_plan(plan.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.get_plan("pro"))
+        .unwrap()
+        .expect("plan should decode");
+    assert_eq!(fetched, plan);
+    assert!(body_sql(&transport.recorded()[0]).starts_with("INSERT INTO plans"));
+}
+
+// --- Config construction route (issue #440) ---
+
+#[test]
+fn cloudflare_d1_from_client_seeds_registry_from_config() {
+    let transport = Arc::new(RecordingTransport::new(vec![query_ok(
+        serde_json::json!([{
+            "id": "acme", "name": "Acme", "slug": "acme", "status": "active",
+            "plan_id": "free", "created_at_unix": 1_753_000_000_i64,
+            "updated_at_unix": 1_753_000_001_i64
+        }]),
+        0,
+    )]));
+    let client = D1Client::new(Arc::new(CloudflareClient::from_parts(
+        CloudflareConfig::new("acct-test", "plaintext-token"),
+        Arc::new(EnvTokenResolver::from_process_env()),
+        transport.clone(),
+        Arc::new(InstantClock),
+        RetryPolicy::default(),
+    )));
+    let mut options = CloudflareD1StorageOptions {
+        control_database_id: "control-db".into(),
+        tenant_databases: Default::default(),
+        audit_event_retention_records: 50,
+    };
+    options
+        .tenant_databases
+        .insert("acme".into(), "acme-db".into());
+
+    let repositories = RuntimeStorageRepositories::cloudflare_d1_from_client(client, options)
+        .expect("config construction should succeed");
+
+    // A control-plane read now works and routes to the seeded control database,
+    // proving the registry was threaded from config into the live backend.
+    let tenant = runtime()
+        .block_on(repositories.get_tenant_account("acme"))
+        .unwrap()
+        .expect("tenant should decode");
+    assert_eq!(tenant.id, "acme");
+    assert!(transport.recorded()[0]
+        .url
+        .contains("/d1/database/control-db/query"));
 }
 
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---

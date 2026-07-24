@@ -108,6 +108,166 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_project
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix
     ON api_keys(key_prefix);
 
+-- --- Account-global control-plane entities (issue #440) ---
+--
+-- These families are account-scoped configuration, not per-request tenant
+-- data, so they live ONLY in the CONTROL database (like `tenants`) and are
+-- never fanned out over tenant databases. The tables exist in every
+-- provisioned database because one migration file provisions both roles, but
+-- the backend only ever reads/writes them against the control database.
+-- SQLite dialect divergences from sql/001_init_postgres.sql (documented in
+-- docs/cloudflare-d1-backend.md): BOOLEAN -> INTEGER 0/1, JSONB -> TEXT,
+-- BIGINT -> INTEGER, DOUBLE PRECISION -> REAL, no cross-table FOREIGN KEYs
+-- (referential integrity is enforced at the application layer), and CHECK
+-- constraints on enumerations are dropped (validated in Rust before write).
+
+-- Admin console human identities (issue #157), distinct from api_keys.
+CREATE TABLE IF NOT EXISTS admin_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    superadmin INTEGER NOT NULL DEFAULT 0,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    last_login_at_unix INTEGER,
+    disabled_at_unix INTEGER
+);
+
+-- One admin user's membership in one tenant, with a per-tenant role. A user
+-- may belong to more than one tenant; hence these edges cannot live in any
+-- single tenant database and stay in the control database.
+CREATE TABLE IF NOT EXISTS admin_user_tenant_memberships (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (user_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_tenant_memberships_user
+    ON admin_user_tenant_memberships(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_tenant_memberships_tenant
+    ON admin_user_tenant_memberships(tenant_id);
+
+-- Hashed refresh tokens backing admin console sessions (never plaintext);
+-- revocation marks a row rather than deleting it, preserving an audit trail.
+CREATE TABLE IF NOT EXISTS admin_user_refresh_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    tenant_id TEXT,
+    role TEXT,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    expires_at_unix INTEGER NOT NULL,
+    revoked_at_unix INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user
+    ON admin_user_refresh_tokens(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_hash
+    ON admin_user_refresh_tokens(token_hash);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user_tenant
+    ON admin_user_refresh_tokens(user_id, tenant_id);
+
+-- Per-tenant single-sign-on configuration (issue #283); exactly one config
+-- per tenant for EITHER OIDC or SAML. OIDC client secrets are NEVER stored
+-- here in plaintext -- only a ferrogate-secrets reference URI.
+CREATE TABLE IF NOT EXISTS sso_provider_configs (
+    tenant_id TEXT PRIMARY KEY,
+    provider_kind TEXT NOT NULL,
+    default_role TEXT NOT NULL DEFAULT 'member',
+    group_role_mapping_json TEXT NOT NULL DEFAULT '{}',
+    oidc_issuer TEXT,
+    oidc_client_id TEXT,
+    oidc_client_secret_ref TEXT,
+    oidc_redirect_uri TEXT,
+    oidc_group_claim TEXT,
+    saml_idp_entity_id TEXT,
+    saml_idp_sso_url TEXT,
+    saml_idp_certificate TEXT,
+    saml_sp_entity_id TEXT,
+    saml_acs_url TEXT,
+    saml_email_attribute TEXT,
+    saml_name_attribute TEXT,
+    saml_groups_attribute TEXT,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- Restart-safe state for an in-flight SSO authorize->callback round trip
+-- (issue #283), keyed by the opaque state token; consumed on first use.
+CREATE TABLE IF NOT EXISTS sso_pending_flows (
+    state TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    code_verifier TEXT,
+    request_id TEXT,
+    created_at_unix INTEGER NOT NULL,
+    expires_at_unix INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sso_pending_flows_expiry
+    ON sso_pending_flows(expires_at_unix);
+
+-- Quota/rate-limit policy attached to one scope (tenant/project/workspace/
+-- key). Resolved with no tenant context in the signature, so these live in
+-- the control database rather than being routed per-tenant.
+CREATE TABLE IF NOT EXISTS quota_policies (
+    id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    model_allowlist_json TEXT NOT NULL DEFAULT '[]',
+    rpm_limit INTEGER,
+    tpm_limit INTEGER,
+    monthly_budget_usd REAL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    alert_threshold_pcts_json TEXT NOT NULL DEFAULT '[]',
+    asset_storage_quota_bytes INTEGER,
+    monthly_egress_bytes_budget INTEGER,
+    download_rpm_limit INTEGER,
+    UNIQUE (scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
+    ON quota_policies(scope_type, scope_id);
+
+-- Sellable subscription tiers (issue #168): feature flags plus default quota
+-- values shared across tenants. Global, so control database only.
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    mcp_enabled INTEGER NOT NULL DEFAULT 0,
+    self_hosted_workers_enabled INTEGER NOT NULL DEFAULT 0,
+    admin_console_seats INTEGER,
+    default_model_allowlist_json TEXT NOT NULL DEFAULT '[]',
+    default_rpm_limit INTEGER,
+    default_tpm_limit INTEGER,
+    default_monthly_budget_usd REAL,
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    asset_hosting_enabled INTEGER NOT NULL DEFAULT 0,
+    default_asset_storage_quota_bytes INTEGER,
+    extension_tools_enabled INTEGER NOT NULL DEFAULT 0,
+    default_monthly_egress_bytes_budget INTEGER,
+    default_download_rpm_limit INTEGER
+);
+
+-- Seed the default 'free' plan every tenant lands on unless assigned another,
+-- mirroring sql/001_init_postgres.sql and the in-memory default_free_plan().
+INSERT OR IGNORE INTO plans
+    (id, name, slug, mcp_enabled, self_hosted_workers_enabled, admin_console_seats,
+     asset_hosting_enabled, default_asset_storage_quota_bytes,
+     default_monthly_egress_bytes_budget)
+VALUES ('free', 'Free', 'free', 0, 0, 1, 1, 10485760, 104857600);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

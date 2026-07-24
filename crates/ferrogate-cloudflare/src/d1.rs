@@ -173,13 +173,29 @@ impl D1Client {
             .await
     }
 
-    /// List the account's D1 databases. Requests the maximum page size
-    /// (1,000); pagination beyond the first page is intentionally not
-    /// followed in this admin-path slice.
+    /// List ALL of the account's D1 databases, following pagination beyond the
+    /// first page (issue #440).
+    ///
+    /// The list endpoint caps `per_page` at 1,000, so an account with more than
+    /// 1,000 databases needs its pages walked. The response envelope discards
+    /// `result_info`, so this follows pages by number and stops once a page
+    /// returns fewer rows than `per_page` (the last page) — no cursor state to
+    /// track. Requests one extra empty page only in the exact-multiple case.
     pub async fn list_databases(&self) -> Result<Vec<D1Database>, CloudflareError> {
-        self.client
-            .get_json("accounts/{account_id}/d1/database?per_page=1000", None)
-            .await
+        const PER_PAGE: usize = 1000;
+        let mut databases = Vec::new();
+        let mut page = 1;
+        loop {
+            let path =
+                format!("accounts/{{account_id}}/d1/database?per_page={PER_PAGE}&page={page}");
+            let batch: Vec<D1Database> = self.client.get_json(&path, None).await?;
+            let batch_len = batch.len();
+            databases.extend(batch);
+            if batch_len < PER_PAGE {
+                return Ok(databases);
+            }
+            page += 1;
+        }
     }
 
     /// Fetch one database descriptor by uuid.
