@@ -211,7 +211,7 @@
 use std::collections::BTreeMap;
 
 use ferrogate_cloudflare::d1::D1Client;
-use ferrogate_cloudflare::CloudflareError;
+use ferrogate_cloudflare::{CloudflareError, D1ProxyClient, D1ProxyStatement};
 
 use super::control_plane_store::ControlPlaneStore;
 use super::*;
@@ -316,6 +316,13 @@ impl D1TenantDatabaseRegistry {
 /// The per-tenant Cloudflare D1 control-plane backend (issue #420).
 pub struct D1ControlPlaneStore {
     client: D1Client,
+    /// Proxy-Worker client for the ATOMIC hot path (issue #450). `None` until a
+    /// deployment binds the `workers/d1-proxy` Worker; the atomic-transition
+    /// families fail closed with the typed unimplemented-surface error while it
+    /// is absent (they cannot be served over the REST query API's non-atomic,
+    /// no-`RETURNING` surface). The REST `client` above stays the transport for
+    /// every non-atomic/admin family.
+    proxy: Option<D1ProxyClient>,
     registry: Mutex<D1TenantDatabaseRegistry>,
     /// Process-local usage-aggregate mirror — the same read-modify-write
     /// baseline every backend keeps (see the trait docs on
@@ -1184,13 +1191,16 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             })
     }
 
-    // --- Billing events (IMPLEMENTED, control DB, issue #449) ---
+    // --- Billing events (IMPLEMENTED, control DB, issue #449/#450) ---
     //
     // Settled metering events stored as full `*_json` documents (idempotent on
     // the ledger-entry id, like Postgres/Memory). The combined
-    // `append_billing_event_with_outbox_enqueue` stays UNIMPLEMENTED: it must
-    // commit the metering write and the outbox enqueue in ONE transaction
-    // (issue #150), which the D1 HTTP query API cannot express.
+    // `append_billing_event_with_outbox_enqueue` (issue #150) is the KEYSTONE
+    // atomic op of issue #450: it must commit the metering write and the outbox
+    // enqueue TOGETHER, which the D1 REST query API cannot express — so it routes
+    // through the proxy-Worker `/d1/batch` binding (native `env.DB.batch([...])`,
+    // atomic, `RETURNING`). It fails closed with the typed unimplemented-surface
+    // error when no proxy Worker is bound (a REST-only deployment).
 
     async fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
         self.append_billing_event_async(&event).await
@@ -1198,13 +1208,16 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn append_billing_event_with_outbox_enqueue(
         &self,
-        _event: BillingEvent,
-        _outbox_id: &str,
-        _outbox_next_attempt_unix: i64,
+        event: BillingEvent,
+        outbox_id: &str,
+        outbox_next_attempt_unix: i64,
     ) -> Result<BillingEventAppendOutcome, StorageError> {
-        Err(unimplemented_surface(
-            "append_billing_event_with_outbox_enqueue",
-        ))
+        self.append_billing_event_with_outbox_enqueue_async(
+            &event,
+            outbox_id,
+            outbox_next_attempt_unix,
+        )
+        .await
     }
 
     async fn billing_events(&self) -> Vec<BillingEvent> {

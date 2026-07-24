@@ -311,6 +311,121 @@ impl D1ControlPlaneStore {
         }
     }
 
+    /// Atomic metering write + report-outbox enqueue (issue #150) over the
+    /// proxy-Worker `/d1/batch` binding (issue #450) — the KEYSTONE atomic op.
+    ///
+    /// The D1 REST query API cannot commit the two inserts together (no
+    /// multi-statement-with-params transaction, no `RETURNING`), which is why
+    /// this family stayed erroring on the REST-only backend. It is now routed
+    /// through the proxy Worker as TWO statements committed as one atomic unit by
+    /// `env.DB.batch([...])`:
+    ///
+    /// 1. the metering-event insert, `ON CONFLICT (billing_event_id) DO NOTHING
+    ///    RETURNING billing_event_id` — the RETURNING row is present iff the
+    ///    event was NEWLY recorded (REST has no `RETURNING`, so a REST-only
+    ///    backend cannot learn this in the same round trip);
+    /// 2. the report-outbox enqueue, `ON CONFLICT (id) DO NOTHING` (idempotent
+    ///    on the caller's `outbox_id`).
+    ///
+    /// If either statement fails, D1 rolls the WHOLE batch back — the #150
+    /// atomicity guarantee: a metering write never lands without its outbox
+    /// enqueue, so there is no partial-success case (`enqueue_error` stays `None`
+    /// like Postgres). On an idempotent replay (metering row already present, no
+    /// RETURNING row) the stored event's settlement is re-verified over the REST
+    /// reload path, mirroring [`append_billing_event_async`]; a divergent replay
+    /// is a typed [`StorageError::Conflict`].
+    ///
+    /// Fails closed with the typed unimplemented-surface error when no proxy
+    /// Worker is bound (a REST-only deployment), exactly like the still-deferred
+    /// atomic families.
+    ///
+    /// [`append_billing_event_async`]: Self::append_billing_event_async
+    pub(super) async fn append_billing_event_with_outbox_enqueue_async(
+        &self,
+        event: &BillingEvent,
+        outbox_id: &str,
+        outbox_next_attempt_unix: i64,
+    ) -> Result<BillingEventAppendOutcome, StorageError> {
+        let proxy = self.proxy_client("append_billing_event_with_outbox_enqueue")?;
+        let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(event);
+        let event_json = serialize_storage_document(event)?;
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+
+        // The two statements mirror the standalone `append_billing_event_async`
+        // (metering insert) and `enqueue_billing_report_async` (outbox insert)
+        // SQL verbatim, so the atomic path stays row-for-row consistent with the
+        // non-atomic REST writes; the only addition is the `RETURNING` clause the
+        // binding makes available.
+        let statements = vec![
+            D1ProxyStatement::with_params(
+                "INSERT INTO billing_events \
+                 (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, \
+                  event_json) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (billing_event_id) DO NOTHING \
+                 RETURNING billing_event_id",
+                vec![
+                    billing_event_id.clone(),
+                    event.request_id.clone(),
+                    i64::from(event.provider_attempt.provider_attempt_index).to_string(),
+                    occurred_at_unix.to_string(),
+                    event_json.clone(),
+                ],
+            ),
+            D1ProxyStatement::with_params(
+                "INSERT INTO billing_report_outbox \
+                 (id, attempts, next_attempt_unix, dead_lettered_at_unix, created_at_unix, \
+                  updated_at_unix, event_json) \
+                 VALUES (?, 0, ?, NULL, unixepoch(), unixepoch(), ?) \
+                 ON CONFLICT (id) DO NOTHING",
+                vec![
+                    outbox_id.to_string(),
+                    outbox_next_attempt_unix.to_string(),
+                    event_json,
+                ],
+            ),
+        ];
+
+        let results = proxy.batch(&statements).await.map_err(d1_error)?;
+        // Statement 0 is the metering insert; its RETURNING row is present iff
+        // the event was newly recorded (ON CONFLICT DO NOTHING → no row on
+        // replay). A short batch response is a proxy contract violation.
+        let metering_result = results.first().ok_or_else(|| {
+            StorageError::Runtime(
+                "cloudflare d1 proxy: batch returned no per-statement results".to_string(),
+            )
+        })?;
+        let recorded = !metering_result.results.is_empty();
+        if recorded {
+            return Ok(BillingEventAppendOutcome {
+                recorded: true,
+                enqueue_error: None,
+            });
+        }
+        // Idempotent replay: verify the stored event settles the same way (the
+        // reload is a non-atomic single read, so it stays on the REST path).
+        let existing = self
+            .billing_event_by_id_async(&billing_event_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Runtime(format!(
+                    "billing event id {billing_event_id} conflicted but could not be reloaded"
+                ))
+            })?;
+        if same_billing_event_settlement(&existing, event) {
+            Ok(BillingEventAppendOutcome {
+                recorded: false,
+                enqueue_error: None,
+            })
+        } else {
+            Err(StorageError::Conflict(format!(
+                "billing event id {billing_event_id} was replayed with different provider-attempt \
+                 settlement data"
+            )))
+        }
+    }
+
     pub(super) async fn billing_event_by_id_async(
         &self,
         billing_event_id: &str,

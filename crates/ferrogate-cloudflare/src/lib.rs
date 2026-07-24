@@ -35,6 +35,7 @@
 mod client;
 mod config;
 pub mod d1;
+pub mod d1_proxy;
 mod envelope;
 mod error;
 mod resolver;
@@ -45,6 +46,7 @@ pub use client::{
     ReqwestTransport, RetryPolicy, TokioClock,
 };
 pub use config::{default_ai_gateway_base_url, default_api_base_url, CloudflareConfig};
+pub use d1_proxy::{D1ProxyClient, D1ProxyStatement};
 pub use envelope::{CloudflareEnvelope, CloudflareMessage};
 pub use error::{CloudflareApiError, CloudflareError, AUTHENTICATION_CODES, MISSING_SCOPE_CODES};
 pub use resolver::{EnvTokenResolver, ResolvedToken, TokenResolver};
@@ -56,6 +58,9 @@ mod backoff_test;
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod config_test;
+#[cfg(test)]
+#[path = "d1_proxy_test.rs"]
+mod d1_proxy_test;
 #[cfg(test)]
 #[path = "d1_test.rs"]
 mod d1_test;

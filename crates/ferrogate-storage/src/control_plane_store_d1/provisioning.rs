@@ -20,9 +20,32 @@ impl D1ControlPlaneStore {
     pub fn new(client: D1Client, registry: D1TenantDatabaseRegistry) -> Self {
         Self {
             client,
+            proxy: None,
             registry: Mutex::new(registry),
             usage_aggregates_mirror: Mutex::new(InMemoryRepository::new()),
         }
+    }
+
+    /// Attach the proxy-Worker client (issue #450) that serves the ATOMIC hot
+    /// path (`/d1/batch` + `/d1/query`, native binding, `RETURNING`). Builder
+    /// form so the REST-only construction path (`new`) is unchanged and the
+    /// proxy stays opt-in: absent it, the atomic-transition families fail closed
+    /// with the typed unimplemented-surface error.
+    pub fn with_proxy_client(mut self, proxy: D1ProxyClient) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// The configured proxy-Worker client, or the typed unimplemented-surface
+    /// error when no proxy is bound — so an atomic op called on a REST-only
+    /// deployment fails exactly like the still-deferred atomic families.
+    pub(super) fn proxy_client(
+        &self,
+        method: &'static str,
+    ) -> Result<&D1ProxyClient, StorageError> {
+        self.proxy
+            .as_ref()
+            .ok_or_else(|| unimplemented_surface(method))
     }
 
     /// A snapshot of the current tenant->database registry.

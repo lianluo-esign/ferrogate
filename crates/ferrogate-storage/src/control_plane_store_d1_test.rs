@@ -13,8 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ferrogate_cloudflare::d1::D1Client;
 use ferrogate_cloudflare::{
-    Clock, CloudflareClient, CloudflareConfig, CloudflareError, EnvTokenResolver, HttpRequest,
-    HttpResponse, HttpTransport, RetryPolicy,
+    Clock, CloudflareClient, CloudflareConfig, CloudflareError, D1ProxyClient, EnvTokenResolver,
+    HttpRequest, HttpResponse, HttpTransport, RetryPolicy,
 };
 
 use ferrogate_core::TenantContext;
@@ -122,6 +122,62 @@ fn store_with_transport(
     (D1ControlPlaneStore::new(client, registry), transport)
 }
 
+/// A store wired with BOTH the REST transport (non-atomic path) AND a
+/// proxy-Worker client backed by its own scripted transport (issue #450 atomic
+/// path). The two transports are returned separately so a test can assert which
+/// path a call took — the whole point of the atomic/REST split.
+fn store_with_proxy(
+    registry: D1TenantDatabaseRegistry,
+    rest_responses: Vec<HttpResponse>,
+    proxy_responses: Vec<HttpResponse>,
+) -> (
+    D1ControlPlaneStore,
+    Arc<RecordingTransport>,
+    Arc<RecordingTransport>,
+) {
+    let rest_transport = Arc::new(RecordingTransport::new(rest_responses));
+    let client = D1Client::new(Arc::new(CloudflareClient::from_parts(
+        CloudflareConfig::new("acct-test", "plaintext-token"),
+        Arc::new(EnvTokenResolver::from_process_env()),
+        rest_transport.clone(),
+        Arc::new(InstantClock),
+        RetryPolicy::default(),
+    )));
+    let proxy_transport = Arc::new(RecordingTransport::new(proxy_responses));
+    let proxy = D1ProxyClient::new(
+        "https://ferrogate-d1-proxy.example.workers.dev",
+        proxy_transport.clone(),
+        Arc::new(EnvTokenResolver::from_process_env()),
+        "plaintext-proxy-token",
+    );
+    let store = D1ControlPlaneStore::new(client, registry).with_proxy_client(proxy);
+    (store, rest_transport, proxy_transport)
+}
+
+/// One per-statement result inside a `/d1/batch` response.
+fn proxy_statement_result(rows: serde_json::Value, changes: u64) -> serde_json::Value {
+    serde_json::json!({
+        "results": rows,
+        "success": true,
+        "meta": { "changes": changes, "rows_read": 1, "rows_written": 1 }
+    })
+}
+
+/// A Cloudflare-style envelope wrapping the proxy Worker's per-statement batch
+/// results (the shape `serializeResult` emits in workers/d1-proxy/src/index.ts).
+fn proxy_batch_ok(statements: Vec<serde_json::Value>) -> HttpResponse {
+    response(
+        200,
+        serde_json::json!({
+            "success": true,
+            "errors": [],
+            "messages": [],
+            "result": statements
+        })
+        .to_string(),
+    )
+}
+
 fn control_registry() -> D1TenantDatabaseRegistry {
     D1TenantDatabaseRegistry::with_control_database("control-db")
 }
@@ -148,6 +204,16 @@ fn body_params(request: &HttpRequest) -> Vec<String> {
 
 fn body_sql(request: &HttpRequest) -> String {
     body_json(request)["sql"].as_str().unwrap().to_string()
+}
+
+/// The string params of one proxy `/d1/batch` statement JSON value.
+fn statement_params(statement: &serde_json::Value) -> Vec<String> {
+    statement["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect()
 }
 
 // --- Provisioning lifecycle ---
@@ -1822,6 +1888,158 @@ fn self_hosted_worker_registration_round_trips_and_activity_stats_aggregate() {
     let stats_sql = body_sql(&requests[2]);
     assert!(stats_sql.contains("count(*)"));
     assert!(stats_sql.contains("self_hosted_worker_telemetry_events"));
+}
+
+// --- Atomic op over the proxy-Worker /d1/batch binding (issue #450) ---
+
+/// The KEYSTONE proof: `append_billing_event_with_outbox_enqueue` constructs the
+/// two-statement ATOMIC batch (metering insert + outbox enqueue) and routes it
+/// through the proxy Worker's `/d1/batch`, NOT the REST query API.
+#[test]
+fn append_billing_event_with_outbox_enqueue_builds_atomic_batch() {
+    let event = sample_billing_event("req-1");
+    let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        // The recorded path takes ONE atomic batch and no REST round trip.
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // Statement 0 (metering insert) RETURNS its id -> newly recorded.
+            proxy_statement_result(
+                serde_json::json!([{ "billing_event_id": billing_event_id }]),
+                1,
+            ),
+            // Statement 1 (outbox enqueue) inserts a row, no RETURNING.
+            proxy_statement_result(serde_json::json!([]), 1),
+        ])],
+    );
+
+    let outcome = runtime()
+        .block_on(store.append_billing_event_with_outbox_enqueue(event.clone(), "outbox-1", 100))
+        .expect("atomic append should succeed");
+    assert!(
+        outcome.recorded,
+        "the RETURNING row means the event was recorded"
+    );
+    assert!(
+        outcome.enqueue_error.is_none(),
+        "atomic backends never surface a partial enqueue error"
+    );
+
+    // The REST transport was never touched: the recorded path is a single atomic
+    // batch, exactly the round-trip win the binding buys over REST.
+    assert!(
+        rest_transport.recorded().is_empty(),
+        "the recorded path must not hit the REST query API"
+    );
+
+    // Exactly one POST to /d1/batch, bearer-authenticated with the proxy token.
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(
+        request.url.ends_with("/d1/batch"),
+        "url was {}",
+        request.url
+    );
+    assert_eq!(request.bearer_token, "plaintext-proxy-token");
+
+    // The body is the atomic { statements: [metering, outbox] } envelope.
+    let body = body_json(request);
+    let statements = body["statements"].as_array().expect("statements array");
+    assert_eq!(
+        statements.len(),
+        2,
+        "the atomic unit is exactly two statements"
+    );
+
+    // Statement 0: metering insert, ON CONFLICT DO NOTHING, RETURNING (the
+    // REST API has none of this — that is why the binding exists).
+    let metering_sql = statements[0]["sql"].as_str().unwrap();
+    assert!(metering_sql.starts_with("INSERT INTO billing_events"));
+    assert!(metering_sql.contains("ON CONFLICT (billing_event_id) DO NOTHING"));
+    assert!(metering_sql.contains("RETURNING billing_event_id"));
+    let metering_params = statement_params(&statements[0]);
+    assert_eq!(metering_params.len(), 5);
+    assert_eq!(metering_params[0], billing_event_id);
+    assert_eq!(metering_params[1], "req-1");
+    assert_eq!(metering_params[2], "0"); // provider_attempt_index bound as a string
+    assert_eq!(metering_params[3], "1800000000"); // occurred_at_unix
+    assert_eq!(
+        serde_json::from_str::<ferrogate_billing::BillingEvent>(&metering_params[4]).unwrap(),
+        event,
+        "the fifth metering param is the full event_json document"
+    );
+
+    // Statement 1: outbox enqueue, ON CONFLICT DO NOTHING, idempotent on id.
+    let outbox_sql = statements[1]["sql"].as_str().unwrap();
+    assert!(outbox_sql.starts_with("INSERT INTO billing_report_outbox"));
+    assert!(outbox_sql.contains("ON CONFLICT (id) DO NOTHING"));
+    let outbox_params = statement_params(&statements[1]);
+    assert_eq!(outbox_params.len(), 3);
+    assert_eq!(outbox_params[0], "outbox-1");
+    assert_eq!(outbox_params[1], "100"); // next_attempt_unix
+    assert_eq!(
+        serde_json::from_str::<ferrogate_billing::BillingEvent>(&outbox_params[2]).unwrap(),
+        event,
+    );
+}
+
+/// On an idempotent replay the metering insert conflicts (no RETURNING row); the
+/// op re-verifies the stored settlement over the REST reload path and reports
+/// `recorded = false` without erroring.
+#[test]
+fn append_billing_event_with_outbox_enqueue_replay_verifies_settlement() {
+    let event = sample_billing_event("req-1");
+    let event_doc = serde_json::to_string(&event).unwrap();
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        control_registry(),
+        // REST reload of the already-recorded event for the settlement compare.
+        vec![query_ok(
+            serde_json::json!([{ "document_json": event_doc }]),
+            0,
+        )],
+        // Both statements no-op (changes 0, no RETURNING row) -> not recorded.
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0),
+        ])],
+    );
+
+    let outcome = runtime()
+        .block_on(store.append_billing_event_with_outbox_enqueue(event, "outbox-1", 100))
+        .expect("idempotent replay should not error");
+    assert!(
+        !outcome.recorded,
+        "a conflicting metering insert is not newly recorded"
+    );
+    assert!(outcome.enqueue_error.is_none());
+
+    // The atomic batch went to the proxy; the settlement reload went to REST.
+    assert_eq!(proxy_transport.recorded().len(), 1);
+    let reload = rest_transport.recorded();
+    assert_eq!(reload.len(), 1);
+    assert!(body_sql(&reload[0]).contains("FROM billing_events WHERE billing_event_id = ?"));
+}
+
+/// Without a bound proxy Worker the atomic op fails closed with the typed
+/// unimplemented-surface error, exactly like the still-deferred atomic families
+/// — and never reaches the network.
+#[test]
+fn append_billing_event_with_outbox_enqueue_without_proxy_is_unimplemented() {
+    let (store, transport) = store_with_transport(control_registry(), Vec::new());
+    let error = runtime()
+        .block_on(store.append_billing_event_with_outbox_enqueue(
+            sample_billing_event("req-1"),
+            "outbox-1",
+            100,
+        ))
+        .expect_err("a REST-only backend cannot serve the atomic op");
+    assert!(is_unimplemented_backend_surface(&error), "{error:?}");
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented path must not hit the network"
+    );
 }
 
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---

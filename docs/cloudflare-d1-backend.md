@@ -8,8 +8,11 @@ families landed (issue #445); the observability append/analytics families
 (agent runs/events, request/audit logs) + snapshot replay floors landed (issue
 #447); and the billing ledger/outbox/events, guardrail policy
 revisions/bindings, and managed + self-hosted worker stores landed (issue #449).
-Builds on the shared Cloudflare client (#405), the `ControlPlaneStore` trait
-extraction (#419), and the #425 dispatch consolidation.
+The **proxy-Worker D1 binding** (`workers/d1-proxy/`) + its Rust client
+(`ferrogate_cloudflare::d1_proxy`) + the FIRST atomic-transition op routed
+through it (`append_billing_event_with_outbox_enqueue`) landed as the keystone
+slice (issue #450). Builds on the shared Cloudflare client (#405), the
+`ControlPlaneStore` trait extraction (#419), and the #425 dispatch consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
 entities in **per-tenant Cloudflare D1 databases** driven over the D1 REST
@@ -21,9 +24,12 @@ row-level isolation (`tenant_id` columns + RLS).
 | Piece | Location |
 | --- | --- |
 | D1 REST endpoint wrapper (lifecycle + query) | `crates/ferrogate-cloudflare/src/d1.rs` |
-| Backend (`D1ControlPlaneStore`, registry, provisioning) | `crates/ferrogate-storage/src/control_plane_store_d1.rs` |
+| **Proxy-Worker client (atomic `/d1/batch` + `/d1/query`)** | `crates/ferrogate-cloudflare/src/d1_proxy.rs` |
+| **Proxy Worker (native D1 binding, bearer HTTP API)** | `workers/d1-proxy/` (`src/index.ts`, `src/auth.ts`, `wrangler.toml`) |
+| Backend (`D1ControlPlaneStore`, registry, provisioning) | `crates/ferrogate-storage/src/control_plane_store_d1/` |
+| Atomic op wired through the proxy (`append_billing_event_with_outbox_enqueue`) | `crates/ferrogate-storage/src/control_plane_store_d1/billing.rs` |
 | SQLite-dialect core schema | `sql/d1/001_init_d1.sql` |
-| Mocked-transport tests + portability matrix | `crates/ferrogate-storage/src/control_plane_store_d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_test.rs` |
+| Mocked-transport tests + portability matrix | `crates/ferrogate-storage/src/control_plane_store_d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_test.rs`, `crates/ferrogate-cloudflare/src/d1_proxy_test.rs` |
 
 ### Transport placement decision
 
@@ -123,18 +129,147 @@ and every query is a cross-network round trip. The strategy split is:
 - **Raw HTTP (this slice)** — admin/low-volume operations only: database
   provisioning, schema migration, entity CRUD, config documents. The shared
   client's deterministic backoff (#405) absorbs incidental 429s.
-- **Proxy Worker with a D1 binding (follow-up)** — the hot path. A Worker
-  holding the tenant database binding serves request logs, usage
-  aggregates, billing events, and any per-request reads. See
+- **Proxy Worker with a D1 binding (issue #450, landed for the atomic path)** —
+  a Worker (`workers/d1-proxy/`) holding a native D1 binding (`env.DB`) exposes a
+  bearer-authenticated HTTP API. It runs `prepare().bind()` / `batch()` (atomic)
+  / `RETURNING` — the exact three primitives the REST HTTP query API lacks — for
+  the **atomic-transition hot path**. See
   [`cloudflare-deploy-topology.md`](cloudflare-deploy-topology.md)
   §bindings (`outboundByHost` shim) and
-  [`cloudflare-integration.md`](cloudflare-integration.md) §6. This is
-  exactly why the high-write trait surface is typed unimplemented below
-  instead of being routed over raw HTTP.
+  [`cloudflare-integration.md`](cloudflare-integration.md) §6. This is exactly
+  why the atomic trait surface was typed unimplemented instead of being routed
+  over raw HTTP.
 
 Other D1 limits that shaped the design: 100 KB/statement, 100 params,
 2 MB/row, 30 s/query, single-threaded per database, 10 GB/database,
 50k databases/account (comfortably above any tenant-count target).
+
+## Proxy-Worker D1 binding: the atomic hot path (issue #450)
+
+The D1 **REST** HTTP query API has no multi-statement-with-params transaction
+and no `RETURNING`. That blocks every **atomic-transition** family — the ones
+whose correctness needs two-or-more writes to commit together, or a
+compare-and-swap that reads back the row it just changed: wallets + reservations,
+payment methods/attempts, workflow run budgets,
+`append_billing_event_with_outbox_enqueue` (the metering write + report-outbox
+enqueue of issue #150), and the guardrail activate/archive/restore CAS
+transitions. No amount of empty-string-sentinel SQL over REST expresses an atomic
+batch, so these cannot ride the REST client.
+
+The fix is a small proxy Worker that holds a **native D1 binding** and exposes
+exactly the primitives REST lacks.
+
+### The proxy Worker (`workers/d1-proxy/`)
+
+A TypeScript Worker (typed against `@cloudflare/workers-types`) with a
+`[[d1_databases]]` binding (`env.DB: D1Database`). A DIY bearer gate — a verbatim
+copy of the agent-gateway house pattern (`requireBearer` + constant-time compare,
+its own copy under `workers/d1-proxy/src/auth.ts`; worker dirs never import
+across each other) — fronts two data routes, both POST-only and fail-closed
+(401 missing / 403 invalid / 500 unconfigured token):
+
+| Route | D1 binding call | Purpose |
+| --- | --- | --- |
+| `POST /d1/batch` | `env.DB.batch([prepare().bind(...), ...])` | **Atomic** multi-statement batch. All statements commit together or the whole batch rolls back. Returns one result per statement, each carrying its `RETURNING` rows. |
+| `POST /d1/query` | `prepare().bind(...).all()` | Single statement with `RETURNING`, for CAS ops expressible as one `UPDATE ... RETURNING` / `INSERT ... RETURNING`. |
+| `GET /healthz` | — | Unauthenticated liveness probe (exposes no secret, touches no data). |
+
+Request bodies: `/d1/batch` takes `{ "statements": [ { "sql", "params": [...] }, ... ] }`;
+`/d1/query` takes one `{ "sql", "params": [...] }`. Params are `string | number |
+boolean | null`; the Rust client sends the **all-strings** form (SQLite affinity
+converts on insert), identical to the REST contract. Responses are the same
+Cloudflare-style envelope the REST API uses (`{ success, errors, messages,
+result }`), and each statement result is the same `{ results, success, meta }`
+shape the REST query endpoint returns per statement — so the Rust side reuses one
+decoder (`D1QueryResult`) across both transports. D1 execution failures answer a
+`5001` error code (deliberately NOT a Cloudflare auth/scope/rate-limit code, so a
+rolled-back batch is never misclassified as an auth failure). The Worker also
+guards the documented limits up front (≤100 params/statement, a defensive
+statements/batch cap).
+
+The Worker's `env.DB` binding is fixed at deploy time to the FerroGate **control
+database** — the atomic family wired in this slice (billing metering + report
+outbox) is account-global control-plane data that routes to the control database,
+exactly like the #447/#449 REST families.
+
+### The Rust client (`ferrogate_cloudflare::d1_proxy`)
+
+`D1ProxyClient` is a thin, self-contained client mirroring the `d1.rs` REST
+wrapper's style. It is deliberately **not** built on `CloudflareClient` (which
+templates `{account_id}`, targets the Cloudflare REST base URL, and uses the
+account API token): the proxy Worker lives at its own deployed origin and
+authenticates with its **own** bearer secret. Instead it reuses the lower-level
+shared seams directly — `HttpTransport` (Bearer request/response, injectable +
+mockable with the same scripted transport the REST tests use), `TokenResolver`
+(the `env://`/inline/`cf://` credential seam), and `CloudflareEnvelope` (the wire
+shape). Its surface:
+
+- `batch(&[D1ProxyStatement]) -> Result<Vec<D1QueryResult>, CloudflareError>` —
+  one result per statement, in order.
+- `query(&D1ProxyStatement) -> Result<D1QueryResult, CloudflareError>`.
+
+`D1ProxyStatement { sql, params: Vec<String> }` is the typed request statement.
+Proxy failures surface through the SAME `CloudflareError` mapping as REST
+failures, so callers handle one error model.
+
+### Atomic-vs-REST routing split
+
+- **REST (`D1Client`)** stays the transport for the **non-atomic / admin**
+  surface: provisioning, schema migration, entity CRUD, config documents, and
+  every append/analytics family already landed over REST (billing ledger/outbox
+  reads, observability, etc.).
+- **Proxy (`D1ProxyClient`)** serves the **atomic** hot path only.
+  `D1ControlPlaneStore` holds an `Option<D1ProxyClient>` (builder:
+  `with_proxy_client`). When it is absent (a REST-only deployment) the atomic
+  families **fail closed** with the typed `unimplemented-backend-surface` error,
+  exactly like the still-deferred atomic families — never a silent or partial
+  write.
+
+### Wired atomic op: `append_billing_event_with_outbox_enqueue`
+
+The keystone proof (in `control_plane_store_d1/billing.rs`). It routes a
+**two-statement atomic batch** through `/d1/batch`:
+
+1. The metering insert — `INSERT INTO billing_events ... ON CONFLICT
+   (billing_event_id) DO NOTHING RETURNING billing_event_id`. The `RETURNING` row
+   is present **iff** the event was newly recorded; a REST-only backend cannot
+   learn this in the same round trip.
+2. The report-outbox enqueue — `INSERT INTO billing_report_outbox ... ON CONFLICT
+   (id) DO NOTHING` (idempotent on the caller's `outbox_id`).
+
+Both statements' SQL mirror the standalone `append_billing_event` /
+`enqueue_billing_report` writes verbatim (only `RETURNING` is added), so the
+atomic path stays row-for-row consistent with the non-atomic REST writes. `batch`
+commits them as one unit: if either fails, D1 rolls the whole batch back — the
+issue #150 guarantee that a metering write never lands without its outbox
+enqueue, so there is no partial-success case (`enqueue_error` stays `None`, like
+Postgres). On an idempotent replay (metering row already present → no `RETURNING`
+row) the stored event's settlement is re-verified over the REST reload path
+(`billing_event_by_id`, a non-atomic single read), mirroring
+`append_billing_event`; a divergent replay is a typed `Conflict`.
+
+**Deferred (still erroring), to be wired through the same proxy in follow-ups:**
+wallets + wallet reservations, payment methods/attempts, workflow run budgets,
+and the guardrail activate/archive/restore CAS transitions. The per-tenant atomic
+families additionally need per-database bindings (or a routed binding lookup) —
+this slice's Worker binds only the control database.
+
+### Deploy / binding steps the gate runs live
+
+1. Provision the control database (`D1ControlPlaneStore::provision_control_database`
+   over REST, or an already-provisioned uuid), and note its uuid — the same value
+   seeded into `storage.d1_control_database_id`.
+2. In `workers/d1-proxy/wrangler.toml`, set the `[[d1_databases]]` `database_id`
+   (and `database_name`) to that control database uuid.
+3. `wrangler secret put D1_PROXY_TOKEN` — the DIY bearer secret. Seed the SAME
+   value into FerroGate's Cloudflare credential seam (#405/#417) as the proxy
+   client's token reference.
+4. `npm install && npm run typecheck && wrangler deploy` under `workers/d1-proxy/`
+   (registry access required for install; the dev gate typechecks against the
+   pinned `@cloudflare/workers-types`).
+5. Point the Rust `D1ProxyClient` at the deployed Worker origin
+   (`https://ferrogate-d1-proxy.<subdomain>.workers.dev`) and construct the store
+   with `with_proxy_client`.
 
 ## Implemented vs erroring trait surface (first slice)
 
@@ -226,7 +361,10 @@ Implemented against D1:
   document plus the filter/order/paginate projection columns, with the outbox
   attempt/schedule state kept as columns so reschedule/dead-letter/replay stay
   single-statement `UPDATE`s. `append_billing_event_with_outbox_enqueue` (the
-  two-table atomic enqueue, issue #150) stays erroring.
+  two-table atomic enqueue, issue #150) is now **implemented via the proxy-Worker
+  `/d1/batch` binding** (issue #450) — see the proxy-Worker section above — and
+  fails closed with the typed unimplemented-surface error only when no proxy
+  Worker is bound.
 - **Guardrail policy revisions + bindings** (issue #449, control database):
   `insert_guardrail_policy_revision` (idempotent on `(policy_id, revision)`,
   typed `Conflict` on replay), `get_guardrail_policy_revision`,
@@ -259,8 +397,9 @@ Implemented against D1:
 
 Everything else — the atomic-transition families that need the transaction
 semantics the D1 HTTP query API lacks (wallets + reservations, payment
-methods/attempts, workflow run budgets, `append_billing_event_with_outbox_enqueue`,
-and the guardrail activate/archive/restore CAS transitions);
+methods/attempts, workflow run budgets, and the guardrail
+activate/archive/restore CAS transitions — `append_billing_event_with_outbox_enqueue`
+is now wired through the proxy Worker, issue #450);
 assets/channels/retention (deferred as a whole family — its move/yank/variant
 coordination ops are atomic `FOR UPDATE` cross-table transitions, the same
 transaction gap that blocks wallets, plus inline BYTEA content the document
@@ -319,27 +458,31 @@ defaults to `memory`).
 
 ## Remaining scope (follow-ups)
 
-1. **Proxy-Worker D1 binding path** for the high-write surface (request logs,
-   audit events, billing events, usage aggregates) and per-request reads.
-   Deferred — this is the `prepare().bind()` / `batch()` / `withSession()`
-   binding path, which belongs in a Worker (`workers/**`, out of scope) rather
-   than the raw REST client, exactly as the rate-limit split dictates. Issue
-   #447 lands the durable D1 SQL translation for the request/audit-log and
-   agent-run/event families over the admin HTTP path (routed to the control
-   database, above); the proxy-Worker binding is the separate hot-path
-   transport for the same tables and remains the follow-up.
-2. Remaining entity families still erroring: assets/channels/retention and the
+1. **Proxy-Worker atomic families beyond the keystone.** Issue #450 landed the
+   proxy Worker (`workers/d1-proxy/`), its Rust client
+   (`ferrogate_cloudflare::d1_proxy`), and the first atomic op
+   (`append_billing_event_with_outbox_enqueue`) end-to-end. Still to wire through
+   the SAME `/d1/batch` + `/d1/query` binding: wallets + wallet reservations,
+   payment methods/attempts, workflow run budgets, and the guardrail
+   activate/archive/restore CAS transitions. The per-tenant atomic families
+   additionally need per-database bindings (or a routed binding lookup) — the
+   keystone Worker binds only the control database.
+2. **Proxy-Worker path for the high-write append surface** (request logs, audit
+   events, billing events, usage aggregates) and per-request reads. These already
+   have a durable D1 SQL translation over the admin HTTP path (issue #447/#449,
+   routed to the control database, above); moving their hot-path writes/reads onto
+   the proxy binding is a throughput follow-up, distinct from the atomicity
+   follow-up in (1).
+3. Remaining entity families still erroring: assets/channels/retention and the
    usage monthly/metadata rollups + `persist_usage_aggregate` durable half
-   (deferred as families — see above); the atomic-transition families blocked on
-   the proxy-Worker binding (wallets + reservations, payment methods/attempts,
-   workflow budgets, `append_billing_event_with_outbox_enqueue`, guardrail
-   activate/archive/restore); and the per-entity surfaces agent schedules,
-   observed agent presence, MCP identity. (Issue #449 landed the billing
-   ledger/outbox/events, guardrail revisions/bindings, and managed +
-   self-hosted worker stores over the admin HTTP path, routed to the control
-   database — above.)
-4. `/raw` query variant and `batch` request shape if bulk import ever needs
-   them. (Entity `SELECT`s already return their full result set in one query
-   response; `list_databases` now follows REST pagination past 1,000 rows.)
+   (deferred as families — see above); the atomic-transition families still
+   blocked on wiring through the proxy binding (wallets + reservations, payment
+   methods/attempts, workflow budgets, guardrail activate/archive/restore); and
+   the per-entity surfaces agent schedules, observed agent presence, MCP identity.
+4. `/raw` query variant if bulk import ever needs it. (Entity `SELECT`s already
+   return their full result set in one query response; `list_databases` now
+   follows REST pagination past 1,000 rows; the `batch` request shape is now
+   served by the proxy Worker's `/d1/batch`.)
 5. Live-Cloudflare integration test (gated on account credentials), mirror
-   of `supabase_roundtrip.rs`.
+   of `supabase_roundtrip.rs`, including the live proxy-Worker atomic-batch proofs
+   the dev gate cannot run (below).
