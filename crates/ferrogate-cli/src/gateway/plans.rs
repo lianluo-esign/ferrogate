@@ -40,35 +40,37 @@ impl FerroGateway {
 
         if path == "/admin/v1/plans" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_plans().await {
-                        Ok(plans) => {
-                            let body = AdminList::new(plans.iter().map(admin_plan).collect());
-                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                Method::GET => {
+                    match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
+                        Ok(_) => match state.list_plans().await {
+                            Ok(plans) => {
+                                let body = AdminList::new(plans.iter().map(admin_plan).collect());
+                                write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                    .await
+                            }
+                            Err(error) => {
+                                write_json_error(
+                                    session,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "storage_unavailable",
+                                    error.to_string(),
+                                    &ctx.request_id,
+                                )
                                 .await
-                        }
+                            }
+                        },
                         Err(error) => {
                             write_json_error(
                                 session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "storage_unavailable",
-                                error.to_string(),
+                                error.status,
+                                error.code,
+                                error.message,
                                 &ctx.request_id,
                             )
                             .await
                         }
-                    },
-                    Err(error) => {
-                        write_json_error(
-                            session,
-                            error.status,
-                            error.code,
-                            error.message,
-                            &ctx.request_id,
-                        )
-                        .await
                     }
-                },
+                }
                 Method::POST => self.handle_admin_plan_create(session, ctx, headers).await,
                 _ => {
                     write_json_error(
@@ -98,7 +100,8 @@ impl FerroGateway {
         };
 
         match *method {
-            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+            {
                 Ok(_) => match state.get_plan(id).await {
                     Ok(Some(plan)) => {
                         let body = AdminPlanMutationResponse {
@@ -167,7 +170,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -274,7 +277,7 @@ impl FerroGateway {
         merge: bool,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

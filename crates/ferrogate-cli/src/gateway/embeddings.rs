@@ -57,7 +57,7 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
 
-        let auth = match authenticate(&state, &headers, EMBEDDINGS_SCOPE, &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, EMBEDDINGS_SCOPE, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 self.record_embeddings_error_log(

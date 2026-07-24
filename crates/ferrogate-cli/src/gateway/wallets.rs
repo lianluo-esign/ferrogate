@@ -40,7 +40,9 @@ impl FerroGateway {
 
         if path == "/admin/v1/wallets" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id)
+                    .await
+                {
                     Ok(auth) => match state.list_wallets().await {
                         Ok(wallets) => {
                             let wallets =
@@ -155,7 +157,8 @@ impl FerroGateway {
         }
 
         match *method {
-            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+            {
                 Ok(auth) => {
                     if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
                         return write_json_error(
@@ -233,7 +236,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -341,7 +344,7 @@ impl FerroGateway {
         tenant_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -427,7 +430,7 @@ impl FerroGateway {
             .await;
         }
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -562,7 +565,7 @@ impl FerroGateway {
             .await;
         }
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -793,7 +796,7 @@ impl FerroGateway {
             .await;
         }
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
                     return write_json_error(
@@ -874,7 +877,9 @@ impl FerroGateway {
 
         if path == "/admin/v1/payment-methods" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id)
+                    .await
+                {
                     Ok(auth) => {
                         let Some(tenant_id) = query
                             .and_then(|query| {
@@ -967,7 +972,8 @@ impl FerroGateway {
 
         match *method {
             Method::DELETE => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -1080,7 +1086,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

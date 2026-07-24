@@ -104,7 +104,7 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
 
-        let auth = match authenticate(&state, &headers, MESSAGES_SCOPE, &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, MESSAGES_SCOPE, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 self.record_messages_error_log(

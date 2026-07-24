@@ -70,7 +70,13 @@ fn reader_auth(state: &AppState) -> AuthContext {
         http::header::AUTHORIZATION,
         "Bearer reader-secret".parse().unwrap(),
     );
-    crate::auth::authenticate(state, &headers, "assets.read", "req").expect("authenticates")
+    block_on(crate::auth::authenticate(
+        state,
+        &headers,
+        "assets.read",
+        "req",
+    ))
+    .expect("authenticates")
 }
 
 fn test_ctx() -> ProxyContext {

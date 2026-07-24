@@ -101,7 +101,7 @@ impl AppState {
     /// per-key budgets are unchanged. `None` (a budget with no recorded
     /// scope, e.g. a legacy caller) falls back to the pre-fix behavior of
     /// checking the most specific attributed scope.
-    pub(crate) fn monthly_budget_exceeded(
+    pub(crate) async fn monthly_budget_exceeded(
         &self,
         tenant: &ferrogate_core::TenantContext,
         budget_scope: Option<&ferrogate_policy::QuotaScopeSelector>,
@@ -126,12 +126,12 @@ impl AppState {
             return Ok(false);
         };
         let period_month = self.current_period_month();
-        let spent = crate::gateway::block_on_sync_bridge(
-            self.repositories
-                .get_usage_monthly_rollup(scope_type, scope_id, &period_month),
-        )?
-        .map(|rollup| rollup.cost_usd)
-        .unwrap_or(0.0);
+        let spent = self
+            .repositories
+            .get_usage_monthly_rollup(scope_type, scope_id, &period_month)
+            .await?
+            .map(|rollup| rollup.cost_usd)
+            .unwrap_or(0.0);
         Ok(spent >= budget_usd)
     }
 
@@ -142,32 +142,22 @@ impl AppState {
     /// tenant attribution and when the tenant has no wallet row at all,
     /// so this is purely additive for every tenant that hasn't adopted
     /// prepaid billing.
-    /// Stays sync (unlike the rest of this file's storage-backed methods)
-    /// because its only caller, `auth::finalize_auth`, is itself sync and
-    /// shared by ~150 call sites plus a batch of sync `#[test]` fns --
-    /// converting the whole `authenticate` chain to async is out of scope
-    /// for issue #221's storage migration. Bridges via the same
-    /// `block_on_sync_bridge` helper already used for the RBAC permission
-    /// check in `gateway/mod.rs` rather than duplicating that pattern.
     ///
-    /// Issue #330 re-audited this and keeps it bridged deliberately: its only
-    /// caller is sync `finalize_auth`, and the read is a single `get_wallet`
-    /// point lookup (not a full-table scan). The hot request-path wallet gate
-    /// is the already-async `try_reserve_wallet_credits`; this pre-dispatch
-    /// balance check is the sync-only counterpart. De-bridging needs the
-    /// `authenticate`/`finalize_auth` chain to go async (out of scope here),
-    /// so it falls under the acceptance carve-out for a read behind a
-    /// sync-only caller.
-    pub(crate) fn wallet_balance_exhausted(
+    /// Async and awaited directly by its only caller, `auth::finalize_auth`,
+    /// as of issue #373 (the `authenticate`/`finalize_auth` chain was
+    /// converted to `async`): the single `get_wallet` point-lookup is
+    /// `.await`ed inline, dropping the `block_on_sync_bridge` that parked a
+    /// worker thread per request. The hot request-path wallet gate remains
+    /// the already-async `try_reserve_wallet_credits`; this is the
+    /// pre-dispatch balance check.
+    pub(crate) async fn wallet_balance_exhausted(
         &self,
         tenant: &ferrogate_core::TenantContext,
     ) -> anyhow::Result<bool> {
         let Some(tenant_id) = tenant.organization_id.as_deref() else {
             return Ok(false);
         };
-        let Some(wallet) =
-            crate::gateway::block_on_sync_bridge(self.repositories.get_wallet(tenant_id))?
-        else {
+        let Some(wallet) = self.repositories.get_wallet(tenant_id).await? else {
             return Ok(false);
         };
         // Account for credits already held by in-flight requests from this

@@ -362,7 +362,7 @@ impl FerroGateway {
         // Visibility: a public site is served anonymously; otherwise the caller
         // must present an `assets.read` key attributed to this exact tenant.
         if !manifest.public {
-            let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+            let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
                 Ok(auth) => auth,
                 Err(error) => {
                     let status = error.status;

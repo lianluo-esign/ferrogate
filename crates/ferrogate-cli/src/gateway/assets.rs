@@ -298,7 +298,7 @@ impl FerroGateway {
         asset_type: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -349,7 +349,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -454,7 +454,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -500,7 +500,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -871,7 +871,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1052,7 +1052,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1183,7 +1183,7 @@ impl FerroGateway {
         yanked: bool,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1305,7 +1305,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1487,7 +1487,7 @@ impl FerroGateway {
         name: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1527,7 +1527,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1585,7 +1585,7 @@ impl FerroGateway {
         channel: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1645,7 +1645,7 @@ impl FerroGateway {
         name: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "assets.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

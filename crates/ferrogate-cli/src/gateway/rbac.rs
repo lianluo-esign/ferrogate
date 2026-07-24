@@ -41,7 +41,9 @@ impl FerroGateway {
 
         if path == "/admin/v1/permissions" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id)
+                    .await
+                {
                     Ok(_) => match state.list_permissions().await {
                         Ok(permissions) => {
                             let search = query_value(query, "search");
@@ -126,7 +128,8 @@ impl FerroGateway {
         }
 
         match *method {
-            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+            {
                 Ok(_) => match state.get_permission(id).await {
                     Ok(Some(permission)) => {
                         let body = AdminPermissionMutationResponse {
@@ -168,7 +171,8 @@ impl FerroGateway {
                 }
             },
             Method::DELETE => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -250,7 +254,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -361,35 +365,37 @@ impl FerroGateway {
 
         if path == "/admin/v1/roles" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_roles().await {
-                        Ok(roles) => {
-                            let body = AdminList::new(roles.iter().map(admin_role).collect());
-                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                Method::GET => {
+                    match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
+                        Ok(_) => match state.list_roles().await {
+                            Ok(roles) => {
+                                let body = AdminList::new(roles.iter().map(admin_role).collect());
+                                write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                    .await
+                            }
+                            Err(error) => {
+                                write_json_error(
+                                    session,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "storage_unavailable",
+                                    error.to_string(),
+                                    &ctx.request_id,
+                                )
                                 .await
-                        }
+                            }
+                        },
                         Err(error) => {
                             write_json_error(
                                 session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "storage_unavailable",
-                                error.to_string(),
+                                error.status,
+                                error.code,
+                                error.message,
                                 &ctx.request_id,
                             )
                             .await
                         }
-                    },
-                    Err(error) => {
-                        write_json_error(
-                            session,
-                            error.status,
-                            error.code,
-                            error.message,
-                            &ctx.request_id,
-                        )
-                        .await
                     }
-                },
+                }
                 Method::POST => self.handle_admin_role_upsert(session, ctx, headers).await,
                 _ => {
                     write_json_error(
@@ -426,7 +432,8 @@ impl FerroGateway {
         }
 
         match *method {
-            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+            {
                 Ok(_) => match state.get_role(id).await {
                     Ok(Some(role)) => {
                         let body = AdminRoleMutationResponse {
@@ -468,7 +475,8 @@ impl FerroGateway {
                 }
             },
             Method::DELETE => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -550,7 +558,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -684,7 +692,7 @@ impl FerroGateway {
 
         match (method, role_id_segment) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
                         if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
                             return write_json_error(
@@ -729,7 +737,8 @@ impl FerroGateway {
                 }
             }
             (&Method::POST, None) => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -821,7 +830,8 @@ impl FerroGateway {
                 }
             }
             (&Method::DELETE, Some(role_id)) if !role_id.is_empty() => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(

@@ -16,6 +16,25 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         .block_on(future)
 }
 
+/// Synchronous shim over the now-`async` `super::authenticate` (issue #373).
+/// Every test below drives the auth chain on a fresh current-thread runtime
+/// via the same `block_on` helper already used for the storage setup calls,
+/// so the test bodies stay synchronous and unchanged. Shadows the glob-
+/// imported `authenticate` for unqualified calls in this module only.
+fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: &str,
+    request_id: &str,
+) -> Result<AuthContext, AuthError> {
+    block_on(super::authenticate(
+        state,
+        headers,
+        required_scope,
+        request_id,
+    ))
+}
+
 fn decoy_yaml_key() -> ApiKey {
     ApiKey {
         region_allowlist: Vec::new(),

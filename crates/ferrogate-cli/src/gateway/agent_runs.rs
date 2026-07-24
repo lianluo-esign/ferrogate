@@ -121,7 +121,8 @@ impl FerroGateway {
             .await;
         }
 
-        let auth = match authenticate(&state, &headers, "agent.runs.create", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "agent.runs.create", &ctx.request_id).await
+        {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

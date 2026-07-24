@@ -31,7 +31,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => match state.billing_outbox_dead_letters().await {
                 Ok(rows) => {
                     let rows = filter_by_tenant_scope(&auth, rows, |row| {
@@ -80,7 +80,7 @@ impl FerroGateway {
         report_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

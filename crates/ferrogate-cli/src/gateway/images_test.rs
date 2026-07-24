@@ -9,6 +9,31 @@
 use super::*;
 use crate::config::{ApiKey, Config, Model, Provider};
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+/// Synchronous shim over the now-`async` `crate::auth::authenticate`
+/// (issue #373); shadows the glob-imported name for this test module so the
+/// synchronous request-plan tests below stay unchanged.
+fn authenticate(
+    state: &crate::state::AppState,
+    headers: &http::HeaderMap,
+    required_scope: &str,
+    request_id: &str,
+) -> Result<crate::auth::AuthContext, crate::auth::AuthError> {
+    block_on(crate::auth::authenticate(
+        state,
+        headers,
+        required_scope,
+        request_id,
+    ))
+}
+
 #[test]
 fn estimates_one_image_by_default() {
     let body = serde_json::json!({"model": "art", "prompt": "a red fox"});

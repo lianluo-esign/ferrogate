@@ -43,7 +43,9 @@ impl FerroGateway {
 
         if path == "/admin/v1/quota-policies" {
             return match *method {
-                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id)
+                    .await
+                {
                     Ok(auth) => match state.list_quota_policies().await {
                         Ok(policies) => {
                             let mut authorized = Vec::with_capacity(policies.len());
@@ -148,7 +150,8 @@ impl FerroGateway {
         }
 
         match *method {
-            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id).await
+            {
                 Ok(auth) => {
                     if let Err(error) =
                         authorize_quota_policy_scope(&state, &auth, scope_type, scope_id).await
@@ -217,7 +220,8 @@ impl FerroGateway {
                 .await
             }
             Method::DELETE => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -302,7 +306,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -386,7 +390,7 @@ impl FerroGateway {
         merge: bool,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

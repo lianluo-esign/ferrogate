@@ -139,7 +139,7 @@ impl FerroGateway {
         endpoint: AiEndpoint,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let ingress_plan = match build_ai_ingress_plan(&state, &headers, endpoint, ctx) {
+        let ingress_plan = match build_ai_ingress_plan(&state, &headers, endpoint, ctx).await {
             Ok(plan) => plan,
             Err(rejection) => {
                 self.record_ai_error_log(
@@ -2571,14 +2571,15 @@ pub(super) struct AiProviderRequestInput<'a> {
     pub(super) body: serde_json::Value,
 }
 
-fn build_ai_ingress_plan(
+async fn build_ai_ingress_plan(
     state: &AppState,
     headers: &HeaderMap,
     endpoint: AiEndpoint,
     ctx: &ProxyContext,
 ) -> AiPlanResult<AiIngressPlan> {
-    let auth =
-        authenticate(state, headers, endpoint.scope(), &ctx.request_id).map_err(|error| {
+    let auth = authenticate(state, headers, endpoint.scope(), &ctx.request_id)
+        .await
+        .map_err(|error| {
             reject_ai_request(AiRequestRejection {
                 tenant: TenantContext::default(),
                 logical_model: None,
@@ -3769,27 +3770,29 @@ mod tests {
         assert_eq!(decision, ProviderAttemptDecision::ReturnError);
     }
 
-    #[test]
-    fn ai_ingress_plan_rejects_missing_api_key_before_body_planning() {
+    #[tokio::test]
+    async fn ai_ingress_plan_rejects_missing_api_key_before_body_planning() {
         let state = AppState::new(ai_plan_config());
         let headers = HeaderMap::new();
         let ctx = proxy_context();
 
-        let rejection =
-            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap_err();
+        let rejection = build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx)
+            .await
+            .unwrap_err();
 
         assert_eq!(rejection.status, StatusCode::UNAUTHORIZED);
         assert_eq!(rejection.code, "missing_api_key");
         assert_eq!(rejection.logical_model, None);
     }
 
-    #[test]
-    fn ai_request_plan_resolves_gateway_config_model_and_routes() {
+    #[tokio::test]
+    async fn ai_request_plan_resolves_gateway_config_model_and_routes() {
         let state = AppState::new(ai_plan_config());
         let headers = ai_plan_headers(Some("profile-fast"));
         let ctx = proxy_context();
-        let ingress =
-            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap();
+        let ingress = build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx)
+            .await
+            .unwrap();
         let body = br#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}],"stream":true}"#;
 
         let plan =
@@ -3811,15 +3814,16 @@ mod tests {
         assert!(plan.guardrail_envelope.flattened_text().contains("hello"));
     }
 
-    #[test]
-    fn ai_request_plan_rejects_model_outside_tenant_visibility() {
+    #[tokio::test]
+    async fn ai_request_plan_rejects_model_outside_tenant_visibility() {
         let mut config = ai_plan_config();
         config.models[0].visible_project_ids = vec!["project-other".into()];
         let state = AppState::new(config);
         let headers = ai_plan_headers(None);
         let ctx = proxy_context();
-        let ingress =
-            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap();
+        let ingress = build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx)
+            .await
+            .unwrap();
         let body = br#"{"model":"fast-chat","messages":[]}"#;
 
         let rejection =

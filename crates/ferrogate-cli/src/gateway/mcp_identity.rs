@@ -92,7 +92,7 @@ impl FerroGateway {
         } else {
             "tools.execute"
         };
-        let auth = match authenticate(&state, headers, required_scope, &ctx.request_id) {
+        let auth = match authenticate(&state, headers, required_scope, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(

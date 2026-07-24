@@ -119,7 +119,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -161,7 +161,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -189,7 +189,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -228,7 +228,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -350,7 +350,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -396,7 +396,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };

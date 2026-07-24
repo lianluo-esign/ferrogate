@@ -380,7 +380,7 @@ pub(crate) fn require_platform_operator(auth: &AuthContext) -> Result<(), AuthEr
     Ok(())
 }
 
-pub(crate) fn authenticate(
+pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: &str,
@@ -425,7 +425,7 @@ pub(crate) fn authenticate(
             required_scope,
             request_id,
         )?;
-        return finalize_auth(state, auth, request_id);
+        return finalize_auth(state, auth, request_id).await;
     }
 
     if let Some(auth) = authenticate_durable(state, &provided_key)? {
@@ -436,7 +436,7 @@ pub(crate) fn authenticate(
                 message: format!("API key does not have required scope {required_scope}"),
             });
         }
-        return finalize_auth(state, auth, request_id);
+        return finalize_auth(state, auth, request_id).await;
     }
 
     for configured_key in &state.config.api_keys {
@@ -497,7 +497,7 @@ pub(crate) fn authenticate(
                     message: format!("API key does not have required scope {required_scope}"),
                 });
             }
-            return finalize_auth(state, auth, request_id);
+            return finalize_auth(state, auth, request_id).await;
         }
     }
 
@@ -657,13 +657,14 @@ fn authenticate_durable(
 /// one unified per-minute request budget that is the tighter of the key's
 /// own `request_limit_per_minute` (TOK-12) and the resolved quota's
 /// `rpm_limit` -- a single counter consumption per request either way.
-fn finalize_auth(
+async fn finalize_auth(
     state: &AppState,
     mut auth: AuthContext,
     request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
     let quota = state
         .resolve_effective_quota(&auth.tenant_context())
+        .await
         .map_err(|error| AuthError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "quota_resolution_unavailable",
@@ -688,7 +689,10 @@ fn finalize_auth(
         // tenant/project/workspace budget holds across every key under it), not
         // the nearest attributed scope.
         let budget_scope = auth.effective_quota.monthly_budget_scope.clone();
-        match state.monthly_budget_exceeded(&auth.tenant_context(), budget_scope.as_ref(), budget) {
+        match state
+            .monthly_budget_exceeded(&auth.tenant_context(), budget_scope.as_ref(), budget)
+            .await
+        {
             Ok(true) => {
                 return Err(AuthError {
                     status: StatusCode::TOO_MANY_REQUESTS,
@@ -713,7 +717,7 @@ fn finalize_auth(
     // returns false (never denies) when the tenant has no wallet row at
     // all, so this is purely additive for every tenant that hasn't
     // adopted prepaid billing.
-    match state.wallet_balance_exhausted(&auth.tenant_context()) {
+    match state.wallet_balance_exhausted(&auth.tenant_context()).await {
         Ok(true) => {
             return Err(AuthError {
                 status: StatusCode::TOO_MANY_REQUESTS,

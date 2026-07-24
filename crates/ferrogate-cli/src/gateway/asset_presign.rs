@@ -1188,7 +1188,7 @@ impl FerroGateway {
         require_hosting: bool,
     ) -> PingoraResult<Option<(AuthContext, String)>> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, scope, &ctx.request_id) {
+        let auth = match authenticate(&state, headers, scope, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 write_json_error(

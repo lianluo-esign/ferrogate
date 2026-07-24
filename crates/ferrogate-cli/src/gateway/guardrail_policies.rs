@@ -906,7 +906,7 @@ async fn require_guardrail_auth(
     state: &AppState,
     permission: GuardrailPermission,
 ) -> PingoraResult<Option<AuthContext>> {
-    let auth = match authenticate(state, headers, permission.admin_scope(), &ctx.request_id) {
+    let auth = match authenticate(state, headers, permission.admin_scope(), &ctx.request_id).await {
         Ok(auth) => auth,
         Err(error) => {
             write_json_error(

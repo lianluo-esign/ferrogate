@@ -213,60 +213,49 @@ impl AppState {
     /// workspace/key), one per non-empty scope in `tenant`; any storage
     /// error here must be treated as fail-closed by the caller.
     ///
-    /// Stays a sync `fn` (unlike the rest of this file's storage-backed
-    /// methods) because its only caller, `auth::finalize_auth`, is itself
-    /// sync and shared by ~150 call sites plus a batch of sync `#[test]`
-    /// fns -- converting the whole `authenticate` chain to async is out of
-    /// scope for this migration slice. Bridges via the same
-    /// `block_on_sync_bridge` helper already used for `wallet_balance_exhausted`.
-    ///
-    /// Issue #330 re-audited this and keeps it bridged deliberately: the reads
-    /// are point lookups (`get_quota_policy` per non-empty scope plus one
-    /// `resolve_tenant_plan`), not a full-table scan, and the only hot-path
-    /// caller is sync `finalize_auth`. The lone async caller
-    /// (`virtual_keys.rs`'s admin quota-preview) is a cold operator path. This
-    /// falls under the acceptance carve-out for a read that "must stay bridged
-    /// behind a sync-only caller"; de-bridging needs `authenticate`/
-    /// `finalize_auth` to go async, a separate large refactor.
-    pub(crate) fn resolve_effective_quota(
+    /// Async and awaited directly by its callers as of issue #373: its only
+    /// hot-path caller, `auth::finalize_auth`, is now `async` (its whole
+    /// `authenticate`/`finalize_auth` chain was converted), so this no longer
+    /// needs the `block_on_sync_bridge` that parked a worker thread per
+    /// request. Its point-lookup reads (`get_quota_policy` per non-empty scope
+    /// plus one `resolve_tenant_plan`) are `.await`ed inline.
+    pub(crate) async fn resolve_effective_quota(
         &self,
         tenant: &ferrogate_core::TenantContext,
     ) -> anyhow::Result<EffectiveQuota> {
-        crate::gateway::block_on_sync_bridge(async {
-            let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
-                (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
-                (QuotaScopeKind::Project, tenant.project_id.as_deref()),
-                (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
-                (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
-            ];
-            let mut fetched: HashMap<(QuotaScopeKind, String), StoredQuotaPolicy> = HashMap::new();
-            for (scope_type, scope_id) in scopes {
-                let Some(scope_id) = scope_id else {
-                    continue;
-                };
-                if let Some(policy) = self
-                    .repositories
-                    .get_quota_policy(scope_type, scope_id)
-                    .await?
-                {
-                    fetched.insert((scope_type, scope_id.to_string()), policy);
-                }
-            }
-            let plan = match tenant.organization_id.as_deref() {
-                Some(tenant_id) => self.resolve_tenant_plan(tenant_id).await?,
-                None => None,
+        let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
+            (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
+            (QuotaScopeKind::Project, tenant.project_id.as_deref()),
+            (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
+            (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
+        ];
+        let mut fetched: HashMap<(QuotaScopeKind, String), StoredQuotaPolicy> = HashMap::new();
+        for (scope_type, scope_id) in scopes {
+            let Some(scope_id) = scope_id else {
+                continue;
             };
-            Ok(resolve_effective_quota(
-                QuotaScopeChain {
-                    tenant_id: tenant.organization_id.as_deref(),
-                    project_id: tenant.project_id.as_deref(),
-                    workspace_id: tenant.workspace_id.as_deref(),
-                    key_id: tenant.api_key_id.as_deref(),
-                },
-                |scope_type, scope_id| fetched.get(&(scope_type, scope_id.to_string())).cloned(),
-                plan.as_ref(),
-            ))
-        })
+            if let Some(policy) = self
+                .repositories
+                .get_quota_policy(scope_type, scope_id)
+                .await?
+            {
+                fetched.insert((scope_type, scope_id.to_string()), policy);
+            }
+        }
+        let plan = match tenant.organization_id.as_deref() {
+            Some(tenant_id) => self.resolve_tenant_plan(tenant_id).await?,
+            None => None,
+        };
+        Ok(resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: tenant.organization_id.as_deref(),
+                project_id: tenant.project_id.as_deref(),
+                workspace_id: tenant.workspace_id.as_deref(),
+                key_id: tenant.api_key_id.as_deref(),
+            },
+            |scope_type, scope_id| fetched.get(&(scope_type, scope_id.to_string())).cloned(),
+            plan.as_ref(),
+        ))
     }
 
     /// Committed monthly token spend for one api key (issue #330). The filter

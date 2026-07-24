@@ -375,7 +375,7 @@ impl FerroGateway {
             )
             .await;
         }
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 // Tenant isolation BEFORE pagination/aggregation: a tenant-scoped
                 // caller only ever sees its own tenant's observed activity; the

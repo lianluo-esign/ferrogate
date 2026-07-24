@@ -26,7 +26,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let mut filter = UsageReportFilter::from_query(query);
                 let is_metadata_group_by =

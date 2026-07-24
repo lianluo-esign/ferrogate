@@ -259,7 +259,7 @@ fn wallet_reservation_bounds_concurrent_spend_to_the_funded_balance() {
     // The gate now reports the wallet exhausted even though no debit has
     // landed yet: the two outstanding holds have consumed all 100 credits.
     assert!(
-        state.wallet_balance_exhausted(&tenant).unwrap(),
+        block_on(state.wallet_balance_exhausted(&tenant)).unwrap(),
         "outstanding reservations must make the pre-request gate fail closed"
     );
 
@@ -303,13 +303,13 @@ fn wallet_reservation_hold_is_released_when_the_request_errors_or_cancels() {
     };
     // The balance is now fully held: a third request cannot be covered.
     assert!(matches!(reserve(), WalletReservationOutcome::Insufficient));
-    assert!(state.wallet_balance_exhausted(&tenant).unwrap());
+    assert!(block_on(state.wallet_balance_exhausted(&tenant)).unwrap());
 
     // The first request errors/cancels before it ever settles. Dropping its
     // RAII guard must return the held credits rather than leak capacity.
     drop(first);
     assert!(
-        !state.wallet_balance_exhausted(&tenant).unwrap(),
+        !block_on(state.wallet_balance_exhausted(&tenant)).unwrap(),
         "dropping an in-flight hold must free its credits back to the gate"
     );
     assert!(
@@ -336,7 +336,7 @@ fn wallet_reservation_is_a_noop_for_tenants_without_a_wallet_or_price() {
         block_on(state.try_reserve_wallet_credits(&priced_tenant, 0)).unwrap(),
         WalletReservationOutcome::NotApplicable
     ));
-    assert!(!state.wallet_balance_exhausted(&priced_tenant).unwrap());
+    assert!(!block_on(state.wallet_balance_exhausted(&priced_tenant)).unwrap());
 }
 
 #[test]

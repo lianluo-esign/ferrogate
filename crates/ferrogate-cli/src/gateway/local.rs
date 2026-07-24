@@ -204,7 +204,7 @@ async fn require_guardrail_evidence_auth(
     headers: &http::HeaderMap,
     state: &crate::state::AppState,
 ) -> PingoraResult<Option<AuthContext>> {
-    let auth = match authenticate(state, headers, "admin.read", &ctx.request_id) {
+    let auth = match authenticate(state, headers, "admin.read", &ctx.request_id).await {
         Ok(auth) => auth,
         Err(error) => {
             write_json_error(
@@ -312,7 +312,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "models.read", &ctx.request_id) {
+        match authenticate(&state, headers, "models.read", &ctx.request_id).await {
             Ok(auth) => {
                 // A platform-operator key (organization_id: None) sees every
                 // enabled model; a tenant-scoped key sees only the models
@@ -372,7 +372,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let status = AdminStatus {
                     service: SERVICE_NAME,
@@ -445,7 +445,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let body = AdminList::new(state.observability_status());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -472,7 +472,7 @@ impl FerroGateway {
         path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => match (method, path.strip_prefix("/admin/v1/mcp-servers/")) {
                 (&Method::GET, None) => {
                     state.mcp_health_check_and_reconnect();
@@ -549,7 +549,7 @@ impl FerroGateway {
         path_name: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -745,7 +745,7 @@ impl FerroGateway {
         name: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -854,7 +854,7 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/gateway-configs/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let data = state
                             .config
@@ -883,7 +883,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let Some(profile) = find_gateway_config(&state, id) else {
                             return write_json_error(
@@ -946,7 +946,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1129,7 +1129,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1238,7 +1238,7 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/agent-workflows/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let data = state
                             .config
@@ -1267,7 +1267,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let Some(workflow) = crate::state::select_agent_workflow(
                             &state.config.agent_workflows,
@@ -1334,7 +1334,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1508,7 +1508,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1604,7 +1604,7 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/skill-packages/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let data = state
                             .config
@@ -1633,7 +1633,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let Some(package) = state
                             .config
@@ -1706,7 +1706,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1880,7 +1880,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -1983,7 +1983,7 @@ impl FerroGateway {
             .await;
         }
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "tools.read", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "tools.read", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -2048,7 +2048,7 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/prompt-templates/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let data = state
                             .config
@@ -2077,7 +2077,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let Some(template) = find_prompt_template(&state, id) else {
                             return write_json_error(
@@ -2140,7 +2140,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -2324,7 +2324,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -2451,7 +2451,7 @@ impl FerroGateway {
         };
 
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "prompts.render", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "prompts.render", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -2745,7 +2745,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "tools.read", &ctx.request_id) {
+        match authenticate(&state, headers, "tools.read", &ctx.request_id).await {
             Ok(auth) => {
                 let route = query
                     .and_then(|query| parse_query_param(query, "route"))
@@ -2897,7 +2897,7 @@ impl FerroGateway {
             }
         };
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, required_scope, &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, required_scope, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -3058,7 +3058,8 @@ impl FerroGateway {
             };
 
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id).await
+        {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -3220,7 +3221,8 @@ impl FerroGateway {
             };
 
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id).await
+        {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -3353,7 +3355,7 @@ impl FerroGateway {
         }
 
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "tools.execute", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "tools.execute", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -4032,7 +4034,7 @@ impl FerroGateway {
         }
 
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let events = state.tool_session_events(session_id);
                 let total = events.len();
@@ -4059,7 +4061,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let body = render_prometheus_text(&state.prometheus_metrics_snapshot());
                 write_raw_response(
@@ -4092,7 +4094,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let page = state.request_logs_page(
                     state.admin_pagination(query),
@@ -4122,7 +4124,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let mut filter = RequestLogExportFilter::from_query(query);
                 filter.organization_id =
@@ -4160,7 +4162,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 if path == "/admin/v1/agent-runs" {
                     let mut filter = crate::state::AgentRunFilter::from_query(query);
@@ -4218,7 +4220,7 @@ impl FerroGateway {
         path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let run_id = path.trim_start_matches("/admin/v1/self-hosted-runs/");
                 if run_id.is_empty() || run_id.contains('/') {
@@ -4266,7 +4268,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let page = state.audit_events_page(
                     state.admin_pagination(query),
@@ -4392,7 +4394,7 @@ impl FerroGateway {
             .await;
         }
 
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -4519,7 +4521,7 @@ impl FerroGateway {
             .await;
         }
 
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -4654,7 +4656,7 @@ impl FerroGateway {
         match *method {
             Method::GET => {
                 let state = self.state.current();
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let drain = state.drain_status();
                         let body = AdminDrainResponse {
@@ -4679,7 +4681,8 @@ impl FerroGateway {
             }
             Method::POST => {
                 let state = self.state.current();
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -4785,7 +4788,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let search = query_value(query, "search");
                 let providers = state
@@ -4828,7 +4831,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let provider_filter = query_provider_filter(query);
                 let providers = state
@@ -4952,7 +4955,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let storage = state.storage_status();
                 let session_lifecycle_schema_ready =
@@ -5091,7 +5094,7 @@ impl FerroGateway {
             )
             .await;
         }
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let page = state.managed_worker_sessions_page(
                     state.admin_pagination(query),
@@ -5120,7 +5123,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let body = AdminList::new(vec![
                     framework_adapter_runtime(
@@ -5763,7 +5766,7 @@ impl FerroGateway {
         match (method, path_worker_id) {
             (&Method::GET, None) => {
                 let state = self.state.current();
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let storage = state.storage_status();
                         let body = AdminList::new(vec![AdminSelfHostedWorkerRuntime {
@@ -5870,7 +5873,7 @@ impl FerroGateway {
             }
             (&Method::GET, Some(worker_id)) if !worker_id.contains('/') => {
                 let state = self.state.current();
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
                         if let Err(error) = crate::auth::authorize_self_hosted_worker_scope(
                             &state, &auth, worker_id,
@@ -5920,7 +5923,8 @@ impl FerroGateway {
             }
             (&Method::POST, None) => {
                 let state = self.state.current();
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -6298,7 +6302,7 @@ impl FerroGateway {
         worker_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -6454,7 +6458,7 @@ impl FerroGateway {
         worker_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -6621,7 +6625,7 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         if method == Method::GET {
-            return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            return match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                 Ok(auth) => {
                     if let Err(error) =
                         crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
@@ -6672,7 +6676,7 @@ impl FerroGateway {
             )
             .await;
         }
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -6840,7 +6844,7 @@ impl FerroGateway {
         worker_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -7004,7 +7008,7 @@ impl FerroGateway {
         worker_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -7180,7 +7184,7 @@ impl FerroGateway {
             )
             .await;
         }
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let page = state.self_hosted_worker_records_page(
                     state.admin_pagination(query),
@@ -7209,7 +7213,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let body = AdminList::new(state.provider_health_checks());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -7236,7 +7240,7 @@ impl FerroGateway {
         path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 if path == "/admin/v1/extensions" {
                     if method != Method::GET {
@@ -7373,7 +7377,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -7561,7 +7565,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -7665,7 +7669,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let body = AdminList::new(state.all_tools());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -7703,7 +7707,7 @@ impl FerroGateway {
                 )
                 .await;
             }
-            return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            return match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                 Ok(auth) => {
                     let approvals = crate::auth::filter_by_tenant_scope(
                         &auth,
@@ -7764,7 +7768,7 @@ impl FerroGateway {
 
         match (method.clone(), action) {
             (Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => match state.tool_approval(id) {
                         Some(approval) => {
                             if let Err(error) = crate::auth::authorize_tenant_scope(
@@ -7811,7 +7815,8 @@ impl FerroGateway {
                 }
             }
             (Method::POST, Some("approve" | "deny" | "expire")) => {
-                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await
+                {
                     Ok(auth) => auth,
                     Err(error) => {
                         return write_json_error(
@@ -7991,7 +7996,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => {
                 let search = query_value(query, "search");
                 let models = state
@@ -8034,7 +8039,7 @@ impl FerroGateway {
         let id = path.strip_prefix("/admin/v1/api-keys/");
         match (method, id) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
                         if let Err(error) = crate::auth::require_platform_operator(&auth) {
                             return write_json_error(
@@ -8064,7 +8069,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(id)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(auth) => {
                         if let Err(error) = crate::auth::require_platform_operator(&auth) {
                             return write_json_error(
@@ -8137,7 +8142,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -8320,7 +8325,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -8429,7 +8434,7 @@ impl FerroGateway {
         let name = path.strip_prefix("/admin/v1/policies/");
         match (method, name) {
             (&Method::GET, None) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let body = AdminList::new(state.config.policies.clone());
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -8447,7 +8452,7 @@ impl FerroGateway {
                 }
             }
             (&Method::GET, Some(name)) => {
-                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
                     Ok(_) => {
                         let Some(policy) = find_policy(&state, name) else {
                             return write_json_error(
@@ -8510,7 +8515,7 @@ impl FerroGateway {
         path_name: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -8693,7 +8698,7 @@ impl FerroGateway {
         name: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -8797,7 +8802,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let refs =
                     crate::auth::filter_by_tenant_scope(&auth, state.tenant_refs(), |tenant_ref| {
@@ -8827,7 +8832,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let page = state.metering_events_page(
                     state.admin_pagination(query),
@@ -8867,7 +8872,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let body =
                     AdminList::new(state.metering_export_status(auth.organization_id.as_deref()));
@@ -8893,7 +8898,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(auth) => {
                 let body = AdminList::new(state.usage_aggregates(auth.organization_id.as_deref()));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -8920,7 +8925,7 @@ impl FerroGateway {
         path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        match authenticate(&state, headers, "admin.read", &ctx.request_id).await {
             Ok(_) => match (method, path.strip_prefix("/admin/v1/agent-upstreams/")) {
                 (&Method::GET, None) => {
                     let data = state
@@ -9008,7 +9013,7 @@ impl FerroGateway {
         path_id: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -9176,7 +9181,7 @@ impl FerroGateway {
         id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -9277,7 +9282,7 @@ impl FerroGateway {
         }
 
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "agents.invoke", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, "agents.invoke", &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => {
                 return write_json_error(
@@ -9848,7 +9853,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "agents.read", &ctx.request_id) {
+        match authenticate(&state, headers, "agents.read", &ctx.request_id).await {
             Ok(auth) => {
                 let upstreams: Vec<_> = state
                     .config

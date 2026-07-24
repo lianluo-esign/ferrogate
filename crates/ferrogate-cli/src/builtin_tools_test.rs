@@ -228,8 +228,13 @@ fn execute_fetch_asset_returns_content_matching_stored_fingerprint() {
         "text/plain",
         b"echo hello",
     );
-    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
-        .expect("assets.read key authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("reader-secret"),
+        "assets.read",
+        "req-1",
+    ))
+    .expect("assets.read key authenticates");
 
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
@@ -283,8 +288,13 @@ fn execute_fetch_asset_withholds_a_quarantined_asset() {
         updated_at_unix: 1,
     };
     block_on(state.upsert_asset(quarantined)).unwrap();
-    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
-        .expect("assets.read key authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("reader-secret"),
+        "assets.read",
+        "req-1",
+    ))
+    .expect("assets.read key authenticates");
 
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
@@ -320,8 +330,13 @@ fn execute_fetch_asset_accepts_explicit_coordinates() {
         "application/json",
         br#"{"k":1}"#,
     );
-    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
-        .expect("authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("reader-secret"),
+        "assets.read",
+        "req-1",
+    ))
+    .expect("authenticates");
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
         arguments: json!({ "asset_type": "config", "name": "app", "version": "2" }),
@@ -358,8 +373,13 @@ fn execute_fetch_asset_denies_missing_scope_and_missing_tenant() {
         "text/plain",
         b"x",
     );
-    let auth = crate::auth::authenticate(&state, &bearer("exec-secret"), "tools.execute", "req-1")
-        .expect("authenticates for tools.execute");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("exec-secret"),
+        "tools.execute",
+        "req-1",
+    ))
+    .expect("authenticates for tools.execute");
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
         arguments: json!({ "uri": "asset://cli_tool/deploy/1.0.0" }),
@@ -376,8 +396,13 @@ fn execute_fetch_asset_denies_missing_scope_and_missing_tenant() {
         api_keys: vec![api_key("root", "root-secret", &["assets.read"], None)],
         ..Config::default()
     });
-    let auth = crate::auth::authenticate(&state, &bearer("root-secret"), "assets.read", "req-2")
-        .expect("authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("root-secret"),
+        "assets.read",
+        "req-2",
+    ))
+    .expect("authenticates");
     let error = block_on(execute_fetch_asset(&state, &auth, &request, "req-2")).unwrap_err();
     assert_eq!(error.code(), "tool_denied");
     assert!(error.message().contains("tenant"), "{error:?}");
@@ -394,8 +419,13 @@ fn execute_fetch_asset_reports_missing_asset_as_not_found() {
         )],
         ..Config::default()
     });
-    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
-        .expect("authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("reader-secret"),
+        "assets.read",
+        "req-1",
+    ))
+    .expect("authenticates");
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
         arguments: json!({ "uri": "asset://cli_tool/absent/9.9.9" }),
@@ -417,8 +447,13 @@ fn execute_fetch_asset_rejects_invalid_arguments() {
         )],
         ..Config::default()
     });
-    let auth = crate::auth::authenticate(&state, &bearer("reader-secret"), "assets.read", "req-1")
-        .expect("authenticates");
+    let auth = block_on(crate::auth::authenticate(
+        &state,
+        &bearer("reader-secret"),
+        "assets.read",
+        "req-1",
+    ))
+    .expect("authenticates");
     let request = ToolExecutionRequest {
         name: FETCH_ASSET_TOOL_NAME.to_string(),
         arguments: json!({ "name": "deploy" }),
