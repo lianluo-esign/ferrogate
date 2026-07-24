@@ -425,3 +425,4 @@ current `main`. Where a seam is *planned* (not yet extracted), it says so.
   object-store extraction: #411; managed-agent siblings: #419.
 - FerroGate architecture context: `docs/agentic-gateway-architecture.md`,
   `docs/agent-worker-protocol.md`, `docs/durable-storage.md`.
+- Deploy topology (running the FerroGate runtime ON Cloudflare — Containers vs edge-Worker+origin vs status quo, bindings-vs-REST): `docs/cloudflare-deploy-topology.md` (#424).
