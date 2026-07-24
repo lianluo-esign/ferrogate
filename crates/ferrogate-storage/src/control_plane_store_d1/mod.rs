@@ -214,6 +214,28 @@
 //!   implicit SQLite transaction). Inline BYTEA `content` rides a base64 TEXT
 //!   column; `promote` fails closed to `Quarantined` on an unknown token. Fail
 //!   closed (typed unimplemented-surface) with no proxy; see `assets.rs`.
+//! - Workflow-run execution budgets (#456/#279, TENANT databases, proxy Worker):
+//!   the durable per-run execution envelope. `open` is an idempotent
+//!   insert-then-reload as ONE `/d1/batch` on the run's OWNING tenant DB; `list`
+//!   routes to the tenant's own DB (opt-in empty for an unprovisioned tenant);
+//!   `debit`/`topup`/`get` carry only the run id, so they FAN OUT over the
+//!   provisioned tenant bindings to locate the holding database (the wallet
+//!   id-only-locate pattern). D1/SQLite has no `SELECT ... FOR UPDATE`, so `debit`
+//!   mirrors the Postgres row-locked read-modify-write with an INTERNAL bounded
+//!   optimistic-CAS retry: read the counters, decide `Applied`/`Exceeded` via the
+//!   SHARED `dimension_exceeded_by` arithmetic, then a guarded `UPDATE ... WHERE
+//!   <status + spent_* counters + caps unchanged since the read> RETURNING` (an
+//!   empty RETURNING = a concurrent debit/top-up landed in between → re-read +
+//!   retry). This preserves the no-lost-debit / fail-closed-`Exceeded` invariants
+//!   while keeping the `WorkflowBudgetDebit` contract UNCHANGED (`Applied`/
+//!   `Exceeded`, NO new `Conflict` variant → zero caller changes, no #415
+//!   non-exhaustive-match hazard). `topup` reuses the SAME `apply_topup`
+//!   arithmetic under a caps-guarded CAS-retry, so the raised envelope is
+//!   row-for-row identical across backends. An UNPROVISIONED tenant is `NotFound`
+//!   on the writes (`open`), the database-per-tenant divergence. `CAST(? AS
+//!   INTEGER)` guards every bound numeric param in the debit fit-arithmetic (the
+//!   #455 lesson). Fail closed (typed unimplemented-surface) on `debit`/`topup`
+//!   with no proxy; see `workflow_budget.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -251,14 +273,6 @@
 //!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
 //!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
 //!   the (still-deferred) x402 payment_attempts family into one larger unit.
-//! - Workflow run budgets (`open`/`debit`/`topup`): the idempotent `open`
-//!   mirrors the billing insert-then-reload pattern cleanly, but `debit`/`topup`
-//!   are read-modify-writes the Postgres backend serializes with
-//!   `SELECT ... FOR UPDATE`. D1/SQLite has no row lock, so a faithful mirror
-//!   needs either an optimistic-CAS guard (which would surface a `Conflict` the
-//!   `WorkflowBudgetDebit` caller is not written to handle) or a server-side
-//!   retry loop — a concurrency-contract change deferred rather than landed
-//!   silently. Also needs a new control-DB table + the per-tenant routing call.
 //! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
 //!   observed agent presence, MCP identity.
 //!
@@ -302,6 +316,7 @@ mod rows;
 mod usage;
 mod wallet;
 mod worker_stores;
+mod workflow_budget;
 
 pub use client_config::CloudflareD1StorageOptions;
 
@@ -1916,53 +1931,84 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             .await
     }
 
+    // --- Workflow-run execution budgets (IMPLEMENTED, tenant-DB routed,
+    // issue #456/#279) ---
+    //
+    // The durable per-run execution envelope, routed through the proxy binding
+    // onto per-tenant databases. `open` is an idempotent insert-then-reload
+    // batch; `list` routes to the tenant's own DB; `debit`/`topup`/`get` fan out
+    // by run id. `debit`/`topup` have no `SELECT ... FOR UPDATE` on SQLite, so
+    // they use an INTERNAL bounded optimistic-CAS retry (read -> guarded
+    // `UPDATE ... WHERE <decision read-set unchanged> RETURNING` -> re-read on an
+    // empty RETURNING), which keeps the `WorkflowBudgetDebit` contract UNCHANGED
+    // (`Applied`/`Exceeded`, no `Conflict` variant, no caller changes) while
+    // preserving the no-lost-debit / fail-closed-`Exceeded` invariants. See
+    // `workflow_budget.rs`.
+
     async fn open_workflow_run_budget(
         &self,
-        _workflow_id: &str,
-        _workflow_version: u32,
-        _run_id: &str,
-        _tenant_id: &str,
-        _caps: WorkflowRunBudgetCaps,
-        _now_unix: i64,
+        workflow_id: &str,
+        workflow_version: u32,
+        run_id: &str,
+        tenant_id: &str,
+        caps: WorkflowRunBudgetCaps,
+        now_unix: i64,
     ) -> Result<StoredWorkflowRunBudget, StorageError> {
-        Err(unimplemented_surface("open_workflow_run_budget"))
+        self.open_workflow_run_budget_d1_async(
+            workflow_id,
+            workflow_version,
+            run_id,
+            tenant_id,
+            caps,
+            now_unix,
+        )
+        .await
     }
 
     async fn debit_workflow_run_budget(
         &self,
-        _id: &str,
-        _cost_credits: i64,
-        _tokens: i64,
-        _tool_calls: i64,
-        _now_unix: i64,
+        id: &str,
+        cost_credits: i64,
+        tokens: i64,
+        tool_calls: i64,
+        now_unix: i64,
     ) -> Result<WorkflowBudgetDebit, StorageError> {
-        Err(unimplemented_surface("debit_workflow_run_budget"))
+        self.debit_workflow_run_budget_d1_async(id, cost_credits, tokens, tool_calls, now_unix)
+            .await
     }
 
     async fn topup_workflow_run_budget(
         &self,
-        _id: &str,
-        _add_cost_credits: i64,
-        _add_tokens: i64,
-        _add_tool_calls: i64,
-        _extend_deadline_unix: Option<i64>,
-        _now_unix: i64,
+        id: &str,
+        add_cost_credits: i64,
+        add_tokens: i64,
+        add_tool_calls: i64,
+        extend_deadline_unix: Option<i64>,
+        now_unix: i64,
     ) -> Result<StoredWorkflowRunBudget, StorageError> {
-        Err(unimplemented_surface("topup_workflow_run_budget"))
+        self.topup_workflow_run_budget_d1_async(
+            id,
+            add_cost_credits,
+            add_tokens,
+            add_tool_calls,
+            extend_deadline_unix,
+            now_unix,
+        )
+        .await
     }
 
     async fn get_workflow_run_budget(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
-        Err(unimplemented_surface("get_workflow_run_budget"))
+        self.get_workflow_run_budget_d1_async(id).await
     }
 
     async fn list_workflow_run_budgets(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
     ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
-        Err(unimplemented_surface("list_workflow_run_budgets"))
+        self.list_workflow_run_budgets_d1_async(tenant_id).await
     }
 
     // --- RBAC: permissions / roles / tenant role bindings (IMPLEMENTED,

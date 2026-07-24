@@ -33,8 +33,9 @@ use crate::{
     StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog, StoredRetentionPolicy,
     StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
     StoredTenantAccount, StoredTenantRoleBinding, StoredUsageAggregate, StoredWallet, TokenUsage,
-    VariantDeleteOutcome, VersionYankOutcome, WalletReservationResult,
-    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    VariantDeleteOutcome, VersionYankOutcome, WalletReservationResult, WorkflowBudgetDebit,
+    WorkflowBudgetDimension, WorkflowRunBudgetCaps, D1_TENANT_DATABASE_REGISTRY_ID,
+    D1_TENANT_DATABASE_REGISTRY_KIND, WORKFLOW_RUN_BUDGET_ACTIVE, WORKFLOW_RUN_BUDGET_EXHAUSTED,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -4480,6 +4481,663 @@ fn asset_family_without_proxy_is_unimplemented_and_offline() {
     );
 }
 
+// --- Tenant-scoped workflow-run execution budgets over the proxy binding
+// (issue #456/#279) ---
+
+/// A `workflow_run_budgets` row shaped as the proxy Worker serializes it (integer
+/// affinities as JSON numbers, absent caps as JSON null). Fixed workflow/run
+/// identity; the caps/counters/status vary per scenario.
+#[allow(clippy::too_many_arguments)]
+fn workflow_budget_row(
+    id: &str,
+    cost_budget: Option<i64>,
+    token_budget: Option<i64>,
+    tool_call_budget: Option<i64>,
+    deadline: Option<i64>,
+    spent_credits: i64,
+    spent_tokens: i64,
+    spent_tool_calls: i64,
+    status: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "workflow_id": "wf",
+        "workflow_version": 1,
+        "run_id": "run-1",
+        "tenant_id": "acme",
+        "cost_budget_credits": cost_budget,
+        "token_budget": token_budget,
+        "tool_call_budget": tool_call_budget,
+        "wall_clock_deadline_unix": deadline,
+        "spent_credits": spent_credits,
+        "spent_tokens": spent_tokens,
+        "spent_tool_calls": spent_tool_calls,
+        "status": status,
+        "created_at_unix": 100,
+        "updated_at_unix": 100,
+    })
+}
+
+/// `open` is an idempotent insert-then-reload as ONE atomic `/d1/batch` routed
+/// onto the run's OWNING tenant binding — never the REST query API, never the
+/// control DB. Caps ride `NULLIF(?, '')` (stored value, no CAST).
+#[test]
+fn open_workflow_run_budget_batches_insert_and_reload_on_tenant_binding() {
+    let (store, rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 1), // S0 insert
+            proxy_statement_result(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    Some(5000),
+                    Some(3),
+                    None,
+                    0,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ), // S1 reload
+        ])],
+    );
+
+    let budget = runtime()
+        .block_on(store.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-1",
+            "acme",
+            WorkflowRunBudgetCaps {
+                cost_budget_credits: Some(1000),
+                token_budget: Some(5000),
+                tool_call_budget: Some(3),
+                wall_clock_deadline_unix: None,
+            },
+            100,
+        ))
+        .expect("open should succeed");
+    assert_eq!(budget.id, "wf:1:run-1");
+    assert_eq!(budget.cost_budget_credits, Some(1000));
+    assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_ACTIVE);
+
+    assert!(
+        rest.recorded().is_empty(),
+        "a tenant-scoped workflow-budget op must not touch the REST query API"
+    );
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/batch"));
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let statements = body["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 2, "idempotent insert + reload");
+    let insert = statements[0]["sql"].as_str().unwrap();
+    assert!(insert.starts_with("INSERT INTO workflow_run_budgets"));
+    assert!(insert.contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(insert.contains("NULLIF(?, '')"));
+    let insert_params = statement_params(&statements[0]);
+    assert_eq!(insert_params[0], "wf:1:run-1"); // deterministic id
+    assert_eq!(insert_params[5], "1000"); // cost cap
+    assert_eq!(insert_params[8], ""); // deadline None -> '' -> SQL NULL
+    let reload = statements[1]["sql"].as_str().unwrap();
+    assert!(reload.starts_with("SELECT"));
+    assert!(reload.contains("FROM workflow_run_budgets WHERE id = ?"));
+}
+
+/// Re-opening the same (workflow, run) returns the EXISTING envelope unchanged:
+/// the `DO NOTHING` insert is a no-op and the reload yields the pre-existing row,
+/// so a later step re-declaring wider caps can never widen an in-flight run.
+#[test]
+fn open_workflow_run_budget_idempotent_returns_existing_envelope() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0), // insert did nothing
+            proxy_statement_result(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    250,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ),
+        ])],
+    );
+
+    let budget = runtime()
+        .block_on(store.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-1",
+            "acme",
+            WorkflowRunBudgetCaps {
+                cost_budget_credits: Some(9999), // re-declared wider, MUST be ignored
+                ..WorkflowRunBudgetCaps::default()
+            },
+            200,
+        ))
+        .expect("re-open returns the existing envelope");
+    assert_eq!(budget.cost_budget_credits, Some(1000));
+    assert_eq!(budget.spent_credits, 250);
+}
+
+/// `open` is a tenant-DB WRITE, so an UNPROVISIONED tenant (no DB to insert into)
+/// is a typed `NotFound` — the database-per-tenant divergence, offline.
+#[test]
+fn open_workflow_run_budget_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-1",
+            "ghost",
+            WorkflowRunBudgetCaps::default(),
+            100,
+        ))
+        .expect_err("unprovisioned tenant -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy.recorded().is_empty());
+}
+
+/// A fitting debit locates the run's tenant DB, then commits via the guarded
+/// increment CAS — both onto the TENANT binding. The keystone: the spend sums and
+/// the fit-guard counters are `CAST(? AS INTEGER)` (the #455 numeric lesson), and
+/// the guard pins the FULL read-set (status + counters + caps).
+#[test]
+fn debit_workflow_run_budget_applies_over_tenant_binding() {
+    let (store, rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    Some(3),
+                    None,
+                    0,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ), // locate
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    Some(3),
+                    None,
+                    100,
+                    0,
+                    1,
+                    "active"
+                )]),
+                1,
+            ), // guarded increment RETURNING
+        ],
+    );
+
+    let result = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", 100, 0, 1, 150))
+        .expect("debit should succeed");
+    match result {
+        WorkflowBudgetDebit::Applied(budget) => {
+            assert_eq!(budget.spent_credits, 100);
+            assert_eq!(budget.spent_tool_calls, 1);
+            assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_ACTIVE);
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    assert!(rest.recorded().is_empty());
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "locate + guarded increment");
+    assert_eq!(body_json(&requests[0])["database"], "TENANT_DB_ACME");
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_ACME");
+    let inc = body_sql(&requests[1]);
+    assert!(inc.starts_with("UPDATE workflow_run_budgets SET"));
+    assert!(inc.contains("spent_credits = spent_credits + CAST(? AS INTEGER)"));
+    assert!(inc.contains("WHERE id = ? AND status = 'active'"));
+    assert!(inc.contains("AND spent_credits = CAST(? AS INTEGER)"));
+    assert!(inc.contains("cost_budget_credits IS CAST(NULLIF(?, '') AS INTEGER)"));
+    assert!(inc.contains("RETURNING"));
+    // The guarded increment binds the debit amounts first, then the read-snapshot
+    // counters it CAS-guards on (all zero at the fresh read).
+    let inc_params = body_params(&requests[1]);
+    assert_eq!(inc_params[0], "100"); // cost delta
+    assert_eq!(inc_params[2], "1"); // tool-call delta
+    assert_eq!(inc_params[4], "wf:1:run-1"); // guarded id
+    assert_eq!(inc_params[5], "0"); // guarded spent_credits (read snapshot)
+}
+
+/// A debit that would breach a capped dimension applies NO spend and flips the
+/// run to `exhausted` via the guarded flip CAS (fail-closed). The returned
+/// dimension is the first breached one; the counters are unchanged.
+#[test]
+fn debit_workflow_run_budget_exceeded_flips_to_exhausted() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    950,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ), // locate: 950 spent of a 1000 cap
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    950,
+                    0,
+                    0,
+                    "exhausted"
+                )]),
+                1,
+            ), // guarded flip RETURNING: counters UNCHANGED, status exhausted
+        ],
+    );
+
+    let result = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", 100, 0, 0, 150))
+        .expect("exceeded is an Ok outcome, not an error");
+    match result {
+        WorkflowBudgetDebit::Exceeded { dimension, budget } => {
+            assert_eq!(dimension, WorkflowBudgetDimension::Cost);
+            assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_EXHAUSTED);
+            assert_eq!(budget.spent_credits, 950, "no spend applied on breach");
+        }
+        other => panic!("expected Exceeded, got {other:?}"),
+    }
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "locate + guarded flip");
+    let flip = body_sql(&requests[1]);
+    assert!(flip.contains("SET status = 'exhausted'"));
+    assert!(flip.contains("WHERE id = ? AND status = 'active'"));
+    assert!(flip.contains("cost_budget_credits IS CAST(NULLIF(?, '') AS INTEGER)"));
+    assert!(flip.contains("RETURNING"));
+}
+
+/// An ALREADY-exhausted run rejects the debit from the located read alone — no
+/// second write is issued (it never clobbers a concurrent reactivation).
+#[test]
+fn debit_workflow_run_budget_already_exhausted_returns_exceeded_without_write() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([workflow_budget_row(
+                "wf:1:run-1",
+                Some(1000),
+                None,
+                None,
+                None,
+                500,
+                0,
+                0,
+                "exhausted"
+            )]),
+            0,
+        )],
+    );
+
+    let result = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", 1, 0, 0, 150))
+        .expect("exhausted is an Ok outcome");
+    assert!(matches!(result, WorkflowBudgetDebit::Exceeded { .. }));
+    assert_eq!(
+        proxy.recorded().len(),
+        1,
+        "an already-exhausted read returns without a second write"
+    );
+}
+
+/// The optimistic-CAS keystone: when the guarded increment RETURNS EMPTY (a
+/// concurrent debit landed between the read and the update), the impl re-reads the
+/// committed state and RE-ISSUES the guarded UPDATE — guarding on the RELOADED
+/// counters, never a stale read — so the debit is never lost.
+#[test]
+fn debit_workflow_run_budget_retries_on_cas_conflict() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ), // locate: spent 0
+            proxy_query_ok(serde_json::json!([]), 0), // 1st increment: guard missed
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    100,
+                    0,
+                    0,
+                    "active"
+                )]),
+                0,
+            ), // reload: a racer committed +100
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    150,
+                    0,
+                    0,
+                    "active"
+                )]),
+                1,
+            ), // 2nd increment: success (100 + 50)
+        ],
+    );
+
+    let result = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", 50, 0, 0, 150))
+        .expect("debit should succeed after the CAS retry");
+    match result {
+        WorkflowBudgetDebit::Applied(budget) => assert_eq!(budget.spent_credits, 150),
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    let requests = proxy.recorded();
+    assert_eq!(
+        requests.len(),
+        4,
+        "locate + increment(miss) + reload + increment(retry)"
+    );
+    // The retry's guard binds the RELOADED counter (100), proving the re-read.
+    let retry_params = body_params(&requests[3]);
+    assert_eq!(retry_params[5], "100");
+}
+
+/// A debit against an unknown run id (the id-only fan-out finds nothing) is a
+/// typed `NotFound`.
+#[test]
+fn debit_workflow_run_budget_unknown_is_not_found() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)], // locate: no match on the only tenant
+    );
+    let error = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:missing", 1, 0, 0, 150))
+        .expect_err("unknown run -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+}
+
+/// A negative debit amount is a typed `Conflict` (mirroring Postgres/memory) and
+/// never hits the network.
+#[test]
+fn debit_workflow_run_budget_negative_amount_is_conflict() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", -1, 0, 0, 150))
+        .expect_err("negative amount -> Conflict");
+    assert!(matches!(error, StorageError::Conflict(_)), "{error:?}");
+    assert!(proxy.recorded().is_empty());
+}
+
+/// Without a bound proxy Worker the atomic `open`/`debit`/`topup` (+ the id-only
+/// `get`) fail closed with the typed unimplemented-surface error and never hit the
+/// network, exactly like the still-deferred atomic families.
+#[test]
+fn workflow_run_budget_atomic_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let open = runtime()
+        .block_on(store.open_workflow_run_budget(
+            "wf",
+            1,
+            "run-1",
+            "acme",
+            WorkflowRunBudgetCaps::default(),
+            100,
+        ))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&open), "{open:?}");
+
+    let debit = runtime()
+        .block_on(store.debit_workflow_run_budget("wf:1:run-1", 1, 0, 0, 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&debit), "{debit:?}");
+
+    let topup = runtime()
+        .block_on(store.topup_workflow_run_budget("wf:1:run-1", 1, 0, 0, None, 100))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&topup), "{topup:?}");
+
+    let get = runtime()
+        .block_on(store.get_workflow_run_budget("wf:1:run-1"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&get), "{get:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented workflow-budget path must not hit the network"
+    );
+}
+
+/// A top-up locates the run's tenant DB, then raises the caps + extends the
+/// deadline + reactivates via the caps-guarded CAS, applying the SHARED
+/// `apply_topup` arithmetic (1000 + 500 = 1500; deadline max(500, 900) = 900).
+#[test]
+fn topup_workflow_run_budget_raises_caps_and_reactivates() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1000),
+                    None,
+                    None,
+                    Some(500),
+                    1000,
+                    0,
+                    0,
+                    "exhausted"
+                )]),
+                0,
+            ), // locate
+            proxy_query_ok(
+                serde_json::json!([workflow_budget_row(
+                    "wf:1:run-1",
+                    Some(1500),
+                    None,
+                    None,
+                    Some(900),
+                    1000,
+                    0,
+                    0,
+                    "active"
+                )]),
+                1,
+            ), // guarded caps write RETURNING
+        ],
+    );
+
+    let budget = runtime()
+        .block_on(store.topup_workflow_run_budget("wf:1:run-1", 500, 0, 0, Some(900), 200))
+        .expect("topup should succeed");
+    assert_eq!(budget.cost_budget_credits, Some(1500));
+    assert_eq!(budget.wall_clock_deadline_unix, Some(900));
+    assert_eq!(budget.status, WORKFLOW_RUN_BUDGET_ACTIVE);
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 2, "locate + guarded caps write");
+    let write = body_sql(&requests[1]);
+    assert!(write.contains("cost_budget_credits = NULLIF(?, '')"));
+    assert!(write.contains("status = 'active'"));
+    assert!(
+        write.contains("WHERE id = ? AND cost_budget_credits IS CAST(NULLIF(?, '') AS INTEGER)")
+    );
+    // The write binds the RECOMPUTED absolute caps from the shared apply_topup.
+    let write_params = body_params(&requests[1]);
+    assert_eq!(write_params[0], "1500"); // raised cost cap
+    assert_eq!(write_params[3], "900"); // extended deadline
+}
+
+/// A top-up against an unknown run id is a typed `NotFound`.
+#[test]
+fn topup_workflow_run_budget_unknown_is_not_found() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let error = runtime()
+        .block_on(store.topup_workflow_run_budget("wf:1:missing", 1, 0, 0, None, 200))
+        .expect_err("unknown run -> NotFound");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+}
+
+/// `get` carries only the run id, so it FANS OUT over the provisioned tenant
+/// bindings and returns the first match, selected onto the tenant binding.
+#[test]
+fn get_workflow_run_budget_locates_over_tenant_binding() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([workflow_budget_row(
+                "wf:1:run-1",
+                Some(1000),
+                None,
+                None,
+                None,
+                100,
+                0,
+                0,
+                "active"
+            )]),
+            0,
+        )],
+    );
+    let budget = runtime()
+        .block_on(store.get_workflow_run_budget("wf:1:run-1"))
+        .expect("get should succeed")
+        .expect("budget present");
+    assert_eq!(budget.spent_credits, 100);
+    assert_eq!(
+        body_json(&proxy.recorded()[0])["database"],
+        "TENANT_DB_ACME"
+    );
+}
+
+/// `get` for an unknown run id (no binding answers) is `Ok(None)`.
+#[test]
+fn get_workflow_run_budget_missing_is_none() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let budget = runtime()
+        .block_on(store.get_workflow_run_budget("wf:1:missing"))
+        .expect("get should succeed");
+    assert!(budget.is_none());
+}
+
+/// `list` carries the tenant id, so it routes straight to that tenant's own DB
+/// and orders `created_at_unix DESC, id ASC` to match Postgres.
+#[test]
+fn list_workflow_run_budgets_routes_to_tenant_binding() {
+    let (store, _rest, proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([
+                workflow_budget_row(
+                    "wf:1:run-2",
+                    Some(1000),
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    0,
+                    "active"
+                ),
+                workflow_budget_row("wf:1:run-1", Some(500), None, None, None, 0, 0, 0, "active"),
+            ]),
+            0,
+        )],
+    );
+    let budgets = runtime()
+        .block_on(store.list_workflow_run_budgets("acme"))
+        .expect("list should succeed");
+    assert_eq!(budgets.len(), 2);
+
+    let requests = proxy.recorded();
+    assert_eq!(requests.len(), 1);
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.contains("WHERE tenant_id = ?"));
+    assert!(sql.contains("ORDER BY created_at_unix DESC, id ASC"));
+}
+
+/// `list` for an UNPROVISIONED tenant is EMPTY (opt-in read) and makes no round
+/// trip — the wallet-family opt-in read contract.
+#[test]
+fn list_workflow_run_budgets_unprovisioned_is_empty() {
+    let (store, _rest, proxy) = store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let budgets = runtime()
+        .block_on(store.list_workflow_run_budgets("ghost"))
+        .expect("list on an unprovisioned tenant is not an error");
+    assert!(budgets.is_empty());
+    assert!(
+        proxy.recorded().is_empty(),
+        "an unprovisioned list makes no round trip"
+    );
+}
+
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---
 
 mod portability {
@@ -4575,6 +5233,25 @@ mod portability {
                 "column set of {table} diverged between the Postgres and D1 dialects"
             );
         }
+    }
+
+    /// The tenant-scoped `workflow_run_budgets` ledger (issue #456/#279) exposes
+    /// EXACTLY the columns its Postgres table does, so the same open/debit/topup
+    /// arithmetic compiles against either dialect's row shape.
+    #[test]
+    fn workflow_run_budgets_columns_match_between_postgres_and_d1() {
+        let postgres = columns(POSTGRES_SQL);
+        let d1 = columns(D1_SQL);
+        let postgres_columns = postgres
+            .get("workflow_run_budgets")
+            .expect("postgres migration should define workflow_run_budgets");
+        let d1_columns = d1
+            .get("workflow_run_budgets")
+            .expect("d1 migration should define workflow_run_budgets");
+        assert_eq!(
+            postgres_columns, d1_columns,
+            "column set of workflow_run_budgets diverged between the Postgres and D1 dialects"
+        );
     }
 
     /// The D1 dialect must carry NO RLS/GUC scaffolding (isolation is

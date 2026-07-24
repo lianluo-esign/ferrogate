@@ -895,6 +895,56 @@ CREATE TABLE IF NOT EXISTS retention_policies (
 CREATE INDEX IF NOT EXISTS idx_retention_policies_tenant_resource
     ON retention_policies(tenant_id, resource_type);
 
+-- --- Workflow-run execution budgets (issue #456 / #279) ---
+--
+-- The durable per-workflow-run cumulative execution envelope (issue #279): one
+-- row per (workflow_id@workflow_version, run_id) that each step debits against.
+-- Like the wallet/usage/asset families above, TENANT-SCOPED: a run's budget row
+-- lives in its OWNING tenant's own D1 database (never the control database), so
+-- the table carries no routing FK to `tenants` (physical isolation). Ported
+-- column-for-column from the Postgres workflow_run_budgets table (SQLite
+-- divergences: BIGINT->INTEGER, no cross-table FK). A NULL cap means that
+-- dimension is unbounded; the spent_* columns accumulate monotonically per
+-- dimension; a debit that would breach ANY capped dimension is rejected
+-- fail-closed WITHOUT applying spend and flips status to 'exhausted', and a
+-- top-up raises the caps and flips it back to 'active'.
+--
+-- D1/SQLite has NO `SELECT ... FOR UPDATE`, so debit_workflow_run_budget cannot
+-- serialize concurrent steps on a row lock the way Postgres does. Instead it uses
+-- an OPTIMISTIC compare-and-swap through the proxy Worker: read the counters,
+-- then a guarded `UPDATE ... WHERE <status + spent_* counters + caps unchanged
+-- since the read> RETURNING` (an empty RETURNING set = a concurrent debit/top-up
+-- committed in between, on which the impl re-reads and retries, bounded). Because
+-- the write only lands when the guard still matches the read and `spent_* =
+-- spent_* + delta` runs inside SQLite's per-database serialized writer, N
+-- concurrent steps against a tool-call budget of K let exactly K through -- the
+-- same no-overspend property the Postgres row lock gives -- with ZERO change to
+-- the WorkflowBudgetDebit contract. The atomic debit/top-up transitions run
+-- through the proxy-Worker `/d1/query` binding (issue #450) selected onto the
+-- tenant database (issue #455); a REST-only deployment leaves them fail-closed.
+CREATE TABLE IF NOT EXISTS workflow_run_budgets (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    workflow_version INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    cost_budget_credits INTEGER,
+    token_budget INTEGER,
+    tool_call_budget INTEGER,
+    wall_clock_deadline_unix INTEGER,
+    spent_credits INTEGER NOT NULL DEFAULT 0,
+    spent_tokens INTEGER NOT NULL DEFAULT 0,
+    spent_tool_calls INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+-- The admin per-tenant budget listing filters by tenant_id; the run lookup
+-- (open/debit/topup/get) is by the primary key, so no separate run_id index.
+CREATE INDEX IF NOT EXISTS idx_workflow_run_budgets_tenant
+    ON workflow_run_budgets(tenant_id);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

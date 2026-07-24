@@ -495,10 +495,13 @@ impl PostgresControlPlaneStore {
     }
 }
 
-/// Shared top-up arithmetic used by both backends: add the deltas to each
+/// Shared top-up arithmetic used by every backend: add the deltas to each
 /// capped dimension (a `None` cap stays unbounded), extend the deadline to the
-/// later of the current and requested value, and reactivate the run.
-fn apply_topup(
+/// later of the current and requested value, and reactivate the run. Exposed
+/// `pub(crate)` so the D1 backend applies the SAME arithmetic under its
+/// optimistic-CAS top-up, keeping the raised envelope row-for-row identical
+/// across the Postgres, memory, and D1 backends.
+pub(crate) fn apply_topup(
     budget: &mut StoredWorkflowRunBudget,
     add_cost_credits: i64,
     add_tokens: i64,
