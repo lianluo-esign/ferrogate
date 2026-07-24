@@ -8,6 +8,7 @@
 //! and disconnect-tolerant one-shot HTTP test-server plumbing.
 
 use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 use ferrogate_core::ApprovalPolicy;
 
@@ -53,19 +54,34 @@ fn is_benign_disconnect(err: &std::io::Error) -> bool {
     )
 }
 
-/// Reads from a test-server socket until the end of the HTTP request headers
-/// (CRLFCRLF) or EOF. Tolerates a client that reset the connection under load
-/// instead of panicking, returning whatever was captured so far. Only a
-/// genuinely-unexpected I/O error panics (that would be a real bug, not a race).
+/// Reads one HTTP request from a test-server socket: the headers (through
+/// CRLFCRLF) plus the body as advertised by `Content-Length`, so a request the
+/// OS segments across multiple TCP reads is still captured whole (issue #438 —
+/// stopping at the header terminator raced and dropped bodies that arrived in
+/// a later segment). Requests with no `Content-Length` complete at the header
+/// terminator, as before. The loop is bounded by a total-byte cap and a
+/// wall-clock deadline so a broken test cannot hang the server thread.
+/// Tolerates a client that reset the connection under load instead of
+/// panicking, returning whatever was captured so far. Only a
+/// genuinely-unexpected I/O error panics (that would be a real bug, not a
+/// race). Name kept from the pre-#438 headers-only reader for call-site
+/// stability.
 pub(crate) fn read_until_headers_end(stream: &mut impl Read) -> Vec<u8> {
+    /// Far above any request these tests send; a cap, not a target.
+    const MAX_CAPTURE_BYTES: usize = 1 << 20;
+    /// Generous versus the clients' own timeouts, so the bound never fires in
+    /// a healthy run even under CPU-load stalls (issue #327).
+    const CAPTURE_DEADLINE: Duration = Duration::from_secs(60);
+
+    let deadline = Instant::now() + CAPTURE_DEADLINE;
     let mut received = Vec::new();
     let mut chunk = [0u8; 4096];
-    loop {
+    while received.len() < MAX_CAPTURE_BYTES && Instant::now() < deadline {
         match Read::read(stream, &mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 received.extend_from_slice(&chunk[..n]);
-                if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                if request_capture_is_complete(&received) {
                     break;
                 }
             }
@@ -74,6 +90,33 @@ pub(crate) fn read_until_headers_end(stream: &mut impl Read) -> Vec<u8> {
         }
     }
     received
+}
+
+/// True once `received` holds a full HTTP request: terminated headers plus a
+/// body of at least `Content-Length` bytes (zero when the header is absent or
+/// malformed, matching the header-terminated capture the tests relied on
+/// before bodies were drained).
+fn request_capture_is_complete(received: &[u8]) -> bool {
+    let Some(headers_end) = received.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let body_start = headers_end + 4;
+    let content_length = content_length_of(&received[..headers_end]);
+    received.len() - body_start >= content_length
+}
+
+/// Parses `Content-Length` (case-insensitively, per RFC 9110) out of raw
+/// header bytes, treating a missing or malformed header as zero.
+fn content_length_of(headers: &[u8]) -> usize {
+    String::from_utf8_lossy(headers)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0)
 }
 
 /// Writes the canned response to a test-server socket and flushes it, tolerating
