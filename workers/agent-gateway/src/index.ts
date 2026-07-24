@@ -20,6 +20,15 @@ import {
   persistedMessageCap,
 } from "./memory";
 import type { RawSqlResult, SqlBinding } from "./memory";
+import {
+  dispatchScheduledTask,
+  handleSchedule,
+  scheduleCancel,
+  scheduleCreate,
+  scheduleList,
+  scheduledTaskCap,
+} from "./schedule";
+import type { ScheduleKind } from "./schedule";
 
 /**
  * Worker bindings. `AGENT_GATEWAY` is the Durable Object namespace for the
@@ -38,6 +47,8 @@ export interface Env {
   MEMORY_SEMANTIC_ENABLED?: string;
   /** Chat-history retention cap; defaults to `DEFAULT_MAX_PERSISTED_MESSAGES`. */
   MEMORY_MAX_PERSISTED_MESSAGES?: string;
+  /** Per-instance schedule-row cap; defaults to `DEFAULT_MAX_SCHEDULED_TASKS`. */
+  SCHEDULE_MAX_TASKS_PER_INSTANCE?: string;
   /** Vectorize index for the semantic pilot (unbound unless piloting). */
   VECTORIZE?: Vectorize;
   /** Workers AI binding used for pilot embeddings (unbound unless piloting). */
@@ -319,6 +330,45 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     return memoryChatHistoryPrune(this, maxMessages);
   }
 
+  // ---- Scheduling verbs (issue #426) ------------------------------------
+  //
+  // Thin RPC delegates: the verb implementations live in `schedule.ts`
+  // against the structural `AgentScheduleHost` seam (engineering standard
+  // #429). Schedules persist as rows in `cf_agents_schedules`, multiplexed
+  // through this DO's single alarm — they survive hibernation, and the SDK
+  // re-arms the alarm in the constructor on wake.
+
+  /** Per-instance schedule-row cap for this deployment. */
+  get maxScheduledTasks(): number {
+    return scheduledTaskCap(this.env.SCHEDULE_MAX_TASKS_PER_INSTANCE);
+  }
+
+  /** RPC: cancel-before-recreate + schedule one task (once/cron/interval). */
+  async scheduleCreate(task: unknown) {
+    return scheduleCreate(this, task);
+  }
+
+  /** RPC: list schedules, optionally filtered by taskId/kind. */
+  async scheduleList(criteria?: { taskId?: string; kind?: ScheduleKind }) {
+    return scheduleList(this, criteria);
+  }
+
+  /** RPC: cancel by FerroGate taskId or raw SDK schedule id. */
+  async scheduleCancel(selector: { taskId?: string; scheduleId?: string }) {
+    return scheduleCancel(this, selector);
+  }
+
+  /**
+   * The ONE method name FerroGate-minted schedules call back into (pinned by
+   * `SCHEDULE_DISPATCH_METHOD` — callers can never schedule arbitrary agent
+   * methods). Logs the firing and re-arms emulated intervals; the pinned
+   * agents SDK (0.0.109) has NO `scheduleEvery`, so intervals are delayed
+   * one-shots that re-schedule themselves here.
+   */
+  async runScheduledTask(payload: unknown) {
+    await dispatchScheduledTask(this, payload);
+  }
+
   /**
    * DIY auth gate for path-routed agent traffic (`/agents/:agent/:name/...`).
    * `routeAgentRequest` hands the request here after `onBeforeRequest`; we
@@ -413,6 +463,14 @@ export default {
     //     agent's per-instance memory layers. Auth checked inside.
     if (url.pathname.startsWith("/memory/")) {
       return handleMemory(request, env, url);
+    }
+
+    // 1c. Schedule routes (issue #426): governed create/list/cancel over the
+    //     agent's in-DO SQLite scheduler. Auth checked inside. There is NO
+    //     external enqueue primitive — scheduling is in-agent only, so this
+    //     is the sole path FerroGate schedules future agent work through.
+    if (url.pathname.startsWith("/schedule/")) {
+      return handleSchedule(request, env, url);
     }
 
     // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in

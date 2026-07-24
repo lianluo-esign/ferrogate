@@ -10,6 +10,7 @@ mod action_identity;
 mod agent;
 mod capability_boundary;
 mod cloudflare_agent_memory;
+mod cloudflare_agent_schedule;
 mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
@@ -50,6 +51,12 @@ pub use cloudflare_agent_memory::{
     AgentMemoryClient, AgentMemoryError, AgentSemanticMatch, AgentSemanticMatches, AgentSqlOutcome,
     AgentStateSnapshot, AGENT_INSTANCE_COMPONENT_MAX_LEN, AGENT_INSTANCE_NAME_PREFIX,
     AGENT_INSTANCE_NAME_SEPARATOR,
+};
+pub use cloudflare_agent_schedule::{
+    AgentScheduleCancelOutcome, AgentScheduleCancelSelector, AgentScheduleClient,
+    AgentScheduleCreated, AgentScheduleError, AgentScheduleKind, AgentScheduleList,
+    AgentScheduleListCriteria, AgentScheduleRecord, AgentScheduleTaskSpec, AgentScheduleWhen,
+    SCHEDULE_TASK_ID_MAX_LEN,
 };
 pub use cloudflare_gateway_control::{
     BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface,

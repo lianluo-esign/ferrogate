@@ -85,6 +85,41 @@ Instance names are minted by the Rust naming scheme
 isolation is tenant isolation. Full details:
 [`../../docs/cloudflare-agent-memory.md`](../../docs/cloudflare-agent-memory.md).
 
+## Schedule routes (issue #426)
+
+`src/schedule.ts` adds a governed surface over the agent's **in-DO SQLite
+scheduler** (`this.schedule(...)` → rows in `cf_agents_schedules`, multiplexed
+through the DO's single alarm; they survive hibernation). Cloudflare has **no
+external enqueue primitive** — scheduling is in-agent only — so these routes
+RPC into the named agent. All POST + bearer-gated, instance name in the body:
+
+| Route | Body | Effect |
+|-------|------|--------|
+| `POST /schedule/create` | `{ instance, task: { taskId, kind, delaySeconds?/at?/cron?/everySeconds?, data? } }` | cancel-before-recreate, then schedule (`once`/`cron`/`interval`); 422 `invalid_task`, 429 `schedule_limit` |
+| `POST /schedule/list`   | `{ instance, taskId?, kind? }` | list schedule rows (optionally filtered) |
+| `POST /schedule/cancel` | `{ instance, taskId \| scheduleId }` | cancel all rows for a FerroGate task, or one raw SDK row |
+
+Key decisions (see
+[`../../docs/cloudflare-agent-scheduling.md`](../../docs/cloudflare-agent-scheduling.md)):
+
+- **Pinned callback** — every schedule fires the agent's `runScheduledTask`
+  dispatcher (`SCHEDULE_DISPATCH_METHOD`); callers can never schedule arbitrary
+  agent methods. Firings are logged to `fg_schedule_task_runs` (readable via
+  `/memory/sql/query` — how a live test proves hibernation survival).
+- **Duplicate guard** (github.com/cloudflare/agents #1049) — every create
+  cancels existing rows keyed by `taskId` first, so create is idempotent and
+  interval rows can never accumulate.
+- **`scheduleEvery` is absent from the pinned `agents` 0.0.109** (verified
+  against `node_modules`): `interval` tasks are emulated as delayed one-shots
+  that re-arm themselves in the dispatcher. The host seam still probes for a
+  native `scheduleEvery` so an SDK upgrade is picked up defensively.
+- `SCHEDULE_MAX_TASKS_PER_INSTANCE` (wrangler var, default 100) caps concurrent
+  schedule rows per instance.
+
+The Rust side (`crates/ferrogate-runtime/src/cloudflare_agent_schedule.rs`,
+`AgentScheduleClient`) maps `schedule_create` / `schedule_list` /
+`schedule_cancel` onto exactly these routes.
+
 ## Deploy
 
 ```sh

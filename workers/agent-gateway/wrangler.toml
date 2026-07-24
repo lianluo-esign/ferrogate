@@ -44,6 +44,11 @@ MEMORY_SEMANTIC_ENABLED = "false"
 # Chat-history retention cap enforced by /memory/chat/prune (the pinned Agents
 # SDK 0.0.109 predates the SDK-side maxPersistedMessages option).
 MEMORY_MAX_PERSISTED_MESSAGES = "200"
+# --- Scheduling (issue #426) -------------------------------------------------
+# Governed /schedule/* routes over the agent's in-DO SQLite scheduler
+# (cf_agents_schedules rows, single-alarm multiplexed; survive hibernation).
+# Per-instance cap on concurrent schedule rows (alarm-row hygiene).
+SCHEDULE_MAX_TASKS_PER_INSTANCE = "100"
 
 # Semantic pilot bindings (leave commented out while the pilot is off):
 # [[vectorize]]
