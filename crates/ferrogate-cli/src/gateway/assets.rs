@@ -26,7 +26,7 @@ use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
-use super::sites::is_zip_archive;
+use super::sites::{is_zip_archive, SITE_ASSET_TYPE};
 use super::FerroGateway;
 use crate::{
     auth::authenticate,
@@ -888,6 +888,22 @@ impl FerroGateway {
             return tenant_required(session, ctx).await;
         };
 
+        // #402: the admin console addresses per-file static-site objects by bare
+        // path (`/v1/assets/static_site/{site}/{path}`), but a #397-published
+        // bundle keys them under `__site_file__:{serving_version}:{path}`. Map the
+        // bare path onto the active bundle's prefixed key so a per-file download
+        // resolves for #397-era sites; legacy bare-path rows, reserved keys, and
+        // every other asset family pass through unchanged (preserving #398).
+        let resolved_reference: String;
+        let reference = if asset_type == SITE_ASSET_TYPE {
+            resolved_reference = self
+                .resolve_site_asset_version(&tenant_id, name, reference)
+                .await;
+            resolved_reference.as_str()
+        } else {
+            reference
+        };
+
         let assets = match self
             .asset_versions(&state, &tenant_id, asset_type, name)
             .await
@@ -1051,6 +1067,20 @@ impl FerroGateway {
         };
         let Some(tenant_id) = auth.organization_id.clone() else {
             return tenant_required(session, ctx).await;
+        };
+        // #402: mirror the pull path -- a #397 site's per-file object lives under
+        // `__site_file__:{serving_version}:{path}`, so remap the bare per-file
+        // path the console DELETEs by onto that key so unpublish resolves. The
+        // reserved `__site_manifest__` marker and legacy bare-path rows pass
+        // through unchanged (preserving the #398 decode path).
+        let resolved_version: String;
+        let version = if asset_type == SITE_ASSET_TYPE {
+            resolved_version = self
+                .resolve_site_asset_version(&tenant_id, name, version)
+                .await;
+            resolved_version.as_str()
+        } else {
+            version
         };
         let variant = query_param(query, "platform").unwrap_or_default();
         let id = stored_asset_variant_id(&tenant_id, asset_type, name, version, &variant);

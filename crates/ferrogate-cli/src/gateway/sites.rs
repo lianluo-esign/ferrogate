@@ -847,6 +847,59 @@ impl FerroGateway {
             }))
     }
 
+    /// Maps the BARE per-file reference the admin console addresses a static
+    /// site's objects by (`/v1/assets/static_site/{site}/{path}`) onto the object
+    /// key #397 actually stores each file under
+    /// (`__site_file__:{serving_version}:{path}`), so a per-file download or
+    /// unpublish resolves for a #397-published bundle -- not just legacy sites
+    /// (#402, follow-up to #398). The generic `/v1/assets/*` pull and delete
+    /// handlers call this to compute the effective `{version}` for the
+    /// `static_site` asset type before resolving/deleting the object.
+    ///
+    /// Deliberately narrow and backward-compatible -- it is a no-op for every
+    /// pre-#402 caller:
+    /// - A reserved key (the mutable `__site_manifest__` marker, or a reference
+    ///   already carrying the `__site_file__:` prefix) is returned UNCHANGED; it
+    ///   already addresses a row directly (the console deletes the marker last).
+    /// - Otherwise the ACTIVE bundle is resolved through the same `serving`
+    ///   channel the serve path reads (write-path == read-path, #188). For a
+    ///   #397 site the bare `{path}` is rewritten to the prefixed key ONLY when
+    ///   that object actually exists; for a legacy site (no `serving` channel),
+    ///   or a reference that is not a live per-file path of the active bundle
+    ///   (e.g. a bundle-version manifest key), the reference is returned
+    ///   unchanged so the #398 bare-path decode path still resolves.
+    pub(super) async fn resolve_site_asset_version(
+        &self,
+        tenant_id: &str,
+        site: &str,
+        reference: &str,
+    ) -> String {
+        let already_prefixed = matches!(
+            reference.strip_prefix(SITE_FILE_VERSION_PREFIX),
+            Some(rest) if rest.starts_with(':')
+        );
+        if reference == SITE_MANIFEST_VERSION || already_prefixed {
+            return reference.to_string();
+        }
+        // Resolve the ACTIVE bundle. A legacy site (bare-path keying) or a site
+        // whose serving channel target is missing leaves the reference untouched.
+        let Ok(Some(resolved)) = self.resolve_active_site_bundle(tenant_id, site).await else {
+            return reference.to_string();
+        };
+        let SiteFileKeying::Bundle(bundle_version) = resolved.keying else {
+            return reference.to_string();
+        };
+        // Only remap when the prefixed object exists, so a reference that is not
+        // a live per-file path of the active bundle (e.g. `{bundle_version}`
+        // itself) still addresses its own row.
+        let prefixed = site_file_version(&bundle_version, reference);
+        let prefixed_id = stored_asset_id(tenant_id, SITE_ASSET_TYPE, site, &prefixed);
+        match self.state.current().get_asset(&prefixed_id).await {
+            Ok(Some(_)) => prefixed,
+            _ => reference.to_string(),
+        }
+    }
+
     pub(super) async fn load_site_manifest(
         &self,
         tenant_id: &str,

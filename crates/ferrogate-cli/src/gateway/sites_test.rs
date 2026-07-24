@@ -15,7 +15,10 @@ use super::super::FerroGateway;
 use super::*;
 use crate::config::Config;
 use crate::state::SharedAppState;
-use ferrogate_storage::{asset_channel_id, stored_asset_id, StoredAssetChannel};
+use ferrogate_storage::{
+    asset_channel_id, stored_asset_id, stored_asset_variant_id, StoredAssetChannel,
+    VariantDeleteOutcome,
+};
 
 fn entry(path: &str) -> SiteFileEntry {
     SiteFileEntry {
@@ -515,6 +518,170 @@ fn legacy_manifest_only_site_still_serves() {
         .expect("legacy site resolves");
     assert!(matches!(resolved.keying, SiteFileKeying::Legacy));
     assert_eq!(served(&gw, "/").unwrap().1, b"<h1>legacy</h1>");
+}
+
+#[test]
+fn console_bare_per_file_addressing_round_trips_on_a_397_bundle() {
+    // #402: the admin console addresses per-file objects by BARE path
+    // (`/v1/assets/static_site/{site}/{path}`), but #397 keys each file under
+    // `__site_file__:{bundle_version}:{path}`. The gateway maps the bare path
+    // onto the ACTIVE bundle's prefixed key so a per-file download and unpublish
+    // resolve for a #397-published bundle -- exercised here through the same
+    // Session-free primitives the pull/delete handlers use (write == read, #188).
+    let gw = gateway();
+    let nested = "assets/img/deep/logo.png";
+    let logo = b"\x89PNG nested-logo-bytes";
+    publish(
+        &gw,
+        "2.1.0",
+        &[("index.html", b"<h1>home</h1>"), (nested, logo)],
+    );
+
+    // The console decodes `%2F` back to `/` (the #398 fix) and addresses this
+    // bare nested path. Under #397 the bare path is NOT a stored key, so the
+    // pre-#402 console would 404 here...
+    let bare_id = stored_asset_id(T, SITE_ASSET_TYPE, SITE, nested);
+    assert!(
+        block_on(gw.state.current().get_asset(&bare_id))
+            .unwrap()
+            .is_none(),
+        "a #397 bundle stores no bare-path row -- the pre-#402 console 404s"
+    );
+
+    // ...but the gateway maps it onto the active bundle's prefixed key.
+    let effective = block_on(gw.resolve_site_asset_version(T, SITE, nested));
+    assert_eq!(effective, format!("__site_file__:2.1.0:{nested}"));
+
+    // Download round-trip: the remapped reference resolves (exact match,
+    // mirroring handle_asset_pull) and streams the intended nested file's bytes.
+    let assets: Vec<StoredAsset> =
+        block_on(gw.state.current().list_assets(T, Some(SITE_ASSET_TYPE)))
+            .unwrap()
+            .into_iter()
+            .filter(|asset| asset.name == SITE && asset.is_downloadable())
+            .collect();
+    let channels = block_on(
+        gw.state
+            .current()
+            .list_asset_channels(T, SITE_ASSET_TYPE, SITE),
+    )
+    .unwrap();
+    let resolved = super::super::asset_registry::resolve_version(&assets, &channels, &effective)
+        .expect("remapped per-file reference resolves for download");
+    assert_eq!(resolved.version, effective);
+    let downloaded = block_on(gw.state.current().get_asset(&stored_asset_id(
+        T,
+        SITE_ASSET_TYPE,
+        SITE,
+        &effective,
+    )))
+    .unwrap()
+    .expect("downloaded object present");
+    assert_eq!(
+        downloaded.content, logo,
+        "downloaded the intended nested file"
+    );
+
+    // Unpublish round-trip: the console DELETEs each marker-manifest file by bare
+    // path; each maps onto its prefixed key and deletes. A live `serving` channel
+    // references the bundle-version manifest row, not the file rows, so deleting
+    // a file row is never blocked.
+    let manifest = block_on(gw.load_site_manifest(T, SITE))
+        .unwrap()
+        .expect("marker manifest present");
+    for entry in &manifest.files {
+        let effective = block_on(gw.resolve_site_asset_version(T, SITE, &entry.path));
+        let id = stored_asset_variant_id(T, SITE_ASSET_TYPE, SITE, &effective, "");
+        let outcome = block_on(gw.state.current().delete_asset_variant_if_unreferenced(
+            &id,
+            T,
+            SITE_ASSET_TYPE,
+            SITE,
+            &effective,
+        ))
+        .expect("delete storage ok");
+        assert_eq!(
+            outcome,
+            VariantDeleteOutcome::Deleted,
+            "per-file unpublish resolves + deletes {}",
+            entry.path
+        );
+        assert!(
+            block_on(gw.state.current().get_asset(&id))
+                .unwrap()
+                .is_none(),
+            "per-file object {} is gone after unpublish",
+            entry.path
+        );
+    }
+
+    // The reserved `__site_manifest__` marker key the console deletes LAST is NOT
+    // remapped -- it addresses the marker row directly, so unpublish stays intact.
+    assert_eq!(
+        block_on(gw.resolve_site_asset_version(T, SITE, SITE_MANIFEST_VERSION)),
+        SITE_MANIFEST_VERSION
+    );
+}
+
+#[test]
+fn legacy_and_reserved_references_pass_through_unremapped() {
+    // #402 backward-compat guard: for a LEGACY (pre-#397) site with no `serving`
+    // channel, a bare per-file reference is returned UNCHANGED so the #398
+    // bare-path decode path still resolves; and an already-prefixed / reserved
+    // key is never double-mapped.
+    let gw = gateway();
+    let now = 100;
+    let manifest = SiteManifest {
+        site: SITE.to_string(),
+        bundle_version: "legacy-1".to_string(),
+        public: true,
+        spa_fallback: false,
+        cache_control: None,
+        files: vec![SiteFileEntry {
+            path: "app/main.js".to_string(),
+            content_type: guess_site_content_type("app/main.js"),
+            content_hash: sha256_hex(b"legacy-js"),
+            size_bytes: 9,
+        }],
+        created_at_unix: now,
+        updated_at_unix: now,
+    };
+    block_on(gw.store_site_manifest(T, &manifest, now)).expect("store legacy manifest");
+    // Legacy per-file row keyed by the bare path (no serving channel exists).
+    let file = StoredAsset {
+        id: stored_asset_id(T, SITE_ASSET_TYPE, SITE, "app/main.js"),
+        tenant_id: T.to_string(),
+        project_id: None,
+        asset_type: SITE_ASSET_TYPE.to_string(),
+        name: SITE.to_string(),
+        version: "app/main.js".to_string(),
+        content_type: guess_site_content_type("app/main.js"),
+        content_hash: sha256_hex(b"legacy-js"),
+        size_bytes: 9,
+        content: b"legacy-js".to_vec(),
+        storage_uri: None,
+        variant: String::new(),
+        yanked: false,
+        visibility: AssetVisibility::Visible,
+        created_at_unix: now,
+        updated_at_unix: now,
+    };
+    block_on(gw.state.current().upsert_asset(file)).expect("store legacy file");
+
+    // Legacy bare path stays bare -> the #398 decode path resolves it directly.
+    assert_eq!(
+        block_on(gw.resolve_site_asset_version(T, SITE, "app/main.js")),
+        "app/main.js"
+    );
+    // Reserved marker + an already-prefixed key are returned unchanged.
+    assert_eq!(
+        block_on(gw.resolve_site_asset_version(T, SITE, SITE_MANIFEST_VERSION)),
+        SITE_MANIFEST_VERSION
+    );
+    assert_eq!(
+        block_on(gw.resolve_site_asset_version(T, SITE, "__site_file__:2.1.0:index.html")),
+        "__site_file__:2.1.0:index.html"
+    );
 }
 
 #[test]
