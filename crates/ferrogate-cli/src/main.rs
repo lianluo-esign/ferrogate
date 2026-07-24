@@ -14,6 +14,8 @@ mod billing_client;
 mod budget_alerts;
 mod builtin_tools;
 mod cli;
+mod command_tree;
+mod completions;
 mod config;
 mod ctl;
 mod dashboard;
@@ -23,6 +25,8 @@ mod lifecycle;
 mod metering;
 mod network_access;
 mod plans_cli;
+#[cfg(test)]
+mod reference;
 mod responses;
 mod routing;
 #[cfg(test)]
@@ -34,7 +38,7 @@ mod telemetry;
 mod tokenizer;
 
 use anyhow::Result as AnyResult;
-use clap::{CommandFactory, FromArgMatches};
+use clap::FromArgMatches;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use std::sync::Arc;
@@ -58,12 +62,11 @@ fn main() -> AnyResult<()> {
     // generic Control Plane API resource families (#361–#365), whose entire
     // `ctl <group> <verb>` subtree is derived from the `ferrogate-cli-core`
     // registry metadata rather than hand-enumerated here (registering a new
-    // family in the library needs no change in this binary). Registration is a
-    // programming error if it fails (duplicate group/verb), so fail loudly.
-    let mut registry = ferrogate_cli_core::Registry::new();
-    ferrogate_cli_core::register_resource_families(&mut registry)
-        .expect("resource command families register cleanly");
-    let command = Cli::command().subcommand(ctl::build_ctl_command(&registry));
+    // family in the library needs no change in this binary). Assembled through
+    // the shared `command_tree` helper so shell completions (`completions`) and
+    // the generated command reference describe this EXACT command.
+    let registry = command_tree::resource_registry();
+    let command = command_tree::assembled_command(&registry);
     let matches = command.get_matches();
 
     // The resource families own their diagnostics (stderr) and map every
@@ -194,6 +197,9 @@ fn main() -> AnyResult<()> {
         // an `anyhow` error into the generic `?` path.
         Commands::Context(args) => std::process::exit(ctl::run_context(args.command)),
         Commands::Ops(args) => std::process::exit(ctl::run_ops(args)),
+        // Emit a shell completion script for the full assembled command tree
+        // (issue #365). Additive and side-effect-free: writes to stdout only.
+        Commands::Completions(args) => completions::execute(args.shell),
     }
 }
 

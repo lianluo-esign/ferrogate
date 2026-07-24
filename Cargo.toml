@@ -62,6 +62,10 @@ chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
+# Shell completion script generation for the `ferrogate completions <shell>`
+# subcommand (#365). Version-aligned with `clap` above so the `Generator`/`Shell`
+# API matches the resolved `clap` line.
+clap_complete = "4.5"
 croner = "3"
 deadpool-postgres = "0.14.1"
 # Inflate the DEFLATE-compressed SAML `SAMLResponse` payload delivered over the

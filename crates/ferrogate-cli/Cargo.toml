@@ -35,6 +35,10 @@ chrono.workspace = true
 # `ferrogate-cli-core` registry metadata (clap's default builder only accepts
 # `&'static str` names).
 clap = { workspace = true, features = ["string"] }
+# Generates the shell completion scripts emitted by `ferrogate completions
+# <shell>` (#365) from the SAME assembled `clap::Command` the binary runs, so
+# completions cover the generic `ctl <group> <verb>` resource-family tree.
+clap_complete.workspace = true
 flate2 = "1"
 ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }

@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -321,6 +322,18 @@ pub(crate) enum Commands {
     /// Inspect the Control Plane API through the shared typed client (issue
     /// #360). The first vertical slice: `ops status`.
     Ops(OpsArgs),
+    /// Generate a shell completion script for the full `ferrogate` command
+    /// tree (issue #365), including the generic `ctl <group> <verb>` resource
+    /// families. Writes the script to stdout, e.g.
+    /// `ferrogate completions bash > /etc/bash_completion.d/ferrogate`.
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CompletionsArgs {
+    /// Target shell (bash, zsh, fish, powershell, elvish).
+    #[arg(value_enum)]
+    pub(crate) shell: Shell,
 }
 
 #[derive(Debug, Args)]
