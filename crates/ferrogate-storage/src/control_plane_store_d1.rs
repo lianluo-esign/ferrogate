@@ -99,6 +99,27 @@
 //! - Budget alert idempotency ledger (#445, control database):
 //!   `record_budget_alert_notification`, `budget_alert_already_notified`,
 //!   `list_budget_alert_notifications`.
+//! - Observability append/analytics (#447, control database): agent runs
+//!   (`upsert_agent_run`, `agent_run`, `agent_runs`, `agent_runs_by_ids`),
+//!   agent run events (`append_agent_run_event`, `agent_run_events`,
+//!   `agent_run_events_for_runs`), request logs (`append_request_log`,
+//!   `request_logs`, `request_logs_page`, `delete_request_logs`,
+//!   `request_logs_for_agent_runs`), audit events (`append_audit_event`,
+//!   `audit_events`, `audit_events_page`, `delete_audit_events`,
+//!   `audit_events_for_agent_runs`), and the cross-family
+//!   `agent_run_summary_seed_ids`. Each row stores the FULL record as a
+//!   `*_json` document (deserialized on read) plus projection columns; these
+//!   route to the CONTROL database (not per-tenant) because their analytics
+//!   reads are cross-tenant whole-table scans and the `tenant` column is a
+//!   composite storage key, not a routing tenant id -- so a single-query
+//!   control-database mirror of the Postgres single-table ordering/pagination/
+//!   UNION seed is cleaner than a lossy per-tenant fan-out merge. The `()`/
+//!   `Vec`/`Option`-returning surfaces swallow-with-warn on error like the
+//!   Postgres backend; the `Result`-returning ones surface it.
+//! - Snapshot replay floors (#206/#447, control database):
+//!   `get_snapshot_replay_floor`, `advance_snapshot_replay_floor`. SQLite
+//!   `max()` in the upsert keeps the floor monotonic; a follow-up SELECT
+//!   returns it (the HTTP query API has no `RETURNING`).
 //! - Process-local (backend-independent semantics, mirrors Memory/Postgres):
 //!   `set_retention_limits` (no-op like Postgres), `next_audit_event_id`,
 //!   `upsert_usage_aggregate_local`, `store_usage_aggregate_local`,
@@ -113,12 +134,12 @@
 //! proxy-Worker path or a later slice): assets/channels/retention, usage
 //! monthly + metadata rollups, billing ledger/outbox, billing events,
 //! `persist_usage_aggregate` (durable half), guardrail policy
-//! revisions/bindings, snapshot replay floors, request/audit logs, agent
-//! runs/events, managed + self-hosted worker stores, and the remaining
+//! revisions/bindings, managed + self-hosted worker stores, and the remaining
 //! pre-#425 per-entity dispatch surfaces (wallets, payment attempts, agent
 //! schedules, workflow budgets, observed agent presence, MCP identity). RBAC,
 //! site domains, and the budget-alert idempotency ledger from that group are
-//! now implemented (issue #445, see above).
+//! now implemented (issue #445); request/audit logs, agent runs/events, and
+//! snapshot replay floors are now implemented (issue #447), all above.
 //!
 //! Everything erroring returns the typed `unimplemented-backend-surface` error
 //! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
@@ -873,6 +894,35 @@ const SELECT_API_KEY_COLUMNS: &str = "SELECT id, workspace_id, tenant_id, projec
      allowed_providers_json, monthly_token_budget, request_limit_per_minute, created_at_unix, \
      updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix FROM api_keys";
 
+// --- Row DTOs: observability append/analytics families (issue #447) ---
+//
+// Agent runs/events and request/audit logs store the FULL record as a JSON
+// TEXT document that the read paths deserialize (like the Postgres backend's
+// `*_json::text` selects), so a single reusable [`DocumentRow`] carries every
+// list/get read when the JSON column is aliased to `document_json`. The paged
+// reads additionally project a window `count(*) OVER()` total, and the summary
+// seed query projects a bare `run_id`.
+
+/// One page row: the serialized record plus the window total the paginated
+/// reads carry alongside every row (`count(*) OVER() AS total`).
+#[derive(Deserialize)]
+struct PagedDocumentRow {
+    document_json: String,
+    total: i64,
+}
+
+/// A single `run_id` projected by the agent-run summary seed query.
+#[derive(Deserialize)]
+struct SeedIdRow {
+    run_id: String,
+}
+
+/// The persisted monotonic replay floor revision (issue #206).
+#[derive(Deserialize)]
+struct ReplayFloorRow {
+    last_accepted_revision: i64,
+}
+
 impl D1ControlPlaneStore {
     /// Build the backend from a D1 endpoint client and a (possibly empty)
     /// registry — load a persisted registry with
@@ -1284,6 +1334,415 @@ impl D1ControlPlaneStore {
         let database_id = self.control_database_id()?;
         self.execute(&database_id, sql, params).await
     }
+
+    // --- Observability append/analytics families (issue #447, control DB) ---
+    //
+    // Agent runs/events + request/audit logs mirror the Postgres single-table
+    // JSON-document pattern: each write stores the FULL record as a `*_json`
+    // document plus the projection columns the read SQL filters/orders on; each
+    // read selects that document and deserializes it. Every one routes to the
+    // CONTROL database (routing rationale in the module docs + sql/d1 header):
+    // the analytics reads are cross-tenant whole-table scans (time-ordered,
+    // `count(*)`-paginated, UNION-seeded) and the `tenant` column is a
+    // composite storage key, not a routing tenant id, so per-tenant fan-out
+    // would only add a lossy merge-sort over the faithful single-query mirror.
+
+    /// Deserialize a batch of records selected as a `document_json` column, in
+    /// the order the query returned them.
+    async fn fetch_control_documents<T: for<'de> Deserialize<'de>>(
+        &self,
+        sql: &str,
+        params: Vec<String>,
+    ) -> Result<Vec<T>, StorageError> {
+        let rows: Vec<DocumentRow> = self.fetch_control_rows(sql, params).await?;
+        rows.iter()
+            .map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .collect()
+    }
+
+    /// A paginated page of records: every row carries a `count(*) OVER()` total
+    /// alongside its `document_json`, matching the Postgres window-count page.
+    async fn fetch_control_document_page<T: for<'de> Deserialize<'de>>(
+        &self,
+        sql: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<T>, StorageError> {
+        let rows: Vec<PagedDocumentRow> = self.fetch_control_rows(sql, Vec::new()).await?;
+        let total = rows.first().map(|row| row.total).unwrap_or(0);
+        let data = rows
+            .iter()
+            .map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .collect::<Result<Vec<T>, StorageError>>()?;
+        Ok(StoragePage {
+            data,
+            total: usize::try_from(total).unwrap_or(usize::MAX),
+            offset,
+            limit,
+        })
+    }
+
+    async fn upsert_agent_run_async(&self, run: &StoredAgentRun) -> Result<(), StorageError> {
+        let run_json = serialize_storage_document(run)?;
+        let started_at_unix = saturating_i64(run.started_at_unix.unwrap_or_else(now_unix_seconds));
+        let completed_at_unix = run.completed_at_unix.map(saturating_i64);
+        self.execute_control(
+            "INSERT INTO agent_runs \
+             (id, request_id, tenant, started_at_unix, completed_at_unix, run_json) \
+             VALUES (?, ?, ?, ?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             request_id = excluded.request_id, tenant = excluded.tenant, \
+             started_at_unix = excluded.started_at_unix, \
+             completed_at_unix = excluded.completed_at_unix, run_json = excluded.run_json",
+            vec![
+                run.id.clone(),
+                run.request_id.clone(),
+                tenant_storage_key(&run.tenant),
+                started_at_unix.to_string(),
+                optional_number_param(completed_at_unix),
+                run_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn agent_run_async(&self, id: &str) -> Result<Option<StoredAgentRun>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT run_json AS document_json FROM agent_runs WHERE id = ?",
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn agent_runs_async(&self) -> Result<Vec<StoredAgentRun>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT run_json AS document_json FROM agent_runs \
+             ORDER BY started_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn agent_runs_by_ids_async(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAgentRun>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT run_json AS document_json FROM agent_runs WHERE id IN ({}) \
+             ORDER BY started_at_unix ASC, id ASC",
+            in_placeholders(run_ids.len())
+        );
+        self.fetch_control_documents(&sql, run_ids.to_vec()).await
+    }
+
+    async fn append_agent_run_event_async(
+        &self,
+        event: &StoredAgentRunEvent,
+    ) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.execute_control(
+            "INSERT INTO agent_run_events \
+             (id, run_id, request_id, tenant, occurred_at_unix, event_json) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                event.id.clone(),
+                event.run_id.clone(),
+                event.request_id.clone(),
+                tenant_storage_key(&event.tenant),
+                occurred_at_unix.to_string(),
+                event_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn agent_run_events_async(&self) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT event_json AS document_json FROM agent_run_events \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn agent_run_events_for_runs_async(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT event_json AS document_json FROM agent_run_events WHERE run_id IN ({}) \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            in_placeholders(run_ids.len())
+        );
+        self.fetch_control_documents(&sql, run_ids.to_vec()).await
+    }
+
+    async fn append_request_log_async(&self, log: &StoredRequestLog) -> Result<(), StorageError> {
+        let request_json = serialize_storage_document(log)?;
+        let started_at_unix = saturating_i64(log.started_at_unix.unwrap_or_else(now_unix_seconds));
+        let completed_at_unix = log.completed_at_unix.map(saturating_i64);
+        self.execute_control(
+            "INSERT INTO request_logs \
+             (request_id, agent_run_id, tenant, started_at_unix, completed_at_unix, request_json) \
+             VALUES (?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?) \
+             ON CONFLICT (request_id) DO UPDATE SET \
+             agent_run_id = excluded.agent_run_id, tenant = excluded.tenant, \
+             started_at_unix = excluded.started_at_unix, \
+             completed_at_unix = excluded.completed_at_unix, request_json = excluded.request_json",
+            vec![
+                log.request_id.clone(),
+                log.agent_run_id.clone().unwrap_or_default(),
+                tenant_storage_key(&log.tenant),
+                started_at_unix.to_string(),
+                optional_number_param(completed_at_unix),
+                request_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn request_logs_async(&self) -> Result<Vec<StoredRequestLog>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT request_json AS document_json FROM request_logs \
+             ORDER BY started_at_unix ASC, request_id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn request_logs_page_async(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<StoredRequestLog>, StorageError> {
+        let sql = format!(
+            "SELECT request_json AS document_json, count(*) OVER() AS total FROM request_logs \
+             ORDER BY started_at_unix ASC, request_id ASC LIMIT {} OFFSET {}",
+            saturating_i64(limit as u64),
+            saturating_i64(offset as u64)
+        );
+        self.fetch_control_document_page(&sql, offset, limit).await
+    }
+
+    async fn delete_request_logs_async(&self, request_ids: &[String]) -> Result<u64, StorageError> {
+        if request_ids.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "DELETE FROM request_logs WHERE request_id IN ({})",
+            in_placeholders(request_ids.len())
+        );
+        let result = self.execute_control(&sql, request_ids.to_vec()).await?;
+        Ok(result.changes())
+    }
+
+    async fn request_logs_for_agent_runs_async(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredRequestLog>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT request_json AS document_json FROM request_logs WHERE agent_run_id IN ({}) \
+             ORDER BY started_at_unix ASC, request_id ASC",
+            in_placeholders(run_ids.len())
+        );
+        self.fetch_control_documents(&sql, run_ids.to_vec()).await
+    }
+
+    async fn append_audit_event_async(&self, event: &StoredAuditEvent) -> Result<(), StorageError> {
+        let audit_json = serialize_storage_document(event)?;
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.execute_control(
+            "INSERT INTO audit_events \
+             (id, request_id, agent_run_id, tenant, occurred_at_unix, audit_json) \
+             VALUES (?, ?, NULLIF(?, ''), ?, ?, ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                event.id.clone(),
+                event.request_id.clone(),
+                event.agent_run_id.clone().unwrap_or_default(),
+                tenant_storage_key(&event.tenant),
+                occurred_at_unix.to_string(),
+                audit_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn audit_events_async(&self) -> Result<Vec<StoredAuditEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT audit_json AS document_json FROM audit_events \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn audit_events_page_async(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<StoredAuditEvent>, StorageError> {
+        let sql = format!(
+            "SELECT audit_json AS document_json, count(*) OVER() AS total FROM audit_events \
+             ORDER BY occurred_at_unix ASC, id ASC LIMIT {} OFFSET {}",
+            saturating_i64(limit as u64),
+            saturating_i64(offset as u64)
+        );
+        self.fetch_control_document_page(&sql, offset, limit).await
+    }
+
+    async fn delete_audit_events_async(&self, ids: &[String]) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "DELETE FROM audit_events WHERE id IN ({})",
+            in_placeholders(ids.len())
+        );
+        let result = self.execute_control(&sql, ids.to_vec()).await?;
+        Ok(result.changes())
+    }
+
+    async fn audit_events_for_agent_runs_async(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<StoredAuditEvent>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT audit_json AS document_json FROM audit_events WHERE agent_run_id IN ({}) \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            in_placeholders(run_ids.len())
+        );
+        self.fetch_control_documents(&sql, run_ids.to_vec()).await
+    }
+
+    /// Distinct agent-run ids known to the durable store, most recently seen
+    /// first, LIMITed in SQL (issue #231) -- a direct translation of the
+    /// Postgres four-way `UNION ALL` seed. `request_id`, when present, narrows
+    /// each source; the bound value repeats once per `?` (one per subquery).
+    async fn agent_run_summary_seed_ids_async(
+        &self,
+        request_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        let (run_filter, event_filter, params) = match request_id {
+            Some(request_id) => (
+                "WHERE request_id = ?",
+                "AND request_id = ?",
+                vec![request_id.to_string(); 4],
+            ),
+            None => ("", "", Vec::new()),
+        };
+        let sql = format!(
+            "SELECT run_id FROM ( \
+                 SELECT id AS run_id, coalesce(completed_at_unix, started_at_unix, 0) AS seen_at \
+                 FROM agent_runs {run_filter} \
+               UNION ALL \
+                 SELECT run_id, occurred_at_unix AS seen_at FROM agent_run_events {run_filter} \
+               UNION ALL \
+                 SELECT agent_run_id AS run_id, \
+                        coalesce(completed_at_unix, started_at_unix, 0) AS seen_at \
+                 FROM request_logs WHERE agent_run_id IS NOT NULL {event_filter} \
+               UNION ALL \
+                 SELECT agent_run_id AS run_id, occurred_at_unix AS seen_at FROM audit_events \
+                 WHERE agent_run_id IS NOT NULL {event_filter} \
+             ) seeds \
+             GROUP BY run_id \
+             ORDER BY max(seen_at) DESC, run_id ASC \
+             LIMIT {limit}",
+            limit = saturating_i64(limit as u64)
+        );
+        let rows: Vec<SeedIdRow> = self.fetch_control_rows(&sql, params).await?;
+        Ok(rows.into_iter().map(|row| row.run_id).collect())
+    }
+
+    // --- Snapshot replay floors (issue #206/#447, control DB) ---
+
+    async fn get_snapshot_replay_floor_async(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<Option<u64>, StorageError> {
+        let row: Option<ReplayFloorRow> = self
+            .fetch_control_optional(
+                "SELECT last_accepted_revision FROM control_plane_replay_floors \
+                 WHERE tenant_id = ? AND deployment_id = ?",
+                vec![tenant_id.to_string(), deployment_id.to_string()],
+            )
+            .await?;
+        Ok(row.map(|row| u64::try_from(row.last_accepted_revision).unwrap_or(0)))
+    }
+
+    /// Monotonically raise the persisted replay floor (issue #206). SQLite
+    /// `max()` in the upsert guarantees the stored floor never moves backward;
+    /// a follow-up SELECT returns the resulting floor (the HTTP query API
+    /// exposes no `RETURNING`, as with `take_sso_pending_flow`).
+    async fn advance_snapshot_replay_floor_async(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        let revision = i64::try_from(revision).map_err(|_| {
+            StorageError::Runtime(format!(
+                "snapshot replay floor revision {revision} exceeds the storable range"
+            ))
+        })?;
+        self.execute_control(
+            "INSERT INTO control_plane_replay_floors \
+             (tenant_id, deployment_id, last_accepted_revision, updated_at_unix) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (tenant_id, deployment_id) DO UPDATE SET \
+             last_accepted_revision = max( \
+                 control_plane_replay_floors.last_accepted_revision, \
+                 excluded.last_accepted_revision), \
+             updated_at_unix = CASE \
+                 WHEN excluded.last_accepted_revision > \
+                      control_plane_replay_floors.last_accepted_revision \
+                 THEN excluded.updated_at_unix \
+                 ELSE control_plane_replay_floors.updated_at_unix END",
+            vec![
+                tenant_id.to_string(),
+                deployment_id.to_string(),
+                revision.to_string(),
+                updated_at_unix.to_string(),
+            ],
+        )
+        .await?;
+        Ok(self
+            .get_snapshot_replay_floor_async(tenant_id, deployment_id)
+            .await?
+            .unwrap_or(0))
+    }
+}
+
+/// Render an `IN (?, ?, ...)` placeholder list of `count` bound params: the
+/// SQLite-dialect stand-in for the Postgres `= ANY($1)` array predicate.
+fn in_placeholders(count: usize) -> String {
+    vec!["?"; count].join(", ")
 }
 
 fn validate_tenant_id(tenant_id: &str) -> Result<(), StorageError> {
@@ -2656,24 +3115,33 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("restore_guardrail_policy_binding"))
     }
 
-    // --- Snapshot replay floors (UNIMPLEMENTED) ---
+    // --- Snapshot replay floors (IMPLEMENTED, control database, issue #447) ---
+    //
+    // Account-global control-plane snapshot-replay state keyed by
+    // (tenant_id, deployment_id); the sync surface bridges into the async D1
+    // helpers exactly like the config-document methods.
 
     fn get_snapshot_replay_floor(
         &self,
-        _tenant_id: &str,
-        _deployment_id: &str,
+        tenant_id: &str,
+        deployment_id: &str,
     ) -> Result<Option<u64>, StorageError> {
-        Err(unimplemented_surface("get_snapshot_replay_floor"))
+        block_on_sync_bridge(self.get_snapshot_replay_floor_async(tenant_id, deployment_id))
     }
 
     fn advance_snapshot_replay_floor(
         &self,
-        _tenant_id: &str,
-        _deployment_id: &str,
-        _revision: u64,
-        _updated_at_unix: i64,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
     ) -> Result<u64, StorageError> {
-        Err(unimplemented_surface("advance_snapshot_replay_floor"))
+        block_on_sync_bridge(self.advance_snapshot_replay_floor_async(
+            tenant_id,
+            deployment_id,
+            revision,
+            updated_at_unix,
+        ))
     }
 
     // --- High-write append/analytics stores ---
@@ -2691,13 +3159,19 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         // append stores are not served by this backend in the first place.
     }
 
-    async fn append_request_log(&self, _log: StoredRequestLog) {
-        warn_unimplemented("append_request_log");
+    async fn append_request_log(&self, log: StoredRequestLog) {
+        // `()`-returning append: swallow-with-warn on error, mirroring the
+        // Postgres backend's `let _ = ...` (contract in the module docs).
+        if let Err(error) = self.append_request_log_async(&log).await {
+            tracing::warn!("cloudflare d1: append_request_log failed: {error}");
+        }
     }
 
     async fn request_logs(&self) -> Vec<StoredRequestLog> {
-        warn_unimplemented("request_logs");
-        Vec::new()
+        self.request_logs_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: request_logs failed: {error}");
+            Vec::new()
+        })
     }
 
     async fn request_logs_page(
@@ -2705,21 +3179,31 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         offset: usize,
         limit: usize,
     ) -> StoragePage<StoredRequestLog> {
-        warn_unimplemented("request_logs_page");
-        StoragePage::empty(offset, limit)
+        self.request_logs_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: request_logs_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
     }
 
-    async fn delete_request_logs(&self, _request_ids: &[String]) -> Result<u64, StorageError> {
-        Err(unimplemented_surface("delete_request_logs"))
+    async fn delete_request_logs(&self, request_ids: &[String]) -> Result<u64, StorageError> {
+        self.delete_request_logs_async(request_ids).await
     }
 
-    async fn request_logs_for_agent_runs(&self, _run_ids: &[String]) -> Vec<StoredRequestLog> {
-        warn_unimplemented("request_logs_for_agent_runs");
-        Vec::new()
+    async fn request_logs_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredRequestLog> {
+        self.request_logs_for_agent_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: request_logs_for_agent_runs failed: {error}");
+                Vec::new()
+            })
     }
 
-    async fn append_audit_event(&self, _event: StoredAuditEvent) {
-        warn_unimplemented("append_audit_event");
+    async fn append_audit_event(&self, event: StoredAuditEvent) {
+        if let Err(error) = self.append_audit_event_async(&event).await {
+            tracing::warn!("cloudflare d1: append_audit_event failed: {error}");
+        }
     }
 
     fn next_audit_event_id(&self) -> String {
@@ -2731,8 +3215,10 @@ impl ControlPlaneStore for D1ControlPlaneStore {
     }
 
     async fn audit_events(&self) -> Vec<StoredAuditEvent> {
-        warn_unimplemented("audit_events");
-        Vec::new()
+        self.audit_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: audit_events failed: {error}");
+            Vec::new()
+        })
     }
 
     async fn audit_events_page(
@@ -2740,17 +3226,25 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         offset: usize,
         limit: usize,
     ) -> StoragePage<StoredAuditEvent> {
-        warn_unimplemented("audit_events_page");
-        StoragePage::empty(offset, limit)
+        self.audit_events_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: audit_events_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
     }
 
-    async fn delete_audit_events(&self, _ids: &[String]) -> Result<u64, StorageError> {
-        Err(unimplemented_surface("delete_audit_events"))
+    async fn delete_audit_events(&self, ids: &[String]) -> Result<u64, StorageError> {
+        self.delete_audit_events_async(ids).await
     }
 
-    async fn audit_events_for_agent_runs(&self, _run_ids: &[String]) -> Vec<StoredAuditEvent> {
-        warn_unimplemented("audit_events_for_agent_runs");
-        Vec::new()
+    async fn audit_events_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredAuditEvent> {
+        self.audit_events_for_agent_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: audit_events_for_agent_runs failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn append_billing_event(&self, _event: BillingEvent) -> Result<bool, StorageError> {
@@ -2846,52 +3340,73 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             .unwrap_or_default()
     }
 
-    // --- Agent runs / workers (UNIMPLEMENTED) ---
+    // --- Agent runs / events (IMPLEMENTED, control database, issue #447) ---
+    //
+    // See the inherent `*_async` helpers for the routing rationale. The
+    // `()`/`Vec`/`Option`-returning surfaces swallow-with-warn on error like
+    // the Postgres backend; the `Result`-returning ones surface it.
 
-    async fn upsert_agent_run(&self, _run: StoredAgentRun) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_agent_run"))
+    async fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
+        self.upsert_agent_run_async(&run).await
     }
 
-    async fn agent_run(&self, _id: &str) -> Option<StoredAgentRun> {
-        warn_unimplemented("agent_run");
-        None
+    async fn agent_run(&self, id: &str) -> Option<StoredAgentRun> {
+        self.agent_run_async(id).await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_run failed: {error}");
+            None
+        })
     }
 
     async fn agent_runs(&self) -> Vec<StoredAgentRun> {
-        warn_unimplemented("agent_runs");
-        Vec::new()
+        self.agent_runs_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_runs failed: {error}");
+            Vec::new()
+        })
     }
 
-    async fn agent_runs_by_ids(&self, _run_ids: &[String]) -> Vec<StoredAgentRun> {
-        warn_unimplemented("agent_runs_by_ids");
-        Vec::new()
+    async fn agent_runs_by_ids(&self, run_ids: &[String]) -> Vec<StoredAgentRun> {
+        self.agent_runs_by_ids_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_runs_by_ids failed: {error}");
+                Vec::new()
+            })
     }
 
-    async fn append_agent_run_event(
-        &self,
-        _event: StoredAgentRunEvent,
-    ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("append_agent_run_event"))
+    async fn append_agent_run_event(&self, event: StoredAgentRunEvent) -> Result<(), StorageError> {
+        self.append_agent_run_event_async(&event).await
     }
 
     async fn agent_run_events(&self) -> Vec<StoredAgentRunEvent> {
-        warn_unimplemented("agent_run_events");
-        Vec::new()
+        self.agent_run_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_run_events failed: {error}");
+            Vec::new()
+        })
     }
 
-    async fn agent_run_events_for_runs(&self, _run_ids: &[String]) -> Vec<StoredAgentRunEvent> {
-        warn_unimplemented("agent_run_events_for_runs");
-        Vec::new()
+    async fn agent_run_events_for_runs(&self, run_ids: &[String]) -> Vec<StoredAgentRunEvent> {
+        self.agent_run_events_for_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_run_events_for_runs failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn agent_run_summary_seed_ids(
         &self,
-        _request_id: Option<&str>,
-        _limit: usize,
+        request_id: Option<&str>,
+        limit: usize,
     ) -> Vec<String> {
-        warn_unimplemented("agent_run_summary_seed_ids");
-        Vec::new()
+        self.agent_run_summary_seed_ids_async(request_id, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_run_summary_seed_ids failed: {error}");
+                Vec::new()
+            })
     }
+
+    // --- Managed / self-hosted worker stores (UNIMPLEMENTED) ---
 
     async fn upsert_managed_worker_template(
         &self,

@@ -171,6 +171,33 @@ Implemented against D1:
   `list_budget_alert_notifications`. The Postgres `CHECK` on `scope_type` is
   dropped (validated in Rust); `record` is `INSERT ... ON CONFLICT (id) DO
   NOTHING` for once-per-period-per-tier idempotency.
+- **Observability append/analytics** (issue #447, control database): agent
+  runs (`upsert_agent_run`, `agent_run`, `agent_runs`, `agent_runs_by_ids`),
+  agent run events (`append_agent_run_event`, `agent_run_events`,
+  `agent_run_events_for_runs`), request logs (`append_request_log`,
+  `request_logs`, `request_logs_page`, `delete_request_logs`,
+  `request_logs_for_agent_runs`), audit events (`append_audit_event`,
+  `audit_events`, `audit_events_page`, `delete_audit_events`,
+  `audit_events_for_agent_runs`), and the cross-family
+  `agent_run_summary_seed_ids`. Each row stores the FULL record as a `*_json`
+  TEXT document (deserialized on read, mirroring the Postgres `*_json::text`
+  selects) plus the projection columns the filter/order/paginate SQL needs.
+  **Routing note:** unlike per-tenant entity data, these route to the CONTROL
+  database, not a tenant database. Their analytics reads are cross-tenant
+  whole-table scans (time-ordered, `count(*) OVER()`-paginated, and a four-way
+  `UNION ALL` seed) and the `tenant` column is a composite storage key, not a
+  routing tenant id — so a single-query control-database mirror of the Postgres
+  single-table semantics is cleaner and lossless versus a per-tenant fan-out
+  merge-sort with fetch-all-then-slice pagination. Postgres `= ANY($1)`
+  predicates become SQLite `IN (?, …)` lists; the `()`/`Vec`/`Option`-returning
+  surfaces swallow-with-warn on error like the Postgres backend, the
+  `Result`-returning ones surface it.
+- **Snapshot replay floors** (issue #206/#447, control database):
+  `get_snapshot_replay_floor`, `advance_snapshot_replay_floor`. Account-global
+  control-plane snapshot-replay state keyed by `(tenant_id, deployment_id)`.
+  The Postgres `GREATEST(...) ... RETURNING` upsert becomes a SQLite `max()`
+  upsert plus a follow-up `SELECT` (the HTTP query API has no `RETURNING`, as
+  with `take_sso_pending_flow`); `max()` keeps the stored floor monotonic.
 - **Config documents** (generic kind-keyed, control database):
   `upsert_config_document`, `delete_config_document`,
   `get_config_document`, `list_config_documents`,
@@ -183,17 +210,17 @@ Implemented against D1:
   (process-local view).
 
 Everything else — assets/channels/retention, usage monthly + metadata
-rollups, billing ledger/outbox, guardrail policy revisions/bindings, snapshot
-replay floors, request/audit logs, billing events, `persist_usage_aggregate`
-(the durable half), agent runs/events, managed/self-hosted worker stores, and
-the remaining pre-#425 per-entity dispatch surfaces (wallets, payment attempts,
-agent schedules, workflow budgets, observed agent presence, guardrail evidence,
-MCP identity) — returns the **typed `unimplemented-backend-surface` error**
-(`is_unimplemented_backend_surface` matches it) wherever the signature carries a
-`Result`, and logs a warning + returns an empty/default value where it cannot
-(the append/analytics getters). Nothing fails silently; tests pin the contract.
-(RBAC, site domains, and the budget-alert ledger from that group are now
-implemented — issue #445, see above.)
+rollups, billing ledger/outbox, guardrail policy revisions/bindings, billing
+events, `persist_usage_aggregate` (the durable half), managed/self-hosted
+worker stores, and the remaining pre-#425 per-entity dispatch surfaces (wallets,
+payment attempts, agent schedules, workflow budgets, observed agent presence,
+guardrail evidence, MCP identity) — returns the **typed
+`unimplemented-backend-surface` error** (`is_unimplemented_backend_surface`
+matches it) wherever the signature carries a `Result`, and logs a warning +
+returns an empty/default value where it cannot. Nothing fails silently; tests
+pin the contract. (RBAC, site domains, and the budget-alert ledger from that
+group are now implemented — issue #445; request/audit logs, agent runs/events,
+and snapshot replay floors — issue #447, all above.)
 
 ## Config-driven construction (issue #440)
 
@@ -236,15 +263,18 @@ defaults to `memory`).
 
 1. **Proxy-Worker D1 binding path** for the high-write surface (request logs,
    audit events, billing events, usage aggregates) and per-request reads.
-   Deferred — still typed `unimplemented-backend-surface`. This is the
-   `prepare().bind()` / `batch()` / `withSession()` binding path; it belongs
-   in a Worker (`workers/**`, out of scope for #440) rather than the raw REST
-   client, exactly as the rate-limit split dictates.
-2. The CLI hook above (config fields + `state.rs` branch) — storage side is
-   ready; only `crates/ferrogate-cli` wiring remains.
-3. Remaining entity families still erroring (assets, billing ledger/outbox,
-   agent runs, worker stores, wallets/RBAC/schedules and the other per-entity
-   surfaces).
+   Deferred — this is the `prepare().bind()` / `batch()` / `withSession()`
+   binding path, which belongs in a Worker (`workers/**`, out of scope) rather
+   than the raw REST client, exactly as the rate-limit split dictates. Issue
+   #447 lands the durable D1 SQL translation for the request/audit-log and
+   agent-run/event families over the admin HTTP path (routed to the control
+   database, above); the proxy-Worker binding is the separate hot-path
+   transport for the same tables and remains the follow-up.
+2. Remaining entity families still erroring (assets, usage rollups, billing
+   ledger/outbox + events, `persist_usage_aggregate` durable half, guardrail
+   policy revisions/bindings, managed/self-hosted worker stores, and the
+   per-entity surfaces: wallets, payment attempts, agent schedules, workflow
+   budgets, observed agent presence, MCP identity).
 4. `/raw` query variant and `batch` request shape if bulk import ever needs
    them. (Entity `SELECT`s already return their full result set in one query
    response; `list_databases` now follows REST pagination past 1,000 rows.)

@@ -347,6 +347,97 @@ CREATE TABLE IF NOT EXISTS budget_alert_notifications (
     UNIQUE (scope_type, scope_id, period_month, threshold_pct)
 );
 
+-- --- Observability append/analytics families (issue #447) ---
+--
+-- Agent runs/events plus request/audit logs. On Postgres these are single
+-- global tables scanned time-ordered across every tenant (whole-table
+-- analytics reads, count(*)-paginated, and a cross-family UNION seed query);
+-- their `tenant` column is a COMPOSITE storage key, not a routing tenant id.
+-- Routing them per tenant would force a lossy fan-out merge-sort for every
+-- list plus fetch-all-then-slice pagination, so this backend keeps them in the
+-- CONTROL database as single tables -- the faithful mirror of the Postgres
+-- single-query ordering/pagination and UNION seed. They exist in every
+-- provisioned database (one migration file) but the backend only ever
+-- reads/writes them against the control database. Each row stores the FULL
+-- record as a `*_json` TEXT document (the read paths deserialize it) plus the
+-- projection columns the filter/order/paginate SQL needs. SQLite dialect
+-- divergences match the tables above (JSONB -> TEXT, BIGINT -> INTEGER, no
+-- cross-table FOREIGN KEYs, no RLS).
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    tenant TEXT,
+    started_at_unix INTEGER NOT NULL,
+    completed_at_unix INTEGER,
+    run_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_request
+    ON agent_runs(request_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_started
+    ON agent_runs(started_at_unix);
+
+CREATE TABLE IF NOT EXISTS agent_run_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    tenant TEXT,
+    occurred_at_unix INTEGER NOT NULL,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_time
+    ON agent_run_events(run_id, occurred_at_unix);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_request
+    ON agent_run_events(request_id);
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    request_id TEXT PRIMARY KEY,
+    agent_run_id TEXT,
+    tenant TEXT,
+    started_at_unix INTEGER NOT NULL,
+    completed_at_unix INTEGER,
+    request_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_logs_agent_run
+    ON request_logs(agent_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_request_logs_started
+    ON request_logs(started_at_unix);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    tenant TEXT,
+    occurred_at_unix INTEGER NOT NULL,
+    audit_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_agent_run
+    ON audit_events(agent_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_occurred
+    ON audit_events(occurred_at_unix);
+
+-- Durable control-plane snapshot replay floor (issue #206), keyed by
+-- (tenant_id, deployment_id): the monotonic high-water revision a deployment
+-- has accepted. Account-global control-plane state (no tenant-database
+-- routing), so it lives in the CONTROL database. The Postgres upsert uses
+-- GREATEST + RETURNING; this backend uses SQLite `max()` and a follow-up
+-- SELECT (the HTTP query API exposes no RETURNING), documented in the module.
+CREATE TABLE IF NOT EXISTS control_plane_replay_floors (
+    tenant_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
+    last_accepted_revision INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, deployment_id)
+);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

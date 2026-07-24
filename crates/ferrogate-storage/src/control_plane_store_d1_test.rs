@@ -17,13 +17,16 @@ use ferrogate_cloudflare::{
     HttpResponse, HttpTransport, RetryPolicy,
 };
 
+use ferrogate_core::TenantContext;
+
 use crate::control_plane_store::ControlPlaneStore;
 use crate::{
     api_key_tenant_context, is_unimplemented_backend_surface, CloudflareD1StorageOptions,
     D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
     RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
-    StoredApiKey, StoredBudgetAlertNotification, StoredPermission, StoredPlan, StoredQuotaPolicy,
-    StoredRole, StoredSiteDomain, StoredSsoProviderConfig, StoredTenantAccount,
+    StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAuditEvent,
+    StoredBudgetAlertNotification, StoredPermission, StoredPlan, StoredQuotaPolicy,
+    StoredRequestLog, StoredRole, StoredSiteDomain, StoredSsoProviderConfig, StoredTenantAccount,
     StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
@@ -528,12 +531,13 @@ fn out_of_scope_trait_surface_errors_with_the_typed_contract() {
         "{schedule_error:?}"
     );
 
-    let replay_error = store
-        .get_snapshot_replay_floor("acme", "deploy-1")
-        .unwrap_err();
+    // A still-erroring sync surface (guardrail policy bindings): snapshot
+    // replay floors moved to the implemented set in issue #447, so the typed
+    // no-network contract is now pinned on a family that is still out of scope.
+    let guardrail_error = store.get_guardrail_policy_binding("policy-1").unwrap_err();
     assert!(
-        is_unimplemented_backend_surface(&replay_error),
-        "{replay_error:?}"
+        is_unimplemented_backend_surface(&guardrail_error),
+        "{guardrail_error:?}"
     );
 
     // No unimplemented path may reach the network.
@@ -1167,6 +1171,334 @@ fn cloudflare_d1_from_client_seeds_registry_from_config() {
     assert!(transport.recorded()[0]
         .url
         .contains("/d1/database/control-db/query"));
+}
+
+// --- Observability append/analytics families (issue #447, control database) ---
+
+fn sample_agent_run() -> StoredAgentRun {
+    StoredAgentRun {
+        id: "run-1".into(),
+        request_id: "req-1".into(),
+        trace_id: Some("trace-1".into()),
+        tenant: TenantContext::default(),
+        status: "running".into(),
+        provider: "openai".into(),
+        turns_executed: 2,
+        output_recorded: true,
+        started_at_unix: Some(1_753_000_000),
+        completed_at_unix: None,
+    }
+}
+
+fn sample_agent_run_event() -> StoredAgentRunEvent {
+    StoredAgentRunEvent {
+        id: "evt-1".into(),
+        run_id: "run-1".into(),
+        request_id: "req-1".into(),
+        trace_id: None,
+        tenant: TenantContext::default(),
+        turn: 1,
+        kind: "tool_call".into(),
+        target: "search".into(),
+        outcome: "success".into(),
+        tool_call_id: Some("call-1".into()),
+        message: None,
+        occurred_at_unix: Some(1_753_000_010),
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
+    }
+}
+
+fn sample_request_log() -> StoredRequestLog {
+    StoredRequestLog {
+        request_id: "req-1".into(),
+        trace_id: Some("trace-1".into()),
+        agent_run_id: Some("run-1".into()),
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext::default(),
+        route: Some("/v1/chat".into()),
+        provider: Some("openai".into()),
+        logical_model: Some("gpt-5".into()),
+        provider_model: Some("gpt-5-2026".into()),
+        gateway_config_id: None,
+        gateway_config_revision: None,
+        status_code: 200,
+        error_code: None,
+        prompt_recorded: false,
+        response_recorded: false,
+        prompt_body: None,
+        response_body: None,
+        cache_status: None,
+        started_at_unix: Some(1_753_000_000),
+        completed_at_unix: Some(1_753_000_002),
+        parent_action_fingerprint: None,
+    }
+}
+
+fn sample_audit_event() -> StoredAuditEvent {
+    StoredAuditEvent {
+        id: "audit-1".into(),
+        request_id: "req-1".into(),
+        trace_id: None,
+        agent_run_id: Some("run-1".into()),
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        actor_api_key_id: Some("key-1".into()),
+        tenant: TenantContext::default(),
+        action: "invoke".into(),
+        target: "gpt-5".into(),
+        outcome: "success".into(),
+        message: "ok".into(),
+        occurred_at_unix: Some(1_753_000_005),
+        action_fingerprint: None,
+        decision: None,
+        decision_reason: None,
+        output_disposition: None,
+        parent_action_fingerprint: None,
+    }
+}
+
+#[test]
+fn agent_run_round_trips_through_the_control_database() {
+    let run = sample_agent_run();
+    let run_json = serde_json::to_string(&run).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{ "document_json": run_json.clone() }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_agent_run(run.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.agent_run("run-1"))
+        .expect("agent run should decode");
+    assert_eq!(fetched, run);
+
+    let requests = transport.recorded();
+    // Observability families route to the control database, not per-tenant.
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let upsert_sql = body_sql(&requests[0]);
+    assert!(upsert_sql.starts_with("INSERT INTO agent_runs"));
+    assert!(upsert_sql.contains("ON CONFLICT (id) DO UPDATE SET"));
+    let params = body_params(&requests[0]);
+    assert_eq!(params[0], "run-1");
+    assert_eq!(params[1], "req-1");
+    assert_eq!(
+        params[3], "1753000000",
+        "started_at binds as its integer string"
+    );
+    assert_eq!(
+        params[4], "",
+        "None(completed) binds '' collapsed by NULLIF"
+    );
+    assert_eq!(
+        params[5], run_json,
+        "the full run persists as its json document"
+    );
+    assert!(body_sql(&requests[1]).contains("run_json AS document_json"));
+}
+
+#[test]
+fn request_log_appends_and_pages_from_the_control_database() {
+    let log = sample_request_log();
+    let log_json = serde_json::to_string(&log).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{ "document_json": log_json, "total": 1_i64 }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime().block_on(store.append_request_log(log.clone()));
+    let page = runtime().block_on(store.request_logs_page(0, 20));
+    assert_eq!(page.total, 1);
+    assert_eq!(page.offset, 0);
+    assert_eq!(page.limit, 20);
+    assert_eq!(page.data, vec![log]);
+
+    let requests = transport.recorded();
+    let append_sql = body_sql(&requests[0]);
+    assert!(append_sql.starts_with("INSERT INTO request_logs"));
+    assert!(append_sql.contains("ON CONFLICT (request_id) DO UPDATE SET"));
+    // agent_run_id collapses '' -> NULL; the request json is the last param.
+    assert!(append_sql.contains("NULLIF(?, '')"));
+    let page_sql = body_sql(&requests[1]);
+    assert!(page_sql.contains("count(*) OVER() AS total"));
+    assert!(
+        page_sql.contains("LIMIT 20 OFFSET 0"),
+        "page offset/limit inline as integer literals: {page_sql}"
+    );
+}
+
+#[test]
+fn audit_events_append_list_and_delete_by_id_set() {
+    let event = sample_audit_event();
+    let event_json = serde_json::to_string(&event).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "document_json": event_json }]), 0),
+            query_ok(serde_json::json!([]), 2),
+        ],
+    );
+
+    runtime().block_on(store.append_audit_event(event.clone()));
+    let listed = runtime().block_on(store.audit_events());
+    assert_eq!(listed, vec![event]);
+    let deleted = runtime()
+        .block_on(store.delete_audit_events(&["audit-1".into(), "audit-2".into()]))
+        .unwrap();
+    assert_eq!(deleted, 2);
+
+    let requests = transport.recorded();
+    // Append is idempotent by primary key (ON CONFLICT DO NOTHING).
+    assert!(body_sql(&requests[0]).contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(body_sql(&requests[1]).contains("audit_json AS document_json"));
+    let delete_sql = body_sql(&requests[2]);
+    assert!(delete_sql.starts_with("DELETE FROM audit_events WHERE id IN (?, ?)"));
+    assert_eq!(body_params(&requests[2]), vec!["audit-1", "audit-2"]);
+
+    // The empty id set short-circuits with NO network round trip.
+    let (empty_store, empty_transport) = store_with_transport(control_registry(), vec![]);
+    let none = runtime()
+        .block_on(empty_store.delete_audit_events(&[]))
+        .unwrap();
+    assert_eq!(none, 0);
+    assert!(empty_transport.recorded().is_empty());
+}
+
+#[test]
+fn agent_run_events_filter_by_run_id_set() {
+    let event = sample_agent_run_event();
+    let event_json = serde_json::to_string(&event).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "document_json": event_json }]), 0),
+        ],
+    );
+
+    runtime()
+        .block_on(store.append_agent_run_event(event.clone()))
+        .expect("append should succeed");
+    let events = runtime().block_on(store.agent_run_events_for_runs(&["run-1".into()]));
+    assert_eq!(events, vec![event]);
+
+    let requests = transport.recorded();
+    assert!(body_sql(&requests[0]).starts_with("INSERT INTO agent_run_events"));
+    let for_runs_sql = body_sql(&requests[1]);
+    assert!(for_runs_sql.contains("WHERE run_id IN (?)"));
+    assert_eq!(body_params(&requests[1]), vec!["run-1"]);
+
+    // The empty run-id set short-circuits with no further query.
+    let empty = runtime().block_on(store.agent_run_events_for_runs(&[]));
+    assert!(empty.is_empty());
+    assert_eq!(transport.recorded().len(), 2);
+}
+
+#[test]
+fn agent_run_summary_seed_ids_unions_all_four_sources() {
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![query_ok(
+            serde_json::json!([{ "run_id": "run-9" }, { "run_id": "run-3" }]),
+            0,
+        )],
+    );
+
+    let ids = runtime().block_on(store.agent_run_summary_seed_ids(Some("req-1"), 25));
+    assert_eq!(ids, vec!["run-9".to_string(), "run-3".to_string()]);
+
+    let sql = body_sql(&transport.recorded()[0]);
+    assert!(sql.contains("FROM agent_runs"));
+    assert!(sql.contains("FROM agent_run_events"));
+    assert!(sql.contains("FROM request_logs WHERE agent_run_id IS NOT NULL"));
+    assert!(sql.contains("FROM audit_events"));
+    assert!(sql.contains("UNION ALL"));
+    assert!(sql.contains("LIMIT 25"));
+    // The request_id filter binds once per subquery: four positional params.
+    assert_eq!(
+        body_params(&transport.recorded()[0]),
+        vec!["req-1", "req-1", "req-1", "req-1"]
+    );
+
+    // Absent request_id binds NO params (unfiltered UNION over the four tables).
+    let (unfiltered, unfiltered_transport) =
+        store_with_transport(control_registry(), vec![empty_query_ok()]);
+    let _ = runtime().block_on(unfiltered.agent_run_summary_seed_ids(None, 10));
+    assert!(
+        body_params(&unfiltered_transport.recorded()[0]).is_empty(),
+        "the None filter binds no params"
+    );
+}
+
+#[test]
+fn snapshot_replay_floor_upserts_monotonically_and_reads_back() {
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            // advance: the max() upsert then the follow-up SELECT.
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "last_accepted_revision": 42_i64 }]), 0),
+            // get.
+            query_ok(serde_json::json!([{ "last_accepted_revision": 42_i64 }]), 0),
+        ],
+    );
+
+    let floor = store
+        .advance_snapshot_replay_floor("acme", "deploy-1", 42, 1_753_000_000)
+        .unwrap();
+    assert_eq!(floor, 42);
+    let read = store
+        .get_snapshot_replay_floor("acme", "deploy-1")
+        .unwrap()
+        .expect("floor should be present");
+    assert_eq!(read, 42);
+
+    let requests = transport.recorded();
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let upsert_sql = body_sql(&requests[0]);
+    assert!(upsert_sql.starts_with("INSERT INTO control_plane_replay_floors"));
+    assert!(
+        upsert_sql.contains("max("),
+        "the monotonic upsert uses SQLite max(): {upsert_sql}"
+    );
+    assert_eq!(
+        body_params(&requests[0]),
+        vec!["acme", "deploy-1", "42", "1753000000"]
+    );
+    // No RETURNING: the resulting floor comes from a follow-up SELECT.
+    assert!(body_sql(&requests[1]).contains("SELECT last_accepted_revision"));
+
+    // An absent floor reads back as None.
+    let (missing_store, _missing_transport) =
+        store_with_transport(control_registry(), vec![empty_query_ok()]);
+    let missing = missing_store
+        .get_snapshot_replay_floor("acme", "deploy-2")
+        .unwrap();
+    assert!(missing.is_none());
 }
 
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---
