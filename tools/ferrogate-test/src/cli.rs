@@ -52,6 +52,8 @@ pub(crate) enum Commands {
     SupabaseLiveToken4aiProvider(SupabaseLiveToken4aiProviderArgs),
     /// Run Guardrail detector E2E and verify durable evidence directly in live Supabase.
     GuardrailSupabase(SupabaseLiveRestartArgs),
+    /// Run config-selected Workers AI Llama Guard detector E2E against a local mock Workers AI endpoint (#430).
+    GuardrailWorkersAiLlamaGuard(LocalArgs),
     /// Run per-user MCP OAuth identity isolation and DB-RBAC E2E against live Supabase.
     McpIdentitySupabase(SupabaseLiveRestartArgs),
     /// Prove target-capability RBAC write/read/runtime equality in live Supabase.
@@ -215,6 +217,7 @@ pub(crate) struct Dispatch {
     pub(crate) supabase_live_restart: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_live_token4ai_provider: fn(&SupabaseLiveToken4aiProviderArgs) -> Result<()>,
     pub(crate) guardrail_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
+    pub(crate) guardrail_workers_ai_llama_guard: fn(&LocalArgs) -> Result<()>,
     pub(crate) mcp_identity_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) target_capability_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_migration: fn(&LocalArgs) -> Result<()>,
@@ -231,7 +234,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, guardrail-supabase (live Supabase required), mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -260,6 +263,9 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
             (dispatch.supabase_live_token4ai_provider)(&args)
         }
         Commands::GuardrailSupabase(args) => (dispatch.guardrail_supabase)(&args),
+        Commands::GuardrailWorkersAiLlamaGuard(args) => {
+            (dispatch.guardrail_workers_ai_llama_guard)(&args)
+        }
         Commands::McpIdentitySupabase(args) => (dispatch.mcp_identity_supabase)(&args),
         Commands::TargetCapabilitySupabase(args) => (dispatch.target_capability_supabase)(&args),
         Commands::SupabaseMigration(args) => (dispatch.supabase_migration)(&args),
