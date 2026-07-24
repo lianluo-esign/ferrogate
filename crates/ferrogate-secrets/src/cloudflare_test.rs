@@ -346,6 +346,15 @@ fn create_secret_rejects_value_exceeding_beta_cap() {
     );
 }
 
+/// JSON array of `count` secret metadata items (`bulk-0` … `bulk-{count-1}`),
+/// for scripting a store that already holds a given number of secrets.
+fn secrets_listing_json(count: usize) -> String {
+    let items: Vec<String> = (0..count)
+        .map(|index| format!(r#"{{"id":"sec-{index}","name":"bulk-{index}"}}"#))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 #[test]
 fn create_secret_writes_via_rest() {
     let mut routes = HashMap::new();
@@ -354,6 +363,14 @@ fn create_secret_writes_via_rest() {
         (
             200,
             ok_envelope(r#"[{"id":"store-1","name":"provider-keys"}]"#),
+        ),
+    );
+    // The #418 budget guardrail counts the store's secrets before writing.
+    routes.insert(
+        format!("Get {BASE}/stores/store-1/secrets"),
+        (
+            200,
+            ok_envelope(r#"[{"id":"sec-1","name":"openai-api-key"}]"#),
         ),
     );
     routes.insert(
@@ -370,4 +387,63 @@ fn create_secret_writes_via_rest() {
         )
         .unwrap();
     assert_eq!(id, "sec-new");
+}
+
+#[test]
+fn create_secret_rejects_new_secret_when_store_is_at_the_budget() {
+    // 100 existing secrets = the full beta budget. Deliberately NO Post route:
+    // the guardrail must fail before any create request, so a POST attempt
+    // would surface as the loud "unscripted request" error instead.
+    let mut routes = HashMap::new();
+    routes.insert(
+        format!("Get {BASE}/stores"),
+        (
+            200,
+            ok_envelope(r#"[{"id":"store-1","name":"provider-keys"}]"#),
+        ),
+    );
+    routes.insert(
+        format!("Get {BASE}/stores/store-1/secrets"),
+        (200, ok_envelope(&secrets_listing_json(100))),
+    );
+    let resolver = resolver_with(routes);
+    let error = resolver
+        .create_secret("provider-keys", "one-too-many", "sk-value", None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("100 secrets") && error.contains("budget"),
+        "budget error must state usage vs budget: {error}"
+    );
+    assert!(
+        !error.contains("unscripted request"),
+        "the guardrail must fire before any create request: {error}"
+    );
+}
+
+#[test]
+fn create_secret_allows_overwrite_when_store_is_at_the_budget() {
+    // Overwriting an existing name consumes no new slot, so it stays allowed
+    // even with the budget fully consumed (the soft-cap warning is logged).
+    let mut routes = HashMap::new();
+    routes.insert(
+        format!("Get {BASE}/stores"),
+        (
+            200,
+            ok_envelope(r#"[{"id":"store-1","name":"provider-keys"}]"#),
+        ),
+    );
+    routes.insert(
+        format!("Get {BASE}/stores/store-1/secrets"),
+        (200, ok_envelope(&secrets_listing_json(100))),
+    );
+    routes.insert(
+        format!("Post {BASE}/stores/store-1/secrets"),
+        (200, ok_envelope(r#"[{"id":"sec-7","name":"bulk-7"}]"#)),
+    );
+    let resolver = resolver_with(routes);
+    let id = resolver
+        .create_secret("provider-keys", "bulk-7", "rotated-value", None)
+        .unwrap();
+    assert_eq!(id, "sec-7");
 }

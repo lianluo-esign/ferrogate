@@ -26,6 +26,7 @@ use ferrogate_cloudflare::{
 use serde::Deserialize;
 
 use crate::cloudflare_bindings::cf_binding_env_var;
+use crate::cloudflare_caps::CfSecretsCapacityPolicy;
 use crate::{non_empty_env, SecretRef, SecretResolver};
 
 /// Cloudflare Secrets Store **beta** capacity caps, per account. The resolver
@@ -127,11 +128,17 @@ struct CfSecretCreate<'a> {
 /// [`CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT`] store,
 /// [`CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT`] secrets, and
 /// [`CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES`] per value. The
-/// [`create_secret`](Self::create_secret) write path enforces the value-size
-/// cap client-side before any network call, and documents the account-level
-/// count caps (which Cloudflare enforces server-side).
+/// [`create_secret`](Self::create_secret) write path enforces both fail-fast
+/// through the attached [`CfSecretsCapacityPolicy`] (issue #418): the
+/// value-size cap client-side before any network call, and the secret-count
+/// budget (hard error for a new secret at the budget, soft warning near it)
+/// against the store's current secret listing — instead of letting Cloudflare
+/// reject the write server-side with an opaque error. See
+/// `docs/cloudflare-secrets-tenancy.md` for the tenancy decision the budget
+/// protects.
 pub struct CloudflareSecretResolver {
     client: CloudflareClient,
+    capacity: CfSecretsCapacityPolicy,
 }
 
 // `CloudflareClient` intentionally does not derive `Debug` (it holds redacted
@@ -159,22 +166,44 @@ impl CloudflareSecretResolver {
             .map_err(|error| {
                 anyhow::anyhow!("failed to build Cloudflare Secrets Store client: {error}")
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            capacity: CfSecretsCapacityPolicy::from_env(),
+        })
     }
 
     /// Assemble a resolver from an already-built [`CloudflareClient`] — the
     /// seam tests use to inject a scripted [`ferrogate_cloudflare::HttpTransport`]
-    /// so resolution is exercised with no network.
+    /// so resolution is exercised with no network. Uses the default (beta-cap)
+    /// [`CfSecretsCapacityPolicy`]; override with
+    /// [`with_capacity_policy`](Self::with_capacity_policy).
     pub fn from_client(client: CloudflareClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            capacity: CfSecretsCapacityPolicy::default(),
+        }
+    }
+
+    /// Replace the capacity guardrail policy enforced by
+    /// [`create_secret`](Self::create_secret).
+    pub fn with_capacity_policy(mut self, capacity: CfSecretsCapacityPolicy) -> Self {
+        self.capacity = capacity;
+        self
     }
 
     /// Create (or overwrite) a secret value in the store — the **write** side
-    /// of the manage plane (`POST .../secrets`). Enforces the beta value-size
-    /// cap ([`CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES`]) client-side before any
-    /// network call; the account-level 1-store / 100-secret caps are enforced
-    /// by Cloudflare and surfaced verbatim through the returned error. Returns
-    /// the new secret's id on success.
+    /// of the manage plane (`POST .../secrets`). Guardrails (issue #418) run
+    /// fail-fast through the attached [`CfSecretsCapacityPolicy`]:
+    ///
+    /// 1. value-size check **before any network call** — an oversized value
+    ///    errors with its exact byte count and the cap in force;
+    /// 2. secret-count budget check against the store's current listing —
+    ///    creating a **new** secret with the budget already consumed errors
+    ///    before the create request is issued (overwriting an existing name
+    ///    consumes no slot and stays allowed), and a write landing near the
+    ///    budget logs a capacity warning.
+    ///
+    /// Returns the new secret's id on success.
     pub fn create_secret(
         &self,
         store: &str,
@@ -182,13 +211,7 @@ impl CloudflareSecretResolver {
         value: &str,
         comment: Option<&str>,
     ) -> AnyResult<String> {
-        if value.len() > CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES {
-            bail!(
-                "Cloudflare Secrets Store value for cf://{store}/{name} is {} bytes, exceeding the beta cap of {} bytes per secret value",
-                value.len(),
-                CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES
-            );
-        }
+        self.capacity.check_value_size(store, name, value)?;
         if name.is_empty() {
             bail!("Cloudflare Secrets Store secret name must not be empty");
         }
@@ -207,6 +230,24 @@ impl CloudflareSecretResolver {
                 "Cloudflare Secrets Store {store} not found (the beta allows {CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT} store per account)"
             )
         })?;
+        // Secret-count budget guardrail (issue #418): reuse the existing
+        // manage-plane listing to count the store's secrets and detect whether
+        // this write overwrites an existing name (no new slot) or creates a
+        // new one — and fail fast / warn per the capacity policy BEFORE the
+        // create request is issued.
+        let existing = self.list_secrets(&store_id).await?;
+        let name_already_exists = existing.iter().any(|candidate| candidate.name == name);
+        if let Some(warning) =
+            self.capacity
+                .check_secret_budget(store, name, existing.len(), name_already_exists)?
+        {
+            tracing::warn!(
+                used_after_write = warning.used_after_write,
+                max_secrets = warning.max_secrets,
+                warn_at_secrets = warning.warn_at_secrets,
+                "{warning}"
+            );
+        }
         let batch = [CfSecretCreate {
             name,
             value,
@@ -283,10 +324,11 @@ impl CloudflareSecretResolver {
             .map(|candidate| candidate.id))
     }
 
-    /// List a store's secrets and resolve `name` to a secret id.
-    async fn resolve_secret_id(&self, store_id: &str, name: &str) -> AnyResult<Option<String>> {
-        let secrets: Vec<CfNamedResource> = self
-            .client
+    /// List a store's secrets (metadata only — ids and names, never values).
+    /// Shared by the existence check ([`resolve_secret_id`](Self::resolve_secret_id))
+    /// and the #418 secret-count budget guardrail in the write path.
+    async fn list_secrets(&self, store_id: &str) -> AnyResult<Vec<CfNamedResource>> {
+        self.client
             .get_json(
                 &format!("accounts/{{account_id}}/secrets_store/stores/{store_id}/secrets"),
                 None,
@@ -297,8 +339,14 @@ impl CloudflareSecretResolver {
                     error,
                     &format!("failed to list secrets in Cloudflare Secrets Store {store_id}"),
                 )
-            })?;
-        Ok(secrets
+            })
+    }
+
+    /// List a store's secrets and resolve `name` to a secret id.
+    async fn resolve_secret_id(&self, store_id: &str, name: &str) -> AnyResult<Option<String>> {
+        Ok(self
+            .list_secrets(store_id)
+            .await?
             .into_iter()
             .find(|candidate| candidate.name == name)
             .map(|candidate| candidate.id))

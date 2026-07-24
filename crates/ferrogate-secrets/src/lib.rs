@@ -34,12 +34,17 @@
 
 mod cloudflare;
 mod cloudflare_bindings;
+mod cloudflare_caps;
 
 pub use cloudflare::{
     CfSecretsStoreConfig, CloudflareSecretResolver, CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT,
     CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT, CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
 };
 pub use cloudflare_bindings::{cf_binding_env_var, CfSecretBindings, CF_BINDING_ENV_PREFIX};
+pub use cloudflare_caps::{
+    CfSecretsCapacityPolicy, CfSecretsCapacityWarning, CF_SECRETS_MAX_SECRETS_ENV,
+    CF_SECRETS_MAX_VALUE_BYTES_ENV, CF_SECRETS_WARN_AT_ENV, DEFAULT_CF_SECRETS_WARN_AT,
+};
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -549,6 +554,10 @@ fn send_http_request<S: Read + Write>(
 #[cfg(test)]
 #[path = "cloudflare_test.rs"]
 mod cloudflare_test;
+
+#[cfg(test)]
+#[path = "cloudflare_caps_test.rs"]
+mod cloudflare_caps_test;
 
 #[cfg(test)]
 mod tests {
