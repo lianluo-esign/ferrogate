@@ -20,8 +20,9 @@ use ferrogate_runtime::{
 };
 
 use crate::{
-    backends::FirecrackerMicroVm, docker_backend::DockerIsolationBackend,
-    handler_runtime::HandlerRunState, local_process_backend::LocalProcessIsolationBackend,
+    backends::FirecrackerMicroVm, cloudflare_container_backend::ManagedContainerBackend,
+    docker_backend::DockerIsolationBackend, handler_runtime::HandlerRunState,
+    local_process_backend::LocalProcessIsolationBackend,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,11 +145,35 @@ pub(crate) trait AgentWorkerStateStore {
         run_id: &str,
     ) -> Option<LocalProcessIsolationBackend>;
 
+    /// The gateway-driven Cloudflare container backend (issue #442) is stored
+    /// behind the object-safe [`ManagedContainerBackend`] handle so one map can
+    /// hold backends built from either the production block-on transport or a
+    /// mock, exactly like the Docker/local-process tiers hold their concrete
+    /// backends.
+    fn get_cloudflare_container_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut (dyn ManagedContainerBackend + 'static)>;
+
+    fn put_cloudflare_container_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: Box<dyn ManagedContainerBackend>,
+    );
+
+    fn remove_cloudflare_container_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<Box<dyn ManagedContainerBackend>>;
+
     #[cfg(test)]
     fn lifecycle_events(&self) -> Vec<StoredLifecycleEvent>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct InMemoryAgentWorkerStateStore {
     idempotent_responses: HashMap<String, AgentWorkerManagementResponse>,
     lifecycle_events: Vec<StoredLifecycleEvent>,
@@ -156,6 +181,27 @@ pub(crate) struct InMemoryAgentWorkerStateStore {
     firecracker_vms: HashMap<String, FirecrackerMicroVm>,
     docker_backends: HashMap<String, DockerIsolationBackend>,
     local_process_backends: HashMap<String, LocalProcessIsolationBackend>,
+    // Boxed gateway-driven container backends (issue #442) are not `Debug`
+    // (their transport is a trait object), so `Debug` is implemented by hand
+    // below and this field is summarized by count rather than derived.
+    cloudflare_container_backends: HashMap<String, Box<dyn ManagedContainerBackend>>,
+}
+
+impl std::fmt::Debug for InMemoryAgentWorkerStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryAgentWorkerStateStore")
+            .field("idempotent_responses", &self.idempotent_responses)
+            .field("lifecycle_events", &self.lifecycle_events)
+            .field("handler_runs", &self.handler_runs)
+            .field("firecracker_vms", &self.firecracker_vms)
+            .field("docker_backends", &self.docker_backends)
+            .field("local_process_backends", &self.local_process_backends)
+            .field(
+                "cloudflare_container_backends",
+                &self.cloudflare_container_backends.len(),
+            )
+            .finish()
+    }
 }
 
 impl InMemoryAgentWorkerStateStore {
@@ -333,6 +379,35 @@ impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
         run_id: &str,
     ) -> Option<LocalProcessIsolationBackend> {
         self.local_process_backends
+            .remove(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn get_cloudflare_container_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut (dyn ManagedContainerBackend + 'static)> {
+        self.cloudflare_container_backends
+            .get_mut(&Self::microvm_key(session_id, run_id))
+            .map(|backend| backend.as_mut())
+    }
+
+    fn put_cloudflare_container_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: Box<dyn ManagedContainerBackend>,
+    ) {
+        self.cloudflare_container_backends
+            .insert(Self::microvm_key(&session_id, &run_id), backend);
+    }
+
+    fn remove_cloudflare_container_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<Box<dyn ManagedContainerBackend>> {
+        self.cloudflare_container_backends
             .remove(&Self::microvm_key(session_id, run_id))
     }
 

@@ -169,6 +169,41 @@ fn cloudflare_container_registered_backend() -> RegisteredIsolationBackend {
     }
 }
 
+/// Environment variable an operator sets to pin managed provisioning to a
+/// specific isolation backend by its wire kind (issue #442). This is the ONLY
+/// way to reach a gateway-driven tier: the automatic on-host ranking
+/// (`selectable_isolation_backend_descriptors` + `select_isolation_backend`)
+/// deliberately never returns one, so a remote backend can only be provisioned
+/// when the operator asks for it by name.
+pub(crate) const PROVISION_ISOLATION_BACKEND_ENV: &str = "AGENT_WORKER_PROVISION_ISOLATION_BACKEND";
+
+/// The wire kind an operator has pinned provisioning to, if any. Absent or blank
+/// means "use the default on-host selection".
+pub(crate) fn operator_pinned_isolation_backend() -> Option<String> {
+    env::var(PROVISION_ISOLATION_BACKEND_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Resolve the ready Cloudflare container descriptor for an EXPLICIT operator
+/// provision request, or an error explaining why the tier is unavailable (fail
+/// closed). This is the only path that hands a gateway-driven descriptor to the
+/// provision dispatch; the on-host selectable set never includes it. Readiness
+/// means the backend is enabled and its fronting-Worker URL + control token are
+/// configured — no network call is made here.
+pub(crate) fn ready_cloudflare_container_descriptor() -> Result<IsolationBackendDescriptor, String>
+{
+    let backend = cloudflare_container_registered_backend();
+    if backend.ready {
+        Ok(backend.descriptor)
+    } else {
+        Err(backend.readiness_reason.unwrap_or_else(|| {
+            "cloudflare container backend is not ready for provisioning".to_string()
+        }))
+    }
+}
+
 /// The local-process (Linux namespace) backend is a third real host
 /// implementation for daemon-less, unprivileged hosts. Readiness is probed
 /// with real `unshare` namespace invocations; if the host cannot provide the

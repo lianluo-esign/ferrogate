@@ -38,12 +38,14 @@
 //!
 //! The REMOTE-provisioning dispatch that constructs this backend from a
 //! production [`ferrogate_runtime::BlockingHttpControlTransport`] and drives it
-//! from the management lifecycle (mirroring `provision_docker` in
-//! `lifecycle.rs`, plus per-session storage in `state.rs`) is deferred to a
-//! follow-up slice — see the issue #415 "remaining" enumeration. Until that
-//! dispatch consumes this backend the non-test build has no caller, so
-//! `dead_code` is allowed off the test path, mirroring `x402_client.rs`.
-#![cfg_attr(not(test), allow(dead_code))]
+//! from the management lifecycle lands in issue #442: an operator pins the
+//! Cloudflare container tier explicitly and the provision path mirrors
+//! `provision_docker` in `lifecycle.rs` (through the split
+//! `cloudflare_container_lifecycle.rs` module), with per-session storage in
+//! `state.rs`. Because that dispatch has to hold backends built from different
+//! transports (the production block-on bridge, or a mock in offline tests)
+//! behind one in-memory map, it stores them through the object-safe
+//! [`ManagedContainerBackend`] handle below.
 
 use std::env;
 
@@ -171,6 +173,11 @@ impl<T: GatewayControlTransport> CloudflareContainerIsolationBackend<T> {
     }
 
     /// The descriptor this backend was constructed from, for evidence/identity.
+    /// The remote-provisioning dispatch reads the descriptor through the runtime
+    /// [`ferrogate_runtime::IsolationBackendLifecycle::descriptor`] contract on
+    /// the [`ManagedContainerBackend`] handle, so this inherent accessor is only
+    /// used by the backend's own tests.
+    #[cfg(test)]
     pub(crate) fn backend_descriptor(&self) -> &IsolationBackendDescriptor {
         &self.descriptor
     }
@@ -384,6 +391,33 @@ impl<T: GatewayControlTransport> ferrogate_runtime::IsolationBackendLifecycle
             instance_id: instance_id.to_string(),
             evidence,
         })
+    }
+}
+
+/// Object-safe handle for a provisioned Cloudflare container backend kept in the
+/// agent-worker session state (issue #442).
+///
+/// The remote-provisioning dispatch stores the backend behind this trait so the
+/// in-memory state can keep a single concrete map regardless of the
+/// [`GatewayControlTransport`] `T` the backend was built from — the production
+/// block-on HTTP bridge, or a scripted mock in offline unit tests. It extends
+/// the runtime [`ferrogate_runtime::IsolationBackendLifecycle`] contract with
+/// the instance id assigned at `start`, so the exec/stop/logs/artifacts/cleanup
+/// dispatch threads the same evidence id the Docker and local-process tiers do.
+/// `Send` is required because the state store is shared across the worker's
+/// serving threads behind an `Arc<Mutex<…>>`.
+pub(crate) trait ManagedContainerBackend:
+    ferrogate_runtime::IsolationBackendLifecycle + Send
+{
+    /// The isolation instance id assigned at `start`, if the instance is up.
+    fn stored_instance_id(&self) -> Option<&str>;
+}
+
+impl<T: GatewayControlTransport + 'static> ManagedContainerBackend
+    for CloudflareContainerIsolationBackend<T>
+{
+    fn stored_instance_id(&self) -> Option<&str> {
+        self.instance_id()
     }
 }
 

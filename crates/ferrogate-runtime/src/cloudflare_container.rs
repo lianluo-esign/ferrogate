@@ -580,6 +580,40 @@ impl<T: GatewayControlTransport> ContainerControlClient<T> {
     }
 }
 
+impl ContainerControlClient<crate::cloudflare_gateway_control::BlockingHttpControlTransport> {
+    /// Build a **production** container client that drives the deployed
+    /// agent-gateway Worker over real HTTP.
+    ///
+    /// This is the constructor the `agent-worker` remote-provisioning dispatch
+    /// (issue #442) uses: it wraps the reqwest [`crate::HttpTransport`] in the
+    /// synchronous block-on bridge ([`crate::BlockingHttpControlTransport`]) so
+    /// the whole `/container/*` verb set is reachable from the worker's
+    /// non-async lifecycle path without that crate taking a direct
+    /// `ferrogate-cloudflare`/`tokio` dependency. Offline unit tests construct
+    /// the client with [`ContainerControlClient::new`] and a mock
+    /// [`GatewayControlTransport`] instead, so this bridge is only exercised
+    /// against a live Worker (the test gate's coverage).
+    pub fn production(
+        base_url: impl Into<String>,
+        control_token: impl Into<String>,
+    ) -> Result<Self, ContainerControlError> {
+        let http = ferrogate_cloudflare::ReqwestTransport::new().map_err(|e| {
+            ContainerControlError::Transport(format!(
+                "failed to build the Cloudflare container HTTP transport: {e}"
+            ))
+        })?;
+        let transport = crate::cloudflare_gateway_control::BlockingHttpControlTransport::new(
+            std::sync::Arc::new(http),
+        )
+        .map_err(|e| {
+            ContainerControlError::Transport(format!(
+                "failed to build the Cloudflare container control transport bridge: {e}"
+            ))
+        })?;
+        Ok(Self::new(base_url, control_token, transport))
+    }
+}
+
 /// Map a non-2xx container-route response onto the typed error vocabulary.
 fn map_error(verb: &'static str, response: &HttpResponse) -> ContainerControlError {
     let body_text = String::from_utf8_lossy(&response.body).into_owned();

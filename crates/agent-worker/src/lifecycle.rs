@@ -77,6 +77,40 @@ fn provision(
     // can NEVER be selected as a silent degradation — a missing KVM/bundle
     // preflight becomes an explicit microvm_required_backend_unavailable error.
     let microvm_required = crate::backends::microvm_isolation_required();
+
+    // Explicit gateway-driven remote provisioning (issue #442). The Cloudflare
+    // Containers/Sandbox tier is gateway-driven, so it is deliberately excluded
+    // from the on-host selectable set below and can never be picked by the
+    // automatic ranking (fail-closed). An operator opts a session into it by
+    // pinning AGENT_WORKER_PROVISION_ISOLATION_BACKEND=cloudflare_container;
+    // only then is it provisioned through the fronting agent-gateway Worker.
+    // Any other pin value defers to the on-host selection below.
+    if let Some(pinned) = crate::backends::operator_pinned_isolation_backend() {
+        if pinned == isolation_backend_kind_wire(&IsolationBackendKind::CloudflareContainer) {
+            if microvm_required {
+                // A microVM-required workload (#280) must never fall to a
+                // non-microVM backend, even one an operator pinned.
+                return Err(microvm_required_unavailable_error(
+                    "operator pinned the Cloudflare container tier, but this workload requires \
+                     Firecracker microVM isolation",
+                ));
+            }
+            let selected =
+                crate::backends::ready_cloudflare_container_descriptor().map_err(|reason| {
+                    ManagedWorkerError::management_protocol_error(
+                        AgentWorkerManagementErrorCode::IncompatibleBackend,
+                        format!(
+                            "agent-worker Cloudflare container provision refused (fail closed): \
+                             {reason}"
+                        ),
+                    )
+                })?;
+            return crate::cloudflare_container_lifecycle::provision_cloudflare_container(
+                state, envelope, &selected,
+            );
+        }
+    }
+
     let selection_policy = if microvm_required {
         IsolationPolicy {
             allowed_kinds: vec![IsolationBackendKind::FirecrackerMicroVm],
@@ -235,7 +269,7 @@ fn microvm_required_unavailable_error(reason: &str) -> ManagedWorkerError {
 // are identical regardless of which backend serviced the session — that is the
 // replaceability #82 requires.
 
-fn isolation_prepare_request(
+pub(crate) fn isolation_prepare_request(
     envelope: &AgentWorkerManagementEnvelope,
     session_id: &str,
     run_id: &str,
@@ -1108,6 +1142,17 @@ fn exec_or_attach(
     {
         return exec_or_attach_local_process(state, envelope, &session_id, &run_id, worker_mode);
     }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::exec_or_attach_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
         // Real guest execution (#280): when the host opts into the vsock
@@ -1254,6 +1299,17 @@ fn stream_status(
     {
         return stream_status_local_process(state, envelope, &session_id, &run_id);
     }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::stream_status_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
         let lifecycle = lifecycle_result_with_instance(
@@ -1293,6 +1349,17 @@ fn collect_artifacts(
     {
         return collect_artifacts_local_process(state, envelope, &session_id, &run_id);
     }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::collect_artifacts_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         return Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
             artifacts: existing.artifact_results(),
@@ -1323,6 +1390,17 @@ fn stop(
         .is_some()
     {
         return stop_local_process(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::stop_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
     }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
@@ -1365,6 +1443,17 @@ fn snapshot_or_checkpoint(
         .is_some()
     {
         return snapshot_local_process(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::snapshot_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
@@ -1424,6 +1513,17 @@ fn cleanup(
         .is_some()
     {
         return cleanup_local_process(state, envelope, &session_id, &run_id);
+    }
+    if state
+        .get_cloudflare_container_backend_mut(&session_id, &run_id)
+        .is_some()
+    {
+        return crate::cloudflare_container_lifecycle::cleanup_cloudflare_container(
+            state,
+            envelope,
+            &session_id,
+            &run_id,
+        );
     }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
@@ -1491,7 +1591,7 @@ fn lifecycle_not_started(
 /// result. Provision records the backend actually selected through the
 /// registry contract; pre-provision status paths report the managed default
 /// with an empty version, meaning "no backend selected yet".
-struct LifecycleBackendIdentity {
+pub(crate) struct LifecycleBackendIdentity {
     name: String,
     kind: String,
     version: String,
@@ -1509,7 +1609,7 @@ impl LifecycleBackendIdentity {
         }
     }
 
-    fn from_descriptor(descriptor: &IsolationBackendDescriptor) -> Self {
+    pub(crate) fn from_descriptor(descriptor: &IsolationBackendDescriptor) -> Self {
         Self {
             name: descriptor.backend_name.clone(),
             kind: isolation_backend_kind_wire(&descriptor.kind).to_string(),
@@ -1551,7 +1651,7 @@ fn lifecycle_result_with_instance(
     )
 }
 
-fn lifecycle_result_for_backend(
+pub(crate) fn lifecycle_result_for_backend(
     envelope: &AgentWorkerManagementEnvelope,
     status: ManagedWorkerSessionStatus,
     outcome: &str,
@@ -1574,7 +1674,7 @@ fn lifecycle_result_for_backend(
     })
 }
 
-fn lifecycle_session_id(
+pub(crate) fn lifecycle_session_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {
     envelope.session_id.clone().ok_or_else(|| {
@@ -1585,7 +1685,7 @@ fn lifecycle_session_id(
     })
 }
 
-fn lifecycle_run_id(
+pub(crate) fn lifecycle_run_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {
     envelope.run_id.clone().ok_or_else(|| {
