@@ -13,6 +13,7 @@ mod compliance;
 mod constants;
 mod docker;
 mod fixtures;
+mod function_egress_cloudflare;
 mod guardrails;
 mod http;
 mod local;
@@ -28,6 +29,7 @@ mod workers_ai_guardrail;
 use api_contract::run_api_contract;
 use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
+use function_egress_cloudflare::run_function_egress_cloudflare_api;
 use guardrails::run_guardrail_supabase;
 use mcp_identity::run_mcp_identity_supabase;
 use scenarios::{
@@ -52,6 +54,7 @@ fn main() -> Result<()> {
         component_compliance_supabase: run_component_compliance_supabase,
         gateway_billing_chain: run_gateway_billing_chain,
         function_egress: run_function_egress_api,
+        function_egress_cloudflare: run_function_egress_cloudflare_api,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
         supabase_live_restart: run_supabase_live_restart,
@@ -86,6 +89,7 @@ fn main() -> Result<()> {
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
             run_function_egress_api(local)?;
+            run_function_egress_cloudflare_api(local)?;
             run_workers_ai_llama_guard(local)?;
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
