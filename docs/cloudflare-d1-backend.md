@@ -4,9 +4,12 @@ Status: first slice landed (issue #420); auth/quota entity families + the
 storage-side config-driven construction route + `list_databases` pagination
 landed (issue #440); the ferrogate-cli construction hook (config fields +
 `state.rs` branch) + the RBAC / site-domain / budget-alert-ledger entity
-families landed (issue #445). Builds on the shared Cloudflare client (#405), the
-`ControlPlaneStore` trait extraction (#419), and the #425 dispatch
-consolidation.
+families landed (issue #445); the observability append/analytics families
+(agent runs/events, request/audit logs) + snapshot replay floors landed (issue
+#447); and the billing ledger/outbox/events, guardrail policy
+revisions/bindings, and managed + self-hosted worker stores landed (issue #449).
+Builds on the shared Cloudflare client (#405), the `ControlPlaneStore` trait
+extraction (#419), and the #425 dispatch consolidation.
 
 FerroGate's third control-plane storage backend persists control-plane
 entities in **per-tenant Cloudflare D1 databases** driven over the D1 REST
@@ -48,7 +51,16 @@ already provides.
   account-scoped configuration, not per-request tenant data — admin identities
   span tenants, quota lookups carry no tenant context, and site-domain lookups
   resolve by hostname with no tenant context — so they are never fanned out over
-  tenant databases.
+  tenant databases. It also holds the issue #447 observability tables
+  (`agent_runs`, `agent_run_events`, `request_logs`, `audit_events`,
+  `control_plane_replay_floors`) and the issue #449 billing
+  (`billing_ledger`, `billing_report_outbox`, `billing_events`), guardrail
+  (`guardrail_policy_revisions`, `guardrail_policy_bindings`), and managed /
+  self-hosted worker-store tables — all whole-table cross-tenant reads whose
+  `tenant` column is a composite storage key, not a routing id, so a single
+  control-database mirror is cleaner than a lossy per-tenant fan-out. Each of
+  those stores the full record as a `*_json` document plus projection columns
+  for its filter/order/paginate SQL.
 - **Tenant databases** (`ferrogate-tenant-<tenant_id>`, one per tenant):
   that tenant's `projects`, `workspaces`, and `api_keys` rows.
 - Writes route on the entity's `tenant_id`. An empty `tenant_id` routes to
@@ -198,6 +210,42 @@ Implemented against D1:
   The Postgres `GREATEST(...) ... RETURNING` upsert becomes a SQLite `max()`
   upsert plus a follow-up `SELECT` (the HTTP query API has no `RETURNING`, as
   with `take_sso_pending_flow`); `max()` keeps the stored floor monotonic.
+- **Billing ledger + report outbox + billing events** (issue #449, control
+  database): the ledger (`append_billing_ledger_entry` — idempotent
+  `INSERT ... DO NOTHING` plus a reload/settlement-compare on conflict —
+  `list_billing_ledger_entries`, `billing_ledger_entry`), the report outbox
+  (`enqueue_billing_report`, `list_due_billing_reports`,
+  `reschedule_billing_report`, `dead_letter_billing_report`,
+  `list_dead_lettered_billing_reports`, `replay_dead_lettered_billing_report` —
+  a guarded `UPDATE` plus a follow-up `SELECT` for the terminal state, no
+  `RETURNING` — `get_billing_report_outbox_entry`, `delete_billing_report`), and
+  settled metering events (`append_billing_event`, `billing_events`,
+  `billing_events_page`). Billing is account-global cross-tenant metering with
+  whole-table reads, so it routes to the CONTROL database like the #447
+  observability families; each row stores the full record as a `*_json`
+  document plus the filter/order/paginate projection columns, with the outbox
+  attempt/schedule state kept as columns so reschedule/dead-letter/replay stay
+  single-statement `UPDATE`s. `append_billing_event_with_outbox_enqueue` (the
+  two-table atomic enqueue, issue #150) stays erroring.
+- **Guardrail policy revisions + bindings** (issue #449, control database):
+  `insert_guardrail_policy_revision` (idempotent on `(policy_id, revision)`,
+  typed `Conflict` on replay), `get_guardrail_policy_revision`,
+  `list_guardrail_policy_revisions`, `get_guardrail_policy_binding`,
+  `list_guardrail_policy_bindings`. Account-global guardrail configuration
+  (like plans/RBAC). The generation-guarded `activate`/`archive`/`restore` CAS
+  transitions stay erroring (they need the compare-and-swap transaction the D1
+  HTTP query API lacks).
+- **Managed worker stores** (issue #449, control database): templates, agent
+  worker instances, sessions, lifecycle events, and the isolation
+  selection/policy/evidence trio — each an `upsert`/`append` of the full record
+  as a `*_json` document plus an ORDER BY projection column, and a whole-table
+  list.
+- **Self-hosted worker stores** (issue #449, control database): registrations
+  (+ single-get), heartbeats (+ `latest_self_hosted_worker_heartbeat`),
+  telemetry events (+ per-run newest-window and per-worker filtered reads),
+  artifacts (+ single-get), checkpoints (+ single-get), run dispatches (the
+  Postgres capability side-table folds into the dispatch document), and
+  `self_hosted_worker_activity_stats` (count/max subselects in one query).
 - **Config documents** (generic kind-keyed, control database):
   `upsert_config_document`, `delete_config_document`,
   `get_config_document`, `list_config_documents`,
@@ -209,18 +257,28 @@ Implemented against D1:
   `usage_aggregates` (process-local view), `sum_api_key_committed_tokens`
   (process-local view).
 
-Everything else — assets/channels/retention, usage monthly + metadata
-rollups, billing ledger/outbox, guardrail policy revisions/bindings, billing
-events, `persist_usage_aggregate` (the durable half), managed/self-hosted
-worker stores, and the remaining pre-#425 per-entity dispatch surfaces (wallets,
-payment attempts, agent schedules, workflow budgets, observed agent presence,
+Everything else — the atomic-transition families that need the transaction
+semantics the D1 HTTP query API lacks (wallets + reservations, payment
+methods/attempts, workflow run budgets, `append_billing_event_with_outbox_enqueue`,
+and the guardrail activate/archive/restore CAS transitions);
+assets/channels/retention (deferred as a whole family — its move/yank/variant
+coordination ops are atomic `FOR UPDATE` cross-table transitions, the same
+transaction gap that blocks wallets, plus inline BYTEA content the document
+pattern serves poorly); usage monthly + metadata rollups +
+`persist_usage_aggregate` (the durable half — the rollups are maintained by the
+`append_billing_event` settlement transaction's read-modify-write increments,
+which have no single-statement equivalent, and the usage-aggregate
+store-of-record here is still the process-local mirror); and the remaining
+pre-#425 per-entity dispatch surfaces (agent schedules, observed agent presence,
 guardrail evidence, MCP identity) — returns the **typed
 `unimplemented-backend-surface` error** (`is_unimplemented_backend_surface`
 matches it) wherever the signature carries a `Result`, and logs a warning +
 returns an empty/default value where it cannot. Nothing fails silently; tests
 pin the contract. (RBAC, site domains, and the budget-alert ledger from that
 group are now implemented — issue #445; request/audit logs, agent runs/events,
-and snapshot replay floors — issue #447, all above.)
+and snapshot replay floors — issue #447; billing ledger/outbox/events, guardrail
+revisions/bindings, and the managed + self-hosted worker stores — issue #449,
+all above.)
 
 ## Config-driven construction (issue #440)
 
@@ -270,11 +328,16 @@ defaults to `memory`).
    agent-run/event families over the admin HTTP path (routed to the control
    database, above); the proxy-Worker binding is the separate hot-path
    transport for the same tables and remains the follow-up.
-2. Remaining entity families still erroring (assets, usage rollups, billing
-   ledger/outbox + events, `persist_usage_aggregate` durable half, guardrail
-   policy revisions/bindings, managed/self-hosted worker stores, and the
-   per-entity surfaces: wallets, payment attempts, agent schedules, workflow
-   budgets, observed agent presence, MCP identity).
+2. Remaining entity families still erroring: assets/channels/retention and the
+   usage monthly/metadata rollups + `persist_usage_aggregate` durable half
+   (deferred as families — see above); the atomic-transition families blocked on
+   the proxy-Worker binding (wallets + reservations, payment methods/attempts,
+   workflow budgets, `append_billing_event_with_outbox_enqueue`, guardrail
+   activate/archive/restore); and the per-entity surfaces agent schedules,
+   observed agent presence, MCP identity. (Issue #449 landed the billing
+   ledger/outbox/events, guardrail revisions/bindings, and managed +
+   self-hosted worker stores over the admin HTTP path, routed to the control
+   database — above.)
 4. `/raw` query variant and `batch` request shape if bulk import ever needs
    them. (Entity `SELECT`s already return their full result set in one query
    response; `list_databases` now follows REST pagination past 1,000 rows.)

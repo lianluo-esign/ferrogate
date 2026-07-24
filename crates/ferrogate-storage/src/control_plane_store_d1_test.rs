@@ -23,11 +23,13 @@ use crate::control_plane_store::ControlPlaneStore;
 use crate::{
     api_key_tenant_context, is_unimplemented_backend_surface, CloudflareD1StorageOptions,
     D1ControlPlaneStore, D1TenantDatabaseRegistry, DeleteProjectOutcome, QuotaScopeKind,
-    RuntimeStorageRepositories, StorageError, StoredAdminUser, StoredAdminUserRefreshToken,
-    StoredAgentRun, StoredAgentRunEvent, StoredApiKey, StoredAuditEvent,
-    StoredBudgetAlertNotification, StoredPermission, StoredPlan, StoredQuotaPolicy,
-    StoredRequestLog, StoredRole, StoredSiteDomain, StoredSsoProviderConfig, StoredTenantAccount,
-    StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    ReplayDeadLetterOutcome, RuntimeStorageRepositories, StorageError, StoredAdminUser,
+    StoredAdminUserRefreshToken, StoredAgentRun, StoredAgentRunEvent, StoredApiKey,
+    StoredAuditEvent, StoredBudgetAlertNotification, StoredGuardrailPolicyRevision,
+    StoredManagedWorkerTemplate, StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog,
+    StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
+    StoredTenantAccount, StoredTenantRoleBinding, D1_TENANT_DATABASE_REGISTRY_ID,
+    D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -531,10 +533,13 @@ fn out_of_scope_trait_surface_errors_with_the_typed_contract() {
         "{schedule_error:?}"
     );
 
-    // A still-erroring sync surface (guardrail policy bindings): snapshot
-    // replay floors moved to the implemented set in issue #447, so the typed
-    // no-network contract is now pinned on a family that is still out of scope.
-    let guardrail_error = store.get_guardrail_policy_binding("policy-1").unwrap_err();
+    // A still-erroring sync surface: guardrail revisions/bindings READS moved
+    // to the implemented set in issue #449, so the typed no-network contract is
+    // now pinned on the generation-guarded CAS transition that stays out of
+    // scope (it needs the compare-and-swap transaction the D1 HTTP API lacks).
+    let guardrail_error = store
+        .activate_guardrail_policy_revision("policy-1", 1, "admin", 0, false)
+        .unwrap_err();
     assert!(
         is_unimplemented_backend_surface(&guardrail_error),
         "{guardrail_error:?}"
@@ -1499,6 +1504,324 @@ fn snapshot_replay_floor_upserts_monotonically_and_reads_back() {
         .get_snapshot_replay_floor("acme", "deploy-2")
         .unwrap();
     assert!(missing.is_none());
+}
+
+// --- Billing / guardrail / worker stores (issue #449, control database) ---
+
+fn sample_billing_event(request_id: &str) -> ferrogate_billing::BillingEvent {
+    ferrogate_billing::BillingEvent {
+        request_id: request_id.into(),
+        trace_id: Some(format!("trace-{request_id}")),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request(request_id, 0),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext {
+            organization_id: Some("acme".into()),
+            ..TenantContext::default()
+        },
+        logical_model: "chat".into(),
+        provider: "openai".into(),
+        provider_model: "gpt-4o-mini".into(),
+        usage: ferrogate_billing::TokenUsage::new(1, 1, 2),
+        usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_800_000_000),
+        cost_usd: Some(0.000_01),
+        latency_ms: Some(3),
+        metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
+    }
+}
+
+#[test]
+fn billing_event_appends_idempotently_and_pages_from_the_control_database() {
+    let event = sample_billing_event("req-1");
+    let event_doc = serde_json::to_string(&event).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            // INSERT ... ON CONFLICT DO NOTHING lands the row.
+            query_ok(serde_json::json!([]), 1),
+            // count(*) OVER() page carries the doc + window total.
+            query_ok(
+                serde_json::json!([{ "document_json": event_doc, "total": 1_i64 }]),
+                0,
+            ),
+        ],
+    );
+
+    let inserted = runtime()
+        .block_on(store.append_billing_event(event.clone()))
+        .expect("append should succeed");
+    assert!(inserted);
+    let page = runtime().block_on(store.billing_events_page(0, 20));
+    assert_eq!(page.total, 1);
+    assert_eq!(page.data, vec![event.clone()]);
+
+    let requests = transport.recorded();
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let append_sql = body_sql(&requests[0]);
+    assert!(append_sql.starts_with("INSERT INTO billing_events"));
+    assert!(append_sql.contains("ON CONFLICT (billing_event_id) DO NOTHING"));
+    // request_id is the second projection param (billing_event_id, request_id, ...).
+    assert_eq!(body_params(&requests[0])[1], "req-1");
+    assert!(body_sql(&requests[1]).contains("count(*) OVER()"));
+
+    // A conflicting replay (changes = 0) reloads and returns false, not a row.
+    let (replay_store, _replay_transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 0),
+            query_ok(serde_json::json!([{ "document_json": event_doc }]), 0),
+        ],
+    );
+    let replayed = runtime()
+        .block_on(replay_store.append_billing_event(event))
+        .expect("idempotent replay should not error");
+    assert!(!replayed);
+}
+
+#[test]
+fn billing_ledger_entry_appends_and_reads_back_from_control_database() {
+    let entry = ferrogate_billing::charge(
+        &ferrogate_billing::PriceBook::default(),
+        &sample_billing_event("req-ledger"),
+    )
+    .expect("settled cost prices without a rate card");
+    let entry_doc = serde_json::to_string(&entry).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "document_json": entry_doc }]), 0),
+        ],
+    );
+
+    let inserted = runtime()
+        .block_on(store.append_billing_ledger_entry(&entry))
+        .expect("append should succeed");
+    assert!(inserted);
+    let fetched = runtime()
+        .block_on(store.billing_ledger_entry(&entry.id))
+        .unwrap()
+        .expect("ledger entry should decode");
+    assert_eq!(fetched, entry);
+
+    let append_sql = body_sql(&transport.recorded()[0]);
+    assert!(append_sql.starts_with("INSERT INTO billing_ledger"));
+    assert!(append_sql.contains("ON CONFLICT (id) DO NOTHING"));
+}
+
+#[test]
+fn billing_report_outbox_enqueues_lists_due_and_replays() {
+    let event = sample_billing_event("req-1");
+    let event_doc = serde_json::to_string(&event).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "report-1", "event_json": event_doc,
+                    "attempts": 0_i64, "next_attempt_unix": 100_i64,
+                    "dead_lettered_at_unix": null
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.enqueue_billing_report("report-1", &event, 100))
+        .expect("enqueue should succeed");
+    let due = runtime()
+        .block_on(store.list_due_billing_reports(1_000, 10))
+        .expect("list due should succeed");
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, "report-1");
+    assert_eq!(due[0].event, event);
+
+    let requests = transport.recorded();
+    assert!(body_sql(&requests[0]).starts_with("INSERT INTO billing_report_outbox"));
+    let due_sql = body_sql(&requests[1]);
+    assert!(due_sql.contains("next_attempt_unix <= ?"));
+    assert!(due_sql.contains("dead_lettered_at_unix IS NULL"));
+
+    // Replay: a guarded UPDATE fires, then a follow-up SELECT reports the
+    // now-cleared row -- no `UPDATE ... RETURNING` on the HTTP query API.
+    let cleared_doc = serde_json::to_string(&event).unwrap();
+    let (replay_store, replay_transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{
+                    "id": "report-1", "event_json": cleared_doc,
+                    "attempts": 0_i64, "next_attempt_unix": 500_i64,
+                    "dead_lettered_at_unix": null
+                }]),
+                0,
+            ),
+        ],
+    );
+    let outcome = runtime()
+        .block_on(replay_store.replay_dead_lettered_billing_report("report-1", 500))
+        .expect("replay should succeed");
+    match outcome {
+        ReplayDeadLetterOutcome::Replayed(entry) => assert_eq!(entry.id, "report-1"),
+        other => panic!("expected Replayed, got {other:?}"),
+    }
+    let replay_sql = body_sql(&replay_transport.recorded()[0]);
+    assert!(replay_sql.contains("dead_lettered_at_unix = NULL"));
+    assert!(replay_sql.contains("dead_lettered_at_unix IS NOT NULL"));
+}
+
+fn sample_guardrail_revision() -> StoredGuardrailPolicyRevision {
+    StoredGuardrailPolicyRevision {
+        id: "policy-1@1".into(),
+        policy_id: "policy-1".into(),
+        revision: 1,
+        policy_json: "{\"rules\":[]}".into(),
+        created_at_unix: 1_753_000_000,
+        created_by: "admin".into(),
+    }
+}
+
+#[test]
+fn guardrail_policy_revision_inserts_reads_and_rejects_replays() {
+    let revision = sample_guardrail_revision();
+    let revision_doc = serde_json::to_string(&revision).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "document_json": revision_doc }]), 0),
+        ],
+    );
+
+    store
+        .insert_guardrail_policy_revision(revision.clone())
+        .expect("insert should succeed");
+    let fetched = store
+        .get_guardrail_policy_revision("policy-1", 1)
+        .unwrap()
+        .expect("revision should decode");
+    assert_eq!(fetched, revision);
+
+    let insert_sql = body_sql(&transport.recorded()[0]);
+    assert!(insert_sql.starts_with("INSERT INTO guardrail_policy_revisions"));
+    assert!(insert_sql.contains("ON CONFLICT (policy_id, revision) DO NOTHING"));
+
+    // An idempotency-key replay (no rows changed) is a typed Conflict.
+    let (conflict_store, _conflict_transport) =
+        store_with_transport(control_registry(), vec![query_ok(serde_json::json!([]), 0)]);
+    let error = conflict_store
+        .insert_guardrail_policy_revision(sample_guardrail_revision())
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Conflict(_)), "{error:?}");
+}
+
+#[test]
+fn managed_worker_template_upserts_and_lists_from_the_control_database() {
+    let template = StoredManagedWorkerTemplate {
+        id: "tmpl-1".into(),
+        framework_adapter: "langgraph".into(),
+        isolation_backend_kind: "firecracker".into(),
+        enabled: true,
+        max_tenant_sessions: Some(4),
+        max_workspace_sessions: None,
+        created_at_unix: Some(1_753_000_000),
+        updated_at_unix: Some(1_753_000_001),
+    };
+    let template_doc = serde_json::to_string(&template).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(serde_json::json!([{ "document_json": template_doc }]), 0),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_managed_worker_template(template.clone()))
+        .expect("upsert should succeed");
+    let templates = runtime().block_on(store.managed_worker_templates());
+    assert_eq!(templates, vec![template]);
+
+    let requests = transport.recorded();
+    assert!(requests[0].url.contains("/d1/database/control-db/query"));
+    let upsert_sql = body_sql(&requests[0]);
+    assert!(upsert_sql.starts_with("INSERT INTO managed_worker_templates"));
+    assert!(upsert_sql.contains("ON CONFLICT (id) DO UPDATE"));
+    assert!(body_sql(&requests[1]).contains("FROM managed_worker_templates"));
+}
+
+#[test]
+fn self_hosted_worker_registration_round_trips_and_activity_stats_aggregate() {
+    let registration = StoredSelfHostedWorkerRegistration {
+        id: "worker-1".into(),
+        tenant: TenantContext {
+            organization_id: Some("acme".into()),
+            ..TenantContext::default()
+        },
+        workspace_id: "ws-1".into(),
+        worker_name: "runner".into(),
+        status: "active".into(),
+        identity_fingerprint: "sha256:abc".into(),
+        identity_expires_at_unix: None,
+        orchestration_enabled: true,
+        registered_at_unix: Some(1_753_000_000),
+        last_seen_at_unix: None,
+        trust_level: "trusted".into(),
+        capability_envelope_json: "{}".into(),
+        token_secret: "secret".into(),
+    };
+    let registration_doc = serde_json::to_string(&registration).unwrap();
+    let (store, transport) = store_with_transport(
+        control_registry(),
+        vec![
+            query_ok(serde_json::json!([]), 1),
+            query_ok(
+                serde_json::json!([{ "document_json": registration_doc }]),
+                0,
+            ),
+            query_ok(
+                serde_json::json!([{
+                    "telemetry_event_count": 3_i64, "latest_event_at_unix": 1_753_000_500_i64,
+                    "artifact_count": 1_i64, "latest_artifact_at_unix": 1_753_000_400_i64,
+                    "checkpoint_count": 0_i64, "latest_checkpoint_at_unix": null
+                }]),
+                0,
+            ),
+        ],
+    );
+
+    runtime()
+        .block_on(store.upsert_self_hosted_worker_registration(registration.clone()))
+        .expect("upsert should succeed");
+    let fetched = runtime()
+        .block_on(store.self_hosted_worker_registration("worker-1"))
+        .expect("registration should decode");
+    assert_eq!(fetched, registration);
+
+    let stats = runtime().block_on(store.self_hosted_worker_activity_stats("worker-1"));
+    assert_eq!(stats.telemetry_event_count, 3);
+    assert_eq!(stats.latest_event_at_unix, Some(1_753_000_500));
+    assert_eq!(stats.artifact_count, 1);
+    assert_eq!(stats.checkpoint_count, 0);
+    assert_eq!(stats.latest_checkpoint_at_unix, None);
+
+    let requests = transport.recorded();
+    assert!(body_sql(&requests[0]).starts_with("INSERT INTO self_hosted_worker_registrations"));
+    assert!(body_sql(&requests[1]).contains("WHERE id = ?"));
+    let stats_sql = body_sql(&requests[2]);
+    assert!(stats_sql.contains("count(*)"));
+    assert!(stats_sql.contains("self_hosted_worker_telemetry_events"));
 }
 
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---

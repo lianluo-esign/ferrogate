@@ -438,6 +438,227 @@ CREATE TABLE IF NOT EXISTS control_plane_replay_floors (
     PRIMARY KEY (tenant_id, deployment_id)
 );
 
+-- --- Billing / metering families (issue #449) ---
+--
+-- Ledger entries, the durable gateway->billing report outbox, and settled
+-- metering (billing) events. On Postgres these are normalized across several
+-- tables (billing_ledger, billing_report_outbox, metering_events + routes +
+-- usage); this backend follows the issue #447 document pattern instead -- each
+-- row stores the FULL record as a `*_json` TEXT document (the read paths
+-- deserialize it) plus the projection columns the filter/order/paginate SQL
+-- needs. Billing is account-global cross-tenant metering whose reads are
+-- whole-table (list all, count(*)-paginated) with no routing tenant in the
+-- signature, so like the #447 observability tables they live in the CONTROL
+-- database as single tables. SQLite dialect divergences match the tables above
+-- (JSONB -> TEXT, BIGINT -> INTEGER, no cross-table FOREIGN KEYs, no RLS).
+
+CREATE TABLE IF NOT EXISTS billing_ledger (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT,
+    project_id TEXT,
+    api_key_id TEXT,
+    created_at_unix INTEGER NOT NULL,
+    entry_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_scope
+    ON billing_ledger(organization_id, project_id, api_key_id);
+
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_created
+    ON billing_ledger(created_at_unix, id);
+
+CREATE TABLE IF NOT EXISTS billing_report_outbox (
+    id TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_unix INTEGER NOT NULL,
+    dead_lettered_at_unix INTEGER,
+    created_at_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_report_outbox_due
+    ON billing_report_outbox(next_attempt_unix);
+
+CREATE INDEX IF NOT EXISTS idx_billing_report_outbox_dead
+    ON billing_report_outbox(dead_lettered_at_unix);
+
+CREATE TABLE IF NOT EXISTS billing_events (
+    billing_event_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    provider_attempt_index INTEGER NOT NULL DEFAULT 0,
+    occurred_at_unix INTEGER NOT NULL,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_events_occurred
+    ON billing_events(occurred_at_unix, request_id, provider_attempt_index);
+
+-- --- Guardrail policy revisions + bindings (issue #449) ---
+--
+-- Immutable policy revisions plus the mutable active/archived binding per
+-- policy. Account-global guardrail configuration (like plans/RBAC), so the
+-- CONTROL database owns them; each row stores the full record as a `*_json`
+-- document plus projection columns. The atomic activate/archive/restore CAS
+-- transitions (generation-guarded) are NOT implemented on this backend -- they
+-- need the compare-and-swap transaction semantics the D1 HTTP query API lacks
+-- and stay deferred to the proxy-Worker path.
+
+CREATE TABLE IF NOT EXISTS guardrail_policy_revisions (
+    policy_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    immutable_id TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    revision_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (policy_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
+    policy_id TEXT PRIMARY KEY,
+    active_revision INTEGER,
+    updated_at_unix INTEGER NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
+    binding_json TEXT NOT NULL DEFAULT '{}'
+);
+
+-- --- Managed worker stores (issue #449) ---
+--
+-- Managed-worker templates/instances/sessions plus lifecycle events and the
+-- isolation selection/policy/evidence trio (issues #200/#294). All whole-table
+-- admin reads with no routing tenant in the signature (the `tenant` inside each
+-- record is a composite storage key), so like the #447 observability tables
+-- they live in the CONTROL database. Each row stores the full record as a
+-- `*_json` document plus the projection columns the ORDER BY needs.
+
+CREATE TABLE IF NOT EXISTS managed_worker_templates (
+    id TEXT PRIMARY KEY,
+    template_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS agent_worker_instances (
+    id TEXT PRIMARY KEY,
+    started_at_unix INTEGER,
+    instance_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_worker_instances_started
+    ON agent_worker_instances(started_at_unix, id);
+
+CREATE TABLE IF NOT EXISTS managed_worker_sessions (
+    id TEXT PRIMARY KEY,
+    requested_at_unix INTEGER,
+    session_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_sessions_requested
+    ON managed_worker_sessions(requested_at_unix, id);
+
+CREATE TABLE IF NOT EXISTS managed_worker_lifecycle_events (
+    id TEXT PRIMARY KEY,
+    occurred_at_unix INTEGER,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_events_occurred
+    ON managed_worker_lifecycle_events(occurred_at_unix, id);
+
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_selections (
+    session_id TEXT PRIMARY KEY,
+    selected_at_unix INTEGER,
+    selection_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_selections_selected
+    ON managed_worker_isolation_selections(selected_at_unix, session_id);
+
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_policies (
+    session_id TEXT PRIMARY KEY,
+    policy_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_evidence (
+    id TEXT PRIMARY KEY,
+    occurred_at_unix INTEGER,
+    evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_evidence_occurred
+    ON managed_worker_isolation_evidence(occurred_at_unix, id);
+
+-- --- Self-hosted worker stores (issue #449) ---
+--
+-- Registrations, heartbeats, telemetry events, artifacts, checkpoints, and run
+-- dispatches for operator-hosted workers (issues #221/#228/#231/#329). The
+-- Postgres backend keeps a normalized dispatch-capability side table; here the
+-- required capabilities ride inside the dispatch document. Whole-table +
+-- worker/run-filtered admin reads with no routing tenant, so CONTROL database;
+-- each row stores the full record as a `*_json` document plus projection
+-- columns (`worker_id`/`run_id` for the filtered reads, timestamps for order).
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_registrations (
+    id TEXT PRIMARY KEY,
+    registered_at_unix INTEGER,
+    registration_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_registered
+    ON self_hosted_worker_registrations(registered_at_unix, id);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    reported_at_unix INTEGER,
+    heartbeat_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_heartbeats_worker
+    ON self_hosted_worker_heartbeats(worker_id, reported_at_unix);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_telemetry_events (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    run_id TEXT,
+    occurred_at_unix INTEGER,
+    ingested_at_unix INTEGER,
+    event_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_worker
+    ON self_hosted_worker_telemetry_events(worker_id, occurred_at_unix);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_run
+    ON self_hosted_worker_telemetry_events(run_id, occurred_at_unix);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_artifacts (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    created_at_unix INTEGER,
+    artifact_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_artifacts_worker
+    ON self_hosted_worker_artifacts(worker_id, created_at_unix);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_checkpoints (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    created_at_unix INTEGER,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_worker
+    ON self_hosted_worker_checkpoints(worker_id, created_at_unix);
+
+CREATE TABLE IF NOT EXISTS self_hosted_run_dispatches (
+    dispatch_id TEXT PRIMARY KEY,
+    queued_at_unix INTEGER,
+    dispatch_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatches_queued
+    ON self_hosted_run_dispatches(queued_at_unix, dispatch_id);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

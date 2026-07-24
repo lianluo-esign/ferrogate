@@ -120,6 +120,41 @@
 //!   `get_snapshot_replay_floor`, `advance_snapshot_replay_floor`. SQLite
 //!   `max()` in the upsert keeps the floor monotonic; a follow-up SELECT
 //!   returns it (the HTTP query API has no `RETURNING`).
+//! - Billing ledger + report outbox + billing events (#449, control database):
+//!   `append_billing_ledger_entry` (idempotent INSERT ... DO NOTHING + a
+//!   reload/settlement-compare on conflict), `list_billing_ledger_entries`
+//!   (scope-filtered, paginated), `billing_ledger_entry`; the report outbox
+//!   (`enqueue_billing_report`, `list_due_billing_reports`,
+//!   `reschedule_billing_report`, `dead_letter_billing_report`,
+//!   `list_dead_lettered_billing_reports`, `replay_dead_lettered_billing_report`
+//!   (guarded UPDATE + follow-up SELECT for the terminal state),
+//!   `get_billing_report_outbox_entry`, `delete_billing_report`); and settled
+//!   metering events (`append_billing_event`, `billing_events`,
+//!   `billing_events_page`). Billing is account-global cross-tenant metering
+//!   with whole-table reads, so it routes to the CONTROL database like the #447
+//!   observability families; each row stores the FULL record as a `*_json`
+//!   document plus the filter/order/paginate projection columns, with the
+//!   outbox attempt/schedule state kept as columns so reschedule/dead-letter/
+//!   replay stay single-statement UPDATEs.
+//! - Guardrail policy revisions + bindings (#449, control database):
+//!   `insert_guardrail_policy_revision` (idempotent on `(policy_id, revision)`,
+//!   typed `Conflict` on replay), `get_guardrail_policy_revision`,
+//!   `list_guardrail_policy_revisions`, `get_guardrail_policy_binding`,
+//!   `list_guardrail_policy_bindings`. Account-global guardrail configuration
+//!   (like plans/RBAC), so the CONTROL database owns them.
+//! - Managed worker stores (#449, control database): templates, agent worker
+//!   instances, sessions, lifecycle events, and the isolation
+//!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
+//!   record as a `*_json` document plus an ORDER BY projection column, and a
+//!   whole-table list. Routed to the CONTROL database (whole-table admin reads;
+//!   the record's `tenant` is a composite storage key, not a routing id).
+//! - Self-hosted worker stores (#449, control database): registrations
+//!   (+ single-get), heartbeats (+ `latest_self_hosted_worker_heartbeat`),
+//!   telemetry events (+ per-run newest-window and per-worker filtered reads),
+//!   artifacts (+ single-get), checkpoints (+ single-get), run dispatches (the
+//!   Postgres capability side-table folds into the dispatch document), and
+//!   `self_hosted_worker_activity_stats` (count/max subselects in one query).
+//!   Same CONTROL-database routing as the managed families.
 //! - Process-local (backend-independent semantics, mirrors Memory/Postgres):
 //!   `set_retention_limits` (no-op like Postgres), `next_audit_event_id`,
 //!   `upsert_usage_aggregate_local`, `store_usage_aggregate_local`,
@@ -131,15 +166,36 @@
 //! tenants, and quota lookups carry no tenant context.
 //!
 //! Still erroring (typed `unimplemented-backend-surface`, awaiting the
-//! proxy-Worker path or a later slice): assets/channels/retention, usage
-//! monthly + metadata rollups, billing ledger/outbox, billing events,
-//! `persist_usage_aggregate` (durable half), guardrail policy
-//! revisions/bindings, managed + self-hosted worker stores, and the remaining
-//! pre-#425 per-entity dispatch surfaces (wallets, payment attempts, agent
-//! schedules, workflow budgets, observed agent presence, MCP identity). RBAC,
-//! site domains, and the budget-alert idempotency ledger from that group are
-//! now implemented (issue #445); request/audit logs, agent runs/events, and
-//! snapshot replay floors are now implemented (issue #447), all above.
+//! proxy-Worker path or a later slice):
+//!
+//! - Atomic-transition families that need the transaction semantics the D1 HTTP
+//!   query API lacks (no multi-statement-with-params transaction, no
+//!   `... RETURNING`): wallets + wallet reservations, payment methods/attempts,
+//!   workflow run budgets, and the CAS members of families otherwise landed
+//!   here — `append_billing_event_with_outbox_enqueue` (metering write + outbox
+//!   enqueue must commit together, issue #150) and the generation-guarded
+//!   guardrail activate/archive/restore transitions. BLOCKED on the
+//!   proxy-Worker D1 binding.
+//! - assets/channels/retention, deferred as a whole family: its coordination
+//!   ops (`create_asset_within_quota`, `move_asset_channel_if_resolvable`,
+//!   `set_asset_version_yank`, `delete_asset_variant_if_unreferenced`,
+//!   `promote_pending_asset_visibility`) are atomic `FOR UPDATE` cross-table
+//!   transitions (write-skew close-out) — the same transaction gap that blocks
+//!   wallets — plus inline BYTEA content the document pattern serves poorly.
+//! - usage monthly + metadata rollups + `persist_usage_aggregate` (durable
+//!   half): the rollups are maintained by the `append_billing_event` settlement
+//!   transaction's read-modify-write increments across sibling tables (no
+//!   single-statement equivalent), and the usage-aggregate store-of-record on
+//!   this backend is still the process-local mirror; both land with the
+//!   rollup-maintenance slice.
+//! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
+//!   observed agent presence, MCP identity.
+//!
+//! RBAC, site domains, and the budget-alert idempotency ledger were
+//! implemented in issue #445; request/audit logs, agent runs/events, and
+//! snapshot replay floors in issue #447; billing ledger/outbox/events,
+//! guardrail revisions/bindings, and the managed + self-hosted worker stores in
+//! issue #449 -- all above.
 //!
 //! Everything erroring returns the typed `unimplemented-backend-surface` error
 //! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
@@ -204,15 +260,6 @@ pub(crate) fn unimplemented_surface(method: &'static str) -> StorageError {
         "{D1_UNIMPLEMENTED_SURFACE}: {method} is not implemented by the cloudflare_d1 \
          control-plane backend (see control_plane_store_d1 module docs)"
     ))
-}
-
-/// The signature of some append/analytics getters cannot carry an error, so
-/// the unimplemented contract there is: warn loudly, return empty/default.
-pub(crate) fn warn_unimplemented(method: &'static str) {
-    tracing::warn!(
-        "{D1_UNIMPLEMENTED_SURFACE}: {method} is not implemented by the cloudflare_d1 \
-         control-plane backend; returning an empty result"
-    );
 }
 
 fn d1_error(error: CloudflareError) -> StorageError {
@@ -922,6 +969,71 @@ struct SeedIdRow {
 struct ReplayFloorRow {
     last_accepted_revision: i64,
 }
+
+// --- Row DTOs: billing / worker families (issue #449) ---
+//
+// Most #449 reads deserialize a full `*_json` record document (via
+// [`D1ControlPlaneStore::fetch_control_documents`]), but two carry additional
+// projection columns the domain type needs: the billing report-outbox
+// attempt/schedule state (kept as columns so reschedule/dead-letter/replay are
+// single-statement UPDATEs like the Postgres backend) and the SQL-computed
+// self-hosted worker activity aggregates.
+
+/// A billing report-outbox row: the serialized [`BillingEvent`] plus the
+/// mutable attempt/schedule/dead-letter columns.
+#[derive(Deserialize)]
+struct BillingOutboxRow {
+    id: String,
+    event_json: String,
+    attempts: i64,
+    next_attempt_unix: i64,
+    dead_lettered_at_unix: Option<i64>,
+}
+
+impl BillingOutboxRow {
+    fn into_stored(self) -> Result<StoredBillingReportOutboxEntry, StorageError> {
+        Ok(StoredBillingReportOutboxEntry {
+            id: self.id,
+            event: deserialize_storage_document(&self.event_json)?,
+            attempts: self.attempts,
+            next_attempt_unix: self.next_attempt_unix,
+            dead_lettered_at_unix: self.dead_lettered_at_unix,
+        })
+    }
+}
+
+/// Per-worker activity aggregates computed in one control-database query
+/// (issue #231 parity): counts + max timestamps across the telemetry,
+/// artifact, and checkpoint tables for a single worker.
+#[derive(Deserialize)]
+struct SelfHostedWorkerActivityStatsRow {
+    telemetry_event_count: i64,
+    latest_event_at_unix: Option<i64>,
+    artifact_count: i64,
+    latest_artifact_at_unix: Option<i64>,
+    checkpoint_count: i64,
+    latest_checkpoint_at_unix: Option<i64>,
+}
+
+impl From<SelfHostedWorkerActivityStatsRow> for StoredSelfHostedWorkerActivityStats {
+    fn from(row: SelfHostedWorkerActivityStatsRow) -> Self {
+        let count = |value: i64| usize::try_from(value).unwrap_or_default();
+        let at_unix = |value: Option<i64>| value.and_then(|value| u64::try_from(value).ok());
+        Self {
+            telemetry_event_count: count(row.telemetry_event_count),
+            artifact_count: count(row.artifact_count),
+            checkpoint_count: count(row.checkpoint_count),
+            latest_event_at_unix: at_unix(row.latest_event_at_unix),
+            latest_artifact_at_unix: at_unix(row.latest_artifact_at_unix),
+            latest_checkpoint_at_unix: at_unix(row.latest_checkpoint_at_unix),
+        }
+    }
+}
+
+/// The `SELECT` column lists for the billing report-outbox reads: the
+/// serialized event plus the mutable attempt/schedule/dead-letter state.
+const SELECT_BILLING_OUTBOX_COLUMNS: &str = "SELECT id, event_json, attempts, next_attempt_unix, \
+     dead_lettered_at_unix FROM billing_report_outbox";
 
 impl D1ControlPlaneStore {
     /// Build the backend from a D1 endpoint client and a (possibly empty)
@@ -1736,6 +1848,984 @@ impl D1ControlPlaneStore {
             .get_snapshot_replay_floor_async(tenant_id, deployment_id)
             .await?
             .unwrap_or(0))
+    }
+
+    // --- Billing ledger / outbox / events (issue #449, control DB) ---
+    //
+    // Billing is account-global cross-tenant metering: the reads are
+    // whole-table (list all, count(*)-paginated) and the tenant inside each
+    // record is a composite storage key, not a routing tenant id, so like the
+    // #447 observability families these route to the CONTROL database. Each row
+    // stores the FULL record as a `*_json` document; the ledger/event tables add
+    // filter/order projection columns and the outbox keeps its attempt/schedule
+    // state as columns so reschedule/dead-letter/replay are single-statement
+    // UPDATEs (the transaction-free equivalent of the Postgres backend).
+
+    async fn append_billing_ledger_entry_async(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        let entry_json = serialize_storage_document(entry)?;
+        let result = self
+            .execute_control(
+                "INSERT INTO billing_ledger \
+                 (id, organization_id, project_id, api_key_id, created_at_unix, entry_json) \
+                 VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), unixepoch(), ?) \
+                 ON CONFLICT (id) DO NOTHING",
+                vec![
+                    entry.id.clone(),
+                    entry.tenant.organization_id.clone().unwrap_or_default(),
+                    entry.tenant.project_id.clone().unwrap_or_default(),
+                    entry.tenant.api_key_id.clone().unwrap_or_default(),
+                    entry_json,
+                ],
+            )
+            .await?;
+        if result.changes() > 0 {
+            return Ok(true);
+        }
+        // Idempotent replay (issue #248 parity): reload and require the same
+        // provider-attempt settlement, else surface a typed conflict. The D1
+        // HTTP API has no nested-connection self-deadlock, so the reload is a
+        // plain follow-up SELECT rather than the Postgres drop-then-reacquire.
+        let existing = self
+            .billing_ledger_entry_async(&entry.id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Runtime(format!(
+                    "billing ledger id {} conflicted but could not be reloaded",
+                    entry.id
+                ))
+            })?;
+        if ferrogate_billing::same_provider_attempt_settlement(&existing, entry) {
+            Ok(false)
+        } else {
+            Err(StorageError::Conflict(format!(
+                "billing ledger id {} was replayed with different provider-attempt settlement data",
+                entry.id
+            )))
+        }
+    }
+
+    async fn billing_ledger_entry_async(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT entry_json AS document_json FROM billing_ledger WHERE id = ?",
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn list_billing_ledger_entries_async(
+        &self,
+        filter: &ferrogate_billing::LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        // Each filter dimension is pushed into the WHERE clause with the
+        // empty-string sentinel `(? = '' OR column = ?)` idiom -- the
+        // all-strings-params equivalent of the Postgres `$n::text IS NULL OR
+        // column = $n` -- so one fixed statement serves the unfiltered and
+        // per-scope cases and a scoped page never comes back lossy.
+        let organization_id = filter.organization_id.clone().unwrap_or_default();
+        let project_id = filter.project_id.clone().unwrap_or_default();
+        let api_key_id = filter.api_key_id.clone().unwrap_or_default();
+        let sql = format!(
+            "SELECT entry_json AS document_json FROM billing_ledger \
+             WHERE (? = '' OR organization_id = ?) \
+               AND (? = '' OR project_id = ?) \
+               AND (? = '' OR api_key_id = ?) \
+             ORDER BY created_at_unix ASC, id ASC LIMIT {} OFFSET {}",
+            saturating_i64(limit as u64),
+            saturating_i64(offset as u64)
+        );
+        self.fetch_control_documents(
+            &sql,
+            vec![
+                organization_id.clone(),
+                organization_id,
+                project_id.clone(),
+                project_id,
+                api_key_id.clone(),
+                api_key_id,
+            ],
+        )
+        .await
+    }
+
+    async fn enqueue_billing_report_async(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        self.execute_control(
+            "INSERT INTO billing_report_outbox \
+             (id, attempts, next_attempt_unix, dead_lettered_at_unix, created_at_unix, \
+              updated_at_unix, event_json) \
+             VALUES (?, 0, ?, NULL, unixepoch(), unixepoch(), ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![id.to_string(), next_attempt_unix.to_string(), event_json],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn list_due_billing_reports_async(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        let sql = format!(
+            "{SELECT_BILLING_OUTBOX_COLUMNS} \
+             WHERE next_attempt_unix <= ? AND dead_lettered_at_unix IS NULL \
+             ORDER BY next_attempt_unix ASC LIMIT {}",
+            saturating_i64(limit as u64)
+        );
+        let rows: Vec<BillingOutboxRow> = self
+            .fetch_control_rows(&sql, vec![now_unix.to_string()])
+            .await?;
+        rows.into_iter()
+            .map(BillingOutboxRow::into_stored)
+            .collect()
+    }
+
+    async fn reschedule_billing_report_async(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.execute_control(
+            "UPDATE billing_report_outbox \
+             SET attempts = attempts + 1, next_attempt_unix = ?, updated_at_unix = unixepoch() \
+             WHERE id = ?",
+            vec![next_attempt_unix.to_string(), id.to_string()],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn dead_letter_billing_report_async(
+        &self,
+        id: &str,
+        dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.execute_control(
+            "UPDATE billing_report_outbox \
+             SET dead_lettered_at_unix = ?, updated_at_unix = ? WHERE id = ?",
+            vec![
+                dead_lettered_at_unix.to_string(),
+                dead_lettered_at_unix.to_string(),
+                id.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn list_dead_lettered_billing_reports_async(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        let sql = format!(
+            "{SELECT_BILLING_OUTBOX_COLUMNS} WHERE dead_lettered_at_unix IS NOT NULL \
+             ORDER BY dead_lettered_at_unix DESC LIMIT {}",
+            saturating_i64(limit as u64)
+        );
+        let rows: Vec<BillingOutboxRow> = self.fetch_control_rows(&sql, Vec::new()).await?;
+        rows.into_iter()
+            .map(BillingOutboxRow::into_stored)
+            .collect()
+    }
+
+    async fn replay_dead_lettered_billing_report_async(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        // Conditional CAS (issue #388): the guarded UPDATE fires only from the
+        // dead-lettered state; a follow-up SELECT then reports the exact
+        // terminal state (the HTTP query API has no `UPDATE ... RETURNING`, as
+        // with `take_sso_pending_flow`).
+        let now = saturating_i64(now_unix_seconds());
+        let updated = self
+            .execute_control(
+                "UPDATE billing_report_outbox \
+                 SET dead_lettered_at_unix = NULL, attempts = 0, next_attempt_unix = ?, \
+                     updated_at_unix = ? \
+                 WHERE id = ? AND dead_lettered_at_unix IS NOT NULL",
+                vec![
+                    next_attempt_unix.to_string(),
+                    now.to_string(),
+                    id.to_string(),
+                ],
+            )
+            .await?;
+        let entry = self.get_billing_report_outbox_entry_async(id).await?;
+        if updated.changes() > 0 {
+            let entry = entry.ok_or_else(|| {
+                StorageError::Runtime(format!(
+                    "billing report outbox id {id} replayed but could not be reloaded"
+                ))
+            })?;
+            return Ok(ReplayDeadLetterOutcome::Replayed(entry));
+        }
+        Ok(match entry {
+            Some(entry) => ReplayDeadLetterOutcome::NotDeadLettered(entry),
+            None => ReplayDeadLetterOutcome::NotFound,
+        })
+    }
+
+    async fn get_billing_report_outbox_entry_async(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        let row: Option<BillingOutboxRow> = self
+            .fetch_control_optional(
+                &format!("{SELECT_BILLING_OUTBOX_COLUMNS} WHERE id = ?"),
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(BillingOutboxRow::into_stored).transpose()
+    }
+
+    async fn delete_billing_report_async(&self, id: &str) -> Result<(), StorageError> {
+        self.execute_control(
+            "DELETE FROM billing_report_outbox WHERE id = ?",
+            vec![id.to_string()],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn append_billing_event_async(&self, event: &BillingEvent) -> Result<bool, StorageError> {
+        let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(event);
+        let event_json = serialize_storage_document(event)?;
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        let result = self
+            .execute_control(
+                "INSERT INTO billing_events \
+                 (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, \
+                  event_json) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (billing_event_id) DO NOTHING",
+                vec![
+                    billing_event_id.clone(),
+                    event.request_id.clone(),
+                    i64::from(event.provider_attempt.provider_attempt_index).to_string(),
+                    occurred_at_unix.to_string(),
+                    event_json,
+                ],
+            )
+            .await?;
+        if result.changes() > 0 {
+            return Ok(true);
+        }
+        let existing = self
+            .billing_event_by_id_async(&billing_event_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Runtime(format!(
+                    "billing event id {billing_event_id} conflicted but could not be reloaded"
+                ))
+            })?;
+        if same_billing_event_settlement(&existing, event) {
+            Ok(false)
+        } else {
+            Err(StorageError::Conflict(format!(
+                "billing event id {billing_event_id} was replayed with different provider-attempt \
+                 settlement data"
+            )))
+        }
+    }
+
+    async fn billing_event_by_id_async(
+        &self,
+        billing_event_id: &str,
+    ) -> Result<Option<BillingEvent>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT event_json AS document_json FROM billing_events WHERE billing_event_id = ?",
+                vec![billing_event_id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn billing_events_async(&self) -> Result<Vec<BillingEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT event_json AS document_json FROM billing_events \
+             ORDER BY occurred_at_unix ASC, request_id ASC, provider_attempt_index ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn billing_events_page_async(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<BillingEvent>, StorageError> {
+        let sql = format!(
+            "SELECT event_json AS document_json, count(*) OVER() AS total FROM billing_events \
+             ORDER BY occurred_at_unix ASC, request_id ASC, provider_attempt_index ASC \
+             LIMIT {} OFFSET {}",
+            saturating_i64(limit as u64),
+            saturating_i64(offset as u64)
+        );
+        self.fetch_control_document_page(&sql, offset, limit).await
+    }
+
+    // --- Guardrail policy revisions / bindings (issue #449, control DB) ---
+    //
+    // Immutable revisions plus the mutable per-policy binding: account-global
+    // guardrail configuration (like plans/RBAC), so the CONTROL database owns
+    // them. Each row stores the full record as a `*_json` document; revisions
+    // add a composite (policy_id, revision) key + immutable-id idempotency. The
+    // generation-guarded activate/archive/restore CAS transitions stay
+    // unimplemented (they need the transaction the D1 HTTP API lacks).
+
+    async fn insert_guardrail_policy_revision_async(
+        &self,
+        revision: &StoredGuardrailPolicyRevision,
+    ) -> Result<(), StorageError> {
+        let revision_json = serialize_storage_document(revision)?;
+        let result = self
+            .execute_control(
+                "INSERT INTO guardrail_policy_revisions \
+                 (policy_id, revision, immutable_id, created_at_unix, created_by, revision_json) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (policy_id, revision) DO NOTHING",
+                vec![
+                    revision.policy_id.clone(),
+                    i64::from(revision.revision).to_string(),
+                    revision.id.clone(),
+                    saturating_i64(revision.created_at_unix).to_string(),
+                    revision.created_by.clone(),
+                    revision_json,
+                ],
+            )
+            .await?;
+        if result.changes() == 0 {
+            return Err(StorageError::Conflict(format!(
+                "guardrail policy revision {} already exists",
+                revision.id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn get_guardrail_policy_revision_async(
+        &self,
+        policy_id: &str,
+        revision: u32,
+    ) -> Result<Option<StoredGuardrailPolicyRevision>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT revision_json AS document_json FROM guardrail_policy_revisions \
+                 WHERE policy_id = ? AND revision = ?",
+                vec![policy_id.to_string(), i64::from(revision).to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn list_guardrail_policy_revisions_async(
+        &self,
+        policy_id: Option<&str>,
+    ) -> Result<Vec<StoredGuardrailPolicyRevision>, StorageError> {
+        match policy_id {
+            Some(policy_id) => {
+                self.fetch_control_documents(
+                    "SELECT revision_json AS document_json FROM guardrail_policy_revisions \
+                     WHERE policy_id = ? ORDER BY policy_id ASC, revision ASC",
+                    vec![policy_id.to_string()],
+                )
+                .await
+            }
+            None => {
+                self.fetch_control_documents(
+                    "SELECT revision_json AS document_json FROM guardrail_policy_revisions \
+                     ORDER BY policy_id ASC, revision ASC",
+                    Vec::new(),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn get_guardrail_policy_binding_async(
+        &self,
+        policy_id: &str,
+    ) -> Result<Option<StoredGuardrailPolicyBinding>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT binding_json AS document_json FROM guardrail_policy_bindings \
+                 WHERE policy_id = ?",
+                vec![policy_id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn list_guardrail_policy_bindings_async(
+        &self,
+    ) -> Result<Vec<StoredGuardrailPolicyBinding>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT binding_json AS document_json FROM guardrail_policy_bindings \
+             ORDER BY policy_id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    // --- Managed worker stores (issue #449, control DB) ---
+    //
+    // Each family is an upsert of the FULL record as a `*_json` document plus
+    // the projection column its whole-table ORDER BY needs. Whole-table admin
+    // reads with no routing tenant, so the CONTROL database owns them.
+
+    async fn upsert_managed_worker_template_async(
+        &self,
+        template: &StoredManagedWorkerTemplate,
+    ) -> Result<(), StorageError> {
+        let template_json = serialize_storage_document(template)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_templates (id, template_json) VALUES (?, ?) \
+             ON CONFLICT (id) DO UPDATE SET template_json = excluded.template_json",
+            vec![template.id.clone(), template_json],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_templates_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerTemplate>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT template_json AS document_json FROM managed_worker_templates ORDER BY id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn upsert_agent_worker_instance_async(
+        &self,
+        instance: &StoredAgentWorkerInstance,
+    ) -> Result<(), StorageError> {
+        let instance_json = serialize_storage_document(instance)?;
+        self.execute_control(
+            "INSERT INTO agent_worker_instances (id, started_at_unix, instance_json) \
+             VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             started_at_unix = excluded.started_at_unix, instance_json = excluded.instance_json",
+            vec![
+                instance.id.clone(),
+                optional_number_param(instance.started_at_unix),
+                instance_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn agent_worker_instances_async(
+        &self,
+    ) -> Result<Vec<StoredAgentWorkerInstance>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT instance_json AS document_json FROM agent_worker_instances \
+             ORDER BY started_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn upsert_managed_worker_session_async(
+        &self,
+        session: &StoredManagedWorkerSession,
+    ) -> Result<(), StorageError> {
+        let session_json = serialize_storage_document(session)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_sessions (id, requested_at_unix, session_json) \
+             VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             requested_at_unix = excluded.requested_at_unix, session_json = excluded.session_json",
+            vec![
+                session.id.clone(),
+                optional_number_param(session.requested_at_unix),
+                session_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_sessions_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerSession>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT session_json AS document_json FROM managed_worker_sessions \
+             ORDER BY requested_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn append_managed_worker_lifecycle_event_async(
+        &self,
+        event: &StoredManagedWorkerLifecycleEvent,
+    ) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_lifecycle_events (id, occurred_at_unix, event_json) \
+             VALUES (?, NULLIF(?, ''), ?) ON CONFLICT (id) DO NOTHING",
+            vec![
+                event.id.clone(),
+                optional_number_param(event.occurred_at_unix),
+                event_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_lifecycle_events_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerLifecycleEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT event_json AS document_json FROM managed_worker_lifecycle_events \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn upsert_managed_worker_isolation_selection_async(
+        &self,
+        selection: &StoredManagedWorkerIsolationSelection,
+    ) -> Result<(), StorageError> {
+        let selection_json = serialize_storage_document(selection)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_isolation_selections \
+             (session_id, selected_at_unix, selection_json) VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+             selected_at_unix = excluded.selected_at_unix, \
+             selection_json = excluded.selection_json",
+            vec![
+                selection.session_id.clone(),
+                optional_number_param(selection.selected_at_unix),
+                selection_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_isolation_selections_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationSelection>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT selection_json AS document_json FROM managed_worker_isolation_selections \
+             ORDER BY selected_at_unix ASC, session_id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn upsert_managed_worker_isolation_policy_async(
+        &self,
+        policy: &StoredManagedWorkerIsolationPolicy,
+    ) -> Result<(), StorageError> {
+        let policy_json = serialize_storage_document(policy)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_isolation_policies (session_id, policy_json) \
+             VALUES (?, ?) \
+             ON CONFLICT (session_id) DO UPDATE SET policy_json = excluded.policy_json",
+            vec![policy.session_id.clone(), policy_json],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_isolation_policies_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationPolicy>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT policy_json AS document_json FROM managed_worker_isolation_policies \
+             ORDER BY session_id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn upsert_managed_worker_isolation_evidence_async(
+        &self,
+        evidence: &StoredManagedWorkerIsolationEvidence,
+    ) -> Result<(), StorageError> {
+        let evidence_json = serialize_storage_document(evidence)?;
+        self.execute_control(
+            "INSERT INTO managed_worker_isolation_evidence (id, occurred_at_unix, evidence_json) \
+             VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             occurred_at_unix = excluded.occurred_at_unix, \
+             evidence_json = excluded.evidence_json",
+            vec![
+                evidence.id.clone(),
+                optional_number_param(evidence.occurred_at_unix),
+                evidence_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn managed_worker_isolation_evidence_async(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationEvidence>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT evidence_json AS document_json FROM managed_worker_isolation_evidence \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    // --- Self-hosted worker stores (issue #449, control DB) ---
+    //
+    // Registrations/heartbeats/telemetry/artifacts/checkpoints/dispatches, each
+    // a full-record `*_json` document plus the projection columns the
+    // worker/run-filtered reads and orderings need. The Postgres capability
+    // side-table is folded into the dispatch document. Same CONTROL-database
+    // routing rationale as the managed families above.
+
+    async fn upsert_self_hosted_worker_registration_async(
+        &self,
+        registration: &StoredSelfHostedWorkerRegistration,
+    ) -> Result<(), StorageError> {
+        let registration_json = serialize_storage_document(registration)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_worker_registrations \
+             (id, registered_at_unix, registration_json) VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             registered_at_unix = excluded.registered_at_unix, \
+             registration_json = excluded.registration_json",
+            vec![
+                registration.id.clone(),
+                optional_number_param(registration.registered_at_unix),
+                registration_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_worker_registrations_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerRegistration>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT registration_json AS document_json FROM self_hosted_worker_registrations \
+             ORDER BY registered_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn self_hosted_worker_registration_async(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerRegistration>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT registration_json AS document_json FROM self_hosted_worker_registrations \
+                 WHERE id = ?",
+                vec![worker_id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn append_self_hosted_worker_heartbeat_async(
+        &self,
+        heartbeat: &StoredSelfHostedWorkerHeartbeat,
+    ) -> Result<(), StorageError> {
+        let heartbeat_json = serialize_storage_document(heartbeat)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_worker_heartbeats \
+             (id, worker_id, reported_at_unix, heartbeat_json) VALUES (?, ?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                heartbeat.id.clone(),
+                heartbeat.worker_id.clone(),
+                optional_number_param(heartbeat.reported_at_unix),
+                heartbeat_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_worker_heartbeats_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerHeartbeat>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT heartbeat_json AS document_json FROM self_hosted_worker_heartbeats \
+             ORDER BY reported_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn latest_self_hosted_worker_heartbeat_async(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerHeartbeat>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT heartbeat_json AS document_json FROM self_hosted_worker_heartbeats \
+                 WHERE worker_id = ? ORDER BY reported_at_unix DESC, id DESC LIMIT 1",
+                vec![worker_id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn append_self_hosted_worker_telemetry_event_async(
+        &self,
+        event: &StoredSelfHostedWorkerTelemetryEvent,
+    ) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_worker_telemetry_events \
+             (id, worker_id, run_id, occurred_at_unix, ingested_at_unix, event_json) \
+             VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO NOTHING",
+            vec![
+                event.id.clone(),
+                event.worker_id.clone(),
+                event.run_id.clone().unwrap_or_default(),
+                optional_number_param(event.occurred_at_unix),
+                optional_number_param(event.ingested_at_unix),
+                event_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_worker_telemetry_events_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT event_json AS document_json FROM self_hosted_worker_telemetry_events \
+             ORDER BY occurred_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn self_hosted_worker_telemetry_events_for_run_async(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        // Keep the NEWEST window (DESC + LIMIT) so a run exceeding the bound
+        // preserves its latest lifecycle state, then reverse to the ascending
+        // timeline the caller expects (issue #231 parity).
+        let limit = if limit == 0 {
+            i64::MAX
+        } else {
+            saturating_i64(limit as u64)
+        };
+        let sql = format!(
+            "SELECT event_json AS document_json FROM self_hosted_worker_telemetry_events \
+             WHERE run_id = ? ORDER BY occurred_at_unix DESC, ingested_at_unix DESC, id DESC \
+             LIMIT {limit}"
+        );
+        let mut events: Vec<StoredSelfHostedWorkerTelemetryEvent> = self
+            .fetch_control_documents(&sql, vec![run_id.to_string()])
+            .await?;
+        events.reverse();
+        Ok(events)
+    }
+
+    async fn self_hosted_worker_telemetry_events_for_worker_async(
+        &self,
+        worker_id: &str,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT event_json AS document_json FROM self_hosted_worker_telemetry_events \
+             WHERE worker_id = ? ORDER BY occurred_at_unix ASC, ingested_at_unix ASC, id ASC",
+            vec![worker_id.to_string()],
+        )
+        .await
+    }
+
+    async fn upsert_self_hosted_worker_artifact_async(
+        &self,
+        artifact: &StoredSelfHostedWorkerArtifact,
+    ) -> Result<(), StorageError> {
+        let artifact_json = serialize_storage_document(artifact)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_worker_artifacts \
+             (id, worker_id, created_at_unix, artifact_json) VALUES (?, ?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             worker_id = excluded.worker_id, created_at_unix = excluded.created_at_unix, \
+             artifact_json = excluded.artifact_json",
+            vec![
+                artifact.id.clone(),
+                artifact.worker_id.clone(),
+                optional_number_param(artifact.created_at_unix),
+                artifact_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_worker_artifacts_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerArtifact>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT artifact_json AS document_json FROM self_hosted_worker_artifacts \
+             ORDER BY created_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn self_hosted_worker_artifact_async(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerArtifact>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT artifact_json AS document_json FROM self_hosted_worker_artifacts \
+                 WHERE id = ?",
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn upsert_self_hosted_worker_checkpoint_async(
+        &self,
+        checkpoint: &StoredSelfHostedWorkerCheckpoint,
+    ) -> Result<(), StorageError> {
+        let checkpoint_json = serialize_storage_document(checkpoint)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_worker_checkpoints \
+             (id, worker_id, created_at_unix, checkpoint_json) VALUES (?, ?, NULLIF(?, ''), ?) \
+             ON CONFLICT (id) DO UPDATE SET \
+             worker_id = excluded.worker_id, created_at_unix = excluded.created_at_unix, \
+             checkpoint_json = excluded.checkpoint_json",
+            vec![
+                checkpoint.id.clone(),
+                checkpoint.worker_id.clone(),
+                optional_number_param(checkpoint.created_at_unix),
+                checkpoint_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_worker_checkpoints_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerCheckpoint>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT checkpoint_json AS document_json FROM self_hosted_worker_checkpoints \
+             ORDER BY created_at_unix ASC, id ASC",
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn self_hosted_worker_checkpoint_async(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredSelfHostedWorkerCheckpoint>, StorageError> {
+        let row: Option<DocumentRow> = self
+            .fetch_control_optional(
+                "SELECT checkpoint_json AS document_json FROM self_hosted_worker_checkpoints \
+                 WHERE id = ?",
+                vec![id.to_string()],
+            )
+            .await?;
+        row.map(|row| deserialize_storage_document(row.document_json.as_str()))
+            .transpose()
+    }
+
+    async fn self_hosted_worker_activity_stats_async(
+        &self,
+        worker_id: &str,
+    ) -> Result<StoredSelfHostedWorkerActivityStats, StorageError> {
+        // One control-database query with worker-filtered count/max subselects
+        // -- the transaction-free equivalent of the Postgres four-table scan.
+        let row: Option<SelfHostedWorkerActivityStatsRow> = self
+            .fetch_control_optional(
+                "SELECT \
+                    (SELECT count(*) FROM self_hosted_worker_telemetry_events WHERE worker_id = ?) \
+                        AS telemetry_event_count, \
+                    (SELECT max(occurred_at_unix) FROM self_hosted_worker_telemetry_events \
+                     WHERE worker_id = ?) AS latest_event_at_unix, \
+                    (SELECT count(*) FROM self_hosted_worker_artifacts WHERE worker_id = ?) \
+                        AS artifact_count, \
+                    (SELECT max(created_at_unix) FROM self_hosted_worker_artifacts \
+                     WHERE worker_id = ?) AS latest_artifact_at_unix, \
+                    (SELECT count(*) FROM self_hosted_worker_checkpoints WHERE worker_id = ?) \
+                        AS checkpoint_count, \
+                    (SELECT max(created_at_unix) FROM self_hosted_worker_checkpoints \
+                     WHERE worker_id = ?) AS latest_checkpoint_at_unix",
+                vec![worker_id.to_string(); 6],
+            )
+            .await?;
+        Ok(row
+            .map(StoredSelfHostedWorkerActivityStats::from)
+            .unwrap_or_default())
+    }
+
+    async fn upsert_self_hosted_run_dispatch_async(
+        &self,
+        dispatch: &StoredSelfHostedRunDispatch,
+    ) -> Result<(), StorageError> {
+        let dispatch_json = serialize_storage_document(dispatch)?;
+        self.execute_control(
+            "INSERT INTO self_hosted_run_dispatches (dispatch_id, queued_at_unix, dispatch_json) \
+             VALUES (?, NULLIF(?, ''), ?) \
+             ON CONFLICT (dispatch_id) DO UPDATE SET \
+             queued_at_unix = excluded.queued_at_unix, dispatch_json = excluded.dispatch_json",
+            vec![
+                dispatch.dispatch_id.clone(),
+                optional_number_param(dispatch.queued_at_unix),
+                dispatch_json,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn self_hosted_run_dispatches_async(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedRunDispatch>, StorageError> {
+        self.fetch_control_documents(
+            "SELECT dispatch_json AS document_json FROM self_hosted_run_dispatches \
+             ORDER BY queued_at_unix ASC, dispatch_id ASC",
+            Vec::new(),
+        )
+        .await
     }
 }
 
@@ -2867,7 +3957,15 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_all_asset_channels"))
     }
 
-    // --- Usage rollups / billing ledger + outbox (UNIMPLEMENTED) ---
+    // --- Usage rollups (UNIMPLEMENTED, deferred) ---
+    //
+    // The monthly/metadata rollups are maintained by the append_billing_event
+    // settlement transaction on Postgres (read-modify-write increments across
+    // sibling tables); reproducing that on D1 needs the multi-statement
+    // transaction the HTTP query API lacks, so the rollup reads (and the
+    // durable `persist_usage_aggregate` half, whose store-of-record on this
+    // backend is still the process-local mirror) stay deferred to the
+    // rollup-maintenance slice. See the module docs.
 
     async fn get_usage_monthly_rollup(
         &self,
@@ -2884,86 +3982,93 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_usage_monthly_rollups"))
     }
 
+    // --- Billing ledger + report outbox (IMPLEMENTED, control DB, issue #449) ---
+
     async fn append_billing_ledger_entry(
         &self,
-        _entry: &ferrogate_billing::LedgerEntry,
+        entry: &ferrogate_billing::LedgerEntry,
     ) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("append_billing_ledger_entry"))
+        self.append_billing_ledger_entry_async(entry).await
     }
 
     async fn list_billing_ledger_entries(
         &self,
-        _filter: &ferrogate_billing::LedgerListFilter,
-        _offset: usize,
-        _limit: usize,
+        filter: &ferrogate_billing::LedgerListFilter,
+        offset: usize,
+        limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
-        Err(unimplemented_surface("list_billing_ledger_entries"))
+        self.list_billing_ledger_entries_async(filter, offset, limit)
+            .await
     }
 
     async fn billing_ledger_entry(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
-        Err(unimplemented_surface("billing_ledger_entry"))
+        self.billing_ledger_entry_async(id).await
     }
 
     async fn enqueue_billing_report(
         &self,
-        _id: &str,
-        _event: &ferrogate_billing::BillingEvent,
-        _next_attempt_unix: i64,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("enqueue_billing_report"))
+        self.enqueue_billing_report_async(id, event, next_attempt_unix)
+            .await
     }
 
     async fn list_due_billing_reports(
         &self,
-        _now_unix: i64,
-        _limit: usize,
+        now_unix: i64,
+        limit: usize,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        Err(unimplemented_surface("list_due_billing_reports"))
+        self.list_due_billing_reports_async(now_unix, limit).await
     }
 
     async fn reschedule_billing_report(
         &self,
-        _id: &str,
-        _next_attempt_unix: i64,
+        id: &str,
+        next_attempt_unix: i64,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("reschedule_billing_report"))
+        self.reschedule_billing_report_async(id, next_attempt_unix)
+            .await
     }
 
     async fn dead_letter_billing_report(
         &self,
-        _id: &str,
-        _dead_lettered_at_unix: i64,
+        id: &str,
+        dead_lettered_at_unix: i64,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("dead_letter_billing_report"))
+        self.dead_letter_billing_report_async(id, dead_lettered_at_unix)
+            .await
     }
 
     async fn list_dead_lettered_billing_reports(
         &self,
-        _limit: usize,
+        limit: usize,
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
-        Err(unimplemented_surface("list_dead_lettered_billing_reports"))
+        self.list_dead_lettered_billing_reports_async(limit).await
     }
 
     async fn replay_dead_lettered_billing_report(
         &self,
-        _id: &str,
-        _next_attempt_unix: i64,
+        id: &str,
+        next_attempt_unix: i64,
     ) -> Result<ReplayDeadLetterOutcome, StorageError> {
-        Err(unimplemented_surface("replay_dead_lettered_billing_report"))
+        self.replay_dead_lettered_billing_report_async(id, next_attempt_unix)
+            .await
     }
 
     async fn get_billing_report_outbox_entry(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
-        Err(unimplemented_surface("get_billing_report_outbox_entry"))
+        self.get_billing_report_outbox_entry_async(id).await
     }
 
-    async fn delete_billing_report(&self, _id: &str) -> Result<(), StorageError> {
-        Err(unimplemented_surface("delete_billing_report"))
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        self.delete_billing_report_async(id).await
     }
 
     // --- Config documents (IMPLEMENTED, control database) ---
@@ -3048,41 +4153,47 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         block_on_sync_bridge(self.config_documents_async())
     }
 
-    // --- Guardrail policy surface (UNIMPLEMENTED) ---
+    // --- Guardrail policy revisions + bindings (control DB, issue #449) ---
+    //
+    // insert/get/list revisions and get/list bindings are IMPLEMENTED: each is
+    // a single-statement document read/write bridged into the async helpers
+    // like the config-document methods. The generation-guarded
+    // activate/archive/restore CAS transitions below stay UNIMPLEMENTED -- they
+    // need the compare-and-swap transaction the D1 HTTP query API lacks.
 
     fn insert_guardrail_policy_revision(
         &self,
-        _revision: StoredGuardrailPolicyRevision,
+        revision: StoredGuardrailPolicyRevision,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("insert_guardrail_policy_revision"))
+        block_on_sync_bridge(self.insert_guardrail_policy_revision_async(&revision))
     }
 
     fn get_guardrail_policy_revision(
         &self,
-        _policy_id: &str,
-        _revision: u32,
+        policy_id: &str,
+        revision: u32,
     ) -> Result<Option<StoredGuardrailPolicyRevision>, StorageError> {
-        Err(unimplemented_surface("get_guardrail_policy_revision"))
+        block_on_sync_bridge(self.get_guardrail_policy_revision_async(policy_id, revision))
     }
 
     fn list_guardrail_policy_revisions(
         &self,
-        _policy_id: Option<&str>,
+        policy_id: Option<&str>,
     ) -> Result<Vec<StoredGuardrailPolicyRevision>, StorageError> {
-        Err(unimplemented_surface("list_guardrail_policy_revisions"))
+        block_on_sync_bridge(self.list_guardrail_policy_revisions_async(policy_id))
     }
 
     fn get_guardrail_policy_binding(
         &self,
-        _policy_id: &str,
+        policy_id: &str,
     ) -> Result<Option<StoredGuardrailPolicyBinding>, StorageError> {
-        Err(unimplemented_surface("get_guardrail_policy_binding"))
+        block_on_sync_bridge(self.get_guardrail_policy_binding_async(policy_id))
     }
 
     fn list_guardrail_policy_bindings(
         &self,
     ) -> Result<Vec<StoredGuardrailPolicyBinding>, StorageError> {
-        Err(unimplemented_surface("list_guardrail_policy_bindings"))
+        block_on_sync_bridge(self.list_guardrail_policy_bindings_async())
     }
 
     fn activate_guardrail_policy_revision(
@@ -3247,8 +4358,16 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             })
     }
 
-    async fn append_billing_event(&self, _event: BillingEvent) -> Result<bool, StorageError> {
-        Err(unimplemented_surface("append_billing_event"))
+    // --- Billing events (IMPLEMENTED, control DB, issue #449) ---
+    //
+    // Settled metering events stored as full `*_json` documents (idempotent on
+    // the ledger-entry id, like Postgres/Memory). The combined
+    // `append_billing_event_with_outbox_enqueue` stays UNIMPLEMENTED: it must
+    // commit the metering write and the outbox enqueue in ONE transaction
+    // (issue #150), which the D1 HTTP query API cannot express.
+
+    async fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
+        self.append_billing_event_async(&event).await
     }
 
     async fn append_billing_event_with_outbox_enqueue(
@@ -3263,13 +4382,19 @@ impl ControlPlaneStore for D1ControlPlaneStore {
     }
 
     async fn billing_events(&self) -> Vec<BillingEvent> {
-        warn_unimplemented("billing_events");
-        Vec::new()
+        self.billing_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: billing_events failed: {error}");
+            Vec::new()
+        })
     }
 
     async fn billing_events_page(&self, offset: usize, limit: usize) -> StoragePage<BillingEvent> {
-        warn_unimplemented("billing_events_page");
-        StoragePage::empty(offset, limit)
+        self.billing_events_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: billing_events_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
     }
 
     // Process-local usage-aggregate mirror: backend-independent semantics
@@ -3406,237 +4531,328 @@ impl ControlPlaneStore for D1ControlPlaneStore {
             })
     }
 
-    // --- Managed / self-hosted worker stores (UNIMPLEMENTED) ---
+    // --- Managed worker stores (IMPLEMENTED, control DB, issue #449) ---
+    //
+    // Each `upsert`/`append` writes the full record as a `*_json` document and
+    // surfaces its error; each `Vec`-returning list swallows-with-warn like the
+    // #447 observability getters and the Postgres backend.
 
     async fn upsert_managed_worker_template(
         &self,
-        _template: StoredManagedWorkerTemplate,
+        template: StoredManagedWorkerTemplate,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_managed_worker_template"))
+        self.upsert_managed_worker_template_async(&template).await
     }
 
     async fn managed_worker_templates(&self) -> Vec<StoredManagedWorkerTemplate> {
-        warn_unimplemented("managed_worker_templates");
-        Vec::new()
+        self.managed_worker_templates_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_templates failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn upsert_agent_worker_instance(
         &self,
-        _instance: StoredAgentWorkerInstance,
+        instance: StoredAgentWorkerInstance,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_agent_worker_instance"))
+        self.upsert_agent_worker_instance_async(&instance).await
     }
 
     async fn agent_worker_instances(&self) -> Vec<StoredAgentWorkerInstance> {
-        warn_unimplemented("agent_worker_instances");
-        Vec::new()
+        self.agent_worker_instances_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_worker_instances failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn upsert_managed_worker_session(
         &self,
-        _session: StoredManagedWorkerSession,
+        session: StoredManagedWorkerSession,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_managed_worker_session"))
+        self.upsert_managed_worker_session_async(&session).await
     }
 
     async fn managed_worker_sessions(&self) -> Vec<StoredManagedWorkerSession> {
-        warn_unimplemented("managed_worker_sessions");
-        Vec::new()
+        self.managed_worker_sessions_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_sessions failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn append_managed_worker_lifecycle_event(
         &self,
-        _event: StoredManagedWorkerLifecycleEvent,
+        event: StoredManagedWorkerLifecycleEvent,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "append_managed_worker_lifecycle_event",
-        ))
+        self.append_managed_worker_lifecycle_event_async(&event)
+            .await
     }
 
     async fn managed_worker_lifecycle_events(&self) -> Vec<StoredManagedWorkerLifecycleEvent> {
-        warn_unimplemented("managed_worker_lifecycle_events");
-        Vec::new()
+        self.managed_worker_lifecycle_events_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_lifecycle_events failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn upsert_managed_worker_isolation_selection(
         &self,
-        _selection: StoredManagedWorkerIsolationSelection,
+        selection: StoredManagedWorkerIsolationSelection,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "upsert_managed_worker_isolation_selection",
-        ))
+        self.upsert_managed_worker_isolation_selection_async(&selection)
+            .await
     }
 
     async fn managed_worker_isolation_selections(
         &self,
     ) -> Vec<StoredManagedWorkerIsolationSelection> {
-        warn_unimplemented("managed_worker_isolation_selections");
-        Vec::new()
+        self.managed_worker_isolation_selections_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: managed_worker_isolation_selections failed: {error}"
+                );
+                Vec::new()
+            })
     }
 
     async fn upsert_managed_worker_isolation_policy(
         &self,
-        _policy: StoredManagedWorkerIsolationPolicy,
+        policy: StoredManagedWorkerIsolationPolicy,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "upsert_managed_worker_isolation_policy",
-        ))
+        self.upsert_managed_worker_isolation_policy_async(&policy)
+            .await
     }
 
     async fn managed_worker_isolation_policies(&self) -> Vec<StoredManagedWorkerIsolationPolicy> {
-        warn_unimplemented("managed_worker_isolation_policies");
-        Vec::new()
+        self.managed_worker_isolation_policies_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_isolation_policies failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn upsert_managed_worker_isolation_evidence(
         &self,
-        _evidence: StoredManagedWorkerIsolationEvidence,
+        evidence: StoredManagedWorkerIsolationEvidence,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "upsert_managed_worker_isolation_evidence",
-        ))
+        self.upsert_managed_worker_isolation_evidence_async(&evidence)
+            .await
     }
 
     async fn managed_worker_isolation_evidence(&self) -> Vec<StoredManagedWorkerIsolationEvidence> {
-        warn_unimplemented("managed_worker_isolation_evidence");
-        Vec::new()
+        self.managed_worker_isolation_evidence_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_isolation_evidence failed: {error}");
+                Vec::new()
+            })
     }
+
+    // --- Self-hosted worker stores (IMPLEMENTED, control DB, issue #449) ---
 
     async fn upsert_self_hosted_worker_registration(
         &self,
-        _registration: StoredSelfHostedWorkerRegistration,
+        registration: StoredSelfHostedWorkerRegistration,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "upsert_self_hosted_worker_registration",
-        ))
+        self.upsert_self_hosted_worker_registration_async(&registration)
+            .await
     }
 
     async fn self_hosted_worker_registrations(&self) -> Vec<StoredSelfHostedWorkerRegistration> {
-        warn_unimplemented("self_hosted_worker_registrations");
-        Vec::new()
+        self.self_hosted_worker_registrations_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_registrations failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn self_hosted_worker_registration(
         &self,
-        _worker_id: &str,
+        worker_id: &str,
     ) -> Option<StoredSelfHostedWorkerRegistration> {
-        warn_unimplemented("self_hosted_worker_registration");
-        None
+        self.self_hosted_worker_registration_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_registration failed: {error}");
+                None
+            })
     }
 
     async fn latest_self_hosted_worker_heartbeat(
         &self,
-        _worker_id: &str,
+        worker_id: &str,
     ) -> Option<StoredSelfHostedWorkerHeartbeat> {
-        warn_unimplemented("latest_self_hosted_worker_heartbeat");
-        None
+        self.latest_self_hosted_worker_heartbeat_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: latest_self_hosted_worker_heartbeat failed: {error}"
+                );
+                None
+            })
     }
 
     async fn self_hosted_worker_activity_stats(
         &self,
-        _worker_id: &str,
+        worker_id: &str,
     ) -> StoredSelfHostedWorkerActivityStats {
-        warn_unimplemented("self_hosted_worker_activity_stats");
-        StoredSelfHostedWorkerActivityStats::default()
+        self.self_hosted_worker_activity_stats_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_activity_stats failed: {error}");
+                StoredSelfHostedWorkerActivityStats::default()
+            })
     }
 
     async fn append_self_hosted_worker_heartbeat(
         &self,
-        _heartbeat: StoredSelfHostedWorkerHeartbeat,
+        heartbeat: StoredSelfHostedWorkerHeartbeat,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("append_self_hosted_worker_heartbeat"))
+        self.append_self_hosted_worker_heartbeat_async(&heartbeat)
+            .await
     }
 
     async fn self_hosted_worker_heartbeats(&self) -> Vec<StoredSelfHostedWorkerHeartbeat> {
-        warn_unimplemented("self_hosted_worker_heartbeats");
-        Vec::new()
+        self.self_hosted_worker_heartbeats_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_heartbeats failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn append_self_hosted_worker_telemetry_event(
         &self,
-        _event: StoredSelfHostedWorkerTelemetryEvent,
+        event: StoredSelfHostedWorkerTelemetryEvent,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "append_self_hosted_worker_telemetry_event",
-        ))
+        self.append_self_hosted_worker_telemetry_event_async(&event)
+            .await
     }
 
     async fn self_hosted_worker_telemetry_events(
         &self,
     ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
-        warn_unimplemented("self_hosted_worker_telemetry_events");
-        Vec::new()
+        self.self_hosted_worker_telemetry_events_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events failed: {error}"
+                );
+                Vec::new()
+            })
     }
 
     async fn self_hosted_worker_telemetry_events_for_run(
         &self,
-        _run_id: &str,
-        _limit: usize,
+        run_id: &str,
+        limit: usize,
     ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
-        warn_unimplemented("self_hosted_worker_telemetry_events_for_run");
-        Vec::new()
+        self.self_hosted_worker_telemetry_events_for_run_async(run_id, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events_for_run failed: {error}"
+                );
+                Vec::new()
+            })
     }
 
     async fn self_hosted_worker_telemetry_events_for_worker(
         &self,
-        _worker_id: &str,
+        worker_id: &str,
     ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
-        warn_unimplemented("self_hosted_worker_telemetry_events_for_worker");
-        Vec::new()
+        self.self_hosted_worker_telemetry_events_for_worker_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events_for_worker failed: {error}"
+                );
+                Vec::new()
+            })
     }
 
     async fn upsert_self_hosted_worker_artifact(
         &self,
-        _artifact: StoredSelfHostedWorkerArtifact,
+        artifact: StoredSelfHostedWorkerArtifact,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_self_hosted_worker_artifact"))
+        self.upsert_self_hosted_worker_artifact_async(&artifact)
+            .await
     }
 
     async fn self_hosted_worker_artifacts(&self) -> Vec<StoredSelfHostedWorkerArtifact> {
-        warn_unimplemented("self_hosted_worker_artifacts");
-        Vec::new()
+        self.self_hosted_worker_artifacts_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_artifacts failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn self_hosted_worker_artifact(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Option<StoredSelfHostedWorkerArtifact> {
-        warn_unimplemented("self_hosted_worker_artifact");
-        None
+        self.self_hosted_worker_artifact_async(id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_artifact failed: {error}");
+                None
+            })
     }
 
     async fn upsert_self_hosted_worker_checkpoint(
         &self,
-        _checkpoint: StoredSelfHostedWorkerCheckpoint,
+        checkpoint: StoredSelfHostedWorkerCheckpoint,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface(
-            "upsert_self_hosted_worker_checkpoint",
-        ))
+        self.upsert_self_hosted_worker_checkpoint_async(&checkpoint)
+            .await
     }
 
     async fn self_hosted_worker_checkpoints(&self) -> Vec<StoredSelfHostedWorkerCheckpoint> {
-        warn_unimplemented("self_hosted_worker_checkpoints");
-        Vec::new()
+        self.self_hosted_worker_checkpoints_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_checkpoints failed: {error}");
+                Vec::new()
+            })
     }
 
     async fn self_hosted_worker_checkpoint(
         &self,
-        _id: &str,
+        id: &str,
     ) -> Option<StoredSelfHostedWorkerCheckpoint> {
-        warn_unimplemented("self_hosted_worker_checkpoint");
-        None
+        self.self_hosted_worker_checkpoint_async(id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_checkpoint failed: {error}");
+                None
+            })
     }
 
     async fn upsert_self_hosted_run_dispatch(
         &self,
-        _dispatch: StoredSelfHostedRunDispatch,
+        dispatch: StoredSelfHostedRunDispatch,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("upsert_self_hosted_run_dispatch"))
+        self.upsert_self_hosted_run_dispatch_async(&dispatch).await
     }
 
     async fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch> {
-        warn_unimplemented("self_hosted_run_dispatches");
-        Vec::new()
+        self.self_hosted_run_dispatches_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_run_dispatches failed: {error}");
+                Vec::new()
+            })
     }
 
     // --- Per-entity module surfaces (#437, UNIMPLEMENTED) ---
