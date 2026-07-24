@@ -411,6 +411,19 @@ fn scanner_timeout_secs() -> u64 {
 mod tests {
     use super::*;
 
+    /// Install the process-wide rustls crypto provider before any test builds a
+    /// `reqwest::Client` (via `HttpScanner::new` / `build_scanner`). The
+    /// workspace `reqwest` uses the `rustls-no-provider` feature, so building a
+    /// Client panics ("No rustls crypto provider is configured") unless a
+    /// provider is installed first. Production installs it in `main.rs`; this
+    /// mirrors that (same `ring` provider) so the client-building tests pass
+    /// deterministically standalone, not just by parallel-scheduling luck in the
+    /// full suite (issue #448). Idempotent: `install_default` is a no-op after
+    /// the first success, so every test that reaches a Client build can call it.
+    fn ensure_rustls_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     /// A configurable in-memory scanner so pluggability is tested without a
     /// live clamd / network.
     struct MockScanner(ScanVerdict);
@@ -520,6 +533,10 @@ mod tests {
 
     #[test]
     fn config_selects_backend_and_defers_large_objects() {
+        // The `Http` backend below builds a `reqwest::Client`, which panics
+        // without a process-installed rustls crypto provider (see the helper).
+        ensure_rustls_crypto_provider();
+
         let default = AssetScanConfig::default();
         assert_eq!(default.backend, ScanBackend::Eicar);
         assert_eq!(default.build_scanner().backend_name(), "eicar");
