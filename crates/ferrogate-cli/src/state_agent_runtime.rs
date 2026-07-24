@@ -1591,6 +1591,9 @@ impl AppState {
                 ferrogate_runtime::IsolationBackendKind::Gvisor => "gvisor",
                 ferrogate_runtime::IsolationBackendKind::RootlessDocker => "rootless_docker",
                 ferrogate_runtime::IsolationBackendKind::LocalProcess => "local_process",
+                ferrogate_runtime::IsolationBackendKind::CloudflareContainer => {
+                    "cloudflare_container"
+                }
             }
         }
 
