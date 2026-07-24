@@ -26,6 +26,7 @@ mod dispatch;
 mod embeddings;
 mod external_actions;
 mod function_egress;
+mod function_egress_cloudflare;
 mod guardrail_policies;
 mod handlers;
 mod images;

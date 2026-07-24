@@ -42,7 +42,9 @@ use std::net::SocketAddr;
 const BODY_EXCERPT_MAX_BYTES: usize = 2048;
 /// Capability recorded in the minted token for edge-function-side authorization.
 const FUNCTION_CAPABILITY: &str = "function";
-const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
+/// Shared token issuer for both hosted-function broker branches (Supabase here,
+/// Cloudflare Worker in `function_egress_cloudflare`).
+pub(super) const FUNCTION_TOKEN_ISSUER: &str = "ferrogate";
 
 /// Runtime configuration for the gateway function egress broker.
 ///
@@ -78,7 +80,18 @@ impl FunctionEgressGatewayConfig {
     /// Load from the environment. Returns `None` (broker disabled) unless a
     /// signing secret is configured. Allowlist is `FG_FN_ALLOWLIST` (JSON array
     /// of rules); apikey is `FG_FN_APIKEY`.
+    ///
+    /// The Supabase branch is the default: it stays active when the
+    /// `FG_FN_TARGET_KIND` discriminant (#435) is unset or `supabase`, and is
+    /// disabled (fail-closed, no shared credentials misrouted) when the
+    /// operator declared a Cloudflare Worker target or an unknown kind.
     pub(super) fn from_env() -> Option<Self> {
+        if !matches!(
+            super::function_egress_cloudflare::env_function_target_kind(),
+            Some(super::function_egress_cloudflare::FunctionTargetKind::Supabase)
+        ) {
+            return None;
+        }
         Self::from_values(
             std::env::var("FG_FN_JWT_SECRET").ok(),
             std::env::var("FG_FN_APIKEY").ok(),
@@ -135,8 +148,9 @@ impl FunctionEgressGatewayConfig {
 }
 
 /// Normalize a project base URL for comparison, matching the allowlist's own
-/// normalization (trim surrounding whitespace and any trailing slash).
-fn normalize_base_url(base_url: &str) -> String {
+/// normalization (trim surrounding whitespace and any trailing slash). Shared
+/// with the Cloudflare Worker broker branch.
+pub(super) fn normalize_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 

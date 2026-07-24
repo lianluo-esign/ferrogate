@@ -1,6 +1,8 @@
 # Function Egress Broker — enterprise-grade Supabase edge-function invocation
 
-Status: design (2026-07-03) · Owner: jamesduan · Tracks: #115 and its children
+Status: design (2026-07-03, Cloudflare Worker branch added 2026-07-24) ·
+Owner: jamesduan · Tracks: #115 and its children; #416/#435 for the
+Cloudflare Worker target
 
 ## 1. Problem
 
@@ -103,6 +105,43 @@ Decision: **both** worker types use gateway-brokered execution. No special case.
 > disabled. An absent allowlist still means an empty deny-by-default ruleset; a
 > malformed allowlist is treated as an operator error instead of silently
 > degrading into "deny everything".
+
+## 5a. Cloudflare Worker targets (#416/#435)
+
+The broker can host its function on a deployed Cloudflare Worker instead of a
+Supabase project. Governance is identical by construction: the runtime's
+`prepare_governed_worker_invocation` (#416) composes the same fail-closed
+pipeline (per-tenant egress allowlist authorize → mint scoped JWT → build the
+governed request) and emits the same transport-agnostic request shape the
+gateway's TLS egress executor already runs. The `/v1/functions/execute` route
+dispatches to the Worker branch when — and only when — the operator declared it
+in config (#435).
+
+Config surface (env, `FG_FN_*`; shared names reused where semantics match):
+
+| Variable | Meaning |
+|---|---|
+| `FG_FN_TARGET_KIND` | Target-platform discriminant: `supabase` (default when unset — pre-#435 behavior is byte-identical) or `cloudflare_worker`. Any other value disables **both** branches (fail-closed) with a warning. Exactly one branch is active per process. |
+| `FG_FN_CF_WORKER` | Required for the Worker branch. JSON `CloudflareWorkerTarget`: `{"base_url":"https://<worker>.<account>.workers.dev","invoke_path":"<segment>","auth_key_ref":"secret:<ref>"}`. Validated fail-closed at startup (https-only base, clean single-segment invoke path, non-empty secret-ref). |
+| `FG_FN_JWT_SECRET` | Reused — signs the short-lived scoped bearer JWT the Worker verifies. |
+| `FG_FN_ALLOWLIST` | Reused — the same per-tenant rule array; `function_slugs` match the Worker `invoke_path`. **Single-worker rule** (mirror of TOK-6): every rule's `base_url` must equal the declared `FG_FN_CF_WORKER` base URL (after trailing-slash normalization), otherwise the branch stays disabled. |
+| `FG_FN_APIKEY` | Supabase-only. Workers have no `apikey` concept; the Worker request carries the scoped bearer only and never emits an `apikey` header. |
+
+On the wire the route accepts the runtime's `WorkerInvocationRequest`
+(`{"target":{"base_url","invoke_path","auth_key_ref"},"method","body_json"}`).
+The wire `auth_key_ref` is **never trusted**: the broker replaces it with the
+operator-declared `FG_FN_CF_WORKER` secret-ref before the governed pipeline
+runs, so a (future) credential dereference cannot be steered by the caller.
+Like the Supabase `auth_key_ref`, the secret-ref is reserved — validated
+non-empty but not yet dereferenced; the minted scoped JWT is the credential the
+Worker receives today.
+
+Deny/audit behavior matches the Supabase branch exactly: disabled config →
+`503 function_egress_disabled`; allowlist/validation denial → `403
+function_denied` with a `denied` audit event (target
+`cloudflare_worker:<invoke_path>`); upstream failure → `502
+function_upstream_error`; success → bounded outcome plus an `executed` audit
+event.
 
 ## 6. Defense in depth
 

@@ -2999,6 +2999,18 @@ impl FerroGateway {
             .await;
         }
 
+        // Cloudflare Worker branch (#435): active only when the operator set
+        // the `FG_FN_TARGET_KIND=cloudflare_worker` config discriminant. The
+        // Supabase path below is untouched (and remains the default) when the
+        // discriminant is unset — at most one branch is enabled per process.
+        if let Some(cf_config) =
+            super::function_egress_cloudflare::cloudflare_function_egress_config()
+        {
+            return self
+                .handle_function_execute_cloudflare(session, ctx, headers, cf_config)
+                .await;
+        }
+
         // Fail closed: the broker is disabled unless a signing secret is configured.
         let Some(config) = super::function_egress::function_egress_config() else {
             return write_json_error(
@@ -3155,6 +3167,166 @@ impl FerroGateway {
             "executed",
             format!(
                 "edge function {slug} returned status {}",
+                outcome.status_code
+            ),
+        ));
+        write_json_response(session, StatusCode::OK, &outcome, &ctx.request_id).await
+    }
+
+    /// Cloudflare Worker branch of `/v1/functions/execute` (#435): the same
+    /// parse → authenticate → tenant-attribute → fail-closed broker → execute
+    /// → audit sequence as the Supabase path above, dispatching to the
+    /// runtime's governed Worker pipeline (#416) and the shared TLS egress
+    /// executor. The POST-method check runs in the caller before branching.
+    async fn handle_function_execute_cloudflare(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        config: &super::function_egress_cloudflare::CloudflareFunctionEgressGatewayConfig,
+    ) -> PingoraResult<()> {
+        let body =
+            match read_request_body(session, self.state.current().limits().tool_body_max_bytes())
+                .await?
+            {
+                Ok(body) => body,
+                Err(limit) => {
+                    return write_json_error_and_close(
+                        session,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        format!(
+                            "request body exceeds maximum size of {} bytes",
+                            limit.max_bytes
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+        let request: ferrogate_runtime::WorkerInvocationRequest =
+            match serde_json::from_slice(&body) {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_json",
+                        format!("invalid worker invocation request: {error}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        // Attribute to the authenticated tenant, never the client-supplied body.
+        let tenant = auth.tenant_context();
+        let tenant_key = tenant
+            .organization_id
+            .or(tenant.project_id)
+            .or(tenant.team_id)
+            .or(tenant.user_id)
+            .or(tenant.api_key_id)
+            .unwrap_or_default();
+        if tenant_key.trim().is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "no_tenant",
+                "authenticated identity has no tenant scope for function egress",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        // Persist every governed decision to the control-plane audit store so
+        // the brokered Worker call is auditable end to end, exactly like the
+        // Supabase branch.
+        let audit_target = format!("cloudflare_worker:{}", request.target.invoke_path.trim());
+        let (http_request, invoke_path, timeout_millis) =
+            match super::function_egress_cloudflare::prepare_cloudflare_invocation(
+                config,
+                &tenant_key,
+                &request,
+                now_unix,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "function.execute",
+                        audit_target,
+                        "denied",
+                        error.to_string(),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::FORBIDDEN,
+                        "function_denied",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+
+        let outcome = match super::function_egress::execute_edge_function_request(
+            &http_request,
+            &invoke_path,
+            std::time::Duration::from_millis(timeout_millis),
+            FUNCTION_EGRESS_RESPONSE_BODY_MAX_BYTES,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "function.execute",
+                    audit_target,
+                    "upstream_error",
+                    error.to_string(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_GATEWAY,
+                    "function_upstream_error",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            ctx,
+            &auth,
+            "function.execute",
+            audit_target,
+            "executed",
+            format!(
+                "cloudflare worker {invoke_path} returned status {}",
                 outcome.status_code
             ),
         ));
