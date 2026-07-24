@@ -417,3 +417,211 @@ fn postgres_quota_admission_is_one_conditional_insert_with_a_quota_guard() {
     assert!(query.contains("id_exists"));
     assert!(query.contains("quota_ok"));
 }
+
+// -------- Live Postgres: the #369 inline immutable first-push race ------------
+//
+// The bounded live proof the test gate asked for: two CONCURRENT first pushes of
+// the SAME immutable inline version (same `{tenant}/{type}/{name}/{version}`,
+// DIFFERENT content bytes) race the `create_asset_within_quota` create-if-absent
+// primitive against a real database. This is the repository floor the
+// `asset_inline_publish` module (crate `ferrogate-cli`) is built on: exactly one
+// concurrent push is admitted (`AssetQuotaAdmission::Admitted` -> the visible
+// version), the loser observes the durable winner (`AssetQuotaAdmission::
+// AlreadyExists`, which the inline-publish handler maps to the typed 409
+// `asset_version_immutable`). The winner's durable row is internally consistent:
+// its stored bytes, its metadata `content_hash`, its `size_bytes`, and the
+// listing all belong to the SAME attempt, so a different-content race can never
+// leave one attempt's hash pointing at another attempt's bytes. Unlimited quota
+// (`None`) is used so the OverQuota arm is unreachable and this exercises the
+// pure #369 create-if-absent invariant.
+//
+// Mirrors the #378 `live_promotion_cas_fires_only_from_pending` pattern exactly:
+// DSN-gated (skips cleanly when `FERROGATE_TEST_POSTGRES_DSN` is unset),
+// serialized against the shared pooler, unique per-run schema with RAII drop.
+// Bounded: two connections, two inserts, one re-read, one listing -- no load or
+// stress. The gate environment has live credentials and runs it on re-entry.
+// ---------------------------------------------------------------------------
+
+use crate::schema_routing_test_support::{run_sql, serialize_db_test, unique_schema, SchemaGuard};
+use crate::{stored_asset_id, PostgresStorageConfig, PostgresTlsMode, POSTGRES_SCHEMA_SQL};
+
+const RACE_TENANT: &str = "tenant-369-first-push";
+const RACE_ASSET_TYPE: &str = "cli_tool";
+const RACE_NAME: &str = "deploy";
+const RACE_VERSION: &str = "1.0.0";
+
+/// One first-push candidate for the immutable version: SAME id as its rival, but
+/// a DISTINCT content fingerprint (`content`, `content_hash`, and `size_bytes`
+/// all keyed off `fill`) so a winner/loser mix-up would be observable as a row
+/// whose stored hash does not match its stored bytes.
+fn race_candidate(id: &str, fill: u8, size_bytes: u64) -> StoredAsset {
+    StoredAsset {
+        id: id.into(),
+        tenant_id: RACE_TENANT.into(),
+        project_id: None,
+        asset_type: RACE_ASSET_TYPE.into(),
+        name: RACE_NAME.into(),
+        version: RACE_VERSION.into(),
+        content_type: "application/octet-stream".into(),
+        content_hash: format!("{fill:064x}"),
+        size_bytes,
+        content: vec![fill; size_bytes as usize],
+        storage_uri: None,
+        variant: String::new(),
+        yanked: false,
+        visibility: Default::default(),
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }
+}
+
+#[test]
+fn live_concurrent_first_pushes_admit_exactly_one_immutable_winner() {
+    let Ok(dsn) = std::env::var("FERROGATE_TEST_POSTGRES_DSN") else {
+        eprintln!(
+            "skipping live_concurrent_first_pushes_admit_exactly_one_immutable_winner: \
+             FERROGATE_TEST_POSTGRES_DSN is not set"
+        );
+        return;
+    };
+
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_asset_inline_first_push_test");
+    let _guard = SchemaGuard::new(&dsn, &schema);
+
+    run_sql(
+        &dsn,
+        &format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; CREATE SCHEMA \"{schema}\"; \
+             SET search_path TO \"{schema}\"; {POSTGRES_SCHEMA_SQL} \
+             INSERT INTO \"{schema}\".tenants (id, name, slug) \
+             VALUES ('{RACE_TENANT}', 'first-push tenant', '{RACE_TENANT}') \
+             ON CONFLICT (id) DO NOTHING;"
+        ),
+    );
+
+    let config = PostgresStorageConfig {
+        dsn: dsn.clone(),
+        // Two connections so both first pushes can genuinely hit Postgres at
+        // once; the row-level `INSERT ... ON CONFLICT (id) DO NOTHING` is the
+        // single serialization point that picks the one winner.
+        pool_size: 2,
+        pool_acquire_timeout_millis: 30_000,
+        tls_mode: PostgresTlsMode::Disable,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
+        schema: Some(schema.clone()),
+        search_path: Vec::new(),
+    };
+    let repositories = Arc::new(
+        RuntimeStorageRepositories::postgres_for_migration(config, false, false)
+            .expect("open the postgres control plane against the test DSN"),
+    );
+
+    let id = stored_asset_id(RACE_TENANT, RACE_ASSET_TYPE, RACE_NAME, RACE_VERSION);
+
+    // Two DIFFERENT-content first pushes of the SAME immutable version, released
+    // together on a barrier (never a timing sleep).
+    let attempts: [(u8, u64); 2] = [(0xAA, 8), (0xBB, 16)];
+    let barrier = Arc::new(Barrier::new(attempts.len() + 1));
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::new();
+
+    for (fill, size_bytes) in attempts {
+        let repositories = Arc::clone(&repositories);
+        let barrier = Arc::clone(&barrier);
+        let id = id.clone();
+        let tx = tx.clone();
+        handles.push(thread::spawn(move || {
+            let candidate = race_candidate(&id, fill, size_bytes);
+            barrier.wait();
+            // Unlimited quota (`None`): the OverQuota arm is unreachable, so this
+            // is the pure #369 create-if-absent first-push race.
+            let outcome = block_on(repositories.create_asset_within_quota(candidate, None))
+                .expect("concurrent first-push admission");
+            tx.send((fill, size_bytes, outcome))
+                .expect("report outcome");
+        }));
+    }
+    drop(tx);
+    barrier.wait();
+
+    let outcomes: Vec<(u8, u64, AssetQuotaAdmission)> = rx.into_iter().collect();
+    for handle in handles {
+        handle.join().expect("first-push worker");
+    }
+
+    // Exactly one concurrent first push is admitted; the loser gets the typed
+    // conflict (`AlreadyExists` -> 409 `asset_version_immutable` at the handler).
+    let winners: Vec<&(u8, u64, AssetQuotaAdmission)> = outcomes
+        .iter()
+        .filter(|(_, _, outcome)| *outcome == AssetQuotaAdmission::Admitted)
+        .collect();
+    let losers: Vec<&(u8, u64, AssetQuotaAdmission)> = outcomes
+        .iter()
+        .filter(|(_, _, outcome)| *outcome == AssetQuotaAdmission::AlreadyExists)
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one concurrent first push may win the immutable version: {outcomes:?}",
+    );
+    assert_eq!(
+        losers.len(),
+        1,
+        "the losing first push must get the typed create-if-absent conflict, \
+         never a silent overwrite: {outcomes:?}",
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|(_, _, outcome)| matches!(outcome, AssetQuotaAdmission::OverQuota { .. })),
+        "an unlimited-quota first-push race can never report OverQuota: {outcomes:?}",
+    );
+    let (winner_fill, winner_size, _) = *winners[0];
+
+    // The durable winner is internally consistent: its stored bytes, its metadata
+    // hash, and its size all belong to the SAME attempt -- a different-content
+    // race never leaves one attempt's hash referencing another's bytes.
+    let winner = block_on(repositories.get_asset(&id))
+        .expect("re-read the durable winner")
+        .expect("the winning immutable version must be visible");
+    assert_eq!(winner.id, id);
+    assert_eq!(
+        winner.content_hash,
+        format!("{winner_fill:064x}"),
+        "the visible row's metadata hash must be the winner's own hash",
+    );
+    assert_eq!(
+        winner.size_bytes, winner_size,
+        "the visible row's size must be the winner's own size",
+    );
+    assert_eq!(
+        winner.content,
+        vec![winner_fill; winner_size as usize],
+        "the visible row's stored bytes must be the winner's own bytes (no row/object hash mismatch)",
+    );
+
+    // The listing surface agrees: exactly one row for the version, and it is the
+    // same winner (list / manifest / download can only resolve to one attempt).
+    let listed = block_on(repositories.list_assets(RACE_TENANT, Some(RACE_ASSET_TYPE)))
+        .expect("list the tenant's assets");
+    assert_eq!(
+        listed.len(),
+        1,
+        "exactly one immutable row survives the first-push race: {listed:?}",
+    );
+    assert_eq!(listed[0].id, id);
+    assert_eq!(
+        listed[0].content_hash, winner.content_hash,
+        "the listed row is the same winner the download would serve",
+    );
+
+    // Only the winner's bytes were reserved; the loser reserved nothing.
+    assert_eq!(
+        block_on(repositories.tenant_asset_storage_bytes_used(RACE_TENANT)).expect("usage"),
+        winner_size,
+        "exactly the winner's bytes are reserved; the losing first push is uncharged",
+    );
+}
