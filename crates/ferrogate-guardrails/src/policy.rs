@@ -48,18 +48,15 @@ pub enum PolicyRevisionStatus {
     Archived,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PolicyAggregation {
+    #[default]
     All,
     Any,
-    Threshold { minimum: u32 },
-}
-
-impl Default for PolicyAggregation {
-    fn default() -> Self {
-        Self::All
-    }
+    Threshold {
+        minimum: u32,
+    },
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
