@@ -1,7 +1,12 @@
 import type { Page, Route } from "@playwright/test";
 import type { components } from "../../src/lib/api-types.generated";
 import type { StoredSession } from "../../src/lib/session-storage";
-import { adminStatus, providerHealth } from "../../src/test/fixtures/ops";
+import {
+  adminOverview,
+  adminStatus,
+  overviewSectionUnavailable,
+  providerHealth,
+} from "../../src/test/fixtures/ops";
 
 type AdminProject = components["schemas"]["AdminProject"];
 type AdminTenantAccount = components["schemas"]["AdminTenantAccount"];
@@ -19,6 +24,12 @@ type TokenMeteringEvent = components["schemas"]["TokenMeteringEvent"];
 
 interface AdminApiOptions {
   failPaths?: string[];
+  /**
+   * Return the control-plane overview with its `control_plane` section marked
+   * unavailable (a 200 with a failed SECTION, not a transport error) so the
+   * cockpit's partial-failure-not-zero path can be exercised in the browser.
+   */
+  partialOverview?: boolean;
 }
 
 const ADMIN_API_PATTERN = "http://localhost:8080/admin/v1/**";
@@ -255,6 +266,25 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
       body: JSON.stringify({
         error: { code: "e2e_forced_failure", message: "forced browser-contract failure" },
       }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/overview") {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        adminOverview(
+          options.partialOverview
+            ? {
+                control_plane: overviewSectionUnavailable(
+                  "control-plane store unreachable (browser contract)",
+                ),
+              }
+            : {},
+        ),
+      ),
     });
     return;
   }

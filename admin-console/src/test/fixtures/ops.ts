@@ -1,6 +1,13 @@
 // Fixture builders for the Operations cockpit tests (#322). Each returns a
 // contract-shaped object with sensible defaults, overridable per test.
 import type { components } from "@/lib/api-types.generated";
+import type {
+  AdminOverviewSection,
+  OverviewAlertsData,
+  OverviewControlPlaneData,
+  OverviewRuntimeData,
+  OverviewUsageData,
+} from "@/lib/overview";
 
 type AdminSchema<K extends keyof components["schemas"]> = components["schemas"][K];
 
@@ -132,6 +139,163 @@ export function providerHealth(
     routing,
     local_observations: routing,
     cluster_observations: null,
+    ...overrides,
+  };
+}
+
+// --- Control-plane overview (issue #343, contract #339) ---
+
+/** An `ok` overview section wrapping a typed payload. */
+export function overviewSectionOk<T>(
+  data: T,
+  source = "control_plane_store",
+  generatedAtUnix = Math.floor(Date.now() / 1000),
+): AdminOverviewSection {
+  return {
+    status: "ok",
+    source,
+    generated_at_unix: generatedAtUnix,
+    data: data as Record<string, unknown>,
+  };
+}
+
+/** An `unavailable` overview section — carries an error, never a zero payload. */
+export function overviewSectionUnavailable(
+  error: string,
+  source = "control_plane_store",
+): AdminOverviewSection {
+  return { status: "unavailable", source, error };
+}
+
+export function overviewRuntimeData(
+  overrides: Partial<OverviewRuntimeData> = {},
+): OverviewRuntimeData {
+  return {
+    providers: { total: 4, enabled: 3 },
+    models: { total: 12, enabled: 10 },
+    static_api_keys: 7,
+    prompt_templates: 2,
+    upstreams: { total: 5, enabled: 4 },
+    routes: { total: 9, enabled: 8 },
+    plugins: { total: 3, active: 2 },
+    tools: 6,
+    mcp_servers: { total: 5, connected: 4, disconnected: 1 },
+    ...overrides,
+  };
+}
+
+export function overviewControlPlaneData(
+  overrides: Partial<OverviewControlPlaneData> = {},
+): OverviewControlPlaneData {
+  return {
+    tenants: 24,
+    projects: 52,
+    workspaces: 8,
+    virtual_keys: 15,
+    assets: { count: 128, storage_bytes: 5_368_709_120 },
+    agent_runs: { total: 340, by_status: { completed: 300, failed: 32, blocked: 8 } },
+    self_hosted_workers: {
+      total: 12,
+      by_status: { active: 9, stale: 2, draining: 1 },
+    },
+    ...overrides,
+  };
+}
+
+export function overviewUsageData(
+  overrides: Partial<OverviewUsageData> = {},
+): OverviewUsageData {
+  return {
+    current_period_month: "2026-07",
+    lifetime: {
+      prompt_tokens: 8_000_000,
+      completion_tokens: 4_000_000,
+      total_tokens: 12_000_000,
+      cost_usd: 4210.5,
+      request_count: 1_200_000,
+      error_count: 3400,
+    },
+    current_month: {
+      prompt_tokens: 900_000,
+      completion_tokens: 600_000,
+      total_tokens: 1_500_000,
+      cost_usd: 512.75,
+      request_count: 86_000,
+      error_count: 220,
+    },
+    ...overrides,
+  };
+}
+
+export function overviewAlertsData(
+  overrides: Partial<OverviewAlertsData> = {},
+): OverviewAlertsData {
+  return {
+    total: 3,
+    truncated: false,
+    unavailable_sources: [],
+    entries: [
+      {
+        kind: "provider_unhealthy",
+        severity: "critical",
+        summary: "1 enabled provider(s) unreachable or circuit-open",
+        count: 1,
+        detected_at_unix: 1_752_000_000,
+        evidence: [
+          {
+            id: "anthropic",
+            detail: "circuit_open; status=error",
+            at_unix: 1_752_000_000,
+            reference: "/admin/v1/provider-health",
+          },
+        ],
+        evidence_truncated: false,
+      },
+      {
+        kind: "agent_runs_failed",
+        severity: "warning",
+        summary: "32 agent run(s) in a failure/pressure state",
+        count: 32,
+        detected_at_unix: 1_752_000_000,
+        evidence: [
+          { id: "failed", detail: "32 in status failed", reference: "/admin/v1/agent-runs" },
+        ],
+        evidence_truncated: false,
+      },
+      {
+        kind: "self_hosted_workers_unhealthy",
+        severity: "warning",
+        summary: "3 self-hosted worker(s) in a failure/pressure state",
+        count: 3,
+        detected_at_unix: 1_752_000_000,
+        evidence: [
+          {
+            id: "stale",
+            detail: "2 in status stale",
+            reference: "/admin/v1/self-hosted-worker-records",
+          },
+          { id: "draining", detail: "1 in status draining" },
+        ],
+        evidence_truncated: false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** A full, fresh, global-scope control-plane overview. */
+export function adminOverview(
+  overrides: Partial<AdminSchema<"AdminOverview">> = {},
+): AdminSchema<"AdminOverview"> {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    object: "control_plane.overview",
+    generated_at_unix: now,
+    scope: { kind: "global" },
+    runtime: overviewSectionOk(overviewRuntimeData(), "runtime_config", now),
+    control_plane: overviewSectionOk(overviewControlPlaneData(), "control_plane_store", now),
+    usage: overviewSectionOk(overviewUsageData(), "control_plane_store", now),
+    alerts: overviewSectionOk(overviewAlertsData(), "runtime+control_plane", now),
     ...overrides,
   };
 }

@@ -163,6 +163,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Scoped control-plane overview: inventory counts, durable token totals, and bounded critical alerts.
+         * @description Returns the dashboard's global control-plane overview in one bounded request. Counts and token totals are produced by bounded repository aggregation (COUNT/SUM pushdown on Postgres, in-process fold elsewhere), never by loading whole collections. A platform-operator key sees every tenant; a tenant-scoped key is confined to its own tenant. Each section carries an explicit available/unavailable state so a storage failure is reported honestly instead of as a fabricated zero.
+         */
+        get: operations["getAdminOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/status": {
         parameters: {
             query?: never;
@@ -2914,6 +2934,38 @@ export interface components {
             /** @constant */
             runtime: "pingora";
             cluster: components["schemas"]["ClusterStatus"];
+        };
+        /** @description A read section of the control-plane overview that is either fresh data or an explicit unavailable/error state. `data` is absent whenever `status` is not `ok`, so a failed section is never reported as a fabricated zero. */
+        AdminOverviewSection: {
+            /** @enum {string} */
+            status: "ok" | "unavailable";
+            /** @description Where this section was computed from, e.g. `runtime_config` or `control_plane_store`. */
+            source: string;
+            /** Format: int64 */
+            generated_at_unix?: number;
+            /** @description Present only when `status` is `unavailable`. */
+            error?: string;
+            /** @description Section payload; present only when `status` is `ok`. */
+            data?: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description Scoped control-plane overview (issue #339). Inventory counts and durable token totals are produced by bounded repository aggregation; each section reports its own availability so a partial storage failure never becomes a false zero. */
+        AdminOverview: {
+            /** @enum {string} */
+            object: "control_plane.overview";
+            /** Format: int64 */
+            generated_at_unix: number;
+            /** @description Effective visibility scope. `global` for a platform-operator key; `tenant` (with `tenant_id`) for a tenant-scoped key. */
+            scope: {
+                /** @enum {string} */
+                kind: "global" | "tenant";
+                tenant_id?: string;
+            };
+            runtime: components["schemas"]["AdminOverviewSection"];
+            control_plane: components["schemas"]["AdminOverviewSection"];
+            usage: components["schemas"]["AdminOverviewSection"];
+            alerts: components["schemas"]["AdminOverviewSection"];
         };
         AdminStatus: {
             /** @constant */
@@ -6816,6 +6868,28 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    getAdminOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Control-plane overview. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getAdminStatus: {
