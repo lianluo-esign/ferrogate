@@ -45,11 +45,17 @@
 //! * `listPlans`/`getPlan`/`createPlan`/`replacePlan`/`updatePlan` — the plan
 //!   catalog is already owned by the #361 `organization` family (`plans` group);
 //!   re-declaring it here would duplicate coverage and collide on the group name.
-//! * Dead-letter **replay** and plan **assignment** operations named in the
-//!   issue scope are **not present** in the shipped admin OpenAPI contract, so
-//!   there is no `operationId` to map. Dead letters are exposed read-only here
-//!   (`billing-events dead-letters`); a replay operation must first be added to
-//!   the contract before the CLI can drive it.
+//! * Plan **assignment** (`assignTenantPlan`) is owned by the #361 `organization`
+//!   family's `tenant-accounts assign-plan` verb (it addresses a tenant, not a
+//!   billing collection), so it is not re-declared here.
+//!
+//! ## Dead-letter replay landed (#388, wired via #443)
+//!
+//! The billing outbox dead-letter **replay** operation
+//! (`replayBillingOutboxDeadLetter`) landed in the admin OpenAPI contract via
+//! #388 and is now driven by the `billing-events replay` verb — a first-class
+//! `POST .../{report_id}/replay` recovery action alongside the read-only
+//! `dead-letters` listing.
 
 use crate::command::{CommandGroup, GroupDescriptor, VerbDescriptor};
 use crate::error::CliResult;
@@ -175,17 +181,30 @@ impl CommandGroup for BillingEventsGroup {
                     "List billing outbox dead letters",
                     "listBillingOutboxDeadLetters",
                 ),
+                VerbDescriptor::api(
+                    "replay",
+                    "Replay a dead-lettered billing outbox record",
+                    "replayBillingOutboxDeadLetter",
+                ),
             ],
         )
     }
 }
 
 /// Build the request for a `billing-events` verb. `dead-letters` reads the
-/// dead-letter collection; `list` reads the billing event stream. Both preserve
-/// pagination/filters via `input.list`.
+/// dead-letter collection; `list` reads the billing event stream — both preserve
+/// pagination/filters via `input.list`. `replay` is a first-class recovery
+/// action that `POST`s `.../{report_id}/replay` to re-emit a single
+/// dead-lettered outbox record (its own verb rather than a generic mutate so the
+/// audit trail records the precise operator intent); the server owns idempotency,
+/// so any operator-supplied document passes through unmodified.
 pub fn build_billing_events(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "dead-letters" => BILLING_DEAD_LETTERS.read(&[], &input.list),
+        "replay" => BILLING_DEAD_LETTERS.action(
+            &[first_segment(input, "billing dead-letter")?, "replay"],
+            input.body.clone(),
+        ),
         other => build_crud(&BILLING_EVENTS, other, input),
     }
 }

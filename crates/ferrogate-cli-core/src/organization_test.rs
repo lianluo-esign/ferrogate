@@ -166,6 +166,7 @@ fn coverage_manifest_declares_the_expected_operation_ids() {
         "replaceTenantAccount",
         "updateTenantAccount",
         "getTenantResolvedDefaults",
+        "assignTenantPlan",
         "listAdminTenants",
         "listProjects",
         "deleteProject",
@@ -178,8 +179,8 @@ fn coverage_manifest_declares_the_expected_operation_ids() {
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 6 + 1 + 6 + 6 + 5 + 6 = 30 distinct operation ids.
-    assert_eq!(manifest.len(), 30);
+    // 7 + 1 + 6 + 6 + 5 + 6 = 31 distinct operation ids.
+    assert_eq!(manifest.len(), 31);
 }
 
 #[test]
@@ -196,6 +197,43 @@ fn resolved_defaults_builds_the_nested_read() {
     let spec = build_tenant_accounts("resolved-defaults", &input).unwrap();
     assert_eq!(spec.method, Method::GET);
     assert_eq!(spec.path, "/admin/v1/tenant-accounts/t_1/resolved-defaults");
+}
+
+#[test]
+fn assign_plan_puts_the_plan_document_onto_the_tenant_plan_subpath() {
+    // assignTenantPlan is a first-class subscription action: PUT the operator's
+    // plan-assignment document onto `.../{tenant_id}/plan`, carried verbatim.
+    let spec = build_tenant_accounts(
+        "assign-plan",
+        &ResourceInput::new()
+            .with_segments(["t_1"])
+            .with_body(serde_json::json!({"plan_id": "pro"})),
+    )
+    .unwrap();
+    assert_eq!(spec.method, Method::PUT);
+    assert_eq!(spec.path, "/admin/v1/tenant-accounts/t_1/plan");
+    assert_eq!(spec.body.as_ref().unwrap()["plan_id"], "pro");
+}
+
+#[test]
+fn assign_plan_without_body_is_a_usage_error() {
+    let error = build_tenant_accounts("assign-plan", &ResourceInput::new().with_segments(["t_1"]))
+        .unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(error
+        .to_string()
+        .contains("requires a JSON request document"));
+}
+
+#[test]
+fn assign_plan_without_tenant_is_a_usage_error() {
+    let error = build_tenant_accounts(
+        "assign-plan",
+        &ResourceInput::new().with_body(serde_json::json!({"plan_id": "pro"})),
+    )
+    .unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(error.to_string().contains("requires a target id"));
 }
 
 #[test]

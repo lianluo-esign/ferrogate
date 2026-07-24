@@ -23,7 +23,9 @@
 //!   composite `{asset_type}/{name}/{version}` key rather than a single id, so
 //!   `get`/`put`/`delete` take three segments. `list`/`list-by-type` read the
 //!   collection and per-type views, `manifest` reads the immutable resolved
-//!   manifest, `storage-summary` exposes retention/GC visibility, and
+//!   manifest, `storage-summary` exposes retention/GC visibility, `withheld`
+//!   reads the operator view of assets held back by the scan pipeline
+//!   (`pending_scan`/`quarantined`), and
 //!   `yank`/`unyank` are first-class lifecycle actions (`POST`/`DELETE` on the
 //!   `.../yank` sub-path) so an operator's intent and the audit trail stay
 //!   precise instead of collapsing into a generic update.
@@ -127,6 +129,11 @@ impl CommandGroup for AssetsGroup {
                     "Show asset storage/retention summary",
                     "getAssetStorageSummary",
                 ),
+                VerbDescriptor::api(
+                    "withheld",
+                    "List withheld (pending_scan/quarantined) assets",
+                    "listWithheldAssets",
+                ),
                 VerbDescriptor::api("yank", "Yank an asset version", "yankAssetVersion"),
                 VerbDescriptor::api(
                     "unyank",
@@ -165,6 +172,7 @@ pub fn build_assets(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec>
             ASSETS.read(&[asset_type, name, "manifest"], &input.list)
         }
         "storage-summary" => ASSETS.read(&["storage", "summary"], &input.list),
+        "withheld" => ASSETS.read(&["withheld"], &input.list),
         "yank" => {
             let [asset_type, name, version] = asset_version_ref(input, verb)?;
             ASSETS.action(&[asset_type, name, version, "yank"], input.body.clone())

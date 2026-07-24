@@ -139,6 +139,7 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "deleteAsset",
         "getAssetManifest",
         "getAssetStorageSummary",
+        "listWithheldAssets",
         "yankAssetVersion",
         "unyankAssetVersion",
         "createAssetUploadIntent",
@@ -154,8 +155,8 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 9 (assets) + 3 (transfer) + 3 (channels) + 4 (site-domains) = 19 ids.
-    assert_eq!(manifest.len(), 19);
+    // 10 (assets) + 3 (transfer) + 3 (channels) + 4 (site-domains) = 20 ids.
+    assert_eq!(manifest.len(), 20);
 }
 
 #[test]
@@ -222,6 +223,32 @@ fn asset_list_reads_and_manifest_and_storage_summary() {
     let summary = build_assets("storage-summary", &ResourceInput::new()).unwrap();
     assert_eq!(summary.method, Method::GET);
     assert_eq!(summary.path, "/v1/assets/storage/summary");
+}
+
+#[test]
+fn withheld_reads_the_operator_view_and_preserves_filters() {
+    use crate::resource::ListParams;
+
+    let withheld = build_assets("withheld", &ResourceInput::new()).unwrap();
+    assert_eq!(withheld.method, Method::GET);
+    assert_eq!(withheld.path, "/v1/assets/withheld");
+
+    // The contract's `asset_type`/`search` filters ride the query verbatim.
+    let filtered = build_assets(
+        "withheld",
+        &ResourceInput::new().with_list(
+            ListParams::new()
+                .with_filter("asset_type", "models")
+                .with_filter("search", "llama"),
+        ),
+    )
+    .unwrap();
+    assert!(filtered
+        .query
+        .contains(&("asset_type".to_string(), "models".to_string())));
+    assert!(filtered
+        .query
+        .contains(&("search".to_string(), "llama".to_string())));
 }
 
 #[test]

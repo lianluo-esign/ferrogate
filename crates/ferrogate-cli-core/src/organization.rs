@@ -60,18 +60,31 @@ impl CommandGroup for TenantAccountsGroup {
                     "Show a tenant's resolved defaults",
                     "getTenantResolvedDefaults",
                 ),
+                VerbDescriptor::api(
+                    "assign-plan",
+                    "Assign a subscription plan to a tenant",
+                    "assignTenantPlan",
+                ),
             ],
         )
     }
 }
 
-/// Build the request for a tenant-accounts verb.
+/// Build the request for a tenant-accounts verb. `resolved-defaults` reads the
+/// nested defaults view; `assign-plan` is a first-class subscription action that
+/// `PUT`s the operator's plan-assignment document onto `.../{tenant_id}/plan`
+/// (its own verb rather than a generic `update` so the audit trail records the
+/// precise operator intent); everything else is CRUD keyed by `tenant_id`.
 pub fn build_tenant_accounts(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "resolved-defaults" => TENANT_ACCOUNTS.get(&[
             first_segment(input, "tenant-accounts")?,
             "resolved-defaults",
         ]),
+        "assign-plan" => TENANT_ACCOUNTS.replace(
+            &[first_segment(input, "tenant-accounts")?, "plan"],
+            input.require_body(verb)?,
+        ),
         other => build_crud(&TENANT_ACCOUNTS, other, input),
     }
 }

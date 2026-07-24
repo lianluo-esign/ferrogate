@@ -146,6 +146,7 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "deletePaymentMethod",
         "listAdminBillingEventsCompat",
         "listBillingOutboxDeadLetters",
+        "replayBillingOutboxDeadLetter",
         "listAdminUsageAggregates",
         "listUsageReports",
         "listAdminMeteringEvents",
@@ -153,8 +154,8 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 7 (wallets) + 3 (payment-methods) + 2 (billing-events) + 4 (usage) = 16.
-    assert_eq!(manifest.len(), 16);
+    // 7 (wallets) + 3 (payment-methods) + 3 (billing-events) + 4 (usage) = 17.
+    assert_eq!(manifest.len(), 17);
 }
 
 #[test]
@@ -284,6 +285,27 @@ fn billing_events_and_dead_letters_map_to_their_collections() {
     let dl = build_billing_events("dead-letters", &ResourceInput::new()).unwrap();
     assert_eq!(dl.method, Method::GET);
     assert_eq!(dl.path, "/admin/v1/billing-outbox-dead-letters");
+}
+
+#[test]
+fn dead_letter_replay_is_a_first_class_post_action_on_the_report() {
+    // replayBillingOutboxDeadLetter re-emits one dead-lettered record via
+    // POST .../{report_id}/replay; the id rides the path, no body is required.
+    let replay =
+        build_billing_events("replay", &ResourceInput::new().with_segments(["rpt_42"])).unwrap();
+    assert_eq!(replay.method, Method::POST);
+    assert_eq!(
+        replay.path,
+        "/admin/v1/billing-outbox-dead-letters/rpt_42/replay"
+    );
+    assert!(replay.body.is_none());
+}
+
+#[test]
+fn dead_letter_replay_without_report_id_is_a_usage_error() {
+    let error = build_billing_events("replay", &ResourceInput::new()).unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(error.to_string().contains("requires a target id"));
 }
 
 #[test]
