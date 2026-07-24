@@ -1,0 +1,2094 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-24
+// description: Per-tenant Cloudflare D1 control-plane backend (issue #420): tenant->database
+// provisioning over the D1 REST API plus the core-entity subset of `ControlPlaneStore`.
+
+//! # Cloudflare D1 control-plane backend (issue #420)
+//!
+//! The third [`ControlPlaneStore`] backend: FerroGate control-plane entities
+//! persisted in **per-tenant Cloudflare D1 databases** over the D1 HTTP query
+//! API (`ferrogate_cloudflare::d1`), replacing shared-Postgres row-level
+//! isolation with physical database-per-tenant isolation.
+//!
+//! ## Topology and routing
+//!
+//! - One **control database** holds the `tenants` table, the generic
+//!   `control_plane_resources` config-document table, and the
+//!   tenant->database registry document.
+//! - One **tenant database** per tenant holds that tenant's `projects`,
+//!   `workspaces`, and `api_keys` rows (schema: `sql/d1/001_init_d1.sql`).
+//! - Writes route on the entity's `tenant_id`; an EMPTY `tenant_id` routes to
+//!   the control database (pre-multi-tenant records). Id-only reads and
+//!   unfiltered lists fan out over the control + all registered tenant
+//!   databases — acceptable on this admin/low-volume path, see the
+//!   rate-limit section below.
+//!
+//! ## Tenant->database registry
+//!
+//! [`D1TenantDatabaseRegistry`] maps `tenant_id` -> D1 database uuid and
+//! names the control database. It is persisted through the EXISTING
+//! config-document surface (kind [`D1_TENANT_DATABASE_REGISTRY_KIND`], id
+//! [`D1_TENANT_DATABASE_REGISTRY_ID`]) rather than any new storage: on this
+//! backend that document lives in the control database's
+//! `control_plane_resources` table, and a deployment whose admin store is
+//! Postgres can persist the same document there (the Postgres backend's
+//! kind-keyed table accepts arbitrary kinds).
+//!
+//! ## Rate-limit strategy (issue #420 acceptance)
+//!
+//! The public Cloudflare REST API allows ~1,200 requests / 5 min / user, so
+//! this raw-HTTP backend is the **admin / low-volume** path: provisioning,
+//! schema migration, control-plane CRUD, config documents. Hot-path traffic
+//! (request logs, usage aggregates, billing events) must instead go through
+//! a **proxy Worker holding a D1 binding** (`docs/cloudflare-deploy-topology.md`
+//! §bindings `outboundByHost` shim; `docs/cloudflare-integration.md` §6) —
+//! which is exactly why the high-write trait surface below is typed as
+//! unimplemented instead of being routed over raw HTTP.
+//!
+//! ## Config-driven construction (issue #440)
+//!
+//! [`RuntimeStorageRepositories::cloudflare_d1_from_client`] is the storage
+//! half of the `storage.provider = "cloudflare_d1"` route: it seeds the
+//! tenant->database registry from [`CloudflareD1StorageOptions`] (the
+//! operator's `control_database_id` + any resumed tenant databases) and wraps
+//! the store. The caller owns the transport — it builds the
+//! `CloudflareClient`/[`D1Client`] from the `[cloudflare]` block and passes it
+//! in — so this crate stays transport-free and unit-testable. Absent config
+//! selects nothing; the backend is opt-in.
+//!
+//! ## Implemented vs erroring trait surface
+//!
+//! Implemented against D1 (issue #420 core + #440 auth/quota families):
+//! - API keys: `upsert_api_key_record`, `get_api_key_record`,
+//!   `list_api_key_records`, `find_api_key_records_by_prefix`.
+//! - Tenant accounts: `upsert_tenant_account`, `get_tenant_account`,
+//!   `list_tenant_accounts`.
+//! - Projects: `upsert_project`, `get_project`, `list_projects`,
+//!   `delete_project`, `delete_project_if_unreferenced`.
+//! - Workspaces: `upsert_workspace`, `get_workspace`, `list_workspaces`,
+//!   `delete_workspace`, `delete_workspace_if_unreferenced`,
+//!   `resolve_workspace_scope`.
+//! - Admin users (#440, control database): `upsert_admin_user`,
+//!   `get_admin_user_by_id`, `get_admin_user_by_email`,
+//!   `upsert_admin_user_membership`, `list_admin_user_memberships_by_user`,
+//!   `list_admin_user_memberships_by_tenant`, `delete_admin_user_membership`.
+//! - Admin refresh tokens (#440, control database):
+//!   `upsert_admin_user_refresh_token`, `get_admin_user_refresh_token_by_hash`,
+//!   `revoke_all_admin_user_refresh_tokens`,
+//!   `revoke_admin_user_refresh_tokens_for_tenant`.
+//! - SSO (#440, control database): `upsert_sso_provider_config`,
+//!   `get_sso_provider_config`, `delete_sso_provider_config`,
+//!   `insert_sso_pending_flow`, `take_sso_pending_flow` (read-then-delete,
+//!   since the HTTP query API has no `DELETE ... RETURNING`).
+//! - Quota policies + plans (#440, control database): `upsert_quota_policy`,
+//!   `get_quota_policy`, `list_quota_policies`, `delete_quota_policy`,
+//!   `upsert_plan`, `get_plan`, `list_plans`.
+//! - Config documents (generic, kind-keyed, control database):
+//!   `upsert_config_document`, `delete_config_document`,
+//!   `get_config_document`, `list_config_documents`,
+//!   `list_config_resource_documents`, `replace_config_documents`,
+//!   `control_plane_snapshot`, `config_documents`.
+//! - RBAC (#445, control database): `upsert_permission`, `get_permission`,
+//!   `list_permissions`, `delete_permission`, `upsert_role`, `get_role`,
+//!   `list_roles`, `delete_role`, `bind_tenant_role`,
+//!   `list_tenant_role_bindings`, `unbind_tenant_role`.
+//! - Site domains (#445, control database): `upsert_site_domain`,
+//!   `get_site_domain`, `list_site_domains`, `delete_site_domain`.
+//! - Budget alert idempotency ledger (#445, control database):
+//!   `record_budget_alert_notification`, `budget_alert_already_notified`,
+//!   `list_budget_alert_notifications`.
+//! - Observability append/analytics (#447, control database): agent runs
+//!   (`upsert_agent_run`, `agent_run`, `agent_runs`, `agent_runs_by_ids`),
+//!   agent run events (`append_agent_run_event`, `agent_run_events`,
+//!   `agent_run_events_for_runs`), request logs (`append_request_log`,
+//!   `request_logs`, `request_logs_page`, `delete_request_logs`,
+//!   `request_logs_for_agent_runs`), audit events (`append_audit_event`,
+//!   `audit_events`, `audit_events_page`, `delete_audit_events`,
+//!   `audit_events_for_agent_runs`), and the cross-family
+//!   `agent_run_summary_seed_ids`. Each row stores the FULL record as a
+//!   `*_json` document (deserialized on read) plus projection columns; these
+//!   route to the CONTROL database (not per-tenant) because their analytics
+//!   reads are cross-tenant whole-table scans and the `tenant` column is a
+//!   composite storage key, not a routing tenant id -- so a single-query
+//!   control-database mirror of the Postgres single-table ordering/pagination/
+//!   UNION seed is cleaner than a lossy per-tenant fan-out merge. The `()`/
+//!   `Vec`/`Option`-returning surfaces swallow-with-warn on error like the
+//!   Postgres backend; the `Result`-returning ones surface it.
+//! - Snapshot replay floors (#206/#447, control database):
+//!   `get_snapshot_replay_floor`, `advance_snapshot_replay_floor`. SQLite
+//!   `max()` in the upsert keeps the floor monotonic; a follow-up SELECT
+//!   returns it (the HTTP query API has no `RETURNING`).
+//! - Billing ledger + report outbox + billing events (#449, control database):
+//!   `append_billing_ledger_entry` (idempotent INSERT ... DO NOTHING + a
+//!   reload/settlement-compare on conflict), `list_billing_ledger_entries`
+//!   (scope-filtered, paginated), `billing_ledger_entry`; the report outbox
+//!   (`enqueue_billing_report`, `list_due_billing_reports`,
+//!   `reschedule_billing_report`, `dead_letter_billing_report`,
+//!   `list_dead_lettered_billing_reports`, `replay_dead_lettered_billing_report`
+//!   (guarded UPDATE + follow-up SELECT for the terminal state),
+//!   `get_billing_report_outbox_entry`, `delete_billing_report`); and settled
+//!   metering events (`append_billing_event`, `billing_events`,
+//!   `billing_events_page`). Billing is account-global cross-tenant metering
+//!   with whole-table reads, so it routes to the CONTROL database like the #447
+//!   observability families; each row stores the FULL record as a `*_json`
+//!   document plus the filter/order/paginate projection columns, with the
+//!   outbox attempt/schedule state kept as columns so reschedule/dead-letter/
+//!   replay stay single-statement UPDATEs.
+//! - Guardrail policy revisions + bindings (#449, control database):
+//!   `insert_guardrail_policy_revision` (idempotent on `(policy_id, revision)`,
+//!   typed `Conflict` on replay), `get_guardrail_policy_revision`,
+//!   `list_guardrail_policy_revisions`, `get_guardrail_policy_binding`,
+//!   `list_guardrail_policy_bindings`. Account-global guardrail configuration
+//!   (like plans/RBAC), so the CONTROL database owns them.
+//! - Managed worker stores (#449, control database): templates, agent worker
+//!   instances, sessions, lifecycle events, and the isolation
+//!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
+//!   record as a `*_json` document plus an ORDER BY projection column, and a
+//!   whole-table list. Routed to the CONTROL database (whole-table admin reads;
+//!   the record's `tenant` is a composite storage key, not a routing id).
+//! - Self-hosted worker stores (#449, control database): registrations
+//!   (+ single-get), heartbeats (+ `latest_self_hosted_worker_heartbeat`),
+//!   telemetry events (+ per-run newest-window and per-worker filtered reads),
+//!   artifacts (+ single-get), checkpoints (+ single-get), run dispatches (the
+//!   Postgres capability side-table folds into the dispatch document), and
+//!   `self_hosted_worker_activity_stats` (count/max subselects in one query).
+//!   Same CONTROL-database routing as the managed families.
+//! - Process-local (backend-independent semantics, mirrors Memory/Postgres):
+//!   `set_retention_limits` (no-op like Postgres), `next_audit_event_id`,
+//!   `upsert_usage_aggregate_local`, `store_usage_aggregate_local`,
+//!   `usage_aggregates`, `sum_api_key_committed_tokens` (process-local view).
+//!
+//! The #440 auth/quota/plan families are all **account-global control-plane
+//! configuration** and therefore route to the CONTROL database (like
+//! `tenants`), never fanned out over tenant databases — admin identities span
+//! tenants, and quota lookups carry no tenant context.
+//!
+//! Still erroring (typed `unimplemented-backend-surface`, awaiting the
+//! proxy-Worker path or a later slice):
+//!
+//! - Atomic-transition families that need the transaction semantics the D1 HTTP
+//!   query API lacks (no multi-statement-with-params transaction, no
+//!   `... RETURNING`): wallets + wallet reservations, payment methods/attempts,
+//!   workflow run budgets, and the CAS members of families otherwise landed
+//!   here — `append_billing_event_with_outbox_enqueue` (metering write + outbox
+//!   enqueue must commit together, issue #150) and the generation-guarded
+//!   guardrail activate/archive/restore transitions. BLOCKED on the
+//!   proxy-Worker D1 binding.
+//! - assets/channels/retention, deferred as a whole family: its coordination
+//!   ops (`create_asset_within_quota`, `move_asset_channel_if_resolvable`,
+//!   `set_asset_version_yank`, `delete_asset_variant_if_unreferenced`,
+//!   `promote_pending_asset_visibility`) are atomic `FOR UPDATE` cross-table
+//!   transitions (write-skew close-out) — the same transaction gap that blocks
+//!   wallets — plus inline BYTEA content the document pattern serves poorly.
+//! - usage monthly + metadata rollups + `persist_usage_aggregate` (durable
+//!   half): the rollups are maintained by the `append_billing_event` settlement
+//!   transaction's read-modify-write increments across sibling tables (no
+//!   single-statement equivalent), and the usage-aggregate store-of-record on
+//!   this backend is still the process-local mirror; both land with the
+//!   rollup-maintenance slice.
+//! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
+//!   observed agent presence, MCP identity.
+//!
+//! RBAC, site domains, and the budget-alert idempotency ledger were
+//! implemented in issue #445; request/audit logs, agent runs/events, and
+//! snapshot replay floors in issue #447; billing ledger/outbox/events,
+//! guardrail revisions/bindings, and the managed + self-hosted worker stores in
+//! issue #449 -- all above.
+//!
+//! Everything erroring returns the typed `unimplemented-backend-surface` error
+//! ([`is_unimplemented_backend_surface`]) when it can return a `Result`, and
+//! logs a warning + returns an empty/default value when its signature cannot
+//! carry an error (the append/analytics getters). Nothing fails silently.
+//! Inherent provisioning surface: [`D1ControlPlaneStore::provision_control_database`],
+//! [`D1ControlPlaneStore::provision_tenant_database`],
+//! [`D1ControlPlaneStore::deprovision_tenant_database`],
+//! [`D1ControlPlaneStore::list_provisioned_databases`].
+//!
+//! See `docs/cloudflare-d1-backend.md` for the full design record.
+
+use std::collections::BTreeMap;
+
+use ferrogate_cloudflare::d1::D1Client;
+use ferrogate_cloudflare::CloudflareError;
+
+use super::control_plane_store::ControlPlaneStore;
+use super::*;
+
+mod auth_quota;
+mod billing;
+mod client;
+mod client_config;
+mod config_documents;
+mod core_entities;
+mod guardrail;
+mod observability;
+mod provisioning;
+mod rbac_site_domain;
+mod rows;
+mod worker_stores;
+
+pub use client_config::CloudflareD1StorageOptions;
+
+/// Stable machine-checkable prefix carried by every error this backend
+/// returns for a trait method outside its implemented surface.
+pub const D1_UNIMPLEMENTED_SURFACE: &str = "unimplemented-backend-surface";
+
+/// Config-document kind under which the tenant->database registry persists.
+pub const D1_TENANT_DATABASE_REGISTRY_KIND: &str = "d1_tenant_database";
+
+/// Config-document id of the singleton registry document.
+pub const D1_TENANT_DATABASE_REGISTRY_ID: &str = "registry";
+
+/// The SQLite-dialect core schema applied to every provisioned database.
+const D1_SCHEMA_SQL: &str = include_str!("../../../../sql/d1/001_init_d1.sql");
+
+/// The config-document kinds that make up [`ControlPlaneDocuments`] /
+/// [`ControlPlaneSnapshot`] — mirrors the Postgres backend's
+/// `replace_config_documents` kind list.
+const CONFIG_DOCUMENT_KINDS: [&str; 10] = [
+    "api_key",
+    "tenant",
+    "policy",
+    "gateway_config",
+    "agent_workflow",
+    "skill_package",
+    "prompt_template",
+    "plugin_registration",
+    "mcp_server",
+    "agent_upstream",
+];
+
+/// True when `error` is this backend's typed "method outside the implemented
+/// D1 surface" error — the contract callers/tests match on instead of string
+/// scraping.
+pub fn is_unimplemented_backend_surface(error: &StorageError) -> bool {
+    matches!(error, StorageError::Runtime(message) if message.starts_with(D1_UNIMPLEMENTED_SURFACE))
+}
+
+/// Shared by this trait impl AND the per-entity modules' enum-dispatch arms
+/// (wallet, RBAC, MCP identity, ... — the pre-#425 surfaces), so every
+/// unimplemented path carries the same typed prefix.
+pub(crate) fn unimplemented_surface(method: &'static str) -> StorageError {
+    StorageError::Runtime(format!(
+        "{D1_UNIMPLEMENTED_SURFACE}: {method} is not implemented by the cloudflare_d1 \
+         control-plane backend (see control_plane_store_d1 module docs)"
+    ))
+}
+
+fn d1_error(error: CloudflareError) -> StorageError {
+    StorageError::Runtime(format!("cloudflare d1: {error}"))
+}
+
+/// Persisted tenant->database mapping plus the control database id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct D1TenantDatabaseRegistry {
+    /// D1 database uuid holding tenants + config documents + this registry.
+    #[serde(default)]
+    pub control_database_id: String,
+    /// tenant_id -> D1 database uuid (BTreeMap: deterministic serialization
+    /// and fan-out order).
+    #[serde(default)]
+    pub tenant_databases: BTreeMap<String, String>,
+}
+
+impl D1TenantDatabaseRegistry {
+    /// A registry with only the control database configured.
+    pub fn with_control_database(control_database_id: impl Into<String>) -> Self {
+        Self {
+            control_database_id: control_database_id.into(),
+            tenant_databases: BTreeMap::new(),
+        }
+    }
+
+    /// Decode the persisted registry document.
+    pub fn from_document_json(document_json: &str) -> Result<Self, StorageError> {
+        deserialize_storage_document(document_json)
+    }
+
+    /// Encode this registry as its config-document JSON.
+    pub fn to_document_json(&self) -> Result<String, StorageError> {
+        serialize_storage_document(self)
+    }
+}
+
+/// The per-tenant Cloudflare D1 control-plane backend (issue #420).
+pub struct D1ControlPlaneStore {
+    client: D1Client,
+    registry: Mutex<D1TenantDatabaseRegistry>,
+    /// Process-local usage-aggregate mirror — the same read-modify-write
+    /// baseline every backend keeps (see the trait docs on
+    /// `upsert_usage_aggregate_local`).
+    usage_aggregates_mirror: Mutex<InMemoryRepository<StoredUsageAggregate>>,
+}
+
+impl std::fmt::Debug for D1ControlPlaneStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("D1ControlPlaneStore")
+            .finish_non_exhaustive()
+    }
+}
+
+fn poisoned_registry_lock() -> StorageError {
+    StorageError::Runtime("d1 tenant database registry lock is poisoned".to_string())
+}
+
+/// Serialize an optional integer as a bind param: `NULLIF(?, '')` in the SQL
+/// turns the empty string back into SQL NULL, keeping params inside the
+/// documented all-strings REST contract.
+fn optional_number_param<T: ToString>(value: Option<T>) -> String {
+    value.map(|number| number.to_string()).unwrap_or_default()
+}
+
+/// Bind a SQL boolean as SQLite's `"1"`/`"0"` integer affinity string.
+fn bool_param(value: bool) -> String {
+    if value { "1" } else { "0" }.to_string()
+}
+
+/// Render an `IN (?, ?, ...)` placeholder list of `count` bound params: the
+/// SQLite-dialect stand-in for the Postgres `= ANY($1)` array predicate.
+fn in_placeholders(count: usize) -> String {
+    vec!["?"; count].join(", ")
+}
+
+fn validate_tenant_id(tenant_id: &str) -> Result<(), StorageError> {
+    if tenant_id.is_empty()
+        || !tenant_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(StorageError::Runtime(format!(
+            "cloudflare d1: tenant id {tenant_id:?} cannot name a D1 database \
+             (expected ASCII alphanumerics, '-' or '_')"
+        )));
+    }
+    Ok(())
+}
+
+/// The migration file with `--` comment lines stripped, ready to send as one
+/// multi-statement D1 batch.
+fn schema_batch_sql() -> String {
+    D1_SCHEMA_SQL
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn documents_to_snapshot(documents: &ControlPlaneDocuments) -> ControlPlaneSnapshot {
+    fn values(documents: &[(String, String)]) -> Vec<String> {
+        documents
+            .iter()
+            .map(|(_, document)| document.clone())
+            .collect()
+    }
+    ControlPlaneSnapshot {
+        api_keys: values(&documents.api_keys),
+        tenants: values(&documents.tenants),
+        policies: values(&documents.policies),
+        gateway_configs: values(&documents.gateway_configs),
+        agent_workflows: values(&documents.agent_workflows),
+        skill_packages: values(&documents.skill_packages),
+        prompt_templates: values(&documents.prompt_templates),
+        plugin_registrations: values(&documents.plugin_registrations),
+        mcp_servers: values(&documents.mcp_servers),
+        agent_upstreams: values(&documents.agent_upstreams),
+    }
+}
+
+#[async_trait::async_trait]
+impl ControlPlaneStore for D1ControlPlaneStore {
+    // --- API keys (IMPLEMENTED) ---
+
+    async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
+        self.upsert_api_key_record_async(api_key).await
+    }
+
+    async fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        self.get_api_key_record_async(id).await
+    }
+
+    async fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        self.list_api_key_records_async().await
+    }
+
+    async fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        self.find_api_key_records_by_prefix_async(key_prefix).await
+    }
+
+    // --- Admin users / SSO / refresh tokens (IMPLEMENTED, control database) ---
+
+    async fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+        self.upsert_admin_user_async(user).await
+    }
+
+    async fn get_admin_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        self.get_admin_user_by_id_async(id).await
+    }
+
+    async fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        self.get_admin_user_by_email_async(email).await
+    }
+
+    async fn upsert_admin_user_membership(
+        &self,
+        membership: StoredAdminUserMembership,
+    ) -> Result<(), StorageError> {
+        self.upsert_admin_user_membership_async(membership).await
+    }
+
+    async fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        self.list_admin_user_memberships_by_user_async(user_id)
+            .await
+    }
+
+    async fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        self.list_admin_user_memberships_by_tenant_async(tenant_id)
+            .await
+    }
+
+    async fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_admin_user_membership_async(user_id, tenant_id)
+            .await
+    }
+
+    async fn upsert_sso_provider_config(
+        &self,
+        config: StoredSsoProviderConfig,
+    ) -> Result<(), StorageError> {
+        self.upsert_sso_provider_config_async(config).await
+    }
+
+    async fn get_sso_provider_config(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<StoredSsoProviderConfig>, StorageError> {
+        self.get_sso_provider_config_async(tenant_id).await
+    }
+
+    async fn delete_sso_provider_config(&self, tenant_id: &str) -> Result<bool, StorageError> {
+        self.delete_sso_provider_config_async(tenant_id).await
+    }
+
+    async fn insert_sso_pending_flow(
+        &self,
+        flow: StoredSsoPendingFlow,
+    ) -> Result<(), StorageError> {
+        self.insert_sso_pending_flow_async(flow).await
+    }
+
+    async fn take_sso_pending_flow(
+        &self,
+        state: &str,
+        now_unix: i64,
+    ) -> Result<Option<StoredSsoPendingFlow>, StorageError> {
+        self.take_sso_pending_flow_async(state, now_unix).await
+    }
+
+    async fn upsert_admin_user_refresh_token(
+        &self,
+        token: StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError> {
+        self.upsert_admin_user_refresh_token_async(token).await
+    }
+
+    async fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
+        self.get_admin_user_refresh_token_by_hash_async(token_hash)
+            .await
+    }
+
+    async fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        self.revoke_all_admin_user_refresh_tokens_async(user_id, revoked_at_unix)
+            .await
+    }
+
+    async fn revoke_admin_user_refresh_tokens_for_tenant(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        self.revoke_admin_user_refresh_tokens_for_tenant_async(user_id, tenant_id, revoked_at_unix)
+            .await
+    }
+
+    // --- Tenant accounts (IMPLEMENTED, control database) ---
+
+    async fn upsert_tenant_account(
+        &self,
+        account: StoredTenantAccount,
+    ) -> Result<(), StorageError> {
+        self.upsert_tenant_account_async(account).await
+    }
+
+    async fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError> {
+        self.get_tenant_account_async(id).await
+    }
+
+    async fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        self.list_tenant_accounts_async().await
+    }
+
+    // --- Projects (IMPLEMENTED, tenant database) ---
+
+    async fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
+        self.upsert_project_async(project).await
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        self.get_project_async(id).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        self.list_projects_async().await
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_project_async(id).await
+    }
+
+    async fn delete_project_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        self.delete_project_if_unreferenced_async(id).await
+    }
+
+    // --- Workspaces (IMPLEMENTED, tenant database) ---
+
+    async fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
+        self.upsert_workspace_async(workspace).await
+    }
+
+    async fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        self.get_workspace_async(id).await
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        self.list_workspaces_async().await
+    }
+
+    async fn delete_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_workspace_async(id).await
+    }
+
+    async fn delete_workspace_if_unreferenced(
+        &self,
+        id: &str,
+    ) -> Result<DeleteWorkspaceOutcome, StorageError> {
+        self.delete_workspace_if_unreferenced_async(id).await
+    }
+
+    async fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        self.resolve_workspace_scope_async(workspace_id).await
+    }
+
+    // --- Quota policies / plans (IMPLEMENTED, control database) ---
+
+    async fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        self.upsert_quota_policy_async(policy).await
+    }
+
+    async fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
+        self.get_quota_policy_async(scope_type, scope_id).await
+    }
+
+    async fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        self.list_quota_policies_async().await
+    }
+
+    async fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_quota_policy_async(scope_type, scope_id).await
+    }
+
+    async fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+        self.upsert_plan_async(plan).await
+    }
+
+    async fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        self.get_plan_async(id).await
+    }
+
+    async fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        self.list_plans_async().await
+    }
+
+    // --- Assets (UNIMPLEMENTED) ---
+
+    async fn upsert_asset(&self, _asset: StoredAsset) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_asset"))
+    }
+
+    async fn create_asset_if_absent(&self, _asset: StoredAsset) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("create_asset_if_absent"))
+    }
+
+    async fn create_asset_within_quota(
+        &self,
+        _asset: StoredAsset,
+        _quota_bytes: Option<u64>,
+    ) -> Result<AssetQuotaAdmission, StorageError> {
+        Err(unimplemented_surface("create_asset_within_quota"))
+    }
+
+    async fn get_asset(&self, _id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        Err(unimplemented_surface("get_asset"))
+    }
+
+    async fn list_assets(
+        &self,
+        _tenant_id: &str,
+        _asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        Err(unimplemented_surface("list_assets"))
+    }
+
+    async fn list_withheld_assets(
+        &self,
+        _tenant_id: &str,
+        _asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        Err(unimplemented_surface("list_withheld_assets"))
+    }
+
+    async fn tenant_asset_storage_bytes_used(&self, _tenant_id: &str) -> Result<u64, StorageError> {
+        Err(unimplemented_surface("tenant_asset_storage_bytes_used"))
+    }
+
+    async fn delete_asset(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_asset"))
+    }
+
+    async fn upsert_asset_channel(&self, _channel: StoredAssetChannel) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_asset_channel"))
+    }
+
+    async fn list_asset_channels(
+        &self,
+        _tenant_id: &str,
+        _asset_type: &str,
+        _name: &str,
+    ) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        Err(unimplemented_surface("list_asset_channels"))
+    }
+
+    async fn delete_asset_channel(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_asset_channel"))
+    }
+
+    async fn move_asset_channel_if_resolvable(
+        &self,
+        _channel: StoredAssetChannel,
+    ) -> Result<ChannelMoveOutcome, StorageError> {
+        Err(unimplemented_surface("move_asset_channel_if_resolvable"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn set_asset_version_yank(
+        &self,
+        _tenant_id: &str,
+        _asset_type: &str,
+        _name: &str,
+        _version: &str,
+        _yanked: bool,
+        _now_unix: i64,
+    ) -> Result<VersionYankOutcome, StorageError> {
+        Err(unimplemented_surface("set_asset_version_yank"))
+    }
+
+    async fn delete_asset_variant_if_unreferenced(
+        &self,
+        _id: &str,
+        _tenant_id: &str,
+        _asset_type: &str,
+        _name: &str,
+        _version: &str,
+    ) -> Result<VariantDeleteOutcome, StorageError> {
+        Err(unimplemented_surface(
+            "delete_asset_variant_if_unreferenced",
+        ))
+    }
+
+    async fn promote_pending_asset_visibility(
+        &self,
+        _id: &str,
+        _target: AssetPromotionTarget,
+        _now_unix: i64,
+    ) -> Result<AssetVisibilityPromotionOutcome, StorageError> {
+        Err(unimplemented_surface("promote_pending_asset_visibility"))
+    }
+
+    async fn upsert_retention_policy(
+        &self,
+        _policy: StoredRetentionPolicy,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_retention_policy"))
+    }
+
+    async fn list_retention_policies(
+        &self,
+        _tenant_id: &str,
+        _resource_type: &str,
+    ) -> Result<Vec<StoredRetentionPolicy>, StorageError> {
+        Err(unimplemented_surface("list_retention_policies"))
+    }
+
+    async fn list_all_assets(&self) -> Result<Vec<StoredAsset>, StorageError> {
+        Err(unimplemented_surface("list_all_assets"))
+    }
+
+    async fn list_all_asset_channels(&self) -> Result<Vec<StoredAssetChannel>, StorageError> {
+        Err(unimplemented_surface("list_all_asset_channels"))
+    }
+
+    // --- Usage rollups (UNIMPLEMENTED, deferred) ---
+    //
+    // The monthly/metadata rollups are maintained by the append_billing_event
+    // settlement transaction on Postgres (read-modify-write increments across
+    // sibling tables); reproducing that on D1 needs the multi-statement
+    // transaction the HTTP query API lacks, so the rollup reads (and the
+    // durable `persist_usage_aggregate` half, whose store-of-record on this
+    // backend is still the process-local mirror) stay deferred to the
+    // rollup-maintenance slice. See the module docs.
+
+    async fn get_usage_monthly_rollup(
+        &self,
+        _scope_type: QuotaScopeKind,
+        _scope_id: &str,
+        _period_month: &str,
+    ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
+        Err(unimplemented_surface("get_usage_monthly_rollup"))
+    }
+
+    async fn list_usage_monthly_rollups(
+        &self,
+    ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
+        Err(unimplemented_surface("list_usage_monthly_rollups"))
+    }
+
+    // --- Billing ledger + report outbox (IMPLEMENTED, control DB, issue #449) ---
+
+    async fn append_billing_ledger_entry(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        self.append_billing_ledger_entry_async(entry).await
+    }
+
+    async fn list_billing_ledger_entries(
+        &self,
+        filter: &ferrogate_billing::LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        self.list_billing_ledger_entries_async(filter, offset, limit)
+            .await
+    }
+
+    async fn billing_ledger_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        self.billing_ledger_entry_async(id).await
+    }
+
+    async fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.enqueue_billing_report_async(id, event, next_attempt_unix)
+            .await
+    }
+
+    async fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        self.list_due_billing_reports_async(now_unix, limit).await
+    }
+
+    async fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.reschedule_billing_report_async(id, next_attempt_unix)
+            .await
+    }
+
+    async fn dead_letter_billing_report(
+        &self,
+        id: &str,
+        dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.dead_letter_billing_report_async(id, dead_lettered_at_unix)
+            .await
+    }
+
+    async fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        self.list_dead_lettered_billing_reports_async(limit).await
+    }
+
+    async fn replay_dead_lettered_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<ReplayDeadLetterOutcome, StorageError> {
+        self.replay_dead_lettered_billing_report_async(id, next_attempt_unix)
+            .await
+    }
+
+    async fn get_billing_report_outbox_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredBillingReportOutboxEntry>, StorageError> {
+        self.get_billing_report_outbox_entry_async(id).await
+    }
+
+    async fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        self.delete_billing_report_async(id).await
+    }
+
+    // --- Config documents (IMPLEMENTED, control database) ---
+
+    fn upsert_config_document(
+        &self,
+        kind: &'static str,
+        id: String,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        block_on_sync_bridge(self.upsert_config_document_async(kind, id, document_json))
+    }
+
+    fn delete_config_document(&self, kind: &'static str, id: &str) -> Result<bool, StorageError> {
+        block_on_sync_bridge(self.delete_config_document_async(kind, id))
+    }
+
+    fn get_config_document(
+        &self,
+        kind: &'static str,
+        id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        block_on_sync_bridge(self.get_config_document_async(kind, id))
+    }
+
+    fn list_config_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
+        Ok(
+            block_on_sync_bridge(self.list_config_resource_documents_async(kind))?
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+        )
+    }
+
+    fn list_config_resource_documents(
+        &self,
+        kind: &'static str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        block_on_sync_bridge(self.list_config_resource_documents_async(kind))
+    }
+
+    fn replace_config_documents(
+        &self,
+        documents: ControlPlaneDocuments,
+    ) -> Result<(), StorageError> {
+        let ControlPlaneDocuments {
+            api_keys,
+            tenants,
+            policies,
+            gateway_configs,
+            agent_workflows,
+            skill_packages,
+            prompt_templates,
+            plugin_registrations,
+            mcp_servers,
+            agent_upstreams,
+        } = documents;
+        let by_kind: [(&str, Vec<(String, String)>); 10] = [
+            (CONFIG_DOCUMENT_KINDS[0], api_keys),
+            (CONFIG_DOCUMENT_KINDS[1], tenants),
+            (CONFIG_DOCUMENT_KINDS[2], policies),
+            (CONFIG_DOCUMENT_KINDS[3], gateway_configs),
+            (CONFIG_DOCUMENT_KINDS[4], agent_workflows),
+            (CONFIG_DOCUMENT_KINDS[5], skill_packages),
+            (CONFIG_DOCUMENT_KINDS[6], prompt_templates),
+            (CONFIG_DOCUMENT_KINDS[7], plugin_registrations),
+            (CONFIG_DOCUMENT_KINDS[8], mcp_servers),
+            (CONFIG_DOCUMENT_KINDS[9], agent_upstreams),
+        ];
+        for (kind, documents) in by_kind {
+            block_on_sync_bridge(self.replace_config_kind_async(kind, documents))?;
+        }
+        Ok(())
+    }
+
+    fn control_plane_snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+        let documents = block_on_sync_bridge(self.config_documents_async())?;
+        Ok(documents_to_snapshot(&documents))
+    }
+
+    fn config_documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
+        block_on_sync_bridge(self.config_documents_async())
+    }
+
+    // --- Guardrail policy revisions + bindings (control DB, issue #449) ---
+    //
+    // insert/get/list revisions and get/list bindings are IMPLEMENTED: each is
+    // a single-statement document read/write bridged into the async helpers
+    // like the config-document methods. The generation-guarded
+    // activate/archive/restore CAS transitions below stay UNIMPLEMENTED -- they
+    // need the compare-and-swap transaction the D1 HTTP query API lacks.
+
+    fn insert_guardrail_policy_revision(
+        &self,
+        revision: StoredGuardrailPolicyRevision,
+    ) -> Result<(), StorageError> {
+        block_on_sync_bridge(self.insert_guardrail_policy_revision_async(&revision))
+    }
+
+    fn get_guardrail_policy_revision(
+        &self,
+        policy_id: &str,
+        revision: u32,
+    ) -> Result<Option<StoredGuardrailPolicyRevision>, StorageError> {
+        block_on_sync_bridge(self.get_guardrail_policy_revision_async(policy_id, revision))
+    }
+
+    fn list_guardrail_policy_revisions(
+        &self,
+        policy_id: Option<&str>,
+    ) -> Result<Vec<StoredGuardrailPolicyRevision>, StorageError> {
+        block_on_sync_bridge(self.list_guardrail_policy_revisions_async(policy_id))
+    }
+
+    fn get_guardrail_policy_binding(
+        &self,
+        policy_id: &str,
+    ) -> Result<Option<StoredGuardrailPolicyBinding>, StorageError> {
+        block_on_sync_bridge(self.get_guardrail_policy_binding_async(policy_id))
+    }
+
+    fn list_guardrail_policy_bindings(
+        &self,
+    ) -> Result<Vec<StoredGuardrailPolicyBinding>, StorageError> {
+        block_on_sync_bridge(self.list_guardrail_policy_bindings_async())
+    }
+
+    fn activate_guardrail_policy_revision(
+        &self,
+        _policy_id: &str,
+        _revision: u32,
+        _updated_by: &str,
+        _updated_at_unix: u64,
+        _rollback_only: bool,
+    ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
+        Err(unimplemented_surface("activate_guardrail_policy_revision"))
+    }
+
+    fn archive_guardrail_policy_revision(
+        &self,
+        _policy_id: &str,
+        _revision: u32,
+        _updated_by: &str,
+        _updated_at_unix: u64,
+    ) -> Result<GuardrailPolicyBindingTransition, StorageError> {
+        Err(unimplemented_surface("archive_guardrail_policy_revision"))
+    }
+
+    fn restore_guardrail_policy_binding(
+        &self,
+        _policy_id: &str,
+        _expected_generation: Option<u64>,
+        _binding: Option<StoredGuardrailPolicyBinding>,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("restore_guardrail_policy_binding"))
+    }
+
+    // --- Snapshot replay floors (IMPLEMENTED, control database, issue #447) ---
+    //
+    // Account-global control-plane snapshot-replay state keyed by
+    // (tenant_id, deployment_id); the sync surface bridges into the async D1
+    // helpers exactly like the config-document methods.
+
+    fn get_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+    ) -> Result<Option<u64>, StorageError> {
+        block_on_sync_bridge(self.get_snapshot_replay_floor_async(tenant_id, deployment_id))
+    }
+
+    fn advance_snapshot_replay_floor(
+        &self,
+        tenant_id: &str,
+        deployment_id: &str,
+        revision: u64,
+        updated_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        block_on_sync_bridge(self.advance_snapshot_replay_floor_async(
+            tenant_id,
+            deployment_id,
+            revision,
+            updated_at_unix,
+        ))
+    }
+
+    // --- High-write append/analytics stores ---
+    //
+    // These are the HOT paths the rate-limit strategy explicitly keeps OFF
+    // the raw REST API (see module docs): erroring where the signature
+    // allows, warn + empty where it does not.
+
+    fn set_retention_limits(
+        &self,
+        _request_log_retention_records: usize,
+        _audit_event_retention_records: usize,
+    ) {
+        // Like the Postgres backend: no in-process bounds to configure; the
+        // append stores are not served by this backend in the first place.
+    }
+
+    async fn append_request_log(&self, log: StoredRequestLog) {
+        // `()`-returning append: swallow-with-warn on error, mirroring the
+        // Postgres backend's `let _ = ...` (contract in the module docs).
+        if let Err(error) = self.append_request_log_async(&log).await {
+            tracing::warn!("cloudflare d1: append_request_log failed: {error}");
+        }
+    }
+
+    async fn request_logs(&self) -> Vec<StoredRequestLog> {
+        self.request_logs_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: request_logs failed: {error}");
+            Vec::new()
+        })
+    }
+
+    async fn request_logs_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoragePage<StoredRequestLog> {
+        self.request_logs_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: request_logs_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
+    }
+
+    async fn delete_request_logs(&self, request_ids: &[String]) -> Result<u64, StorageError> {
+        self.delete_request_logs_async(request_ids).await
+    }
+
+    async fn request_logs_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredRequestLog> {
+        self.request_logs_for_agent_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: request_logs_for_agent_runs failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn append_audit_event(&self, event: StoredAuditEvent) {
+        if let Err(error) = self.append_audit_event_async(&event).await {
+            tracing::warn!("cloudflare d1: append_audit_event failed: {error}");
+        }
+    }
+
+    fn next_audit_event_id(&self) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        format!("audit-{nanos}-{}", std::process::id())
+    }
+
+    async fn audit_events(&self) -> Vec<StoredAuditEvent> {
+        self.audit_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: audit_events failed: {error}");
+            Vec::new()
+        })
+    }
+
+    async fn audit_events_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoragePage<StoredAuditEvent> {
+        self.audit_events_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: audit_events_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
+    }
+
+    async fn delete_audit_events(&self, ids: &[String]) -> Result<u64, StorageError> {
+        self.delete_audit_events_async(ids).await
+    }
+
+    async fn audit_events_for_agent_runs(&self, run_ids: &[String]) -> Vec<StoredAuditEvent> {
+        self.audit_events_for_agent_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: audit_events_for_agent_runs failed: {error}");
+                Vec::new()
+            })
+    }
+
+    // --- Billing events (IMPLEMENTED, control DB, issue #449) ---
+    //
+    // Settled metering events stored as full `*_json` documents (idempotent on
+    // the ledger-entry id, like Postgres/Memory). The combined
+    // `append_billing_event_with_outbox_enqueue` stays UNIMPLEMENTED: it must
+    // commit the metering write and the outbox enqueue in ONE transaction
+    // (issue #150), which the D1 HTTP query API cannot express.
+
+    async fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
+        self.append_billing_event_async(&event).await
+    }
+
+    async fn append_billing_event_with_outbox_enqueue(
+        &self,
+        _event: BillingEvent,
+        _outbox_id: &str,
+        _outbox_next_attempt_unix: i64,
+    ) -> Result<BillingEventAppendOutcome, StorageError> {
+        Err(unimplemented_surface(
+            "append_billing_event_with_outbox_enqueue",
+        ))
+    }
+
+    async fn billing_events(&self) -> Vec<BillingEvent> {
+        self.billing_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: billing_events failed: {error}");
+            Vec::new()
+        })
+    }
+
+    async fn billing_events_page(&self, offset: usize, limit: usize) -> StoragePage<BillingEvent> {
+        self.billing_events_page_async(offset, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: billing_events_page failed: {error}");
+                StoragePage::empty(offset, limit)
+            })
+    }
+
+    // Process-local usage-aggregate mirror: backend-independent semantics
+    // (IMPLEMENTED, mirrors the Postgres backend's local half verbatim).
+
+    fn upsert_usage_aggregate_local(
+        &self,
+        id: String,
+        build: &mut dyn FnMut(Option<StoredUsageAggregate>) -> StoredUsageAggregate,
+    ) -> Result<StoredUsageAggregate, StorageError> {
+        if let Ok(mut aggregates) = self.usage_aggregates_mirror.lock() {
+            let existing = aggregates.get(&id);
+            let aggregate = build(existing);
+            aggregates.insert(id, aggregate.clone());
+            Ok(aggregate)
+        } else {
+            Err(StorageError::Serialization(
+                "usage aggregate repository lock poisoned".into(),
+            ))
+        }
+    }
+
+    fn store_usage_aggregate_local(
+        &self,
+        aggregate: StoredUsageAggregate,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut aggregates) = self.usage_aggregates_mirror.lock() {
+            aggregates.insert(aggregate.id.clone(), aggregate);
+            Ok(())
+        } else {
+            Err(StorageError::Serialization(
+                "usage aggregate repository lock poisoned".into(),
+            ))
+        }
+    }
+
+    async fn persist_usage_aggregate(
+        &self,
+        _aggregate: &StoredUsageAggregate,
+    ) -> Result<(), StorageError> {
+        // The DURABLE half is a hot-path write that belongs behind the proxy
+        // Worker (see module docs), so it is typed unimplemented rather than
+        // silently dropped.
+        Err(unimplemented_surface("persist_usage_aggregate"))
+    }
+
+    async fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
+        // Process-local view (the mirror), matching the Memory backend's
+        // store-of-record read; documented in the module docs.
+        self.usage_aggregates_mirror
+            .lock()
+            .map(|aggregates| aggregates.list())
+            .unwrap_or_default()
+    }
+
+    async fn sum_api_key_committed_tokens(&self, api_key_id: &str) -> u64 {
+        self.usage_aggregates_mirror
+            .lock()
+            .map(|aggregates| {
+                aggregates
+                    .list()
+                    .into_iter()
+                    .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
+                    .fold(0_u64, |total, aggregate| {
+                        total.saturating_add(aggregate.usage.total_tokens)
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    // --- Agent runs / events (IMPLEMENTED, control database, issue #447) ---
+    //
+    // See the inherent `*_async` helpers for the routing rationale. The
+    // `()`/`Vec`/`Option`-returning surfaces swallow-with-warn on error like
+    // the Postgres backend; the `Result`-returning ones surface it.
+
+    async fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
+        self.upsert_agent_run_async(&run).await
+    }
+
+    async fn agent_run(&self, id: &str) -> Option<StoredAgentRun> {
+        self.agent_run_async(id).await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_run failed: {error}");
+            None
+        })
+    }
+
+    async fn agent_runs(&self) -> Vec<StoredAgentRun> {
+        self.agent_runs_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_runs failed: {error}");
+            Vec::new()
+        })
+    }
+
+    async fn agent_runs_by_ids(&self, run_ids: &[String]) -> Vec<StoredAgentRun> {
+        self.agent_runs_by_ids_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_runs_by_ids failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn append_agent_run_event(&self, event: StoredAgentRunEvent) -> Result<(), StorageError> {
+        self.append_agent_run_event_async(&event).await
+    }
+
+    async fn agent_run_events(&self) -> Vec<StoredAgentRunEvent> {
+        self.agent_run_events_async().await.unwrap_or_else(|error| {
+            tracing::warn!("cloudflare d1: agent_run_events failed: {error}");
+            Vec::new()
+        })
+    }
+
+    async fn agent_run_events_for_runs(&self, run_ids: &[String]) -> Vec<StoredAgentRunEvent> {
+        self.agent_run_events_for_runs_async(run_ids)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_run_events_for_runs failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn agent_run_summary_seed_ids(
+        &self,
+        request_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        self.agent_run_summary_seed_ids_async(request_id, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_run_summary_seed_ids failed: {error}");
+                Vec::new()
+            })
+    }
+
+    // --- Managed worker stores (IMPLEMENTED, control DB, issue #449) ---
+    //
+    // Each `upsert`/`append` writes the full record as a `*_json` document and
+    // surfaces its error; each `Vec`-returning list swallows-with-warn like the
+    // #447 observability getters and the Postgres backend.
+
+    async fn upsert_managed_worker_template(
+        &self,
+        template: StoredManagedWorkerTemplate,
+    ) -> Result<(), StorageError> {
+        self.upsert_managed_worker_template_async(&template).await
+    }
+
+    async fn managed_worker_templates(&self) -> Vec<StoredManagedWorkerTemplate> {
+        self.managed_worker_templates_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_templates failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn upsert_agent_worker_instance(
+        &self,
+        instance: StoredAgentWorkerInstance,
+    ) -> Result<(), StorageError> {
+        self.upsert_agent_worker_instance_async(&instance).await
+    }
+
+    async fn agent_worker_instances(&self) -> Vec<StoredAgentWorkerInstance> {
+        self.agent_worker_instances_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: agent_worker_instances failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn upsert_managed_worker_session(
+        &self,
+        session: StoredManagedWorkerSession,
+    ) -> Result<(), StorageError> {
+        self.upsert_managed_worker_session_async(&session).await
+    }
+
+    async fn managed_worker_sessions(&self) -> Vec<StoredManagedWorkerSession> {
+        self.managed_worker_sessions_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_sessions failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn append_managed_worker_lifecycle_event(
+        &self,
+        event: StoredManagedWorkerLifecycleEvent,
+    ) -> Result<(), StorageError> {
+        self.append_managed_worker_lifecycle_event_async(&event)
+            .await
+    }
+
+    async fn managed_worker_lifecycle_events(&self) -> Vec<StoredManagedWorkerLifecycleEvent> {
+        self.managed_worker_lifecycle_events_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_lifecycle_events failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn upsert_managed_worker_isolation_selection(
+        &self,
+        selection: StoredManagedWorkerIsolationSelection,
+    ) -> Result<(), StorageError> {
+        self.upsert_managed_worker_isolation_selection_async(&selection)
+            .await
+    }
+
+    async fn managed_worker_isolation_selections(
+        &self,
+    ) -> Vec<StoredManagedWorkerIsolationSelection> {
+        self.managed_worker_isolation_selections_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: managed_worker_isolation_selections failed: {error}"
+                );
+                Vec::new()
+            })
+    }
+
+    async fn upsert_managed_worker_isolation_policy(
+        &self,
+        policy: StoredManagedWorkerIsolationPolicy,
+    ) -> Result<(), StorageError> {
+        self.upsert_managed_worker_isolation_policy_async(&policy)
+            .await
+    }
+
+    async fn managed_worker_isolation_policies(&self) -> Vec<StoredManagedWorkerIsolationPolicy> {
+        self.managed_worker_isolation_policies_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_isolation_policies failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn upsert_managed_worker_isolation_evidence(
+        &self,
+        evidence: StoredManagedWorkerIsolationEvidence,
+    ) -> Result<(), StorageError> {
+        self.upsert_managed_worker_isolation_evidence_async(&evidence)
+            .await
+    }
+
+    async fn managed_worker_isolation_evidence(&self) -> Vec<StoredManagedWorkerIsolationEvidence> {
+        self.managed_worker_isolation_evidence_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: managed_worker_isolation_evidence failed: {error}");
+                Vec::new()
+            })
+    }
+
+    // --- Self-hosted worker stores (IMPLEMENTED, control DB, issue #449) ---
+
+    async fn upsert_self_hosted_worker_registration(
+        &self,
+        registration: StoredSelfHostedWorkerRegistration,
+    ) -> Result<(), StorageError> {
+        self.upsert_self_hosted_worker_registration_async(&registration)
+            .await
+    }
+
+    async fn self_hosted_worker_registrations(&self) -> Vec<StoredSelfHostedWorkerRegistration> {
+        self.self_hosted_worker_registrations_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_registrations failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn self_hosted_worker_registration(
+        &self,
+        worker_id: &str,
+    ) -> Option<StoredSelfHostedWorkerRegistration> {
+        self.self_hosted_worker_registration_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_registration failed: {error}");
+                None
+            })
+    }
+
+    async fn latest_self_hosted_worker_heartbeat(
+        &self,
+        worker_id: &str,
+    ) -> Option<StoredSelfHostedWorkerHeartbeat> {
+        self.latest_self_hosted_worker_heartbeat_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: latest_self_hosted_worker_heartbeat failed: {error}"
+                );
+                None
+            })
+    }
+
+    async fn self_hosted_worker_activity_stats(
+        &self,
+        worker_id: &str,
+    ) -> StoredSelfHostedWorkerActivityStats {
+        self.self_hosted_worker_activity_stats_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_activity_stats failed: {error}");
+                StoredSelfHostedWorkerActivityStats::default()
+            })
+    }
+
+    async fn append_self_hosted_worker_heartbeat(
+        &self,
+        heartbeat: StoredSelfHostedWorkerHeartbeat,
+    ) -> Result<(), StorageError> {
+        self.append_self_hosted_worker_heartbeat_async(&heartbeat)
+            .await
+    }
+
+    async fn self_hosted_worker_heartbeats(&self) -> Vec<StoredSelfHostedWorkerHeartbeat> {
+        self.self_hosted_worker_heartbeats_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_heartbeats failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn append_self_hosted_worker_telemetry_event(
+        &self,
+        event: StoredSelfHostedWorkerTelemetryEvent,
+    ) -> Result<(), StorageError> {
+        self.append_self_hosted_worker_telemetry_event_async(&event)
+            .await
+    }
+
+    async fn self_hosted_worker_telemetry_events(
+        &self,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        self.self_hosted_worker_telemetry_events_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events failed: {error}"
+                );
+                Vec::new()
+            })
+    }
+
+    async fn self_hosted_worker_telemetry_events_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        self.self_hosted_worker_telemetry_events_for_run_async(run_id, limit)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events_for_run failed: {error}"
+                );
+                Vec::new()
+            })
+    }
+
+    async fn self_hosted_worker_telemetry_events_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        self.self_hosted_worker_telemetry_events_for_worker_async(worker_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "cloudflare d1: self_hosted_worker_telemetry_events_for_worker failed: {error}"
+                );
+                Vec::new()
+            })
+    }
+
+    async fn upsert_self_hosted_worker_artifact(
+        &self,
+        artifact: StoredSelfHostedWorkerArtifact,
+    ) -> Result<(), StorageError> {
+        self.upsert_self_hosted_worker_artifact_async(&artifact)
+            .await
+    }
+
+    async fn self_hosted_worker_artifacts(&self) -> Vec<StoredSelfHostedWorkerArtifact> {
+        self.self_hosted_worker_artifacts_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_artifacts failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn self_hosted_worker_artifact(
+        &self,
+        id: &str,
+    ) -> Option<StoredSelfHostedWorkerArtifact> {
+        self.self_hosted_worker_artifact_async(id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_artifact failed: {error}");
+                None
+            })
+    }
+
+    async fn upsert_self_hosted_worker_checkpoint(
+        &self,
+        checkpoint: StoredSelfHostedWorkerCheckpoint,
+    ) -> Result<(), StorageError> {
+        self.upsert_self_hosted_worker_checkpoint_async(&checkpoint)
+            .await
+    }
+
+    async fn self_hosted_worker_checkpoints(&self) -> Vec<StoredSelfHostedWorkerCheckpoint> {
+        self.self_hosted_worker_checkpoints_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_checkpoints failed: {error}");
+                Vec::new()
+            })
+    }
+
+    async fn self_hosted_worker_checkpoint(
+        &self,
+        id: &str,
+    ) -> Option<StoredSelfHostedWorkerCheckpoint> {
+        self.self_hosted_worker_checkpoint_async(id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_worker_checkpoint failed: {error}");
+                None
+            })
+    }
+
+    async fn upsert_self_hosted_run_dispatch(
+        &self,
+        dispatch: StoredSelfHostedRunDispatch,
+    ) -> Result<(), StorageError> {
+        self.upsert_self_hosted_run_dispatch_async(&dispatch).await
+    }
+
+    async fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch> {
+        self.self_hosted_run_dispatches_async()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("cloudflare d1: self_hosted_run_dispatches failed: {error}");
+                Vec::new()
+            })
+    }
+
+    // --- Per-entity module surfaces (#437, UNIMPLEMENTED) ---
+    //
+    // These families are not part of the first D1 slice (issue #420); each
+    // returns the typed `unimplemented-backend-surface` error a proxy-Worker
+    // impl will later replace. Same contract as the erroring surfaces above.
+
+    // --- Site domains (IMPLEMENTED, control database, issue #445) ---
+    //
+    // hostname is the natural key; serve-path lookups carry no tenant context,
+    // so these route to the control database rather than fanning out.
+
+    async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
+        self.upsert_site_domain_async(domain).await
+    }
+
+    async fn get_site_domain(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomain>, StorageError> {
+        self.get_site_domain_async(hostname).await
+    }
+
+    async fn list_site_domains(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomain>, StorageError> {
+        self.list_site_domains_async(tenant_id).await
+    }
+
+    async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError> {
+        self.delete_site_domain_async(hostname).await
+    }
+
+    async fn list_usage_metadata_rollups(
+        &self,
+        _metadata_key: &str,
+        _organization_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
+        Err(unimplemented_surface("list_usage_metadata_rollups"))
+    }
+
+    async fn touch_observed_agent_presence(
+        &self,
+        _touch: ObservedAgentPresenceTouch,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("touch_observed_agent_presence"))
+    }
+
+    async fn list_observed_agent_presence_since(
+        &self,
+        _tenant_scope: Option<&str>,
+        _since_unix: i64,
+    ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
+        Err(unimplemented_surface("list_observed_agent_presence_since"))
+    }
+
+    // --- Budget alert idempotency ledger (IMPLEMENTED, control database,
+    // issue #445) ---
+    //
+    // Scope-keyed, once-per-period-per-tier records: account-global alerting
+    // state with no tenant-database routing, so the control database owns them.
+
+    async fn record_budget_alert_notification(
+        &self,
+        notification: StoredBudgetAlertNotification,
+    ) -> Result<(), StorageError> {
+        self.record_budget_alert_notification_async(notification)
+            .await
+    }
+
+    async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
+        self.budget_alert_already_notified_async(id).await
+    }
+
+    async fn list_budget_alert_notifications(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
+        self.list_budget_alert_notifications_async(scope_type, scope_id, period_month)
+            .await
+    }
+
+    async fn open_workflow_run_budget(
+        &self,
+        _workflow_id: &str,
+        _workflow_version: u32,
+        _run_id: &str,
+        _tenant_id: &str,
+        _caps: WorkflowRunBudgetCaps,
+        _now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        Err(unimplemented_surface("open_workflow_run_budget"))
+    }
+
+    async fn debit_workflow_run_budget(
+        &self,
+        _id: &str,
+        _cost_credits: i64,
+        _tokens: i64,
+        _tool_calls: i64,
+        _now_unix: i64,
+    ) -> Result<WorkflowBudgetDebit, StorageError> {
+        Err(unimplemented_surface("debit_workflow_run_budget"))
+    }
+
+    async fn topup_workflow_run_budget(
+        &self,
+        _id: &str,
+        _add_cost_credits: i64,
+        _add_tokens: i64,
+        _add_tool_calls: i64,
+        _extend_deadline_unix: Option<i64>,
+        _now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        Err(unimplemented_surface("topup_workflow_run_budget"))
+    }
+
+    async fn get_workflow_run_budget(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
+        Err(unimplemented_surface("get_workflow_run_budget"))
+    }
+
+    async fn list_workflow_run_budgets(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
+        Err(unimplemented_surface("list_workflow_run_budgets"))
+    }
+
+    // --- RBAC: permissions / roles / tenant role bindings (IMPLEMENTED,
+    // control database, issue #445) ---
+    //
+    // Permissions and roles are shared/global (like plans); tenant role
+    // bindings are account-level admin config keyed by a deterministic
+    // `tenant_id:role_id` id. All account-global, so the control database owns
+    // them -- never fanned out over tenant databases.
+
+    async fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError> {
+        self.upsert_permission_async(permission).await
+    }
+
+    async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+        self.get_permission_async(id).await
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+        self.list_permissions_async().await
+    }
+
+    async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_permission_async(id).await
+    }
+
+    async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
+        self.upsert_role_async(role).await
+    }
+
+    async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+        self.get_role_async(id).await
+    }
+
+    async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+        self.list_roles_async().await
+    }
+
+    async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_role_async(id).await
+    }
+
+    async fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError> {
+        self.bind_tenant_role_async(binding).await
+    }
+
+    async fn list_tenant_role_bindings(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
+        self.list_tenant_role_bindings_async(tenant_id).await
+    }
+
+    async fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.unbind_tenant_role_async(tenant_id, role_id).await
+    }
+
+    async fn upsert_agent_schedule(
+        &self,
+        _schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_agent_schedule"))
+    }
+
+    async fn get_agent_schedule(
+        &self,
+        _schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("get_agent_schedule"))
+    }
+
+    async fn list_agent_schedules(
+        &self,
+        _tenant_id: &str,
+        _workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_agent_schedules"))
+    }
+
+    async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_all_agent_schedules"))
+    }
+
+    async fn delete_agent_schedule(&self, _schedule_id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_agent_schedule"))
+    }
+
+    async fn list_due_agent_schedules(
+        &self,
+        _now_unix: i64,
+        _limit: i64,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_due_agent_schedules"))
+    }
+
+    async fn insert_agent_schedule_fire(
+        &self,
+        _fire: StoredAgentScheduleFire,
+    ) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("insert_agent_schedule_fire"))
+    }
+
+    async fn list_agent_schedule_fires(
+        &self,
+        _schedule_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
+        Err(unimplemented_surface("list_agent_schedule_fires"))
+    }
+
+    async fn settle_wallet_balance(
+        &self,
+        _settlement_id: &str,
+        _tenant_id: &str,
+        _delta_credits: i64,
+        _now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        Err(unimplemented_surface("settle_wallet_balance"))
+    }
+
+    async fn upsert_wallet(&self, _wallet: StoredWallet) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_wallet"))
+    }
+
+    async fn get_wallet(&self, _tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("get_wallet"))
+    }
+
+    async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("list_wallets"))
+    }
+
+    async fn adjust_wallet_balance(
+        &self,
+        _tenant_id: &str,
+        _delta_credits: i64,
+        _now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("adjust_wallet_balance"))
+    }
+
+    async fn set_wallet_dunning(
+        &self,
+        _tenant_id: &str,
+        _dunning: bool,
+        _now_unix: i64,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("set_wallet_dunning"))
+    }
+
+    async fn reserve_wallet_credits(
+        &self,
+        _reservation_id: &str,
+        _tenant_id: &str,
+        _amount_credits: i64,
+        _expires_at_unix: i64,
+        _now_unix: i64,
+    ) -> Result<WalletReservationResult, StorageError> {
+        Err(unimplemented_surface("reserve_wallet_credits"))
+    }
+
+    async fn settle_wallet_reservation(
+        &self,
+        _reservation_id: &str,
+        _now_unix: i64,
+    ) -> Result<WalletReservationSettlement, StorageError> {
+        Err(unimplemented_surface("settle_wallet_reservation"))
+    }
+
+    async fn release_wallet_reservation(
+        &self,
+        _reservation_id: &str,
+        _now_unix: i64,
+    ) -> Result<StoredWalletReservation, StorageError> {
+        Err(unimplemented_surface("release_wallet_reservation"))
+    }
+
+    async fn sweep_expired_wallet_reservations(
+        &self,
+        _now_unix: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        Err(unimplemented_surface("sweep_expired_wallet_reservations"))
+    }
+
+    async fn list_wallet_reservations(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredWalletReservation>, StorageError> {
+        Err(unimplemented_surface("list_wallet_reservations"))
+    }
+
+    async fn upsert_payment_method(
+        &self,
+        _payment_method: StoredPaymentMethod,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_payment_method"))
+    }
+
+    async fn list_payment_methods(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
+        Err(unimplemented_surface("list_payment_methods"))
+    }
+
+    async fn get_payment_method(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        Err(unimplemented_surface("get_payment_method"))
+    }
+
+    async fn delete_payment_method(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_payment_method"))
+    }
+
+    async fn create_payment_attempt(
+        &self,
+        _attempt: StoredPaymentAttempt,
+    ) -> Result<PaymentAttemptCreation, StorageError> {
+        Err(unimplemented_surface("create_payment_attempt"))
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("get_payment_attempt"))
+    }
+
+    async fn list_payment_attempts(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_payment_attempts"))
+    }
+
+    async fn get_payment_attempt_links(
+        &self,
+        _id: &str,
+        _tenant_id: &str,
+    ) -> Result<Option<PaymentAttemptLinks>, StorageError> {
+        Err(unimplemented_surface("get_payment_attempt_links"))
+    }
+
+    async fn list_expirable_due_payment_attempts(
+        &self,
+        _due_at_or_before_unix: i64,
+        _limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_expirable_due_payment_attempts"))
+    }
+
+    async fn list_reconcilable_payment_attempts(
+        &self,
+        _checked_at_or_before_unix: i64,
+        _limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_reconcilable_payment_attempts"))
+    }
+
+    async fn transition_payment_attempt(
+        &self,
+        _op_name: &'static str,
+        _id: &str,
+        _allowed_from: &[&str],
+        _to_state: &str,
+        _evidence: &super::payment_attempt::TransitionEvidence<'_>,
+        _now_unix: i64,
+    ) -> Result<PaymentAttemptTransition, StorageError> {
+        Err(unimplemented_surface("transition_payment_attempt"))
+    }
+
+    // schema_evidence / pool_metrics_snapshot: trait defaults (no durable
+    // schema evidence probe on this slice; no Postgres pool to report).
+}
