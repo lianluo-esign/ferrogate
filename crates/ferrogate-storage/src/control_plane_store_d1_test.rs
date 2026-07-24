@@ -29,8 +29,8 @@ use crate::{
     StoredBudgetAlertNotification, StoredGuardrailPolicyBinding, StoredGuardrailPolicyRevision,
     StoredManagedWorkerTemplate, StoredPermission, StoredPlan, StoredQuotaPolicy, StoredRequestLog,
     StoredRole, StoredSelfHostedWorkerRegistration, StoredSiteDomain, StoredSsoProviderConfig,
-    StoredTenantAccount, StoredTenantRoleBinding, StoredWallet, WalletReservationResult,
-    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+    StoredTenantAccount, StoredTenantRoleBinding, StoredUsageAggregate, StoredWallet, TokenUsage,
+    WalletReservationResult, D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
 };
 
 // --- Mocked transport plumbing (mirrors the ferrogate-cloudflare seams) ---
@@ -3153,6 +3153,428 @@ fn wallet_balance_ops_without_proxy_are_unimplemented_and_offline() {
     assert!(
         transport.recorded().is_empty(),
         "the unimplemented wallet path must not hit the network"
+    );
+}
+
+// --- Tenant-scoped usage rollups + persist_usage_aggregate RMW (issue #456) ---
+
+/// A `usage_monthly_rollups` row shaped as the proxy Worker serializes it
+/// (integer affinities as JSON numbers, cost_usd as a JSON number).
+fn monthly_rollup_row(
+    period_month: &str,
+    scope_type: &str,
+    scope_id: &str,
+    total_tokens: i64,
+    cost_usd: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("{period_month}:{scope_type}:{scope_id}"),
+        "period_month": period_month,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "prompt_tokens": total_tokens,
+        "completion_tokens": 0,
+        "total_tokens": total_tokens,
+        "cost_usd": cost_usd,
+        "request_count": 1,
+        "error_count": 0,
+        "updated_at_unix": 100,
+    })
+}
+
+/// A `usage_metadata_rollups` row shaped as the proxy Worker serializes it.
+fn metadata_rollup_row(
+    period_month: &str,
+    organization_id: &str,
+    metadata_key: &str,
+    metadata_value: &str,
+    total_tokens: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("{period_month}:{organization_id}:{metadata_key}:{metadata_value}"),
+        "period_month": period_month,
+        "organization_id": organization_id,
+        "metadata_key": metadata_key,
+        "metadata_value": metadata_value,
+        "prompt_tokens": total_tokens,
+        "completion_tokens": 0,
+        "total_tokens": total_tokens,
+        "cost_usd": 0.0,
+        "request_count": 1,
+        "error_count": 0,
+        "updated_at_unix": 100,
+    })
+}
+
+/// A usage aggregate attributed to `org` (its owning tenant), a project, and a
+/// key — the routing/tenant-context inputs `persist_usage_aggregate` uses.
+fn sample_usage_aggregate(org: Option<&str>) -> StoredUsageAggregate {
+    StoredUsageAggregate {
+        id: format!("{}:proj-1:key-1:fast-chat:openai", org.unwrap_or("_")),
+        organization_id: org.map(str::to_string),
+        project_id: Some("proj-1".into()),
+        api_key_id: Some("key-1".into()),
+        logical_model: "fast-chat".into(),
+        provider: "openai".into(),
+        usage: TokenUsage::new(10, 20, 30),
+    }
+}
+
+/// `persist_usage_aggregate` records the tenant_contexts upsert + the
+/// usage_aggregate_rollups REPLACE as ONE atomic `/d1/batch` on the OWNING
+/// tenant's binding (routed by organization), mirroring the Postgres transaction.
+/// Tokens are stored values (no CAST — the `upsert_wallet` convention); the
+/// REPLACE reads them back via `excluded.*`.
+#[test]
+fn persist_usage_aggregate_writes_context_and_rollup_batch_on_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // S0 tenant_contexts upsert (no RETURNING) + S1 rollup REPLACE.
+            proxy_statement_result(serde_json::json!([]), 1),
+            proxy_statement_result(serde_json::json!([]), 1),
+        ])],
+    );
+
+    let aggregate = sample_usage_aggregate(Some("acme"));
+    runtime()
+        .block_on(store.persist_usage_aggregate(&aggregate))
+        .expect("persist should write the durable rollup");
+
+    assert!(
+        rest_transport.recorded().is_empty(),
+        "a tenant-scoped usage write must not touch the REST query API"
+    );
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/batch"));
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let statements = body["statements"].as_array().unwrap();
+    assert_eq!(
+        statements.len(),
+        2,
+        "tenant_contexts upsert + rollup REPLACE"
+    );
+
+    // S0: tenant_contexts INSERT ... ON CONFLICT DO NOTHING (the
+    // upsert_tenant_context_parts half), absent parts stored NULL via NULLIF.
+    let context = statements[0]["sql"].as_str().unwrap();
+    assert!(context.starts_with("INSERT INTO tenant_contexts"));
+    assert!(context.contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(context.contains("NULLIF(?, '')"));
+    // Deterministic tenant-context id + org/project/api_key parts.
+    let context_params = statement_params(&statements[0]);
+    assert_eq!(
+        context_params,
+        vec![
+            "org:acme|team:|project:proj-1|workspace:|user:|api_key:key-1",
+            "acme",
+            "proj-1",
+            "key-1",
+        ]
+    );
+
+    // S1: usage_aggregate_rollups REPLACE (INSERT ... ON CONFLICT DO UPDATE SET
+    // ... = excluded ...), the replace_usage_rollup half. Tokens are stored
+    // (no CAST); updated_at_unix uses unixepoch() (the Postgres NOW() analogue).
+    let rollup = statements[1]["sql"].as_str().unwrap();
+    assert!(rollup.starts_with("INSERT INTO usage_aggregate_rollups"));
+    assert!(rollup.contains("ON CONFLICT (id) DO UPDATE SET"));
+    assert!(rollup.contains("prompt_tokens = excluded.prompt_tokens"));
+    assert!(rollup.contains("total_tokens = excluded.total_tokens"));
+    assert!(rollup.contains("unixepoch()"));
+    assert!(
+        !rollup.contains("CAST("),
+        "stored token values are affinity-coerced, not summed in an expression"
+    );
+    let rollup_params = statement_params(&statements[1]);
+    assert_eq!(
+        rollup_params,
+        vec![
+            "acme:proj-1:key-1:fast-chat:openai",
+            "org:acme|team:|project:proj-1|workspace:|user:|api_key:key-1",
+            "fast-chat",
+            "openai",
+            "10",
+            "20",
+            "30",
+        ]
+    );
+}
+
+/// An org-less aggregate has no tenant database to route to, so
+/// `persist_usage_aggregate` is a typed `NotFound` (the database-per-tenant
+/// divergence from Postgres, which records it under a null-org context). No
+/// network round trip.
+#[test]
+fn persist_usage_aggregate_org_less_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.persist_usage_aggregate(&sample_usage_aggregate(None)))
+        .expect_err("an org-less aggregate has no tenant DB");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `persist_usage_aggregate` for an UNPROVISIONED tenant is a typed `NotFound`
+/// (no tenant DB) — no network round trip.
+#[test]
+fn persist_usage_aggregate_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.persist_usage_aggregate(&sample_usage_aggregate(Some("ghost"))))
+        .expect_err("an unprovisioned tenant has no D1 database");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `get_usage_monthly_rollup` fans out over the provisioned tenant bindings (a
+/// scope's rollup lives in its owning tenant DB; the signature carries no tenant
+/// id) and decodes the first match, mapping the TEXT scope_type back to the enum.
+#[test]
+fn get_usage_monthly_rollup_fans_out_and_decodes() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([monthly_rollup_row("2026-07", "project", "proj-1", 30, 1.5)]),
+            0,
+        )],
+    );
+
+    let rollup = runtime()
+        .block_on(store.get_usage_monthly_rollup(QuotaScopeKind::Project, "proj-1", "2026-07"))
+        .expect("get should succeed")
+        .expect("row present");
+    assert_eq!(rollup.scope_type, QuotaScopeKind::Project);
+    assert_eq!(rollup.scope_id, "proj-1");
+    assert_eq!(rollup.period_month, "2026-07");
+    assert_eq!(rollup.total_tokens, 30);
+    assert_eq!(rollup.cost_usd, 1.5);
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one probe on the single provisioned tenant"
+    );
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.contains("FROM usage_monthly_rollups"));
+    assert!(sql.contains("WHERE scope_type = ? AND scope_id = ? AND period_month = ?"));
+    assert_eq!(
+        body_params(&requests[0]),
+        vec!["project", "proj-1", "2026-07"]
+    );
+}
+
+/// `get_usage_monthly_rollup` returns `Ok(None)` when no tenant DB holds the row,
+/// after probing EVERY provisioned binding.
+#[test]
+fn get_usage_monthly_rollup_absent_is_none() {
+    let (store, _rest, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(serde_json::json!([]), 0),
+            proxy_query_ok(serde_json::json!([]), 0),
+        ],
+    );
+
+    let rollup = runtime()
+        .block_on(store.get_usage_monthly_rollup(QuotaScopeKind::Key, "key-9", "2026-07"))
+        .expect("get should succeed");
+    assert!(rollup.is_none());
+    assert_eq!(
+        proxy_transport.recorded().len(),
+        2,
+        "probes both tenant DBs before concluding absent"
+    );
+}
+
+/// `list_usage_monthly_rollups` fans out over every provisioned tenant DB and
+/// re-sorts the union to the Postgres order `period_month DESC, scope_type ASC,
+/// scope_id ASC`.
+#[test]
+fn list_usage_monthly_rollups_fans_out_and_orders() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            // acme DB: two months, scope_type ordering across the union.
+            proxy_query_ok(
+                serde_json::json!([
+                    monthly_rollup_row("2026-06", "tenant", "acme", 5, 0.1),
+                    monthly_rollup_row("2026-07", "project", "proj-1", 30, 1.5),
+                ]),
+                0,
+            ),
+            // bravo DB: same latest month, a scope_type that sorts before project.
+            proxy_query_ok(
+                serde_json::json!([monthly_rollup_row("2026-07", "key", "key-1", 7, 0.2)]),
+                0,
+            ),
+        ],
+    );
+
+    let rollups = runtime()
+        .block_on(store.list_usage_monthly_rollups())
+        .expect("list should fan out");
+    let ordered: Vec<(String, QuotaScopeKind, String)> = rollups
+        .iter()
+        .map(|r| (r.period_month.clone(), r.scope_type, r.scope_id.clone()))
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            // 2026-07 first (period DESC); within it 'key' < 'project' (scope ASC).
+            ("2026-07".into(), QuotaScopeKind::Key, "key-1".into()),
+            ("2026-07".into(), QuotaScopeKind::Project, "proj-1".into()),
+            ("2026-06".into(), QuotaScopeKind::Tenant, "acme".into()),
+        ]
+    );
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2, "one whole-table read per tenant DB");
+    let first_sql = body_json(&requests[0])["sql"].as_str().unwrap().to_string();
+    assert!(first_sql.contains("FROM usage_monthly_rollups"));
+    assert!(
+        !first_sql.contains("WHERE"),
+        "cross-tenant list is unfiltered"
+    );
+}
+
+/// `list_usage_metadata_rollups` with `Some(org)` routes to that org's OWN
+/// database, filtering by metadata_key + organization_id and ordering
+/// `period_month ASC, metadata_value ASC` (the Postgres scoped read).
+#[test]
+fn list_usage_metadata_rollups_scoped_routes_to_org_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([metadata_rollup_row(
+                "2026-07", "acme", "customer", "cust-a", 30
+            ),]),
+            0,
+        )],
+    );
+
+    let rollups = runtime()
+        .block_on(store.list_usage_metadata_rollups("customer", Some("acme")))
+        .expect("scoped metadata read should route to the org DB");
+    assert_eq!(rollups.len(), 1);
+    assert_eq!(rollups[0].organization_id, "acme");
+    assert_eq!(rollups[0].metadata_value, "cust-a");
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.contains("WHERE metadata_key = ? AND organization_id = ?"));
+    assert!(sql.contains("ORDER BY period_month ASC, metadata_value ASC"));
+    assert_eq!(body_params(&requests[0]), vec!["customer", "acme"]);
+}
+
+/// A `Some(org)` read for an UNPROVISIONED (or empty/legacy) org is `Ok(empty)`
+/// with no round trip — the opt-in contract (matching `get_wallet`).
+#[test]
+fn list_usage_metadata_rollups_unprovisioned_org_is_empty() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let rollups = runtime()
+        .block_on(store.list_usage_metadata_rollups("customer", Some("ghost")))
+        .expect("unprovisioned org -> empty");
+    assert!(rollups.is_empty());
+
+    let empty = runtime()
+        .block_on(store.list_usage_metadata_rollups("customer", Some("")))
+        .expect("empty/legacy org -> empty");
+    assert!(empty.is_empty());
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `list_usage_metadata_rollups(None)` is the platform-operator global view: it
+/// fans out over every provisioned tenant DB (metadata_key filter only) and
+/// re-sorts the union to `period_month ASC, metadata_value ASC`.
+#[test]
+fn list_usage_metadata_rollups_operator_view_fans_out() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            proxy_query_ok(
+                serde_json::json!([metadata_rollup_row(
+                    "2026-07", "acme", "customer", "cust-z", 3
+                ),]),
+                0,
+            ),
+            proxy_query_ok(
+                serde_json::json!([metadata_rollup_row(
+                    "2026-07", "bravo", "customer", "cust-a", 9
+                ),]),
+                0,
+            ),
+        ],
+    );
+
+    let rollups = runtime()
+        .block_on(store.list_usage_metadata_rollups("customer", None))
+        .expect("operator view should fan out");
+    let ordered: Vec<String> = rollups.iter().map(|r| r.metadata_value.clone()).collect();
+    // Same month across both DBs -> ordered by metadata_value ASC in the union.
+    assert_eq!(ordered, vec!["cust-a", "cust-z"]);
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 2, "one read per provisioned tenant DB");
+    let sql = body_json(&requests[0])["sql"].as_str().unwrap().to_string();
+    assert!(sql.contains("WHERE metadata_key = ?"));
+    assert!(
+        !sql.contains("organization_id = ?"),
+        "the operator view does not filter by org"
+    );
+    assert_eq!(body_params(&requests[0]), vec!["customer"]);
+}
+
+/// Without a bound proxy Worker the whole #456 usage-rollup op set fails closed
+/// with the typed unimplemented-surface error and never hits the network.
+#[test]
+fn usage_rollup_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let persist = runtime()
+        .block_on(store.persist_usage_aggregate(&sample_usage_aggregate(Some("acme"))))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&persist), "{persist:?}");
+
+    let get = runtime()
+        .block_on(store.get_usage_monthly_rollup(QuotaScopeKind::Tenant, "acme", "2026-07"))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&get), "{get:?}");
+
+    let list = runtime()
+        .block_on(store.list_usage_monthly_rollups())
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list), "{list:?}");
+
+    let metadata = runtime()
+        .block_on(store.list_usage_metadata_rollups("customer", None))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&metadata), "{metadata:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented usage path must not hit the network"
     );
 }
 

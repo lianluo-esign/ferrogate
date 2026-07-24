@@ -720,6 +720,101 @@ CREATE TABLE IF NOT EXISTS wallet_settlements (
 CREATE INDEX IF NOT EXISTS idx_wallet_settlements_tenant_time
     ON wallet_settlements(tenant_id, created_at_unix DESC);
 
+-- --- Usage rollups + tenant contexts (issue #456) ---
+--
+-- Per-tenant usage/cost aggregation. Like the wallet family above, these are
+-- TENANT-SCOPED: in the database-per-tenant topology a tenant's monthly rollups
+-- (across every scope level it owns), its per-metadata rollups, and its usage
+-- aggregate rollups + tenant_contexts live in THAT tenant's own D1 database
+-- (never the control database). Ported column-for-column from the Postgres
+-- usage_monthly_rollups/usage_metadata_rollups/usage_aggregate_rollups/
+-- tenant_contexts tables (SQLite divergences: BIGINT->INTEGER, DOUBLE
+-- PRECISION->REAL, no cross-table FK -- the Postgres
+-- usage_aggregate_rollups.tenant_context_id foreign key to tenant_contexts(id)
+-- is dropped for physical isolation). persist_usage_aggregate writes
+-- tenant_contexts + usage_aggregate_rollups as ONE atomic /d1/batch through the
+-- proxy Worker; the monthly/metadata reads route/fan-out over the tenant
+-- binding(s). A REST-only deployment leaves these fail-closed.
+
+-- The tenant/project/api-key identity a usage aggregate is attributed to;
+-- referenced by usage_aggregate_rollups.tenant_context_id BY VALUE (no FK).
+CREATE TABLE IF NOT EXISTS tenant_contexts (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT,
+    team_id TEXT,
+    project_id TEXT,
+    workspace_id TEXT,
+    user_id TEXT,
+    api_key_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_contexts_org_project
+    ON tenant_contexts(organization_id, project_id);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_contexts_api_key
+    ON tenant_contexts(api_key_id);
+
+-- Per-(tenant_context, model, provider) cumulative token totals; REPLACE-
+-- upserted by persist_usage_aggregate.
+CREATE TABLE IF NOT EXISTS usage_aggregate_rollups (
+    id TEXT PRIMARY KEY,
+    tenant_context_id TEXT NOT NULL,
+    logical_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_rollups_tenant_model_provider
+    ON usage_aggregate_rollups(tenant_context_id, logical_model, provider);
+
+-- Per-scope, per-calendar-month usage/cost rollup (one row per
+-- (period_month, scope_type, scope_id)); the read side of "current month
+-- cumulative cost for scope X". get/list_usage_monthly_rollups read these.
+CREATE TABLE IF NOT EXISTS usage_monthly_rollups (
+    id TEXT PRIMARY KEY,
+    period_month TEXT NOT NULL,
+    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'project', 'workspace', 'key')),
+    scope_id TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (period_month, scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_monthly_rollups_scope
+    ON usage_monthly_rollups(scope_type, scope_id, period_month);
+
+CREATE INDEX IF NOT EXISTS idx_usage_monthly_rollups_period
+    ON usage_monthly_rollups(period_month);
+
+-- Per-calendar-month usage/cost rollup keyed by an arbitrary metadata
+-- key/value pair, scoped to the originating organization (issue #171/#226).
+-- list_usage_metadata_rollups reads these.
+CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
+    id TEXT PRIMARY KEY,
+    period_month TEXT NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT '',
+    metadata_key TEXT NOT NULL,
+    metadata_value TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_org_key
+    ON usage_metadata_rollups(organization_id, metadata_key, period_month);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

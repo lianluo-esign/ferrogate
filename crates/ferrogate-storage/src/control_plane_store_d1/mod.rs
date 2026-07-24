@@ -180,6 +180,21 @@
 //!   same database-per-tenant divergence `reserve` makes, where Postgres records
 //!   the settlement / returns `Ok(None)` / no-ops. Fail closed (typed
 //!   unimplemented-surface) with no proxy; see `wallet.rs`.
+//! - Usage rollups (#456, TENANT databases, proxy Worker): the usage-report
+//!   read surface + the durable usage-aggregate write.
+//!   `get_usage_monthly_rollup`/`list_usage_monthly_rollups` fan out over the
+//!   provisioned tenant bindings (a scope's rollup lives in the OWNING tenant's
+//!   DB, and the signatures carry no tenant id for project/workspace/key scopes),
+//!   re-merging to the Postgres `ORDER BY`. `list_usage_metadata_rollups` routes
+//!   to the org's own DB for a tenant-scoped read (opt-in: empty for an
+//!   unprovisioned/empty org) and fans out for the operator `None` view.
+//!   `persist_usage_aggregate` is the durable settlement RMW: a `tenant_contexts`
+//!   upsert + a `usage_aggregate_rollups` REPLACE as ONE atomic `/d1/batch` on
+//!   the owning tenant's DB (no lost updates), mirroring the Postgres
+//!   transaction; an org-less/unprovisioned aggregate is a typed `NotFound` (the
+//!   database-per-tenant divergence). The process-local `usage_aggregates` mirror
+//!   below stays the read-of-record for `usage_aggregates`/committed-token sum.
+//!   Fail closed (typed unimplemented-surface) with no proxy; see `usage.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -231,12 +246,6 @@
 //!   `promote_pending_asset_visibility`) are atomic `FOR UPDATE` cross-table
 //!   transitions (write-skew close-out) — the same transaction gap that blocks
 //!   wallets — plus inline BYTEA content the document pattern serves poorly.
-//! - usage monthly + metadata rollups + `persist_usage_aggregate` (durable
-//!   half): the rollups are maintained by the `append_billing_event` settlement
-//!   transaction's read-modify-write increments across sibling tables (no
-//!   single-statement equivalent), and the usage-aggregate store-of-record on
-//!   this backend is still the process-local mirror; both land with the
-//!   rollup-maintenance slice.
 //! - the remaining pre-#425 per-entity dispatch surfaces: agent schedules,
 //!   observed agent presence, MCP identity.
 //!
@@ -276,6 +285,7 @@ mod observability;
 mod provisioning;
 mod rbac_site_domain;
 mod rows;
+mod usage;
 mod wallet;
 mod worker_stores;
 
@@ -869,29 +879,26 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("list_all_asset_channels"))
     }
 
-    // --- Usage rollups (UNIMPLEMENTED, deferred) ---
+    // --- Usage rollups (IMPLEMENTED, tenant-DB routed, issue #456) ---
     //
-    // The monthly/metadata rollups are maintained by the append_billing_event
-    // settlement transaction on Postgres (read-modify-write increments across
-    // sibling tables); reproducing that on D1 needs the multi-statement
-    // transaction the HTTP query API lacks, so the rollup reads (and the
-    // durable `persist_usage_aggregate` half, whose store-of-record on this
-    // backend is still the process-local mirror) stay deferred to the
-    // rollup-maintenance slice. See the module docs.
+    // Per-tenant usage-report reads + the durable `persist_usage_aggregate`
+    // RMW, routed through the proxy binding onto per-tenant databases (or fanned
+    // out for the id-only/global reads). See `usage.rs`.
 
     async fn get_usage_monthly_rollup(
         &self,
-        _scope_type: QuotaScopeKind,
-        _scope_id: &str,
-        _period_month: &str,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
     ) -> Result<Option<StoredUsageMonthlyRollup>, StorageError> {
-        Err(unimplemented_surface("get_usage_monthly_rollup"))
+        self.get_usage_monthly_rollup_d1_async(scope_type, scope_id, period_month)
+            .await
     }
 
     async fn list_usage_monthly_rollups(
         &self,
     ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError> {
-        Err(unimplemented_surface("list_usage_monthly_rollups"))
+        self.list_usage_monthly_rollups_d1_async().await
     }
 
     // --- Billing ledger + report outbox (IMPLEMENTED, control DB, issue #449) ---
@@ -1372,12 +1379,12 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn persist_usage_aggregate(
         &self,
-        _aggregate: &StoredUsageAggregate,
+        aggregate: &StoredUsageAggregate,
     ) -> Result<(), StorageError> {
-        // The DURABLE half is a hot-path write that belongs behind the proxy
-        // Worker (see module docs), so it is typed unimplemented rather than
-        // silently dropped.
-        Err(unimplemented_surface("persist_usage_aggregate"))
+        // The DURABLE half: one atomic `/d1/batch` (tenant_contexts upsert +
+        // usage_aggregate_rollups REPLACE) on the owning tenant's database,
+        // mirroring the Postgres transaction. See `usage.rs`.
+        self.persist_usage_aggregate_d1_async(aggregate).await
     }
 
     async fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
@@ -1829,10 +1836,11 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn list_usage_metadata_rollups(
         &self,
-        _metadata_key: &str,
-        _organization_id: Option<&str>,
+        metadata_key: &str,
+        organization_id: Option<&str>,
     ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
-        Err(unimplemented_surface("list_usage_metadata_rollups"))
+        self.list_usage_metadata_rollups_d1_async(metadata_key, organization_id)
+            .await
     }
 
     async fn touch_observed_agent_presence(
