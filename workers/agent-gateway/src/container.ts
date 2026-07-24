@@ -293,8 +293,17 @@ export async function containerExec(
         return fail("invalid_spec", "step.command must be a non-empty argv array");
       }
       const argv = (step.command as unknown[]).map((x) => String(x));
-      // The sandbox `exec` takes a command string; join the argv.
-      const result = await sandbox.exec(argv.join(" "), timeout !== undefined ? { timeout } : undefined);
+      // SECURITY (issue #415, gate re-test — command injection on an untrusted-code
+      // backend): `@cloudflare/sandbox@0.12.4` exposes ONLY a string-command exec API —
+      // `Sandbox.exec(command: string, options?: ExecOptions)`
+      // (node_modules/@cloudflare/sandbox/dist/sandbox-5MHau7vJ.d.ts:3044); there is NO
+      // argv/string[] overload anywhere on the Sandbox surface. A naive `argv.join(" ")`
+      // destroys argument boundaries AND re-subjects every token to the container shell
+      // (word-splitting, globbing, and `;`/`$(...)`/backtick/redirection metacharacters) —
+      // a command-injection surface. We honor the argv contract by POSIX single-quote
+      // quoting each token, so it is passed literally and cannot be split or interpreted.
+      const command = argv.map(shellQuote).join(" ");
+      const result = await sandbox.exec(command, timeout !== undefined ? { timeout } : undefined);
       exitCode = result.exitCode;
       rawStdout = result.stdout;
       rawStderr = result.stderr;
@@ -328,13 +337,17 @@ export async function containerExec(
     // A non-zero / abnormal exit takes the shell down and the SDK raises
     // SessionTerminatedError. This is a GOVERNED outcome, not a crash: map it to
     // a normal exec result carrying the propagated exit code so the caller sees
-    // exitCode != 0 instead of a 5xx. (Live defect #2/#3/#4.)
+    // exitCode != 0 instead of a 5xx. Uniform across the DIRECT-command path (where
+    // the SDK populates the structured `.exitCode`) and the SHELL-WRAPPED path — e.g.
+    // `sh -c "exit N"` — where the SDK leaves `.exitCode` null but embeds the code in
+    // the message ("... shell exited (exit code: N)"); `terminatedExitCode` extracts
+    // both. (Issue #415 live defects: shell-wrapped `sh -c "exit N"` → {exitCode:N}.)
     if (err instanceof SessionTerminatedError) {
       const stderr = capOutput(err.message, max);
       return {
         ok: true,
         instance: body.instance,
-        exitCode: err.exitCode,
+        exitCode: terminatedExitCode(err),
         stdout: "",
         stderr: stderr.text,
         truncated: stderr.truncated,
@@ -489,6 +502,33 @@ export async function containerCleanup(
 function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * POSIX-safe shell quoting for a single argv token. Wrap the whole token in
+ * single quotes — which suppress ALL shell interpretation — and escape any
+ * embedded single-quote as the classic `'\''` idiom (close-quote, an escaped
+ * literal quote, reopen-quote). Because `@cloudflare/sandbox` exec only accepts
+ * a command STRING, this is how we preserve argument boundaries and keep the
+ * shell from word-splitting, globbing, or interpreting metacharacters in a
+ * token — the injection-safety guarantee for the argv contract.
+ */
+function shellQuote(token: string): string {
+  return `'${token.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Recover the exit code from a `SessionTerminatedError` uniformly across the
+ * direct-command and shell-wrapped paths. The SDK populates the structured
+ * `.exitCode` for a command that takes the session shell down directly; for a
+ * shell-wrapped exit (`sh -c "exit N"`) it leaves `.exitCode` null but embeds
+ * the code in the message ("... shell exited (exit code: N)"). Prefer the
+ * structured value, else parse the message; null only if neither is present.
+ */
+function terminatedExitCode(err: SessionTerminatedError): number | null {
+  if (typeof err.exitCode === "number") return err.exitCode;
+  const match = /exit code:\s*(-?\d+)/i.exec(err.message);
+  return match ? Number(match[1]) : null;
 }
 
 // ---------------------------------------------------------------------------

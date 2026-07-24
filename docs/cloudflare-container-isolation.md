@@ -45,7 +45,19 @@ Code map:
   agent-generated code, the primary use of this tier. A non-zero / abnormal exit
   takes the session shell down and surfaces as a thrown **`SessionTerminatedError`**
   (a real export carrying `.exitCode`), which the Worker catches and maps to a
-  governed exec result rather than a 5xx.
+  governed exec result rather than a 5xx. For a **shell-wrapped** exit
+  (`sh -c "exit N"`) the SDK leaves `.exitCode` null and embeds the code in the
+  message (`… shell exited (exit code: N)`); the Worker extracts it either way, so
+  the direct-command and shell-wrapped paths both return `{ exitCode: N }`.
+- **argv contract / injection safety.** `/container/exec` takes `step.command` as
+  an **argv array**, but `Sandbox.exec` accepts only a command *string* (there is
+  no argv/`string[]` overload in `@cloudflare/sandbox@0.12.4`). Naively joining the
+  argv with spaces would re-subject every token to the container shell
+  (word-splitting, globbing, `;`/`$(…)`/backtick/redirection) — a command-injection
+  surface on this untrusted-code backend. The Worker therefore **POSIX
+  single-quote quotes each token** (embedded `'` → `'\''`) before joining, so
+  argument boundaries are preserved and no token is shell-interpreted:
+  `["printf","[%s]","a b","c"]` yields `[a b][c]`, not `[a][b][c]`.
 - **Workers Paid only**; instances scale to zero; instance tiers
   `lite`→`standard-4` (≤ 4 vCPU / 12 GiB).
 
@@ -167,10 +179,15 @@ agent-worker (environment):
   the gate must re-run, against a real CF sandbox: (1) `/container/start` no
   longer throws `configureEgress`; (2) `/container/exec` of a step that exits
   non-zero returns a governed result with the propagated `exitCode` (no
-  `SessionTerminatedError` 5xx); (3) `/container/stop` no longer throws `signal`
-  and stops the instance; (4) `/container/cleanup` on an instance whose session
+  `SessionTerminatedError` 5xx) — for **both** a direct-command exit and a
+  shell-wrapped `sh -c "exit N"` (both must yield `{ exitCode: N }`); (3)
+  `/container/exec` preserves **argv fidelity / injection safety**: argv
+  `["printf","[%s]","a b","c"]` yields `[a b][c]` (not `[a][b][c]`), and shell
+  metacharacters in a token (`;`, `$(…)`, backticks, redirections) are passed
+  literally, not interpreted; (4) `/container/stop` no longer throws `signal` and
+  stops the instance; (5) `/container/cleanup` on an instance whose session
   terminated abnormally completes in **bounded time** (≤ the cleanup timeout, not
-  60–90s); (5) sealed-by-default egress (`enableInternet=false`) blocks internet
+  60–90s); (6) sealed-by-default egress (`enableInternet=false`) blocks internet
   and a governed `egressAllowlist` opens only the allowed hosts (verify the
   container image trusts the interception CA so `setAllowedHosts` enforces).
 - **Remaining (follow-up slice):** wiring the backend into the agent-worker
