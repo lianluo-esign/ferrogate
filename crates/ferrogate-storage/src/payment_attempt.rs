@@ -987,6 +987,11 @@ macro_rules! payment_attempt_transitions {
                                 )
                                 .await
                         }
+                        RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                            super::control_plane_store_d1::unimplemented_surface(
+                                "transition_payment_attempt",
+                            ),
+                        ),
                     }
                 }
             )+
@@ -1096,6 +1101,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.create_payment_attempt(&attempt).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("create_payment_attempt"),
+            ),
         }
     }
 
@@ -1111,6 +1119,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_payment_attempt(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_payment_attempt"),
+            ),
         }
     }
 
@@ -1128,6 +1139,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_payment_attempts(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_payment_attempts"),
+            ),
         }
     }
 
@@ -1147,6 +1161,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_payment_attempt_links(id, tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_payment_attempt_links"),
+            ),
         }
     }
 
@@ -1170,6 +1187,11 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .list_expirable_due_payment_attempts(due_at_or_before_unix, limit as i64)
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "list_expirable_due_payment_attempts",
+                ))
             }
         }
     }
@@ -1196,6 +1218,11 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit as i64)
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "list_reconcilable_payment_attempts",
+                ))
             }
         }
     }

@@ -333,7 +333,7 @@ fn cancelled_refresh_renewal_and_completion_cannot_mutate_later() {
             .mcp_oauth_credentials
             .get("credential")
             .expect("credential"),
-        RuntimeControlPlaneBackend::Postgres(_) => panic!("expected memory control plane"),
+        _ => panic!("expected memory control plane"),
     };
 
     let renewal = StorageOperation::new("cancelled renewal", Duration::from_secs(1));
@@ -384,7 +384,7 @@ fn cancelled_refresh_renewal_and_completion_cannot_mutate_later() {
             .mcp_oauth_credentials
             .get("credential")
             .expect("credential"),
-        RuntimeControlPlaneBackend::Postgres(_) => panic!("expected memory control plane"),
+        _ => panic!("expected memory control plane"),
     };
     assert_eq!(after, before);
 }

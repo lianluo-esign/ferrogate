@@ -451,6 +451,11 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
                     })?
                     .append(StoredGuardrailEvidence { evaluation, checks });
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                return Err(super::control_plane_store_d1::unimplemented_surface(
+                    "append_guardrail_evaluation",
+                ))
+            }
         }
         Ok(())
     }
@@ -503,6 +508,9 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
                     limit: query.limit,
                 })
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("query_guardrail_evaluations"),
+            ),
         }
     }
 
@@ -529,6 +537,9 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
                     })
                 })
                 .collect()),
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_guardrail_evaluations"),
+            ),
         }
     }
 
@@ -555,6 +566,11 @@ impl GuardrailEvaluationRepository for RuntimeStorageRepositories {
                 })
                 .flat_map(|record| record.checks)
                 .collect()),
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "list_guardrail_check_evaluations",
+                ))
+            }
         }
     }
 }

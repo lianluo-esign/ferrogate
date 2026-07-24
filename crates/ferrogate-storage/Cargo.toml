@@ -22,6 +22,7 @@ chrono-tz.workspace = true
 croner.workspace = true
 deadpool-postgres.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
+ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-core = { path = "../ferrogate-core" }
 native-tls.workspace = true
 postgres-native-tls.workspace = true

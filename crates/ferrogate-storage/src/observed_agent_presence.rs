@@ -240,6 +240,11 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.touch_observed_agent_presence(&touch).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "touch_observed_agent_presence",
+                ))
+            }
         }
     }
 
@@ -261,6 +266,11 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .list_observed_agent_presence_since(tenant_scope, since_unix)
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "list_observed_agent_presence_since",
+                ))
             }
         }
     }

@@ -1340,6 +1340,9 @@ impl RuntimeStorageRepositories {
                     .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("settle_wallet_balance"),
+            ),
         }
     }
 
@@ -1358,6 +1361,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_wallet(&wallet).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("upsert_wallet"),
+            ),
         }
     }
 
@@ -1370,6 +1376,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_wallet(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_wallet"),
+            ),
         }
     }
 
@@ -1382,6 +1391,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_wallets().await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_wallets"),
+            ),
         }
     }
 
@@ -1407,6 +1419,9 @@ impl RuntimeStorageRepositories {
                     .adjust_wallet_balance(tenant_id, delta_credits, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("adjust_wallet_balance"),
+            ),
         }
     }
 
@@ -1428,6 +1443,9 @@ impl RuntimeStorageRepositories {
                     .set_wallet_dunning(tenant_id, dunning, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("set_wallet_dunning"),
+            ),
         }
     }
 
@@ -1464,6 +1482,9 @@ impl RuntimeStorageRepositories {
                     )
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("reserve_wallet_credits"),
+            ),
         }
     }
 
@@ -1484,6 +1505,9 @@ impl RuntimeStorageRepositories {
                     .settle_wallet_reservation(reservation_id, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("settle_wallet_reservation"),
+            ),
         }
     }
 
@@ -1503,6 +1527,9 @@ impl RuntimeStorageRepositories {
                     .release_wallet_reservation(reservation_id, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("release_wallet_reservation"),
+            ),
         }
     }
 
@@ -1524,6 +1551,11 @@ impl RuntimeStorageRepositories {
                     .sweep_expired_wallet_reservations(now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "sweep_expired_wallet_reservations",
+                ))
+            }
         }
     }
 
@@ -1540,6 +1572,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_wallet_reservations(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_wallet_reservations"),
+            ),
         }
     }
 
@@ -1557,6 +1592,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_payment_method(&payment_method).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("upsert_payment_method"),
+            ),
         }
     }
 
@@ -1572,6 +1610,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_payment_methods(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_payment_methods"),
+            ),
         }
     }
 
@@ -1587,6 +1628,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_payment_method(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_payment_method"),
+            ),
         }
     }
 
@@ -1599,6 +1643,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_payment_method(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("delete_payment_method"),
+            ),
         }
     }
 }

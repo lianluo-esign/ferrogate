@@ -809,6 +809,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_agent_schedule(&schedule).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("upsert_agent_schedule"),
+            ),
         }
     }
 
@@ -826,6 +829,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_agent_schedule(schedule_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_agent_schedule"),
+            ),
         }
     }
 
@@ -846,6 +852,9 @@ impl RuntimeStorageRepositories {
                     .list_agent_schedules(tenant_id, workspace_id)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_agent_schedules"),
+            ),
         }
     }
 
@@ -862,6 +871,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_all_agent_schedules().await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_all_agent_schedules"),
+            ),
         }
     }
 
@@ -876,6 +888,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_agent_schedule(schedule_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("delete_agent_schedule"),
+            ),
         }
     }
 
@@ -896,6 +911,9 @@ impl RuntimeStorageRepositories {
                     .list_due_agent_schedules(now_unix, limit)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_due_agent_schedules"),
+            ),
         }
     }
 
@@ -915,6 +933,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.insert_agent_schedule_fire(&fire).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("insert_agent_schedule_fire"),
+            ),
         }
     }
 
@@ -935,6 +956,9 @@ impl RuntimeStorageRepositories {
                     .list_agent_schedule_fires(schedule_id, limit)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_agent_schedule_fires"),
+            ),
         }
     }
 }

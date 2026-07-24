@@ -2117,6 +2117,11 @@ impl RuntimeStorageRepositories {
                 operation.finish_commit();
                 result
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "append_mcp_identity_audit_event_with_operation",
+                ))
+            }
         }
     }
 }
@@ -2204,6 +2209,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(store) => {
                 store.authorize_mcp_identity(request).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("authorize_mcp_identity"),
+            ),
         }
     }
 
@@ -2225,6 +2233,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 store
                     .authorize_mcp_identity_with_operation(request, operation)
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "authorize_mcp_identity_with_operation",
+                ))
             }
         }
     }
@@ -2264,6 +2277,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 Ok(flow)
             }
             RuntimeControlPlaneBackend::Postgres(store) => store.begin_mcp_oauth_flow(&flow).await,
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("begin_mcp_oauth_flow"),
+            ),
         }
     }
 
@@ -2290,6 +2306,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(store) => {
                 store.consume_mcp_oauth_flow(id, consumed_at_unix).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("consume_mcp_oauth_flow"),
+            ),
         }
     }
 
@@ -2340,6 +2359,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .commit_mcp_oauth_callback(flow, &credential, permission_key)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("commit_mcp_oauth_callback"),
+            ),
         }
     }
 
@@ -2370,6 +2392,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .get_mcp_oauth_credential(tenant_id, workspace_id, user_id, server_name)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_mcp_oauth_credential"),
+            ),
         }
     }
 
@@ -2391,6 +2416,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(store) => {
                 store.list_mcp_oauth_credentials(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_mcp_oauth_credentials"),
+            ),
         }
     }
 
@@ -2408,6 +2436,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(store) => {
                 store.claim_mcp_oauth_refresh(request).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("claim_mcp_oauth_refresh"),
+            ),
         }
     }
 
@@ -2425,6 +2456,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(store) => {
                 store.renew_mcp_oauth_refresh(request).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("renew_mcp_oauth_refresh"),
+            ),
         }
     }
 
@@ -2445,6 +2479,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .complete_mcp_oauth_refresh(&credential, lease_id)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("complete_mcp_oauth_refresh"),
+            ),
         }
     }
 
@@ -2474,6 +2511,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .release_mcp_oauth_refresh(tenant_id, credential_id, lease_id, outcome)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("release_mcp_oauth_refresh"),
+            ),
         }
     }
 
@@ -2493,6 +2533,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
                 })?;
                 claim_in_memory_mcp_oauth_refresh(&mut store, request, Some(operation))
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "claim_mcp_oauth_refresh_with_operation",
+                ))
             }
         }
     }
@@ -2514,6 +2559,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 })?;
                 renew_in_memory_mcp_oauth_refresh(&mut store, request, Some(operation))
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "renew_mcp_oauth_refresh_with_operation",
+                ))
+            }
         }
     }
 
@@ -2534,6 +2584,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     current,
                     request,
                     request.now_unix,
+                ))
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "reconcile_mcp_oauth_refresh_claim",
                 ))
             }
         }
@@ -2564,6 +2619,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     request.now_unix,
                 ))
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "reconcile_mcp_oauth_refresh_renewal",
+                ))
+            }
         }
     }
 
@@ -2589,6 +2649,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     lease_id,
                     Some(operation),
                 )
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "complete_mcp_oauth_refresh_with_operation",
+                ))
             }
         }
     }
@@ -2625,6 +2690,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     outcome,
                     Some(operation),
                 )
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "release_mcp_oauth_refresh_with_operation",
+                ))
             }
         }
     }
@@ -2691,6 +2761,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                     .revoke_mcp_oauth_identity(request, revoked_at_unix, outcome)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("revoke_mcp_oauth_identity"),
+            ),
         }
     }
 
@@ -2735,6 +2808,11 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                         outcome,
                     )
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "update_mcp_oauth_revocation_outcome",
+                ))
             }
         }
     }

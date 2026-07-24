@@ -538,6 +538,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_permission(&permission).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("upsert_permission"),
+            ),
         }
     }
 
@@ -550,6 +553,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_permission(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_permission"),
+            ),
         }
     }
 
@@ -562,6 +568,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_permissions().await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_permissions"),
+            ),
         }
     }
 
@@ -574,6 +583,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_permission(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("delete_permission"),
+            ),
         }
     }
 
@@ -590,6 +602,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_role(&role).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("upsert_role"),
+            ),
         }
     }
 
@@ -600,6 +615,9 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_role(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_role(id).await,
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_role"),
+            ),
         }
     }
 
@@ -610,6 +628,9 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_roles())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_roles().await,
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_roles"),
+            ),
         }
     }
 
@@ -622,6 +643,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_role(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("delete_role"),
+            ),
         }
     }
 
@@ -643,6 +667,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.bind_tenant_role(&binding).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("bind_tenant_role"),
+            ),
         }
     }
 
@@ -658,6 +685,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_tenant_role_bindings(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_tenant_role_bindings"),
+            ),
         }
     }
 
@@ -674,6 +704,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.unbind_tenant_role(tenant_id, role_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("unbind_tenant_role"),
+            ),
         }
     }
 }

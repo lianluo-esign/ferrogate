@@ -34,6 +34,7 @@
 
 mod client;
 mod config;
+pub mod d1;
 mod envelope;
 mod error;
 mod resolver;
@@ -55,6 +56,9 @@ mod backoff_test;
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod config_test;
+#[cfg(test)]
+#[path = "d1_test.rs"]
+mod d1_test;
 #[cfg(test)]
 #[path = "envelope_test.rs"]
 mod envelope_test;

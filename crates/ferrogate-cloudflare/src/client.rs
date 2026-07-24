@@ -247,6 +247,24 @@ impl CloudflareClient {
         self.request_json(HttpMethod::Get, path, None, tenant).await
     }
 
+    /// Issue a request whose success carries no meaningful `result` (delete
+    /// endpoints that return `result: null`). Returns `()` on a
+    /// `success: true` envelope, a typed error otherwise.
+    pub async fn request_ack(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Option<Vec<u8>>,
+        tenant: Option<&str>,
+    ) -> Result<(), CloudflareError> {
+        let (status, retry_after, bytes) = self.send_raw(method, path, body, tenant).await?;
+        let envelope: CloudflareEnvelope<serde_json::Value> = serde_json::from_slice(&bytes)
+            .map_err(|e| {
+                CloudflareError::Decode(format!("failed to decode Cloudflare envelope: {e}"))
+            })?;
+        envelope.into_ack(status, retry_after)
+    }
+
     /// Preflight/health check: a cheap `GET /accounts/{account_id}` that
     /// verifies the token is valid AND scoped for the account. A token that
     /// authenticates but lacks a required permission group surfaces as

@@ -307,6 +307,9 @@ impl RuntimeStorageRepositories {
                     .list_usage_metadata_rollups(metadata_key, organization_id)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_usage_metadata_rollups"),
+            ),
         }
     }
 }

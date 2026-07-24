@@ -272,7 +272,7 @@ fn live_local_postgres_concurrent_writers_have_one_cas_winner() {
     .expect("initialize isolated local PostgreSQL schema");
     let store = match &repositories.control_plane {
         RuntimeControlPlaneBackend::Postgres(store) => Arc::clone(store),
-        RuntimeControlPlaneBackend::Memory(_) => panic!("expected PostgreSQL control plane"),
+        _ => panic!("expected PostgreSQL control plane"),
     };
 
     let seed = binding(None, Vec::new(), 1);

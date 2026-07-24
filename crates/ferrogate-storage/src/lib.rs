@@ -30,9 +30,14 @@ mod async_postgres;
 pub use async_postgres::PostgresPoolMetricsSnapshot;
 
 mod control_plane_store;
+mod control_plane_store_d1;
 mod control_plane_store_memory;
 mod control_plane_store_postgres;
 use control_plane_store::MemoryControlPlaneStore;
+pub use control_plane_store_d1::{
+    is_unimplemented_backend_surface, D1ControlPlaneStore, D1TenantDatabaseRegistry,
+    D1_TENANT_DATABASE_REGISTRY_ID, D1_TENANT_DATABASE_REGISTRY_KIND,
+};
 
 mod rbac;
 pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding};
@@ -10406,6 +10411,7 @@ fn tenant_from_storage_key(value: Option<&str>) -> TenantContext {
 enum RuntimeControlPlaneBackend {
     Memory(Box<MemoryControlPlaneStore>),
     Postgres(Arc<PostgresControlPlaneStore>),
+    CloudflareD1(Arc<D1ControlPlaneStore>),
 }
 
 fn poisoned_asset_repository_lock() -> StorageError {
@@ -15227,6 +15233,10 @@ mod usage_metadata_schema_test;
 #[cfg(test)]
 #[path = "control_plane_schema_test.rs"]
 mod control_plane_schema_test;
+
+#[cfg(test)]
+#[path = "control_plane_store_d1_test.rs"]
+mod control_plane_store_d1_test;
 
 #[cfg(test)]
 #[path = "asset_storage_usage_test.rs"]

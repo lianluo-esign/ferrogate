@@ -701,6 +701,9 @@ impl RuntimeStorageRepositories {
                     )
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("open_workflow_run_budget"),
+            ),
         }
     }
 
@@ -724,6 +727,9 @@ impl RuntimeStorageRepositories {
                     .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("debit_workflow_run_budget"),
+            ),
         }
     }
 
@@ -762,6 +768,9 @@ impl RuntimeStorageRepositories {
                     )
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("topup_workflow_run_budget"),
+            ),
         }
     }
 
@@ -777,6 +786,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_workflow_run_budget(id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("get_workflow_run_budget"),
+            ),
         }
     }
 
@@ -794,6 +806,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_workflow_run_budgets(tenant_id).await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
+                super::control_plane_store_d1::unimplemented_surface("list_workflow_run_budgets"),
+            ),
         }
     }
 }

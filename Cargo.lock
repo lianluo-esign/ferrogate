@@ -1422,6 +1422,7 @@ dependencies = [
  "croner",
  "deadpool-postgres",
  "ferrogate-billing",
+ "ferrogate-cloudflare",
  "ferrogate-core",
  "native-tls",
  "postgres-native-tls",

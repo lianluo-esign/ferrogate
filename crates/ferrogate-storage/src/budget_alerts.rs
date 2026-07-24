@@ -235,6 +235,11 @@ impl RuntimeStorageRepositories {
                     .record_budget_alert_notification(&notification)
                     .await
             }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "record_budget_alert_notification",
+                ))
+            }
         }
     }
 
@@ -246,6 +251,11 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.budget_alert_already_notified(id).await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "budget_alert_already_notified",
+                ))
             }
         }
     }
@@ -271,6 +281,11 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .list_budget_alert_notifications(scope_type, scope_id, period_month)
                     .await
+            }
+            RuntimeControlPlaneBackend::CloudflareD1(_) => {
+                Err(super::control_plane_store_d1::unimplemented_surface(
+                    "list_budget_alert_notifications",
+                ))
             }
         }
     }

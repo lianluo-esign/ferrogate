@@ -683,6 +683,7 @@ impl RuntimeControlPlaneBackend {
         match self {
             RuntimeControlPlaneBackend::Memory(control_plane) => control_plane.as_ref(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.as_ref(),
+            RuntimeControlPlaneBackend::CloudflareD1(control_plane) => control_plane.as_ref(),
         }
     }
 }
