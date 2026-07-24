@@ -752,6 +752,12 @@ export const zhCN = {
   "page.staticSites.cache.default": "默认",
   "page.staticSites.domains.bind": "绑定域名",
   "page.staticSites.col.path": "路径",
+  // 集成到单站点详情抽屉中的自定义域名绑定（#345）：tenant_id 与 site 均取自站点
+  // 上下文，因此绑定无法跨租户，也无法指向未发布的站点。
+  "page.staticSites.domains.title": "自定义域名",
+  "page.staticSites.domains.description":
+    "为 {site} 绑定自定义主机名。绑定仅限于当前租户与该站点，因此无法指向其他租户或未发布的站点。",
+  "page.staticSites.domains.empty": "该站点尚未绑定自定义域名。",
   // 单站点详情抽屉：来自清单的已发布包文件树。
   "page.staticSites.detail.description": "包 {version} — {files} 个文件，{bytes}。",
   "page.staticSites.detail.files": "包文件",

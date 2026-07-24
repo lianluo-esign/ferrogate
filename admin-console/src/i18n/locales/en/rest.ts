@@ -692,6 +692,13 @@ export const enRest = {
   "page.staticSites.cache.default": "default",
   "page.staticSites.domains.bind": "Bind a domain",
   "page.staticSites.col.path": "Path",
+  // Custom-domain binding integrated into the per-site detail drawer (#345):
+  // tenant_id + site are fixed from the site context, so a bind cannot cross
+  // tenants or target an unpublished site.
+  "page.staticSites.domains.title": "Custom domains",
+  "page.staticSites.domains.description":
+    "Bind a custom hostname to {site}. The bind is scoped to this tenant and site, so it cannot target another tenant or an unpublished site.",
+  "page.staticSites.domains.empty": "No custom domains are bound to this site.",
   // Per-site detail drawer: the published bundle's file tree, from the manifest.
   "page.staticSites.detail.description":
     "Bundle {version} — {files} files, {bytes}.",

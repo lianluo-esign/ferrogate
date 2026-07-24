@@ -48,15 +48,25 @@
 // rollback target only when it has companion `__site_file__:{version}:…` rows —
 // that structural check keeps legacy path-keyed file rows (pre-#397, whose
 // `version` IS a bare file path) out of the history list.
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -101,11 +111,13 @@ import { GATEWAY_ADMIN_BASE_URL } from "@/lib/config";
 import {
   adminDelete,
   adminGet,
+  adminPost,
   type AdminSchema,
   gatewayGet,
   gatewayGetBinary,
   gatewayPut,
 } from "@/lib/gateway-client";
+import { validateSiteDomainHostname } from "@/lib/hostname";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
@@ -375,11 +387,15 @@ function putBundleWithProgress<T>(
 function SiteDetailSheet({
   row,
   apiKey,
+  tenantId,
   onClose,
   onUnpublish,
 }: {
   row: SiteRow | null;
   apiKey: string;
+  /** Session tenant that OWNS every listed site. A domain bind issued from this
+   * drawer uses it verbatim, so a bind cannot target another tenant. */
+  tenantId: string;
   onClose: () => void;
   onUnpublish: () => void;
 }) {
@@ -487,6 +503,83 @@ function SiteDetailSheet({
     onError: (error: unknown, version) =>
       toast.error(rollbackErrorMessage(t, error, version)),
   });
+
+  // Custom-domain binding, integrated into THIS site's context (#345/#265).
+  // The bind's tenant_id + site are taken from the site context — the session
+  // tenant that owns the listing and this row's slug — so a bind from here can
+  // never target another tenant or an unpublished site; the hostname is the only
+  // free input, validated client-side for fast feedback while the gateway stays
+  // authoritative and its ACME/reload posture is surfaced on success.
+  const [bindHostname, setBindHostname] = useState("");
+  const [bindError, setBindError] = useState<string | null>(null);
+  const [bindAcmeNote, setBindAcmeNote] = useState<string | null>(null);
+  const [pendingUnbind, setPendingUnbind] = useState<SiteDomain | null>(null);
+
+  const hostnameCheck =
+    bindHostname.trim() === "" ? null : validateSiteDomainHostname(bindHostname);
+  const hostnameInvalid = hostnameCheck !== null && hostnameCheck.error !== null;
+
+  const bindMutation = useMutation({
+    mutationFn: (hostname: string) =>
+      adminPost(apiKey, "/admin/v1/site-domains", {
+        hostname,
+        tenant_id: tenantId,
+        site: row!.name,
+      }),
+    onSuccess: (response) => {
+      const acme = response.acme;
+      const acmeNote = acme.enabled
+        ? acme.reload_triggered
+          ? t("page.siteDomains.acme.reloadTriggered")
+          : t("page.siteDomains.acme.enabledNoReload")
+        : t("page.siteDomains.acme.disabled");
+      // Keep the ACME posture visible in the drawer (not just a transient toast).
+      setBindAcmeNote(acmeNote);
+      setBindHostname("");
+      setBindError(null);
+      toast.success(
+        t("page.siteDomains.toast.bound", {
+          hostname: response.site_domain.hostname,
+          note: acmeNote,
+        }),
+      );
+      queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
+    },
+    // Surface the gateway verdict verbatim (e.g. hostname already bound, or a
+    // bind targeting a site the tenant does not own).
+    onError: (error: Error) => {
+      setBindError(error.message);
+      toast.error(error.message);
+    },
+  });
+
+  const unbindMutation = useMutation({
+    mutationFn: (target: SiteDomain) =>
+      adminDelete(apiKey, "/admin/v1/site-domains/{hostname}", {
+        params: { hostname: target.hostname },
+      }),
+    onSuccess: (_result, target) => {
+      toast.success(
+        t("page.siteDomains.toast.unbound", { hostname: target.hostname }),
+      );
+      setPendingUnbind(null);
+      queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message);
+      setPendingUnbind(null);
+    },
+  });
+
+  function submitBind() {
+    setBindError(null);
+    const check = validateSiteDomainHostname(bindHostname);
+    if (check.error !== null) {
+      setBindError(check.error);
+      return;
+    }
+    bindMutation.mutate(check.hostname);
+  }
 
   async function handleFileDownload(entry: SiteFileEntry) {
     if (!row) return;
@@ -722,6 +815,179 @@ function SiteDetailSheet({
               )}
             </section>
 
+            {/* Custom domains, bound in THIS site's context. tenant_id + site
+              are fixed from the drawer's row, so the bind cannot cross tenants
+              or target an unpublished site; the ACME + reload posture returned
+              by the gateway stays visible after a successful bind. */}
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-semibold">
+                {t("page.staticSites.domains.title")}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                {t("page.staticSites.domains.description", { site: row.name })}
+              </p>
+
+              {row.domains.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("page.staticSites.domains.empty")}
+                </p>
+              ) : (
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("page.siteDomains.col.hostname")}</TableHead>
+                        <TableHead>{t("page.siteDomains.col.servePath")}</TableHead>
+                        <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
+                        <TableHead className="w-24">
+                          {t("resource.table.actionsColumn")}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {row.domains.map((domain) => (
+                        <TableRow
+                          key={domain.hostname}
+                          data-testid={`static-site-domain-${domain.hostname}`}
+                        >
+                          <TableCell className="font-medium">
+                            {domain.hostname}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs break-all">
+                            {domain.serve_path}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {format.date(domain.created_at_unix * 1000, {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                            })}
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => setPendingUnbind(domain)}
+                            >
+                              {t("page.siteDomains.unbind")}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              {/* ACME posture from the last successful bind, kept visible in the
+                drawer (an aria-live status, not just a transient toast). */}
+              {bindAcmeNote ? (
+                <p
+                  role="status"
+                  className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
+                >
+                  {bindAcmeNote}
+                </p>
+              ) : null}
+
+              <form
+                className="flex flex-col gap-1.5"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  submitBind();
+                }}
+              >
+                <Label htmlFor="site-domain-hostname">
+                  {t("page.siteDomains.field.hostname")}
+                </Label>
+                <div className="flex flex-wrap items-start gap-2">
+                  <Input
+                    id="site-domain-hostname"
+                    value={bindHostname}
+                    onChange={(event) => {
+                      setBindHostname(event.target.value);
+                      setBindError(null);
+                    }}
+                    // eslint-disable-next-line ferrogate/no-untranslated-literal -- example FQDN, identical across locales
+                    placeholder="app.example.com"
+                    aria-invalid={hostnameInvalid}
+                    aria-describedby="site-domain-hostname-hint"
+                    className="max-w-xs"
+                  />
+                  <Button
+                    type="submit"
+                    disabled={
+                      bindMutation.isPending ||
+                      hostnameInvalid ||
+                      bindHostname.trim() === ""
+                    }
+                  >
+                    {bindMutation.isPending
+                      ? t("page.siteDomains.bind.submitting")
+                      : t("page.siteDomains.bind.submit")}
+                  </Button>
+                </div>
+                {hostnameCheck?.error ? (
+                  <p
+                    id="site-domain-hostname-hint"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {hostnameCheck.error}
+                  </p>
+                ) : bindError ? (
+                  <p
+                    id="site-domain-hostname-hint"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {bindError}
+                  </p>
+                ) : (
+                  <p
+                    id="site-domain-hostname-hint"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {t("page.siteDomains.field.hostname.hint")}
+                  </p>
+                )}
+              </form>
+            </section>
+
+            {/* Unbind confirmation for a domain bound to THIS site. */}
+            <AlertDialog
+              open={pendingUnbind !== null}
+              onOpenChange={(open) => !open && setPendingUnbind(null)}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {t("page.siteDomains.unbind.title", {
+                      hostname: pendingUnbind?.hostname ?? "",
+                    })}
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t("page.siteDomains.unbind.description", {
+                      target: `${pendingUnbind?.tenant_id ?? ""}/${pendingUnbind?.site ?? ""}`,
+                    })}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>
+                    {t("resource.action.cancel")}
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(event) => {
+                      event.preventDefault();
+                      if (pendingUnbind) unbindMutation.mutate(pendingUnbind);
+                    }}
+                  >
+                    {t("page.siteDomains.unbind")}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+
             <SheetFooter className="mt-auto">
               <Button
                 type="button"
@@ -795,10 +1061,36 @@ export default function StaticSitesPage() {
   const tenantId = session!.tenant.id;
   const queryClient = useQueryClient();
 
-  // Publish form state.
-  const [formTenant, setFormTenant] = useState(tenantId);
-  const [site, setSite] = useState("");
-  const [version, setVersion] = useState("");
+  // The tenant/site/version selection and the open site are mirrored to the URL
+  // (#345) so a selection is a shareable DIRECT LINK: a deep link seeds these on
+  // mount, and edits write through. Local state stays the immediate source for
+  // snappy text input; `updateParam` writes the change back with `replace` so it
+  // never spams history. Volatile publish inputs (the file, the policy toggles,
+  // the Cache-Control override) stay local — they are not linkable selections.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const updateParam = useCallback(
+    (key: string, value: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (value === null || value === "") next.delete(key);
+          else next.set(key, value);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  // Publish form state (tenant/site/version seeded from + mirrored to the URL).
+  const [formTenant, setFormTenantState] = useState(
+    () => searchParams.get("tenant") ?? tenantId,
+  );
+  const [site, setSiteState] = useState(() => searchParams.get("site") ?? "");
+  const [version, setVersionState] = useState(
+    () => searchParams.get("version") ?? "",
+  );
   const [isPublic, setIsPublic] = useState(false);
   const [spaFallback, setSpaFallback] = useState(false);
   const [cacheControl, setCacheControl] = useState("");
@@ -812,9 +1104,43 @@ export default function StaticSitesPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const setFormTenant = useCallback(
+    (value: string) => {
+      setFormTenantState(value);
+      // The session tenant is the default, so omit it from the URL to keep links
+      // clean; any other selection is recorded.
+      updateParam("tenant", value === tenantId ? null : value);
+    },
+    [updateParam, tenantId],
+  );
+  const setSite = useCallback(
+    (value: string) => {
+      setSiteState(value);
+      updateParam("site", value);
+    },
+    [updateParam],
+  );
+  const setVersion = useCallback(
+    (value: string) => {
+      setVersionState(value);
+      updateParam("version", value);
+    },
+    [updateParam],
+  );
+
   // Detail drawer + unpublish, both keyed by site slug so they survive row
-  // rebuilds (the joined rows re-derive on every manifest status change).
-  const [detailSite, setDetailSite] = useState<string | null>(null);
+  // rebuilds (the joined rows re-derive on every manifest status change). The
+  // open site is mirrored to the URL too, so a drawer is a direct link.
+  const [detailSite, setDetailSiteState] = useState<string | null>(
+    () => searchParams.get("detail"),
+  );
+  const setDetailSite = useCallback(
+    (value: string | null) => {
+      setDetailSiteState(value);
+      updateParam("detail", value);
+    },
+    [updateParam],
+  );
   const [unpublishSite, setUnpublishSite] = useState<string | null>(null);
   const [unpublishConfirm, setUnpublishConfirm] = useState("");
 
@@ -914,8 +1240,8 @@ export default function StaticSitesPage() {
     : null;
 
   function resetForm() {
-    setSite("");
-    setVersion("");
+    setSiteState("");
+    setVersionState("");
     setIsPublic(false);
     setSpaFallback(false);
     setCacheControl("");
@@ -924,6 +1250,17 @@ export default function StaticSitesPage() {
     setPublishError(null);
     setUploadProgress(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    // Drop the mirrored site/version from the URL in a single navigation (the
+    // tenant selection is kept so a subsequent publish stays in context).
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("site");
+        next.delete("version");
+        return next;
+      },
+      { replace: true },
+    );
   }
 
   function onFileChange(next: File | null) {
@@ -1364,6 +1701,7 @@ export default function StaticSitesPage() {
       <SiteDetailSheet
         row={detailRow}
         apiKey={apiKey}
+        tenantId={tenantId}
         onClose={() => setDetailSite(null)}
         onUnpublish={() => {
           if (!detailRow) return;

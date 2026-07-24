@@ -1,14 +1,45 @@
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { HttpResponse, http } from "msw";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import type { AdminSchema } from "@/lib/gateway-client";
 import StaticSitesPage from "@/pages/static-sites";
 import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { createTestQueryClient, renderWithProviders, seedSession } from "@/test/test-utils";
+
+// Surfaces the live location so URL-state assertions can read the query the
+// page writes as the operator picks a tenant/site/version or opens a site.
+let currentSearch = "";
+function LocationProbe() {
+  currentSearch = useLocation().search;
+  return null;
+}
+
+/** Renders the page at `initialEntry` with a LocationProbe so a test can assert
+ * both directions of the URL mirror (deep-link seed + write-through). Mirrors
+ * the assets-page URL-state harness. */
+function renderAtUrl(initialEntry: string, locale: Locale = "en") {
+  currentSearch = "";
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <I18nProvider initialLocale={locale}>
+        <AuthProvider>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <StaticSitesPage />
+            <LocationProbe />
+          </QueryClientProvider>
+        </AuthProvider>
+      </I18nProvider>
+    </MemoryRouter>,
+  );
+}
 
 type AssetSummary = AdminSchema<"AssetSummary">;
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
@@ -913,5 +944,291 @@ describe("StaticSitesPage rollback", () => {
     } finally {
       errorToast.mockRestore();
     }
+  });
+});
+
+describe("StaticSitesPage URL state", () => {
+  it("seeds the publish form's site + version from the query string (direct link)", async () => {
+    mockBase();
+    renderAtUrl("/?site=blog&version=2.0.0");
+    await screen.findByText("No published static sites.");
+
+    // A deep link pre-fills the selection, so a shared URL reopens it as-is.
+    expect(screen.getByLabelText("Site")).toHaveValue("blog");
+    expect(screen.getByLabelText("Version")).toHaveValue("2.0.0");
+  });
+
+  it("mirrors a site edit into the URL as a shareable direct link", async () => {
+    mockBase();
+    const user = userEvent.setup();
+    renderAtUrl("/");
+    await screen.findByText("No published static sites.");
+
+    await user.type(screen.getByLabelText("Site"), "blog");
+
+    // The selection is written through to the query string with `replace`.
+    await waitFor(() => expect(currentSearch).toContain("site=blog"));
+  });
+
+  it("opens a site's detail drawer directly from the detail query param", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    renderAtUrl("/?detail=marketing");
+
+    // The drawer opens on mount for the linked site (no click needed).
+    const drawer = await screen.findByRole("dialog");
+    expect(within(drawer).getByText("marketing")).toBeInTheDocument();
+  });
+});
+
+describe("StaticSitesPage publish error states", () => {
+  async function fillAndPublish(
+    user: ReturnType<typeof userEvent.setup>,
+    site: string,
+    version: string,
+  ) {
+    await user.type(screen.getByLabelText("Site"), site);
+    await user.type(screen.getByLabelText("Version"), version);
+    const zip = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], `${site}.zip`, {
+      type: "application/zip",
+    });
+    uploadFile(screen.getByLabelText("Bundle (ZIP)"), zip);
+    await user.click(screen.getByRole("button", { name: "Publish" }));
+  }
+
+  it("surfaces a quota rejection verbatim and accessibly", async () => {
+    mockBase();
+    const quotaMessage =
+      "asset storage quota exceeded: bundle would use 42 MiB of a 32 MiB tenant quota";
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/1.0.0"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "asset_quota_exceeded",
+              message: quotaMessage,
+              request_id: "req-q",
+            },
+          },
+          { status: 413 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    await screen.findByText("No published static sites.");
+    await fillAndPublish(user, "marketing", "1.0.0");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(quotaMessage);
+  });
+
+  it("surfaces a backend-unavailable failure verbatim", async () => {
+    mockBase();
+    const downMessage = "asset registry is temporarily unavailable";
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/1.0.0"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "backend_unavailable",
+              message: downMessage,
+              request_id: "req-503",
+            },
+          },
+          { status: 503 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    await screen.findByText("No published static sites.");
+    await fillAndPublish(user, "marketing", "1.0.0");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(downMessage);
+  });
+
+  it("surfaces a mid-upload network failure (partial upload) verbatim", async () => {
+    mockBase();
+    FakeXHR.instances = [];
+    const original = globalThis.XMLHttpRequest;
+    vi.stubGlobal("XMLHttpRequest", FakeXHR as unknown as typeof XMLHttpRequest);
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      await screen.findByText("No published static sites.");
+      await fillAndPublish(user, "marketing", "1.0.0");
+
+      await waitFor(() => expect(FakeXHR.instances).toHaveLength(1));
+      const xhr = FakeXHR.instances[0];
+      // Some bytes went up, then the connection dropped mid-upload.
+      act(() => xhr.emitProgress(256, 1024));
+      act(() => xhr.onerror?.());
+
+      // The publish reports the network failure verbatim; it never claims success.
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("network request failed");
+    } finally {
+      vi.stubGlobal("XMLHttpRequest", original);
+    }
+  });
+
+  it("a failed republish leaves the prior site listed and claims no success", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "asset_zip_bomb_rejected",
+              message: "bundle expands past the 64 MiB unpacked ceiling",
+              request_id: "req-bomb",
+            },
+          },
+          { status: 422 },
+        ),
+      ),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      // The already-published site is present before the doomed republish.
+      const row = await screen.findByTestId("static-site-marketing");
+      await within(row).findByText("2.1.0");
+
+      await fillAndPublish(user, "marketing", "2.2.0");
+
+      // The gateway verdict is surfaced verbatim…
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("64 MiB unpacked ceiling");
+      // …no success was ever claimed…
+      expect(successToast).not.toHaveBeenCalled();
+      // …and the prior bundle stays usable (still listed at its old version).
+      const stillThere = screen.getByTestId("static-site-marketing");
+      expect(within(stillThere).getByText("2.1.0")).toBeInTheDocument();
+      expect(
+        within(stillThere).getByRole("link", {
+          name: /\/sites\/tenant-1\/marketing\//,
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      successToast.mockRestore();
+    }
+  });
+});
+
+/** A POST /admin/v1/site-domains bind response with a chosen ACME posture. */
+function bindResponse(
+  hostname: string,
+  acme: { enabled: boolean; reload_triggered: boolean },
+) {
+  return {
+    object: "site_domain",
+    site_domain: domain({ hostname }),
+    acme,
+  };
+}
+
+describe("StaticSitesPage domain binding (site context)", () => {
+  it("binds a hostname using the session tenant + site slug, then shows ACME posture", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    let body: { hostname?: string; tenant_id?: string; site?: string } | null = null;
+    server.use(
+      http.post(gatewayUrl("/admin/v1/site-domains"), async ({ request }) => {
+        body = (await request.json()) as typeof body;
+        return HttpResponse.json(
+          bindResponse("app.example.com", { enabled: true, reload_triggered: true }),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    await user.type(
+      within(drawer).getByLabelText("Hostname (FQDN)"),
+      "app.example.com",
+    );
+    await user.click(
+      within(drawer).getByRole("button", { name: "Bind hostname" }),
+    );
+
+    // The bind is scoped to the site context: tenant_id + site come from the
+    // drawer's row, never free input, so it can't cross tenants or target an
+    // unpublished site.
+    await waitFor(() => expect(body).not.toBeNull());
+    expect(body).toEqual({
+      hostname: "app.example.com",
+      tenant_id: "tenant-1",
+      site: "marketing",
+    });
+    // The ACME + reload posture stays visible in the drawer after binding.
+    const status = await within(drawer).findByRole("status");
+    expect(status).toHaveTextContent(/ACME reload triggered/);
+  });
+
+  it("validates the hostname client-side without issuing a bind", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
+    mockManifest("marketing", manifest());
+    let posted = false;
+    server.use(
+      http.post(gatewayUrl("/admin/v1/site-domains"), () => {
+        posted = true;
+        return HttpResponse.json(
+          bindResponse("bad", { enabled: false, reload_triggered: false }),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    // A single-label hostname is rejected by the client mirror of the gateway
+    // rule; the Bind button stays disarmed and no POST is issued.
+    await user.type(within(drawer).getByLabelText("Hostname (FQDN)"), "localhost");
+    expect(
+      within(drawer).getByRole("button", { name: "Bind hostname" }),
+    ).toBeDisabled();
+    expect(
+      within(drawer).getByText(/fully qualified domain name/),
+    ).toBeInTheDocument();
+    expect(posted).toBe(false);
+  });
+
+  it("unbinds a domain bound to the site behind a confirm", async () => {
+    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [domain()] });
+    mockManifest("marketing", manifest());
+    let unbound: string | null = null;
+    server.use(
+      http.delete(
+        gatewayUrl("/admin/v1/site-domains/:hostname"),
+        ({ params }) => {
+          unbound = params.hostname as string;
+          return HttpResponse.json({ object: "site_domain", deleted: true });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    // The bound hostname is listed in the site context with an Unbind action.
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    await user.click(within(domainRow).getByRole("button", { name: "Unbind" }));
+
+    // Unbind is confirmed before it fires (an alertdialog).
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(within(confirm).getByRole("button", { name: "Unbind" }));
+
+    await waitFor(() => expect(unbound).toBe("app.example.com"));
   });
 });
