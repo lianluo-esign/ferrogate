@@ -13,6 +13,7 @@ mod cloudflare_agent_memory;
 mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
+mod cloudflare_worker_target;
 mod framework_adapter;
 mod function_egress;
 mod function_token;
@@ -64,6 +65,11 @@ pub use cloudflare_worker::{
     CloudflareRunHandle, CloudflareRunProps, CloudflareRunPropsResolver, CloudflareRunStartRequest,
     CloudflareRunStatus, MockCloudflareCall, MockCloudflareControlSurface, CLOUDFLARE_BACKEND_NAME,
     CLOUDFLARE_BACKEND_VERSION, CLOUDFLARE_HOST_LIFECYCLE_OWNER,
+};
+pub use cloudflare_worker_target::{
+    prepare_governed_worker_invocation, CloudflareWorkerInvocation, CloudflareWorkerTarget,
+    CloudflareWorkerTargetError, PreparedWorkerInvocation, WorkerBrokerError,
+    WorkerInvocationRequest, DEFAULT_WORKER_INVOCATION_TIMEOUT_MILLIS, WORKER_FUNCTION_CAPABILITY,
 };
 pub use framework_adapter::{
     authorize_framework_capability, self_hosted_framework_capability_report, FrameworkAdapter,

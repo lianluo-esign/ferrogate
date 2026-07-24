@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cloudflare_worker_target::{CloudflareWorkerTarget, CloudflareWorkerTargetError};
 use crate::supabase_edge_function::{SupabaseEdgeFunctionError, SupabaseEdgeFunctionTarget};
 
 /// Wildcard slug that permits any function under an allowed base URL for a tenant.
@@ -41,6 +42,8 @@ pub struct FunctionEgressAllowlist {
 pub enum FunctionEgressDenied {
     /// The target itself failed fail-closed validation (https, slug, key ref).
     InvalidTarget(SupabaseEdgeFunctionError),
+    /// A Cloudflare Worker target failed fail-closed validation.
+    InvalidWorkerTarget(CloudflareWorkerTargetError),
     /// No allowlist rule exists for the tenant at all.
     NoRuleForTenant(String),
     /// The tenant has rules, but none permit this base URL + slug.
@@ -55,6 +58,7 @@ impl std::fmt::Display for FunctionEgressDenied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidTarget(error) => write!(f, "invalid function target: {error}"),
+            Self::InvalidWorkerTarget(error) => write!(f, "invalid worker target: {error}"),
             Self::NoRuleForTenant(tenant) => {
                 write!(f, "no function egress rule for tenant {tenant}")
             }
@@ -97,9 +101,35 @@ impl FunctionEgressAllowlist {
         target
             .validate()
             .map_err(FunctionEgressDenied::InvalidTarget)?;
+        self.authorize_validated(tenant, &target.base_url, &target.function_slug)
+    }
 
-        let requested_base = normalize_base_url(&target.base_url);
-        let requested_slug = target.function_slug.trim();
+    /// Authorize a Cloudflare Worker target for a tenant, fail-closed — the
+    /// same deny-by-default rule matching as [`Self::authorize`], with the
+    /// Worker's `invoke_path` matched where a Supabase `function_slug` would
+    /// be. One allowlist governs both hosted-function targets (#416).
+    pub fn authorize_cloudflare_worker(
+        &self,
+        tenant: &str,
+        target: &CloudflareWorkerTarget,
+    ) -> Result<(), FunctionEgressDenied> {
+        target
+            .validate()
+            .map_err(FunctionEgressDenied::InvalidWorkerTarget)?;
+        self.authorize_validated(tenant, &target.base_url, &target.invoke_path)
+    }
+
+    /// Shared fail-closed rule matching for an already-validated target:
+    /// requires an exact base-URL match and either an exact slug match or a
+    /// `"*"` wildcard within the tenant's rules.
+    fn authorize_validated(
+        &self,
+        tenant: &str,
+        base_url: &str,
+        function_slug: &str,
+    ) -> Result<(), FunctionEgressDenied> {
+        let requested_base = normalize_base_url(base_url);
+        let requested_slug = function_slug.trim();
 
         let mut tenant_has_rule = false;
         for rule in &self.rules {
