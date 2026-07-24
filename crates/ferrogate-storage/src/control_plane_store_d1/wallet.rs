@@ -253,6 +253,219 @@ impl D1ControlPlaneStore {
             .collect()
     }
 
+    /// List EVERY provisioned tenant's wallet (issue #169, admin cross-tenant
+    /// read). D1 is database-per-tenant, so a tenant's single `wallets` row lives
+    /// in THAT tenant's own database — there is no one table to scan. This fans
+    /// out over the provisioned tenant bindings (the SAME id-only fan-out
+    /// `settle`/`release` use to locate a hold), reads each tenant DB's `wallets`
+    /// row, then orders by `tenant_id` ASC to match the Postgres `list_wallets`
+    /// contract row-for-row. Fails closed (typed unimplemented-surface) without a
+    /// proxy Worker.
+    pub(super) async fn list_wallets_d1_async(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        let proxy = self.proxy_client("list_wallets")?;
+        let mut wallets = Vec::new();
+        for (_tenant_id, binding) in self.provisioned_tenant_bindings()? {
+            let statement = D1ProxyStatement::new(format!("SELECT {WALLET_COLUMNS} FROM wallets"));
+            let result = proxy
+                .query_on(Some(&binding), &statement)
+                .await
+                .map_err(d1_error)?;
+            for row in &result.results {
+                wallets.push(decode_row::<WalletD1Row>(row).map(StoredWallet::from)?);
+            }
+        }
+        // The provisioned bindings already iterate in registry (BTreeMap) key
+        // order, but sort explicitly so the cross-tenant list matches the
+        // Postgres `ORDER BY tenant_id ASC` regardless of registry shape.
+        wallets.sort_by(|left, right| left.tenant_id.cmp(&right.tenant_id));
+        Ok(wallets)
+    }
+
+    /// Apply one provider-attempt debit/credit to a tenant's wallet, recording an
+    /// idempotent settlement ledger row (issue #169), as ONE atomic `/d1/batch`
+    /// on that tenant's database (issue #456). Mirrors the Postgres
+    /// `settle_wallet_balance`: claiming the `settlement_id` and moving the
+    /// balance commit together, so a replay returns the FIRST outcome
+    /// (`newly_applied = false`) instead of debiting twice; a replay whose tenant
+    /// or delta changed is a typed `Conflict`. Unlike `reserve`, a settlement is
+    /// recorded even when the tenant has no wallet row (`balance_after_credits`
+    /// stays NULL) — matching Postgres.
+    ///
+    /// The batch is three statements: a GUARDED wallet debit (skipped on replay,
+    /// so it never re-debits), the GUARDED settlement claim (`INSERT ... SELECT
+    /// ... WHERE NOT EXISTS(settlement) ... RETURNING` — a returned row is the
+    /// "this call recorded it" signal, reading the POST-debit balance), and a
+    /// read-back of the durable settlement for the outcome + the replay guard.
+    ///
+    /// Divergence: an UNPROVISIONED tenant (no tenant DB to hold the ledger) is a
+    /// typed `NotFound`, where Postgres would still record the settlement — the
+    /// same database-per-tenant divergence `reserve` makes (issue #455).
+    pub(super) async fn settle_wallet_balance_d1_async(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        let proxy = self.proxy_client("settle_wallet_balance")?;
+        let binding = self.tenant_proxy_binding(tenant_id)?;
+        let now = now_unix.to_string();
+        let delta = delta_credits.to_string();
+
+        let statements = vec![
+            // S0: debit the wallet, guarded on the settlement not already
+            // existing (so a replay never re-debits). CAST the delta: D1 binds
+            // params as TEXT and this adds the bound `?` to an INTEGER column in
+            // an arithmetic expression (the issue #455 numeric-affinity lesson).
+            D1ProxyStatement::with_params(
+                "UPDATE wallets SET balance_credits = balance_credits + CAST(? AS INTEGER), \
+                 updated_at_unix = ? WHERE tenant_id = ? \
+                 AND NOT EXISTS(SELECT 1 FROM wallet_settlements WHERE id = ?)",
+                vec![
+                    delta.clone(),
+                    now.clone(),
+                    tenant_id.to_string(),
+                    settlement_id.to_string(),
+                ],
+            ),
+            // S1: claim the settlement id, reading the POST-debit balance (S0 ran
+            // first in this batch). Guarded on NOT EXISTS + ON CONFLICT DO
+            // NOTHING so a replay inserts nothing; a RETURNING row means THIS call
+            // recorded it. The balance_after subquery yields NULL (recorded, but
+            // no balance) when the tenant has no wallet row.
+            D1ProxyStatement::with_params(
+                "INSERT INTO wallet_settlements \
+                 (id, tenant_id, delta_credits, balance_after_credits, created_at_unix) \
+                 SELECT ?, ?, ?, (SELECT balance_credits FROM wallets WHERE tenant_id = ?), ? \
+                 WHERE NOT EXISTS(SELECT 1 FROM wallet_settlements WHERE id = ?) \
+                 ON CONFLICT (id) DO NOTHING \
+                 RETURNING balance_after_credits",
+                vec![
+                    settlement_id.to_string(),
+                    tenant_id.to_string(),
+                    delta.clone(),
+                    tenant_id.to_string(),
+                    now.clone(),
+                    settlement_id.to_string(),
+                ],
+            ),
+            // S2: read back the durable settlement (ours, or a concurrent
+            // writer's that won the race) for the outcome + replay tenant/delta
+            // guard.
+            D1ProxyStatement::with_params(
+                format!("SELECT {SETTLEMENT_COLUMNS} FROM wallet_settlements WHERE id = ?"),
+                vec![settlement_id.to_string()],
+            ),
+        ];
+
+        let results = proxy
+            .batch_on(Some(&binding), &statements)
+            .await
+            .map_err(d1_error)?;
+        if results.len() < 3 {
+            return Err(StorageError::Runtime(
+                "cloudflare d1 proxy: settle_wallet_balance batch returned fewer than 3 \
+                 per-statement results"
+                    .to_string(),
+            ));
+        }
+
+        // S1 RETURNING a row -> this call is the one that recorded the settlement.
+        let newly_applied = !results[1].results.is_empty();
+        let Some(row) = results[2].results.first() else {
+            return Err(StorageError::Runtime(format!(
+                "cloudflare d1: wallet settlement {settlement_id} vanished inside its settle batch"
+            )));
+        };
+        let settlement: StoredWalletSettlement = decode_row::<WalletSettlementD1Row>(row)?.into();
+        // Only a replay can disagree with the request (a fresh insert carries the
+        // request's own values), so guard the tenant/delta mismatch there.
+        if !newly_applied
+            && (settlement.tenant_id != tenant_id || settlement.delta_credits != delta_credits)
+        {
+            return Err(StorageError::Conflict(format!(
+                "wallet settlement {settlement_id} replay changed tenant or amount"
+            )));
+        }
+        Ok(WalletSettlementOutcome {
+            settlement,
+            newly_applied,
+        })
+    }
+
+    /// Atomically apply `delta_credits` (negative to debit, positive to
+    /// credit/top-up) to an EXISTING wallet and return the row after the update
+    /// (issue #169) — a single `UPDATE ... RETURNING` on the tenant's database,
+    /// mirroring the Postgres `adjust_wallet_balance`. `Ok(None)` when the
+    /// (provisioned) tenant has no wallet row (opt-in), not an error.
+    ///
+    /// Divergence: an UNPROVISIONED tenant is `NotFound` (the issue #455
+    /// convention, `tenant_proxy_binding` required), where Postgres returns
+    /// `Ok(None)`.
+    pub(super) async fn adjust_wallet_balance_d1_async(
+        &self,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        let proxy = self.proxy_client("adjust_wallet_balance")?;
+        let binding = self.tenant_proxy_binding(tenant_id)?;
+        // CAST the delta: it is added to an INTEGER column in an arithmetic
+        // expression, and D1 binds params as TEXT (the issue #455 lesson).
+        let statement = D1ProxyStatement::with_params(
+            format!(
+                "UPDATE wallets SET balance_credits = balance_credits + CAST(? AS INTEGER), \
+                 updated_at_unix = ? WHERE tenant_id = ? RETURNING {WALLET_COLUMNS}"
+            ),
+            vec![
+                delta_credits.to_string(),
+                now_unix.to_string(),
+                tenant_id.to_string(),
+            ],
+        );
+        let result = proxy
+            .query_on(Some(&binding), &statement)
+            .await
+            .map_err(d1_error)?;
+        result
+            .results
+            .first()
+            .map(|row| decode_row::<WalletD1Row>(row).map(StoredWallet::from))
+            .transpose()
+    }
+
+    /// Set a tenant wallet's dunning flag (issue #169) — a single `UPDATE` on the
+    /// tenant's database, mirroring the Postgres `set_wallet_dunning`. A no-op
+    /// when the (provisioned) tenant has no wallet row.
+    ///
+    /// Divergence: an UNPROVISIONED tenant is `NotFound` (the issue #455
+    /// convention), where Postgres is a silent no-op.
+    pub(super) async fn set_wallet_dunning_d1_async(
+        &self,
+        tenant_id: &str,
+        dunning: bool,
+        now_unix: i64,
+    ) -> Result<(), StorageError> {
+        let proxy = self.proxy_client("set_wallet_dunning")?;
+        let binding = self.tenant_proxy_binding(tenant_id)?;
+        // `dunning` binds as SQLite's 0/1 integer affinity; it is a stored value
+        // (column-affinity coerced on write), not compared against an expression,
+        // so no CAST is needed — same as `upsert_wallet`.
+        let statement = D1ProxyStatement::with_params(
+            "UPDATE wallets SET dunning = ?, updated_at_unix = ? WHERE tenant_id = ?",
+            vec![
+                bool_param(dunning),
+                now_unix.to_string(),
+                tenant_id.to_string(),
+            ],
+        );
+        proxy
+            .query_on(Some(&binding), &statement)
+            .await
+            .map_err(d1_error)?;
+        Ok(())
+    }
+
     /// Place an exact-amount, no-oversell hold against a tenant's wallet
     /// (issue #281) as ONE atomic `/d1/batch` on that tenant's database
     /// (issue #455). See the module docs for the reserve-no-oversell proof.

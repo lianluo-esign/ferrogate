@@ -2802,6 +2802,360 @@ fn wallet_atomic_ops_without_proxy_are_unimplemented_and_offline() {
     );
 }
 
+// --- Tenant-scoped wallet balance/dunning/list ops (issue #456) ---
+
+/// A registry with the control DB plus TWO provisioned tenants ("acme", "bravo"),
+/// used to prove `list_wallets`' cross-tenant fan-out over per-tenant databases.
+fn two_tenant_registry() -> D1TenantDatabaseRegistry {
+    let mut registry = D1TenantDatabaseRegistry::with_control_database("control-db");
+    registry
+        .tenant_databases
+        .insert("acme".to_string(), "tenant-acme-db".to_string());
+    registry
+        .tenant_databases
+        .insert("bravo".to_string(), "tenant-bravo-db".to_string());
+    registry
+}
+
+/// A `wallet_settlements` row shaped as the proxy Worker serializes it.
+fn settlement_row(id: &str, delta: i64, balance_after: Option<i64>) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "tenant_id": "acme",
+        "delta_credits": delta,
+        "balance_after_credits": balance_after,
+        "created_at_unix": 100,
+    })
+}
+
+/// A `wallets` row shaped as the proxy Worker serializes it (SQLite integer
+/// affinities as JSON numbers; `dunning` as 0/1).
+fn wallet_row(tenant: &str, balance: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": tenant,
+        "tenant_id": tenant,
+        "balance_credits": balance,
+        "auto_recharge_threshold_credits": null,
+        "auto_recharge_amount_credits": null,
+        "dunning": 0,
+        "created_at_unix": 100,
+        "updated_at_unix": 100,
+    })
+}
+
+/// `settle_wallet_balance` records the debit + ledger row as one atomic batch on
+/// the TENANT binding: a guarded wallet debit, the guarded settlement claim
+/// reading the post-debit balance, and a read-back — with the delta `CAST` to
+/// INTEGER (the #455 numeric-affinity lesson).
+#[test]
+fn settle_wallet_balance_records_debit_over_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            // S0 debit applied (1 change).
+            proxy_statement_result(serde_json::json!([]), 1),
+            // S1 claim RETURNING the post-debit balance -> this call recorded it.
+            proxy_statement_result(serde_json::json!([{ "balance_after_credits": 400 }]), 1),
+            // S2 read-back of the durable settlement.
+            proxy_statement_result(
+                serde_json::json!([settlement_row("pay-1", -600, Some(400))]),
+                0,
+            ),
+        ])],
+    );
+
+    let outcome = runtime()
+        .block_on(store.settle_wallet_balance("pay-1", "acme", -600, 1000))
+        .expect("settle_wallet_balance should record the debit");
+    assert!(outcome.newly_applied);
+    assert_eq!(outcome.settlement.id, "pay-1");
+    assert_eq!(outcome.settlement.delta_credits, -600);
+    assert_eq!(outcome.settlement.balance_after_credits, Some(400));
+
+    assert!(
+        rest_transport.recorded().is_empty(),
+        "a tenant-scoped wallet op must not touch the REST query API"
+    );
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/batch"));
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let statements = body["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 3, "debit + settlement claim + read-back");
+    // S0: guarded debit, delta CAST to INTEGER (arithmetic against an INTEGER
+    // column; D1 binds params as TEXT — the #455 lesson).
+    let debit = statements[0]["sql"].as_str().unwrap();
+    assert!(debit.contains("balance_credits = balance_credits + CAST(? AS INTEGER)"));
+    assert!(debit.contains("NOT EXISTS(SELECT 1 FROM wallet_settlements WHERE id = ?)"));
+    // S1: guarded settlement claim reading the post-debit balance, RETURNING the
+    // "this call recorded it" signal.
+    let claim = statements[1]["sql"].as_str().unwrap();
+    assert!(claim.starts_with("INSERT INTO wallet_settlements"));
+    assert!(claim.contains("WHERE NOT EXISTS(SELECT 1 FROM wallet_settlements WHERE id = ?)"));
+    assert!(claim.contains("ON CONFLICT (id) DO NOTHING"));
+    assert!(claim.contains("RETURNING balance_after_credits"));
+    // S2: durable read-back for the outcome + replay guard.
+    let read = statements[2]["sql"].as_str().unwrap();
+    assert!(read.starts_with("SELECT"));
+    assert!(read.contains("FROM wallet_settlements WHERE id = ?"));
+    // Debit param binding: CAST'd delta, now, tenant, settlement id.
+    let debit_params = statement_params(&statements[0]);
+    assert_eq!(debit_params, vec!["-600", "1000", "acme", "pay-1"]);
+}
+
+/// Replaying a settlement returns the FIRST durable outcome (`newly_applied =
+/// false`): the guarded debit + claim both skip, the read-back yields the
+/// already-recorded row.
+#[test]
+fn settle_wallet_balance_replay_returns_first_outcome() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0), // debit skipped
+            proxy_statement_result(serde_json::json!([]), 0), // claim inserted nothing
+            proxy_statement_result(
+                serde_json::json!([settlement_row("pay-1", -600, Some(400))]),
+                0,
+            ),
+        ])],
+    );
+
+    let outcome = runtime()
+        .block_on(store.settle_wallet_balance("pay-1", "acme", -600, 2000))
+        .expect("replay is not an error");
+    assert!(!outcome.newly_applied);
+    assert_eq!(outcome.settlement.delta_credits, -600);
+    assert_eq!(outcome.settlement.balance_after_credits, Some(400));
+}
+
+/// A replay whose tenant or amount changed is a typed `Conflict` (mirrors the
+/// Postgres/memory settlement-id idempotency guard).
+#[test]
+fn settle_wallet_balance_replay_changed_amount_is_conflict() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_batch_ok(vec![
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(serde_json::json!([]), 0),
+            proxy_statement_result(
+                serde_json::json!([settlement_row("pay-1", -600, Some(400))]),
+                0,
+            ),
+        ])],
+    );
+
+    let error = runtime()
+        .block_on(store.settle_wallet_balance("pay-1", "acme", -700, 2000))
+        .expect_err("a changed-amount replay must conflict");
+    assert!(matches!(error, StorageError::Conflict(_)), "{error:?}");
+}
+
+/// `settle_wallet_balance` on an UNPROVISIONED tenant is a typed `NotFound` (no
+/// tenant DB to hold the ledger) — the database-per-tenant divergence from
+/// Postgres, which would still record the settlement. No network round trip.
+#[test]
+fn settle_wallet_balance_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.settle_wallet_balance("pay-1", "ghost", -600, 1000))
+        .expect_err("cannot settle against an unprovisioned tenant");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `adjust_wallet_balance` is one `UPDATE ... RETURNING` on the tenant binding,
+/// delta `CAST` to INTEGER; returns the post-update row.
+#[test]
+fn adjust_wallet_balance_updates_over_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(
+            serde_json::json!([wallet_row("acme", 1500)]),
+            1,
+        )],
+    );
+
+    let wallet = runtime()
+        .block_on(store.adjust_wallet_balance("acme", 500, 2000))
+        .expect("adjust should succeed")
+        .expect("existing wallet returns Some");
+    assert_eq!(wallet.balance_credits, 1500);
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/d1/query"));
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.contains("balance_credits = balance_credits + CAST(? AS INTEGER)"));
+    assert!(sql.contains("WHERE tenant_id = ? RETURNING"));
+    assert_eq!(body_params(&requests[0]), vec!["500", "2000", "acme"]);
+}
+
+/// `adjust_wallet_balance` on a provisioned tenant with NO wallet row is
+/// `Ok(None)` (opt-in), not an error — the `UPDATE` matched nothing.
+#[test]
+fn adjust_wallet_balance_no_wallet_is_none() {
+    let (store, _rest, _proxy) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 0)],
+    );
+    let result = runtime()
+        .block_on(store.adjust_wallet_balance("acme", 500, 2000))
+        .expect("no wallet is not an error");
+    assert!(result.is_none());
+}
+
+/// `adjust_wallet_balance` on an UNPROVISIONED tenant is `NotFound` (the #455
+/// convention), where Postgres returns `Ok(None)`. No round trip.
+#[test]
+fn adjust_wallet_balance_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.adjust_wallet_balance("ghost", 500, 2000))
+        .expect_err("cannot adjust an unprovisioned tenant");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `set_wallet_dunning` is one `UPDATE` on the tenant binding; the bool binds as
+/// SQLite's 0/1 affinity.
+#[test]
+fn set_wallet_dunning_updates_over_tenant_binding() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        tenant_registry(),
+        Vec::new(),
+        vec![proxy_query_ok(serde_json::json!([]), 1)],
+    );
+
+    runtime()
+        .block_on(store.set_wallet_dunning("acme", true, 2000))
+        .expect("set_wallet_dunning should succeed");
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(requests.len(), 1);
+    let body = body_json(&requests[0]);
+    assert_eq!(body["database"], "TENANT_DB_ACME");
+    let sql = body["sql"].as_str().unwrap();
+    assert!(sql.starts_with("UPDATE wallets SET dunning = ?"));
+    assert!(sql.contains("WHERE tenant_id = ?"));
+    // dunning -> "1", then now, then tenant.
+    assert_eq!(body_params(&requests[0]), vec!["1", "2000", "acme"]);
+}
+
+/// `set_wallet_dunning` on an UNPROVISIONED tenant is `NotFound` (the #455
+/// convention), where Postgres is a silent no-op. No round trip.
+#[test]
+fn set_wallet_dunning_unprovisioned_tenant_is_not_found() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(tenant_registry(), Vec::new(), Vec::new());
+    let error = runtime()
+        .block_on(store.set_wallet_dunning("ghost", true, 2000))
+        .expect_err("cannot set dunning on an unprovisioned tenant");
+    assert!(matches!(error, StorageError::NotFound(_)), "{error:?}");
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// `list_wallets` (cross-tenant) fans out over EVERY provisioned tenant binding —
+/// D1 is database-per-tenant, so each tenant's single wallet lives in its own DB
+/// — reading each `wallets` table and ordering the union by `tenant_id`.
+#[test]
+fn list_wallets_fans_out_over_tenant_bindings() {
+    let (store, rest_transport, proxy_transport) = store_with_proxy(
+        two_tenant_registry(),
+        Vec::new(),
+        vec![
+            // Fan-out is registry (BTreeMap) order: acme first, then bravo.
+            proxy_query_ok(serde_json::json!([wallet_row("acme", 1000)]), 0),
+            proxy_query_ok(serde_json::json!([wallet_row("bravo", 2000)]), 0),
+        ],
+    );
+
+    let wallets = runtime()
+        .block_on(store.list_wallets())
+        .expect("list_wallets should fan out");
+    assert_eq!(wallets.len(), 2);
+    assert_eq!(wallets[0].tenant_id, "acme");
+    assert_eq!(wallets[0].balance_credits, 1000);
+    assert_eq!(wallets[1].tenant_id, "bravo");
+    assert_eq!(wallets[1].balance_credits, 2000);
+
+    assert!(rest_transport.recorded().is_empty());
+    let requests = proxy_transport.recorded();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one read per provisioned tenant database"
+    );
+    // Each read is an unfiltered whole-table scan of the tenant DB's wallets.
+    let first = body_json(&requests[0]);
+    assert_eq!(first["database"], "TENANT_DB_ACME");
+    let first_sql = first["sql"].as_str().unwrap();
+    assert!(first_sql.starts_with("SELECT"));
+    assert!(first_sql.contains("FROM wallets"));
+    assert!(
+        !first_sql.contains("WHERE"),
+        "cross-tenant list is unfiltered"
+    );
+    assert_eq!(body_json(&requests[1])["database"], "TENANT_DB_BRAVO");
+}
+
+/// `list_wallets` with no provisioned tenants is `Ok(empty)` and makes no round
+/// trip (but still requires a bound proxy).
+#[test]
+fn list_wallets_empty_registry_is_empty() {
+    let (store, _rest, proxy_transport) =
+        store_with_proxy(control_registry(), Vec::new(), Vec::new());
+    let wallets = runtime()
+        .block_on(store.list_wallets())
+        .expect("empty registry lists no wallets");
+    assert!(wallets.is_empty());
+    assert!(proxy_transport.recorded().is_empty());
+}
+
+/// Without a bound proxy Worker the whole #456 wallet balance/dunning/list op set
+/// fails closed with the typed unimplemented-surface error and never hits the
+/// network, exactly like the still-deferred atomic families.
+#[test]
+fn wallet_balance_ops_without_proxy_are_unimplemented_and_offline() {
+    let (store, transport) = store_with_transport(tenant_registry(), Vec::new());
+
+    let settle = runtime()
+        .block_on(store.settle_wallet_balance("pay-1", "acme", -600, 1000))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&settle), "{settle:?}");
+
+    let adjust = runtime()
+        .block_on(store.adjust_wallet_balance("acme", 500, 1000))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&adjust), "{adjust:?}");
+
+    let dunning = runtime()
+        .block_on(store.set_wallet_dunning("acme", true, 1000))
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&dunning), "{dunning:?}");
+
+    let list = runtime()
+        .block_on(store.list_wallets())
+        .expect_err("no proxy -> unimplemented");
+    assert!(is_unimplemented_backend_surface(&list), "{list:?}");
+
+    assert!(
+        transport.recorded().is_empty(),
+        "the unimplemented wallet path must not hit the network"
+    );
+}
+
 // --- Portability matrix: Postgres vs D1 dialects of the core schema ---
 
 mod portability {

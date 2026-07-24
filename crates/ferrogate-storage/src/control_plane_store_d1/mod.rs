@@ -154,22 +154,32 @@
 //!   next-binding planners the Postgres backend uses, so the computed transition
 //!   is row-for-row identical across backends. Fail closed (typed
 //!   unimplemented-surface) when no proxy Worker is bound.
-//! - Wallets + reservations (#455, TENANT databases, proxy Worker): the FIRST
-//!   tenant-scoped atomic family. `reserve_wallet_credits` (the no-oversell
+//! - Wallets + reservations (#455/#456, TENANT databases, proxy Worker): the
+//!   FIRST tenant-scoped atomic family. `reserve_wallet_credits` (the no-oversell
 //!   guarded conditional insert), `settle_wallet_reservation`,
-//!   `release_wallet_reservation`, plus `upsert_wallet`/`get_wallet`/
-//!   `list_wallet_reservations`. Unlike the account-global families above, a
-//!   tenant's wallet/holds/settlements live in THAT tenant's own D1 database, so
-//!   each op selects `tenant_database_binding(tenant_id)` onto the proxy
-//!   `/d1/batch` + `/d1/query` calls (issue #455 per-tenant routing; there is no
-//!   runtime select-a-database-by-id, so the binding must be declared +
-//!   redeployed per tenant). `reserve` mirrors the Postgres `FOR UPDATE` +
-//!   sum-live-holds as one atomic batch (RETURNING-empty on the guarded insert =
-//!   not admitted; a sibling state read splits NoWallet from Insufficient);
-//!   `settle`/`release`, whose signatures carry only a hold id, fan out over the
-//!   provisioned tenant bindings to locate the holding database, then run the
-//!   guarded transition on it. Fail closed (typed unimplemented-surface) with no
-//!   proxy; see `wallet.rs`.
+//!   `release_wallet_reservation`, `settle_wallet_balance`,
+//!   `adjust_wallet_balance`, `set_wallet_dunning`, plus
+//!   `upsert_wallet`/`get_wallet`/`list_wallets`/`list_wallet_reservations`.
+//!   Unlike the account-global families above, a tenant's wallet/holds/
+//!   settlements live in THAT tenant's own D1 database, so each op selects
+//!   `tenant_database_binding(tenant_id)` onto the proxy `/d1/batch` +
+//!   `/d1/query` calls (issue #455 per-tenant routing; there is no runtime
+//!   select-a-database-by-id, so the binding must be declared + redeployed per
+//!   tenant). `reserve` mirrors the Postgres `FOR UPDATE` + sum-live-holds as one
+//!   atomic batch (RETURNING-empty on the guarded insert = not admitted; a
+//!   sibling state read splits NoWallet from Insufficient). `settle_wallet_balance`
+//!   claims the `settlement_id` and moves the balance as one guarded atomic batch
+//!   (idempotent replay = first outcome; records even when there is no wallet
+//!   row). `adjust`/`set_dunning` are single `UPDATE ... RETURNING`/`UPDATE`
+//!   statements on the tenant DB. `settle`/`release`/`list_wallets`, whose
+//!   signatures carry only a hold id or no tenant at all, fan out over the
+//!   provisioned tenant bindings — `list_wallets` reads each tenant DB's single
+//!   wallet row cross-tenant (issue #456), then orders by `tenant_id` to match
+//!   Postgres. A per-tenant mutation (settle-balance/adjust/set-dunning) on an
+//!   UNPROVISIONED tenant is a typed `NotFound` (no tenant DB to route to), the
+//!   same database-per-tenant divergence `reserve` makes, where Postgres records
+//!   the settlement / returns `Ok(None)` / no-ops. Fail closed (typed
+//!   unimplemented-surface) with no proxy; see `wallet.rs`.
 //! - Managed worker stores (#449, control database): templates, agent worker
 //!   instances, sessions, lifecycle events, and the isolation
 //!   selection/policy/evidence trio -- each an `upsert`/`append` of the full
@@ -201,14 +211,12 @@
 //! atomic families that DON'T mirror cleanly onto the control-DB-only binding:
 //!
 //! - The REMAINING wallet/payment surface (the reserve/settle/release trio +
-//!   wallet CRUD landed in #455, above): `settle_wallet_balance`,
-//!   `adjust_wallet_balance`, `set_wallet_dunning`, `list_wallets` (cross-tenant
-//!   fan-out), `sweep_expired_wallet_reservations`, and payment methods/attempts
+//!   wallet CRUD landed in #455; `settle_wallet_balance`/`adjust_wallet_balance`/
+//!   `set_wallet_dunning`/`list_wallets` landed in #456, above):
+//!   `sweep_expired_wallet_reservations`, and payment methods/attempts
 //!   (`transition_payment_attempt` CAS). `sweep` is deferred because its
 //!   money-safety guard reads `payment_attempts.hold_id` — coupling wallets to
-//!   the (still-deferred) x402 payment_attempts family into one larger unit;
-//!   `settle_wallet_balance`/`adjust`/`dunning`/`list_wallets` are the same
-//!   tenant-DB pattern and land with the payments slice.
+//!   the (still-deferred) x402 payment_attempts family into one larger unit.
 //! - Workflow run budgets (`open`/`debit`/`topup`): the idempotent `open`
 //!   mirrors the billing insert-then-reload pattern cleanly, but `debit`/`topup`
 //!   are read-modify-writes the Postgres backend serializes with
@@ -2033,12 +2041,13 @@ impl ControlPlaneStore for D1ControlPlaneStore {
 
     async fn settle_wallet_balance(
         &self,
-        _settlement_id: &str,
-        _tenant_id: &str,
-        _delta_credits: i64,
-        _now_unix: i64,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
     ) -> Result<WalletSettlementOutcome, StorageError> {
-        Err(unimplemented_surface("settle_wallet_balance"))
+        self.settle_wallet_balance_d1_async(settlement_id, tenant_id, delta_credits, now_unix)
+            .await
     }
 
     async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
@@ -2050,25 +2059,27 @@ impl ControlPlaneStore for D1ControlPlaneStore {
     }
 
     async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
-        Err(unimplemented_surface("list_wallets"))
+        self.list_wallets_d1_async().await
     }
 
     async fn adjust_wallet_balance(
         &self,
-        _tenant_id: &str,
-        _delta_credits: i64,
-        _now_unix: i64,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
     ) -> Result<Option<StoredWallet>, StorageError> {
-        Err(unimplemented_surface("adjust_wallet_balance"))
+        self.adjust_wallet_balance_d1_async(tenant_id, delta_credits, now_unix)
+            .await
     }
 
     async fn set_wallet_dunning(
         &self,
-        _tenant_id: &str,
-        _dunning: bool,
-        _now_unix: i64,
+        tenant_id: &str,
+        dunning: bool,
+        now_unix: i64,
     ) -> Result<(), StorageError> {
-        Err(unimplemented_surface("set_wallet_dunning"))
+        self.set_wallet_dunning_d1_async(tenant_id, dunning, now_unix)
+            .await
     }
 
     async fn reserve_wallet_credits(
