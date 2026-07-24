@@ -15,13 +15,22 @@
       "created": "2026-06-11",
       "attribution": "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
     },
-    "description": "The FerroGate Control Plane API is the supported external REST surface for managing FerroGate resources. \"Public\" means supported and externally consumable; it does not mean unauthenticated: every operation still requires authentication, admin.read/admin.write scope enforcement, tenant isolation, and audit evidence.\n\nThis artifact was previously titled \"FerroGate Admin API\". The admin-api name (the `ferrogate admin-api serve` command, the `[admin_api]` config section, and the `FERROGATE_ADMIN_*` environment names) is retained as a documented, deprecated compatibility alias for the migration window. The stable `/admin/v1` paths are unchanged, so existing admin clients keep working.\n\nOperations promoted into the versioned public-stable surface carry `x-ferrogate-stability: \"stable\"` and are covered by the backward-compatibility baseline gate; see the top-level `x-ferrogate-control-plane` block."
+    "description": "The FerroGate Control Plane API is the supported external REST surface for managing FerroGate resources. \"Public\" means supported and externally consumable; it does not mean unauthenticated: every operation still requires authentication, admin.read/admin.write scope enforcement, tenant isolation, and audit evidence.\n\nThis artifact was previously titled \"FerroGate Admin API\". The admin-api name (the `ferrogate admin-api serve` command, the `[admin_api]` config section, and the `FERROGATE_ADMIN_*` environment names) is retained as a documented, deprecated compatibility alias for the migration window. The stable `/admin/v1` paths are unchanged, so existing admin clients keep working.\n\nThe canonical `/control/v1` URI alias serves the identical surface: a request under `/control/v1` is normalized onto the same `/admin/v1` operation at ingress, so both prefixes dispatch through one route contract (auth, admin.read/admin.write scopes, tenant isolation, CSRF, rate limits, request IDs, audit evidence, error codes, and pagination are byte-identical) with no duplicated handlers. Every `/admin/v1` operation below is reachable identically under `/control/v1`; the alias is documented in the top-level `x-ferrogate-control-plane.uri_aliases` block rather than duplicated per path.\n\nOperations promoted into the versioned public-stable surface carry `x-ferrogate-stability: \"stable\"` and are covered by the backward-compatibility baseline gate; see the top-level `x-ferrogate-control-plane` block."
   },
   "x-ferrogate-control-plane": {
     "name": "FerroGate Control Plane API",
     "deprecated_alias": "admin-api",
     "public_major": "v1",
     "stable_path_prefix": "/admin/v1",
+    "alias_path_prefix": "/control/v1",
+    "uri_aliases": [
+      {
+        "alias_prefix": "/control/v1",
+        "canonical_prefix": "/admin/v1",
+        "since": "issue #453",
+        "normalization": "A request received under /control/v1 is normalized onto the identical /admin/v1 operation at request ingress, before routing, authentication, admin.read/admin.write scope enforcement, tenant isolation, CSRF, rate limits, request-id assignment, audit evidence, error handling, and pagination. Both prefixes dispatch through one route contract with no duplicated handlers; behavior (including any echoed path) is byte-identical, and /admin/v1 stays stable and unchanged for the compatibility window. Every operation documented under /admin/v1 in this artifact is reachable identically under /control/v1; the alias is documented here rather than duplicated per path to keep the runtime/OpenAPI operation contract 1:1."
+      }
+    ],
     "public_meaning": "Supported and externally consumable, not unauthenticated. Auth, admin.read/admin.write scopes, tenant isolation, and audit evidence remain mandatory.",
     "stability_contract": "Operations marked x-ferrogate-stability=stable are the versioned public surface. Their path, method, operationId, auth scope, and request/response schema may only change in backward-compatible ways and are enforced by docs/openapi/admin-api.compatibility-baseline.json via scripts/check-openapi.py.",
     "promoted_resources": [
@@ -42,7 +51,6 @@
     "deferred": [
       "ferrogate control-api serve canonical command (admin-api serve remains the entrypoint this slice)",
       "admin_api -> control-plane config/environment migration with conflict rejection",
-      "second URI namespace alias (e.g. /control/v1) generated from one route contract with parity tests",
       "promotion of the remaining admin resource families"
     ]
   },

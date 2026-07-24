@@ -112,6 +112,19 @@ enum RouteClass {
     Assets,
 }
 
+/// Rewrite a request received under the canonical `/control/v1` URI alias onto
+/// the stable `/admin/v1` prefix (issue #453), reusing the shared control-plane
+/// contract so this reverse proxy and the in-process gateway fold the alias
+/// through one definition. Non-alias requests (including already-canonical
+/// `/admin/v1` and the `/v1/assets` surface) are returned unchanged.
+fn normalize_control_plane_alias(mut request: HttpRequest) -> HttpRequest {
+    if let Some(canonical) = ferrogate_admin::control_plane::canonicalize_alias_path(&request.path)
+    {
+        request.path = canonical;
+    }
+    request
+}
+
 fn classify_route(path: &str) -> Option<RouteClass> {
     if path == "/admin" || path.starts_with("/admin/") {
         return Some(RouteClass::Admin);
@@ -328,6 +341,12 @@ fn handle_request<S: Read + Write>(
             return Err(error);
         }
     };
+    // Issue #453: fold the canonical `/control/v1` URI alias onto the stable
+    // `/admin/v1` prefix so the existing route classification, admin.read/
+    // admin.write scope selection, per-path body caps, and upstream forwarding
+    // serve BOTH prefixes from one contract and relay the canonical path to the
+    // gateway. `/admin/v1` and non-admin requests pass through unchanged.
+    let request = normalize_control_plane_alias(request);
     let response = match route_request(&request, service) {
         Routed::Local(response) => response,
         Routed::Forward => {

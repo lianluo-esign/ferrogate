@@ -29,7 +29,20 @@ impl FerroGateway {
         ctx.trace_id = Some(trace.trace_id);
         ctx.traceparent = trace.traceparent;
         ctx.tracestate = trace.tracestate;
-        let path = req.uri.path().to_string();
+        // Issue #453: fold the canonical `/control/v1` URI alias onto the
+        // stable `/admin/v1` prefix at the single request-ingress point, before
+        // ANY downstream processing reads the path. Route-group matching, the
+        // fixed operation contract, CSRF/confused-deputy defense, per-handler
+        // auth + admin.read/admin.write scope enforcement, tenant isolation,
+        // rate limits, request-id assignment, audit evidence, error codes, and
+        // pagination all consume this `path` (directly or via `RequestParts`),
+        // so both prefixes are served by exactly one route contract with no
+        // duplicated handlers. `/admin/v1` requests normalize to a no-op and any
+        // unrelated path is untouched; normalization is transparent, so an alias
+        // request observes byte-identical behavior to the canonical one.
+        let raw_path = req.uri.path();
+        let path = ferrogate_admin::control_plane::canonicalize_alias_path(raw_path)
+            .unwrap_or_else(|| raw_path.to_string());
         let request_headers = req.headers.clone();
         let peer_ip = session
             .client_addr()

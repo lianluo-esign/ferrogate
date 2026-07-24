@@ -91,6 +91,74 @@ fn classify_route_admits_only_the_admin_and_asset_surfaces() {
     assert_eq!(classify_route("/v1/assets-other"), None);
 }
 
+/// Issue #453: the reverse proxy folds `/control/v1` onto `/admin/v1` at
+/// ingress, so the SAME route classification, scope selection, and per-path
+/// body cap apply to both prefixes — proving the alias is served from one
+/// contract with no duplicated proxy routing.
+#[test]
+fn control_v1_alias_is_normalized_onto_admin_v1_before_routing() {
+    fn request(method: &str, path: &str) -> HttpRequest {
+        HttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: String::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    let config = Config::default();
+    let alias_to_canonical = [
+        ("/control/v1", "/admin/v1"),
+        ("/control/v1/status", "/admin/v1/status"),
+        ("/control/v1/providers", "/admin/v1/providers"),
+        ("/control/v1/config/reload", "/admin/v1/config/reload"),
+        (
+            "/control/v1/guardrail-policies",
+            "/admin/v1/guardrail-policies",
+        ),
+    ];
+    for (alias, canonical) in alias_to_canonical {
+        let normalized = normalize_control_plane_alias(request("GET", alias));
+        assert_eq!(
+            normalized.path, canonical,
+            "{alias} must forward as {canonical}"
+        );
+
+        // Same class, same scope for every method, same body cap as canonical.
+        assert_eq!(classify_route(&normalized.path), classify_route(canonical));
+        let class = classify_route(canonical).expect("admin class");
+        for method in ["GET", "HEAD", "POST", "PUT", "DELETE"] {
+            assert_eq!(
+                required_scope(classify_route(&normalized.path).unwrap(), method),
+                required_scope(class, method),
+                "scope parity for {method} {alias}",
+            );
+        }
+        assert_eq!(
+            body_cap_bytes(&config, class, &normalized.path),
+            body_cap_bytes(&config, class, canonical),
+            "body cap parity for {alias}",
+        );
+    }
+
+    // Non-alias requests are untouched: already-canonical admin paths, the
+    // asset surface, the data plane, and near-miss prefixes all pass through.
+    for path in [
+        "/admin/v1/providers",
+        "/admin/status",
+        "/v1/assets",
+        "/v1/chat/completions",
+        "/control/v1x",
+        "/controlled/v1",
+    ] {
+        assert_eq!(
+            normalize_control_plane_alias(request("GET", path)).path,
+            path
+        );
+    }
+}
+
 #[test]
 fn required_scope_mirrors_the_gateway_read_write_convention() {
     assert_eq!(required_scope(RouteClass::Admin, "GET"), "admin.read");

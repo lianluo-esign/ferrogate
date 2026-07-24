@@ -1189,6 +1189,7 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek",
+ "ferrogate-admin",
  "ferrogate-auth",
  "ferrogate-billing",
  "ferrogate-cloudflare",

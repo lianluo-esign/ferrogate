@@ -65,6 +65,46 @@ pub const PUBLIC_API_MAJOR: &str = "v1";
 /// constant this slice so existing admin clients are not broken.
 pub const STABLE_PATH_PREFIX: &str = "/admin/v1";
 
+/// Canonical URI alias prefix for the stable Control Plane surface (issue
+/// #453). A request received under this prefix is *normalized* to
+/// [`STABLE_PATH_PREFIX`] at ingress — before routing, authentication,
+/// `admin.read`/`admin.write` scope enforcement, tenant isolation, CSRF, rate
+/// limits, request-id assignment, audit evidence, error handling, and
+/// pagination — so both prefixes are served by exactly one route contract with
+/// no duplicated handlers and byte-identical behavior.
+///
+/// `/admin/v1` remains the stable, unchanged prefix for the compatibility
+/// window; `/control/v1` is the forward-looking canonical spelling of the same
+/// surface. Normalization is transparent: a request under the alias observes
+/// the same response (including any echoed path) as the canonical request.
+pub const ALIAS_PATH_PREFIX: &str = "/control/v1";
+
+/// Normalize a request path expressed under the [`ALIAS_PATH_PREFIX`]
+/// (`/control/v1`) alias onto the canonical [`STABLE_PATH_PREFIX`]
+/// (`/admin/v1`).
+///
+/// Returns the rewritten path when `path` is under the alias, or `None` when it
+/// is not — so hot-path callers skip an allocation on the overwhelmingly common
+/// non-alias request. Only a *whole leading segment* match is rewritten: the
+/// exact `/control/v1` and any `/control/v1/...` sub-path map onto `/admin/v1`,
+/// while a path that merely shares the textual prefix (e.g. `/control/v1x`) is
+/// left untouched. `path` is the URI path only; query strings are not part of
+/// it and are unaffected.
+///
+/// This is the single source of truth for the alias: both the in-process
+/// gateway ingress and the standalone Control Plane API reverse proxy fold the
+/// alias through this one function rather than each carrying its own prefix
+/// list.
+#[must_use]
+pub fn canonicalize_alias_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(ALIAS_PATH_PREFIX)?;
+    if rest.is_empty() || rest.starts_with('/') {
+        Some(format!("{STABLE_PATH_PREFIX}{rest}"))
+    } else {
+        None
+    }
+}
+
 /// HTTP method of a promoted operation. Uppercase string form matches the
 /// method keys used in the OpenAPI document and the runtime contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -249,6 +289,9 @@ pub struct ControlPlaneSurface {
     pub public_major: &'static str,
     /// Stable route prefix.
     pub stable_path_prefix: &'static str,
+    /// Canonical URI alias prefix served from the same route contract as
+    /// [`ControlPlaneSurface::stable_path_prefix`] (issue #453).
+    pub alias_path_prefix: &'static str,
     /// Resource families promoted this slice.
     pub promoted_resources: &'static [&'static str],
     /// Promoted operations.
@@ -263,6 +306,7 @@ pub fn public_surface() -> ControlPlaneSurface {
         deprecated_alias: DEPRECATED_ALIAS,
         public_major: PUBLIC_API_MAJOR,
         stable_path_prefix: STABLE_PATH_PREFIX,
+        alias_path_prefix: ALIAS_PATH_PREFIX,
         promoted_resources: PROMOTED_RESOURCES,
         promoted_operations: PROMOTED_OPERATIONS,
     }

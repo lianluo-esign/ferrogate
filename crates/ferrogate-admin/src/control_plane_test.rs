@@ -13,9 +13,10 @@
 //! is internally consistent.
 
 use super::{
-    is_promoted, promoted_operations, public_surface, HttpMethod, PublicOperation, Stability,
-    ADMIN_API_LEGACY_TITLE, CONTROL_PLANE_API_TITLE, DEPRECATED_ALIAS, PROMOTED_OPERATIONS,
-    PROMOTED_RESOURCES, PUBLIC_API_MAJOR, STABLE_PATH_PREFIX,
+    canonicalize_alias_path, is_promoted, promoted_operations, public_surface, HttpMethod,
+    PublicOperation, Stability, ADMIN_API_LEGACY_TITLE, ALIAS_PATH_PREFIX, CONTROL_PLANE_API_TITLE,
+    DEPRECATED_ALIAS, PROMOTED_OPERATIONS, PROMOTED_RESOURCES, PUBLIC_API_MAJOR,
+    STABLE_PATH_PREFIX,
 };
 
 use serde_json::Value;
@@ -337,6 +338,123 @@ fn public_surface_snapshot_serializes() {
         json.pointer("/promoted_operations/0/stability")
             .and_then(Value::as_str),
         Some("stable"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. The /control/v1 URI alias folds onto /admin/v1 from one contract (#453).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn alias_prefix_is_distinct_from_and_parallel_to_the_stable_prefix() {
+    assert_eq!(ALIAS_PATH_PREFIX, "/control/v1");
+    assert_eq!(STABLE_PATH_PREFIX, "/admin/v1");
+    assert_ne!(
+        ALIAS_PATH_PREFIX, STABLE_PATH_PREFIX,
+        "the alias and the stable prefix must be different URIs"
+    );
+    // Both carry the same public major, so the alias is a spelling of the same
+    // surface rather than a new version.
+    assert!(ALIAS_PATH_PREFIX.ends_with(PUBLIC_API_MAJOR));
+    assert!(STABLE_PATH_PREFIX.ends_with(PUBLIC_API_MAJOR));
+
+    // The surface snapshot advertises the alias next to the stable prefix.
+    let surface = public_surface();
+    assert_eq!(surface.stable_path_prefix, STABLE_PATH_PREFIX);
+    assert_eq!(surface.alias_path_prefix, ALIAS_PATH_PREFIX);
+}
+
+#[test]
+fn alias_normalization_maps_control_prefix_onto_admin_prefix() {
+    // Every promoted stable operation must resolve identically under the alias:
+    // its alias path normalizes to exactly the operation's canonical path.
+    for op in promoted_operations() {
+        let alias = op
+            .path
+            .strip_prefix(STABLE_PATH_PREFIX)
+            .map(|rest| format!("{ALIAS_PATH_PREFIX}{rest}"))
+            .expect("promoted op lives under the stable prefix");
+        assert_eq!(
+            canonicalize_alias_path(&alias).as_deref(),
+            Some(op.path),
+            "alias {alias} must normalize onto {}",
+            op.path
+        );
+    }
+
+    // A representative slice across the admin surface, plus the bare prefix.
+    let cases = [
+        ("/control/v1", "/admin/v1"),
+        ("/control/v1/status", "/admin/v1/status"),
+        ("/control/v1/providers", "/admin/v1/providers"),
+        ("/control/v1/config/reload", "/admin/v1/config/reload"),
+        (
+            "/control/v1/guardrail-policies/p_1/revisions/2",
+            "/admin/v1/guardrail-policies/p_1/revisions/2",
+        ),
+    ];
+    for (alias, canonical) in cases {
+        assert_eq!(
+            canonicalize_alias_path(alias).as_deref(),
+            Some(canonical),
+            "{alias} must normalize onto {canonical}"
+        );
+    }
+}
+
+#[test]
+fn alias_normalization_ignores_non_alias_and_partial_segments() {
+    // Already-canonical admin paths are not the alias: the ingress layer leaves
+    // them untouched (the stable prefix stays stable, no double-rewrite).
+    assert_eq!(canonicalize_alias_path("/admin/v1/providers"), None);
+    assert_eq!(canonicalize_alias_path("/admin/v1"), None);
+
+    // A path that merely shares the textual prefix is a DIFFERENT resource and
+    // must never be captured by the alias.
+    assert_eq!(canonicalize_alias_path("/control/v1x"), None);
+    assert_eq!(canonicalize_alias_path("/control/v1x/y"), None);
+    assert_eq!(canonicalize_alias_path("/control"), None);
+    assert_eq!(canonicalize_alias_path("/controlled/v1"), None);
+
+    // Unrelated data-plane and root paths are untouched.
+    assert_eq!(canonicalize_alias_path("/v1/chat/completions"), None);
+    assert_eq!(canonicalize_alias_path("/healthz"), None);
+    assert_eq!(canonicalize_alias_path("/"), None);
+}
+
+#[test]
+fn openapi_publishes_the_control_alias_from_the_same_contract() {
+    // The published OpenAPI artifact documents the alias so external consumers
+    // and the compatibility gate can discover it (issue #453). The alias lives
+    // on the top-level control-plane block, keyed to the same stable prefix.
+    let document = openapi();
+    let control_plane = document
+        .get("x-ferrogate-control-plane")
+        .and_then(Value::as_object)
+        .expect("top-level x-ferrogate-control-plane block must be published");
+    assert_eq!(
+        control_plane
+            .get("stable_path_prefix")
+            .and_then(Value::as_str),
+        Some(STABLE_PATH_PREFIX),
+    );
+    assert_eq!(
+        control_plane
+            .get("alias_path_prefix")
+            .and_then(Value::as_str),
+        Some(ALIAS_PATH_PREFIX),
+        "OpenAPI must advertise the /control/v1 alias prefix",
+    );
+    let aliases = control_plane
+        .get("uri_aliases")
+        .and_then(Value::as_array)
+        .expect("uri_aliases must document the alias mapping");
+    assert!(
+        aliases.iter().any(|entry| {
+            entry.get("alias_prefix").and_then(Value::as_str) == Some(ALIAS_PATH_PREFIX)
+                && entry.get("canonical_prefix").and_then(Value::as_str) == Some(STABLE_PATH_PREFIX)
+        }),
+        "uri_aliases must map {ALIAS_PATH_PREFIX} onto {STABLE_PATH_PREFIX}",
     );
 }
 

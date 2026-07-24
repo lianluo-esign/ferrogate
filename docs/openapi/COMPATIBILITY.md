@@ -16,6 +16,27 @@ document by `crates/ferrogate-admin/src/control_plane_test.rs`. Stable
 operations may only change in backward-compatible ways, enforced by the
 compatibility baseline below.
 
+## URI aliases (`/control/v1`)
+
+The stable surface is served under two URI prefixes: the compatibility prefix
+`/admin/v1` and the canonical alias `/control/v1` (issue #453). A request under
+`/control/v1` is normalized onto the identical `/admin/v1` operation at request
+ingress — before routing, authentication, `admin.read`/`admin.write` scope
+enforcement, tenant isolation, CSRF, rate limits, request-id assignment, audit
+evidence, error handling, and pagination — so both prefixes dispatch through one
+route contract with no duplicated handlers and byte-identical behavior. The
+single normalization is `ferrogate_admin::control_plane::canonicalize_alias_path`
+(one source of truth), applied by both the in-process gateway ingress and the
+standalone Control Plane API reverse proxy. `/admin/v1` stays stable and
+unchanged for the compatibility window.
+
+Because normalization happens before contract matching, the alias adds **no**
+new operations to `runtime-api-contract.json` or `admin-api.openapi.json`: the
+runtime/OpenAPI operation contract stays 1:1. The alias is documented in the
+OpenAPI `x-ferrogate-control-plane.uri_aliases` block and proven by dual-path
+parity tests (`crates/ferrogate-cli/tests/control_plane_uri_alias_e2e.rs`) that
+assert identical behavior across both prefixes.
+
 FerroGate's fixed HTTP API has three checked-in contract surfaces:
 
 - `runtime-api-contract.json` is embedded into `ferrogate-cli`. It owns fixed

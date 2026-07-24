@@ -33,6 +33,7 @@ chrono.workspace = true
 clap.workspace = true
 flate2 = "1"
 ed25519-dalek.workspace = true
+ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
