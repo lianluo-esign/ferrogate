@@ -1991,6 +1991,23 @@ export const zhCN = {
   // 移动端侧边栏抽屉的无障碍文案（src/components/ui/sidebar.tsx）。
   "component.sidebar.title": "侧边栏",
   "component.sidebar.description": "显示移动端侧边栏。",
+
+  // 后端错误 / 状态码到本地化运维文案的映射（#346，由 ../errors.ts 解析）。
+  // 原始服务器消息与后端错误 code 作为“技术细节”单独保留并以 translate="no"
+  // 呈现，绝不翻译。
+  "error.unknown": "发生了错误，请重试。",
+  "error.network": "无法连接服务器。请检查网络连接后重试。",
+  "error.http.badRequest": "请求无效。请检查后重试。",
+  "error.http.unauthorized": "登录状态已过期，请重新登录。",
+  "error.http.forbidden": "您没有执行此操作的权限。",
+  "error.http.notFound": "未找到请求的资源。",
+  "error.http.conflict": "此更改与当前状态冲突。请重新加载后再试。",
+  "error.http.unprocessable": "部分字段被拒绝。请检查表单后重试。",
+  "error.http.rateLimited": "请求过于频繁。请稍候再试。",
+  "error.http.server": "服务器遇到错误。请稍后重试。",
+  "error.http.unavailable": "服务暂时不可用。请稍后重试。",
+  "error.code.invalidCredentials": "邮箱或密码不正确。",
+  "error.technicalDetail": "技术细节",
   // `satisfies` (not a `: Messages` annotation) validates completeness AND drift
   // here while keeping `typeof zhCN` a precise literal type, so the type-only
   // completeness gate in `../catalog.ts` (`_ZhCatalogIsComplete`) stays a real

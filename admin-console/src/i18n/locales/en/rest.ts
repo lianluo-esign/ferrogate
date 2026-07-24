@@ -11,6 +11,29 @@
 // keys added here are part of `TranslationKey` and zh-CN must still translate them.
 export const enRest = {
 
+  // Backend error/status-code -> localized operator copy (#346).
+  //
+  // The stable, GENERIC operator headlines resolved by `../errors.ts` from an
+  // `ApiError`'s HTTP status or its backend error `code`. These are cross-cutting
+  // ("you lack permission", "the service is unavailable") — resource-specific
+  // reasons (e.g. an asset-scan rejection) stay in their own page namespace, not
+  // here. The raw server message + backend code are retained SEPARATELY as marked
+  // technical detail (rendered `translate="no"`), never localized. Lives in the
+  // lazy `rest` chunk (errors surface after a route/interaction, not as chrome).
+  "error.unknown": "Something went wrong. Please try again.",
+  "error.network": "Could not reach the server. Check your connection and try again.",
+  "error.http.badRequest": "The request was invalid. Review the details and try again.",
+  "error.http.unauthorized": "Your session has expired. Please sign in again.",
+  "error.http.forbidden": "You do not have permission to perform this action.",
+  "error.http.notFound": "The requested resource could not be found.",
+  "error.http.conflict": "This change conflicts with the current state. Reload and try again.",
+  "error.http.unprocessable": "Some fields were rejected. Review the form and try again.",
+  "error.http.rateLimited": "Too many requests. Wait a moment and try again.",
+  "error.http.server": "The server encountered an error. Please try again shortly.",
+  "error.http.unavailable": "The service is temporarily unavailable. Please try again shortly.",
+  "error.code.invalidCredentials": "The email or password is incorrect.",
+  "error.technicalDetail": "Technical detail",
+
   // Dashboard / operations overview (#348).
   "dashboard.title": "Operations overview",
   "dashboard.subtitle": "Live gateway posture and operator actions for {name}.",

@@ -29,3 +29,4 @@ export {
 } from "./i18n-provider";
 export { LanguageSwitcher } from "./language-switcher";
 export type { InterpolationValues } from "./format";
+export { operatorErrorFor, statusCopyKey, type OperatorError } from "./errors";
