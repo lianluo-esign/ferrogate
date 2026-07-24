@@ -572,6 +572,20 @@ mod cli_parse_tests {
         Cli::command().debug_assert();
     }
 
+    /// The full shipped tree — the derived commands plus the generic
+    /// `ctl <group> <verb>` resource families (#361–#365) built from the
+    /// `ferrogate-cli-core` registry — is internally valid. This is the exact
+    /// command `main` assembles and parses, so the generic subtree cannot
+    /// introduce a duplicate/ambiguous arg or subcommand.
+    #[test]
+    fn augmented_command_tree_with_resource_families_is_valid() {
+        let mut registry = ferrogate_cli_core::Registry::new();
+        ferrogate_cli_core::register_resource_families(&mut registry).expect("families register");
+        Cli::command()
+            .subcommand(crate::ctl::build_ctl_command(&registry))
+            .debug_assert();
+    }
+
     /// #359: the canonical `control-api serve` command parses to the
     /// dedicated Control Plane API dispatch.
     #[test]

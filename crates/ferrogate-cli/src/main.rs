@@ -34,7 +34,7 @@ mod telemetry;
 mod tokenizer;
 
 use anyhow::Result as AnyResult;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use std::sync::Arc;
@@ -53,7 +53,28 @@ use crate::{
 fn main() -> AnyResult<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     init_tracing();
-    let cli = Cli::parse();
+
+    // Build the full command surface: the derived `ferrogate` tree plus the
+    // generic Control Plane API resource families (#361–#365), whose entire
+    // `ctl <group> <verb>` subtree is derived from the `ferrogate-cli-core`
+    // registry metadata rather than hand-enumerated here (registering a new
+    // family in the library needs no change in this binary). Registration is a
+    // programming error if it fails (duplicate group/verb), so fail loudly.
+    let mut registry = ferrogate_cli_core::Registry::new();
+    ferrogate_cli_core::register_resource_families(&mut registry)
+        .expect("resource command families register cleanly");
+    let command = Cli::command().subcommand(ctl::build_ctl_command(&registry));
+    let matches = command.get_matches();
+
+    // The resource families own their diagnostics (stderr) and map every
+    // outcome onto a stable exit-code class, so they terminate the process
+    // directly — exactly like #360's `ops`/`context` below.
+    if let Some((ctl::CTL_COMMAND, ctl_matches)) = matches.subcommand() {
+        std::process::exit(ctl::run_resource(&registry, ctl_matches));
+    }
+
+    let cli =
+        Cli::from_arg_matches(&matches).map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     match cli.command {
         Commands::Run(args) => serve(Config::load(&args.config)?, Some(args.config), args.upgrade),

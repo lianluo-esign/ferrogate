@@ -20,18 +20,23 @@
 //! wiring pattern that later resource families (#361–#365) plug into without
 //! touching transport, renderer, or context code.
 //!
-//! `mod.rs` stays thin (declarations + the two dispatch entrypoints main.rs
+//! `mod.rs` stays thin (declarations + the dispatch entrypoints main.rs
 //! calls); each concern lives in its own file:
 //! * [`store`] — on-disk persistence for the library's in-memory `ContextStore`.
 //! * [`dispatch`] — shared glue: precedence resolution, credential/stdin/env
 //!   readers, the async runtime, and stderr diagnostics.
 //! * [`context_cmd`] — the `context` verbs (create/list/show/use/delete).
 //! * [`ops_cmd`] — the `ops status` vertical slice on the shared client.
+//! * [`resource_cmd`] — the generic `ctl <group> <verb>` tree (#361–#365) built
+//!   from the `ferrogate-cli-core` registry and dispatched through the same
+//!   foundation, with no per-resource code in the binary.
 
 pub(crate) mod context_cmd;
 pub(crate) mod dispatch;
 pub(crate) mod ops_cmd;
+pub(crate) mod resource_cmd;
 pub(crate) mod store;
 
 pub(crate) use context_cmd::run_context;
 pub(crate) use ops_cmd::run_ops;
+pub(crate) use resource_cmd::{build_ctl_command, run_resource, CTL_COMMAND};

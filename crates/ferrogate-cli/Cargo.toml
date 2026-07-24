@@ -30,7 +30,11 @@ blake2.workspace = true
 bytes.workspace = true
 chacha20poly1305.workspace = true
 chrono.workspace = true
-clap.workspace = true
+# The `string` feature lets the generic Control Plane API resource command tree
+# (#361–#365) be built from runtime `String` group/verb names sourced from the
+# `ferrogate-cli-core` registry metadata (clap's default builder only accepts
+# `&'static str` names).
+clap = { workspace = true, features = ["string"] }
 flate2 = "1"
 ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }

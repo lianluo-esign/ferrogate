@@ -42,6 +42,9 @@
 //! * [`command`] — the extensible [`command::Registry`] / [`command::CommandGroup`]
 //!   skeleton that lets #361–#365 add resource families (and their OpenAPI
 //!   `operationId` coverage) as compile-time metadata, with no rewiring.
+//! * [`dispatch`] — the generic `<group> <verb>` → [`transport::RequestSpec`]
+//!   router (and read-only secret redaction) a composing binary drives to reach
+//!   every registered resource family without naming a single resource.
 //! * [`args`] — Clap-derived shared global flags folded into
 //!   [`context::GlobalOverrides`].
 //! * [`version`] — CLI/API version reporting and a fail-closed compatibility
@@ -63,6 +66,7 @@ pub mod billing;
 pub mod catalog;
 pub mod command;
 pub mod context;
+pub mod dispatch;
 pub mod error;
 pub mod evidence;
 pub mod guardrail;
