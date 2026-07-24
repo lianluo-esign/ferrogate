@@ -21,6 +21,13 @@ type AdminUsageReportRow = components["schemas"]["AdminUsageReportRow"];
 type AdminVirtualApiKey = components["schemas"]["AdminVirtualApiKey"];
 type AdminSelfHostedWorkerRecord = components["schemas"]["AdminSelfHostedWorkerRecord"];
 type TokenMeteringEvent = components["schemas"]["TokenMeteringEvent"];
+// #340 reference-control catalogs: model/provider catalogs back the native and
+// virtual key allowlist pickers; the plan catalog backs the tenant-account plan
+// binding; RBAC roles back the tenant-role binding picker.
+type Model = components["schemas"]["Model"];
+type AdminProvider = components["schemas"]["AdminProvider"];
+type AdminPlan = components["schemas"]["AdminPlan"];
+type AdminTenantRoleBinding = components["schemas"]["AdminTenantRoleBinding"];
 
 interface AdminApiOptions {
   failPaths?: string[];
@@ -86,7 +93,28 @@ const permissions: AdminPermission[] = [
   },
 ];
 
-const roles: AdminRole[] = [];
+// #340: RBAC roles catalog so the tenant-role binding picker (target `roles`)
+// and the roles resource list have entities to search + select.
+const roles: AdminRole[] = [
+  {
+    id: "role-billing-admin-01HZZZZZZZZZZZZZZZZZZZZZZ",
+    name: "Billing administrator",
+    slug: "billing-admin",
+    description: "Manage wallets, payment methods and invoices",
+    permission_keys: ["admin.read", "admin.write"],
+    created_at_unix: 1_720_000_000,
+    updated_at_unix: 1_720_086_400,
+  },
+  {
+    id: "role-readonly-auditor-02HZZZZZZZZZZZZZZZZZZ",
+    name: "Read-only auditor",
+    slug: "readonly-auditor",
+    description: "Inspect control-plane resources without mutating them",
+    permission_keys: ["admin.read"],
+    created_at_unix: 1_720_000_001,
+    updated_at_unix: 1_720_086_401,
+  },
+];
 
 const mcpServers: McpServerStatus[] = [
   {
@@ -115,8 +143,141 @@ const apiKeys: AdminApiKey[] = [
     denied_providers: [],
     log_bodies: false,
   },
+  {
+    // #340: this key's allowlist still references a retired model name that is no
+    // longer in the models catalog below, so editing it must surface the value as
+    // an unresolved chip (visibly marked, not silently dropped) while the model is
+    // absent from the picker's selectable options.
+    id: "gateway-key-legacy-analytics-02HZZZZZZZZZZZZZZZZZZ",
+    name: "Legacy analytics gateway key",
+    enabled: true,
+    key_source: "env",
+    scopes: ["admin.read"],
+    allowed_models: ["gpt-legacy-vision-retired"],
+    denied_models: [],
+    allowed_providers: [],
+    denied_providers: [],
+    log_bodies: false,
+  },
 ];
-const workspaces: AdminWorkspace[] = [];
+
+// #340: workspaces are scoped to a project (and therefore a tenant). The first
+// two belong to acme-tenant projects; the third belongs to a project owned by a
+// DIFFERENT tenant, so a project-A-scoped workspace picker must never surface it
+// (cross-tenant combination blocked client-side).
+const workspaces: AdminWorkspace[] = [
+  {
+    id: "workspace-acme-prod-us-east-01HZZZZZZZZZZZZ",
+    project_id: projects[0].id,
+    tenant_id: projects[0].tenant_id,
+    name: "Acme production US-East",
+    slug: "acme-prod-us-east",
+    environment: "production",
+    status: "active",
+    created_at_unix: 1_720_000_000,
+    updated_at_unix: 1_720_086_400,
+  },
+  {
+    id: "workspace-acme-cross-region-eu-west-01HZZZZZ",
+    project_id: projects[1].id,
+    tenant_id: projects[1].tenant_id,
+    name: "Acme cross-region EU-West",
+    slug: "acme-cross-region-eu-west",
+    environment: "staging",
+    status: "active",
+    created_at_unix: 1_720_000_001,
+    updated_at_unix: 1_720_086_401,
+  },
+  {
+    id: "workspace-globex-sandbox-01HZZZZZZZZZZZZZZZZ",
+    project_id: "project_globex_sandbox_01HZZZZZZZZZZZZZZZZ",
+    tenant_id: "tenant_globex_ops_01HZZZZZZZZZZZZZZZZZZZZ",
+    name: "Globex sandbox other-tenant workspace",
+    slug: "globex-sandbox",
+    environment: "sandbox",
+    status: "active",
+    created_at_unix: 1_720_000_002,
+    updated_at_unix: 1_720_086_402,
+  },
+];
+
+// #340: model + provider catalogs back the key allowlist pickers. The retired
+// model referenced by the legacy key above is deliberately ABSENT here.
+const models: Model[] = [
+  {
+    name: "gpt-4.1-mini",
+    provider: "openai",
+    provider_model: "gpt-4.1-mini-2026-04-01",
+    routing_strategy: "priority",
+    fallbacks: [],
+    enabled: true,
+  },
+  {
+    name: "claude-sonnet-4",
+    provider: "anthropic",
+    provider_model: "claude-sonnet-4-2026-05-01",
+    routing_strategy: "priority",
+    fallbacks: [],
+    enabled: true,
+  },
+  {
+    name: "gpt-4.1",
+    provider: "openai",
+    provider_model: "gpt-4.1-2026-07-01",
+    routing_strategy: "priority",
+    fallbacks: [],
+    enabled: true,
+  },
+];
+
+const providers: AdminProvider[] = [
+  {
+    name: "openai",
+    kind: "openai",
+    compatibility: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    has_api_key: true,
+    enabled: true,
+  },
+  {
+    name: "anthropic",
+    kind: "anthropic",
+    compatibility: "openai-compatible",
+    base_url: "https://api.anthropic.com",
+    has_api_key: true,
+    enabled: true,
+  },
+];
+
+// #340: plan catalog backs the tenant-account plan binding + its edit hydration.
+// The tenant-account fixtures above all carry `plan_id: "enterprise"`, so that
+// row must resolve to the human "Enterprise Plan" label on edit.
+const plans: AdminPlan[] = [
+  {
+    id: "enterprise",
+    name: "Enterprise Plan",
+    slug: "enterprise",
+    mcp_enabled: true,
+    self_hosted_workers_enabled: true,
+    default_model_allowlist: [],
+    asset_hosting_enabled: true,
+    extension_tools_enabled: true,
+    created_at_unix: 1_720_000_000,
+    updated_at_unix: 1_720_086_400,
+  },
+  {
+    id: "growth",
+    name: "Growth Plan",
+    slug: "growth",
+    mcp_enabled: true,
+    self_hosted_workers_enabled: false,
+    default_model_allowlist: [],
+    asset_hosting_enabled: false,
+    extension_tools_enabled: false,
+    created_at_unix: 1_720_000_100,
+    updated_at_unix: 1_720_086_500,
+  },
+];
 
 const virtualKeys: AdminVirtualApiKey[] = [
   {
@@ -458,10 +619,15 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
   }
 
   if (request.method() === "GET" && url.pathname === "/admin/v1/roles") {
+    // #340: honour `search` so the tenant-role binding role picker narrows.
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const data = roles.filter((role) =>
+      `${role.id} ${role.name} ${role.slug} ${role.description}`.toLowerCase().includes(search),
+    );
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ object: "list", data: roles }),
+      body: JSON.stringify({ object: "list", data, total: data.length, offset: 0, limit: 20 }),
     });
     return;
   }
@@ -555,16 +721,116 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
   }
 
   if (request.method() === "GET" && url.pathname === "/admin/v1/workspaces") {
+    // #340: honour the `project_id` scope filter the cascading picker sends so a
+    // project-A-scoped lookup never returns another project's (cross-tenant)
+    // workspace, plus the free-text `search` param.
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? 200);
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const projectId = url.searchParams.get("project_id");
+    const filtered = workspaces.filter(
+      (workspace) =>
+        (!projectId || workspace.project_id === projectId) &&
+        `${workspace.id} ${workspace.name} ${workspace.slug}`.toLowerCase().includes(search),
+    );
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         object: "list",
-        data: workspaces,
-        total: workspaces.length,
-        offset: 0,
-        limit: 200,
+        data: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        offset,
+        limit,
       }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/models") {
+    // #340: model catalog for the key allowlist pickers. Honours `search` so the
+    // searchable-chips flow narrows options; a retired model absent from the
+    // catalog can never appear here.
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const data = models.filter((model) =>
+      `${model.name} ${model.provider} ${model.provider_model}`.toLowerCase().includes(search),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data, total: data.length, offset: 0, limit: 20 }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/providers") {
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const data = providers.filter((provider) =>
+      `${provider.name} ${provider.kind} ${provider.base_url}`.toLowerCase().includes(search),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data, total: data.length, offset: 0, limit: 20 }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname === "/admin/v1/plans") {
+    // #340: plan catalog for the tenant-account plan single-reference picker.
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const data = plans.filter((plan) =>
+      `${plan.id} ${plan.name} ${plan.slug}`.toLowerCase().includes(search),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data, total: data.length, offset: 0, limit: 20 }),
+    });
+    return;
+  }
+
+  if (request.method() === "GET" && url.pathname.startsWith("/admin/v1/plans/")) {
+    // #340: per-plan GET hydrates an existing tenant-account plan_id to its label.
+    const planId = decodeURIComponent(url.pathname.slice("/admin/v1/plans/".length));
+    const plan = plans.find((item) => item.id === planId);
+    await route.fulfill({
+      status: plan ? 200 : 404,
+      contentType: "application/json",
+      body: JSON.stringify(
+        plan
+          ? { object: "plan", plan }
+          : { error: { code: "plan_not_found", message: "plan not found" } },
+      ),
+    });
+    return;
+  }
+
+  if (url.pathname.startsWith("/admin/v1/tenant-roles/")) {
+    // #340: the bespoke tenant-role binding page lists (GET) and assigns (POST)
+    // over `/admin/v1/tenant-roles/{tenant_id}`. Bindings start empty; POST echoes
+    // the created binding. Specs that assert the submitted payload register a
+    // higher-precedence route over this same path.
+    if (request.method() === "POST") {
+      const tenantId = decodeURIComponent(url.pathname.slice("/admin/v1/tenant-roles/".length));
+      const body = request.postDataJSON() as { role_id?: string } | null;
+      const binding: AdminTenantRoleBinding = {
+        id: `binding-${tenantId}-${body?.role_id ?? "unknown"}`,
+        tenant_id: tenantId,
+        role_id: String(body?.role_id ?? ""),
+        created_at_unix: 1_752_000_000,
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ object: "tenant_role_binding", binding }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ object: "list", data: [] }),
     });
     return;
   }
