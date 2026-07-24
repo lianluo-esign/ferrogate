@@ -111,6 +111,13 @@ fn exhausted_postgres_store() -> PostgresControlPlaneStore {
     PostgresControlPlaneStore {
         async_pool: Arc::new(AsyncPostgresPool::new(&config).expect("async test pool")),
         schema: StorageSchemaEvidence::postgres_expected(),
+        usage_aggregates_mirror: crate::Mutex::new(crate::InMemoryRepository::new()),
+        durable_worker_retention_records: 0,
+        heartbeat_prune_ticks: crate::AtomicU64::new(0),
+        telemetry_prune_ticks: crate::AtomicU64::new(0),
+        artifact_prune_ticks: crate::AtomicU64::new(0),
+        checkpoint_prune_ticks: crate::AtomicU64::new(0),
+        agent_run_event_prune_ticks: crate::AtomicU64::new(0),
     }
 }
 

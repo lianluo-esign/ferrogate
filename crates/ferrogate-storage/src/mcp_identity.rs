@@ -2107,9 +2107,9 @@ impl RuntimeStorageRepositories {
                     .append_mcp_identity_audit_event_with_operation(&event, operation)
                     .await
             }
-            RuntimeControlPlaneBackend::Memory(_) => {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
                 operation.begin_commit("in-memory MCP identity audit append")?;
-                let result = self
+                let result = control_plane
                     .audit_events
                     .lock()
                     .map_err(|_| StorageError::Runtime("audit event store lock poisoned".into()))
