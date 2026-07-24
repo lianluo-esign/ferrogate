@@ -2,13 +2,17 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-23
-// description: Tests for the Cloudflare Secrets Store cf:// secret resolver (issue #417).
+// description: Tests for the Cloudflare Secrets Store cf:// secret backend —
+// Worker-binding value resolution + write/manage REST plane (issues #417, #423).
 
-//! Tests for the `cf://` Secrets Store backend (issue #417).
+//! Tests for the `cf://` Secrets Store backend (issues #417/#423).
 //!
 //! The Cloudflare REST API is mocked entirely through `ferrogate-cloudflare`'s
 //! injectable [`HttpTransport`] seam — a scripted, URL-keyed fake transport —
-//! so parse + resolve are exercised with **no live network**.
+//! so parse + manage-plane behavior are exercised with **no live network**.
+//! Value resolution (decision #423) is exercised through the Worker-binding
+//! context ([`CfSecretBindings`]) — the injected-map and environment-convention
+//! paths — which by design never touches the network at all.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,8 +25,8 @@ use ferrogate_cloudflare::{
 };
 
 use crate::{
-    CloudflareSecretResolver, SecretRef, SecretResolver, SecretResolverRegistry,
-    CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
+    cf_binding_env_var, CfSecretBindings, CloudflareSecretResolver, SecretRef, SecretResolver,
+    SecretResolverRegistry, CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES,
 };
 
 const BASE: &str = "https://api.test/client/v4/accounts/acct-123/secrets_store";
@@ -79,11 +83,11 @@ fn resolver_with(routes: HashMap<String, (u16, String)>) -> CloudflareSecretReso
     CloudflareSecretResolver::from_client(client)
 }
 
-/// Routes for the happy read path: one store named `provider-keys` (id
-/// `store-1`) holding one secret `openai-api-key` (id `sec-1`). `detail_result`
-/// is spliced in as the `GET .../secrets/sec-1` body so a single helper covers
-/// both the value-bearing and write-only-metadata cases.
-fn read_routes(detail_result: &str) -> HashMap<String, (u16, String)> {
+/// Routes for the manage-plane read path: one store named `provider-keys` (id
+/// `store-1`) holding one secret `openai-api-key` (id `sec-1`). Note there is
+/// no secret-detail route: since #423 the resolver's REST path is an existence
+/// check only (list stores → list secrets) and never fetches a detail body.
+fn read_routes() -> HashMap<String, (u16, String)> {
     let mut routes = HashMap::new();
     routes.insert(
         format!("Get {BASE}/stores"),
@@ -98,10 +102,6 @@ fn read_routes(detail_result: &str) -> HashMap<String, (u16, String)> {
             200,
             ok_envelope(r#"[{"id":"sec-1","name":"openai-api-key"}]"#),
         ),
-    );
-    routes.insert(
-        format!("Get {BASE}/stores/store-1/secrets/sec-1"),
-        (200, ok_envelope(detail_result)),
     );
     routes
 }
@@ -130,42 +130,103 @@ fn rejects_cf_reference_missing_name() {
     assert!(SecretRef::parse("cf:///openai-api-key").is_err());
 }
 
-// --- resolve ---------------------------------------------------------------
+// --- Worker-binding value resolution (decision #423, Option A) -------------
 
 #[test]
-fn cf_resolver_reads_secret_value_via_rest() {
-    let resolver = resolver_with(read_routes(
-        r#"{"id":"sec-1","name":"openai-api-key","value":"sk-cf-secret"}"#,
-    ));
+fn binding_env_var_follows_documented_convention() {
+    assert_eq!(
+        cf_binding_env_var("openai-api-key"),
+        "FERROGATE_CF_SECRET_OPENAI_API_KEY"
+    );
+    assert_eq!(
+        cf_binding_env_var("db.password/v2"),
+        "FERROGATE_CF_SECRET_DB_PASSWORD_V2"
+    );
+}
+
+#[test]
+fn cf_bindings_resolve_value_from_injected_map() {
+    let mut bindings = CfSecretBindings::new();
+    bindings.insert("openai-api-key", "sk-from-binding");
     let reference = SecretRef::CfSecret {
         store: "provider-keys".into(),
         name: "openai-api-key".into(),
     };
     assert_eq!(
-        resolver.resolve(&reference).unwrap().as_deref(),
-        Some("sk-cf-secret")
+        bindings.resolve(&reference).unwrap().as_deref(),
+        Some("sk-from-binding")
+    );
+    // A name absent from the map (and the environment) is simply unset.
+    let missing = SecretRef::CfSecret {
+        store: "provider-keys".into(),
+        name: "cf-binding-test-absent-key".into(),
+    };
+    assert_eq!(bindings.resolve(&missing).unwrap(), None);
+}
+
+#[test]
+fn cf_bindings_resolve_value_from_env_convention() {
+    // Unique secret name so no other (parallel) test touches this variable.
+    std::env::set_var("FERROGATE_CF_SECRET_ENV_CONV_TEST_KEY", "sk-from-env");
+    let bindings = CfSecretBindings::new();
+    let reference = SecretRef::CfSecret {
+        store: "provider-keys".into(),
+        name: "env-conv-test-key".into(),
+    };
+    assert_eq!(
+        bindings.resolve(&reference).unwrap().as_deref(),
+        Some("sk-from-env")
+    );
+
+    // Empty/whitespace values count as unset (mirrors env://).
+    std::env::set_var("FERROGATE_CF_SECRET_ENV_CONV_EMPTY_KEY", "  ");
+    let empty = SecretRef::CfSecret {
+        store: "provider-keys".into(),
+        name: "env-conv-empty-key".into(),
+    };
+    assert_eq!(bindings.resolve(&empty).unwrap(), None);
+}
+
+#[test]
+fn registry_resolves_cf_reference_from_env_binding_without_rest_backend() {
+    // The Worker-binding env convention needs no CLOUDFLARE_* configuration —
+    // exactly how a Worker-bound deployment resolves cf:// with no API token.
+    std::env::set_var("FERROGATE_CF_SECRET_REGISTRY_ENV_BIND_KEY", "sk-bound");
+    let registry = SecretResolverRegistry::new();
+    assert_eq!(
+        registry
+            .resolve("cf://provider-keys/registry-env-bind-key")
+            .unwrap()
+            .as_deref(),
+        Some("sk-bound")
     );
 }
 
 #[test]
-fn cf_resolver_accepts_store_by_id() {
-    // The `store` segment of the ref may be the store id directly.
-    let resolver = resolver_with(read_routes(
-        r#"{"id":"sec-1","name":"openai-api-key","value":"sk-cf-secret"}"#,
-    ));
-    let reference = SecretRef::CfSecret {
-        store: "store-1".into(),
-        name: "openai-api-key".into(),
-    };
+fn registry_prefers_binding_value_over_rest_backend() {
+    // A REST resolver with NO scripted routes: any network call would return
+    // the loud "unscripted request" error — so a successful resolve proves the
+    // binding context short-circuits before any REST traffic.
+    let rest = resolver_with(HashMap::new());
+    let mut bindings = CfSecretBindings::new();
+    bindings.insert("openai-api-key", "sk-from-binding");
+    let registry = SecretResolverRegistry::new()
+        .with_cloudflare(rest)
+        .with_cf_bindings(bindings);
     assert_eq!(
-        resolver.resolve(&reference).unwrap().as_deref(),
-        Some("sk-cf-secret")
+        registry
+            .resolve("cf://provider-keys/openai-api-key")
+            .unwrap()
+            .as_deref(),
+        Some("sk-from-binding")
     );
 }
+
+// --- REST backend: existence checks, write/manage-only scoping -------------
 
 #[test]
 fn cf_resolver_returns_none_for_missing_secret() {
-    let mut routes = read_routes(r#"{"id":"sec-1","name":"openai-api-key"}"#);
+    let mut routes = read_routes();
     // Empty secret list → the requested name is not present.
     routes.insert(
         format!("Get {BASE}/stores/store-1/secrets"),
@@ -193,11 +254,10 @@ fn cf_resolver_returns_none_for_missing_store() {
 
 #[test]
 fn cf_resolver_surfaces_write_only_value_as_precise_error() {
-    // A real Secrets Store returns metadata with NO `value` field. The resolver
-    // must NOT fabricate a value — it surfaces a precise error instead.
-    let resolver = resolver_with(read_routes(
-        r#"{"id":"sec-1","name":"openai-api-key","status":"active"}"#,
-    ));
+    // A real Secrets Store never returns a value over REST. The resolver must
+    // NOT fabricate one — an existing secret surfaces a precise error pointing
+    // at the supported Worker-binding path (decision #423).
+    let resolver = resolver_with(read_routes());
     let reference = SecretRef::CfSecret {
         store: "provider-keys".into(),
         name: "openai-api-key".into(),
@@ -207,6 +267,28 @@ fn cf_resolver_surfaces_write_only_value_as_precise_error() {
         error.contains("write-only"),
         "error should explain the write-only value semantics: {error}"
     );
+    assert!(
+        error.contains("FERROGATE_CF_SECRET_OPENAI_API_KEY"),
+        "error should point at the Worker-binding env convention: {error}"
+    );
+    assert!(
+        error.contains("vault://"),
+        "error should point at the readable-backend alternative: {error}"
+    );
+}
+
+#[test]
+fn cf_resolver_accepts_store_by_id() {
+    // The `store` segment of the ref may be the store id directly; reaching
+    // the write-only error (rather than Ok(None)) proves the store + secret
+    // lookups both succeeded.
+    let resolver = resolver_with(read_routes());
+    let reference = SecretRef::CfSecret {
+        store: "store-1".into(),
+        name: "openai-api-key".into(),
+    };
+    let error = resolver.resolve(&reference).unwrap_err().to_string();
+    assert!(error.contains("write-only"), "unexpected error: {error}");
 }
 
 // --- registry wiring (proves cf:// flows like vault://) --------------------
@@ -215,29 +297,35 @@ fn cf_resolver_surfaces_write_only_value_as_precise_error() {
 fn registry_errors_on_cf_reference_without_cloudflare_configured() {
     let registry = SecretResolverRegistry::new();
     let error = registry
-        .resolve("cf://provider-keys/openai-api-key")
+        .resolve("cf://provider-keys/unbound-unconfigured-key")
         .unwrap_err()
         .to_string();
     assert!(
         error.contains("not configured"),
         "unconfigured cf:// must error clearly: {error}"
     );
+    assert!(
+        error.contains("FERROGATE_CF_SECRET_UNBOUND_UNCONFIGURED_KEY"),
+        "the error must name the binding env var that was checked: {error}"
+    );
 }
 
 #[test]
-fn registry_routes_cf_reference_through_configured_resolver() {
-    let resolver = resolver_with(read_routes(
-        r#"{"id":"sec-1","name":"openai-api-key","value":"sk-cf-secret"}"#,
-    ));
-    let registry = SecretResolverRegistry::new().with_cloudflare(resolver);
-    // A cf:// ref resolves through the registry exactly like a vault:// one —
-    // this is the seam every provider/MCP secret_ref flows through.
+fn registry_routes_cf_reference_through_configured_rest_resolver() {
+    // With no binding value present, a cf:// ref flows through the registry to
+    // the REST backend exactly like a vault:// one — whose existence check
+    // yields None for a missing secret.
+    let mut routes = read_routes();
+    routes.insert(
+        format!("Get {BASE}/stores/store-1/secrets"),
+        (200, ok_envelope("[]")),
+    );
+    let registry = SecretResolverRegistry::new().with_cloudflare(resolver_with(routes));
     assert_eq!(
         registry
-            .resolve("cf://provider-keys/openai-api-key")
-            .unwrap()
-            .as_deref(),
-        Some("sk-cf-secret")
+            .resolve("cf://provider-keys/registry-rest-missing-key")
+            .unwrap(),
+        None
     );
 }
 
