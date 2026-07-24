@@ -6,8 +6,9 @@
   description: Token4AI Cloud, FerroGate AI Gateway, Cloudflare integration research
   spike + developer-docs reference (issue #421): MCP, R2/Workers/Pages static
   hosting, managed agents, Secrets Store, D1, Workers AI Llama Guard, deploy
-  topology, and the shared API-token auth model. AI Gateway was evaluated and
-  dropped as redundant; the rationale is recorded here.
+  topology, and the shared API-token auth model. AI Gateway was originally
+  deprioritized as a standalone managed-product adapter, then re-added by #406 as
+  optional per-provider pass-through routing; the history is recorded here.
 -->
 
 # Cloudflare Integration Reference
@@ -28,7 +29,7 @@ this doc originally called "planned" are now marked **exists today**.
 
 ## Contents
 
-- [1. AI Gateway — evaluated and dropped](#1-ai-gateway--evaluated-and-dropped)
+- [1. AI Gateway — optional pass-through routing](#1-ai-gateway--optional-pass-through-routing)
 - [2. MCP (Model Context Protocol)](#2-mcp-model-context-protocol)
 - [3. Static hosting: R2, Workers Static Assets, Pages](#3-static-hosting-r2-workers-static-assets-pages)
 - [4. Managed agents](#4-managed-agents)
@@ -41,11 +42,11 @@ this doc originally called "planned" are now marked **exists today**.
 
 ---
 
-## 1. AI Gateway — evaluated and dropped
+## 1. AI Gateway — optional pass-through routing
 
-**Decision: the Cloudflare AI Gateway integration was evaluated during this spike
-and DROPPED as redundant.** It is recorded here so the decision is not
-re-litigated by a later implementer.
+Cloudflare AI Gateway is supported as an **active, opt-in** integration: a
+provider can route its upstream requests *through* a configured AI Gateway while
+FerroGate remains the gateway of record.
 
 ### What AI Gateway is
 
@@ -55,36 +56,60 @@ unified billing. It exposes a provider-native "compat" surface
 (`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/{provider}/...`),
 a normalized unified endpoint, BYOK key storage, and `cf-aig-*` request headers.
 
-### Why it was dropped
+### History: deprioritized as a standalone adapter, then re-added by #406
 
-FerroGate **is itself the AI gateway.** Every capability AI Gateway offers is a
-first-class FerroGate responsibility already:
+The spike first evaluated AI Gateway as a **standalone managed-product adapter/
+seam** and deprioritized it as redundant: FerroGate **is itself the AI gateway** —
+caching, rate limiting, retries/fallback, logging/analytics, billing, and provider
+routing are all first-class FerroGate responsibilities (Pingora data plane, the
+observability + billing pipeline, the provider adapters + secret-resolver). Making
+FerroGate a *client of* AI Gateway for those functions would double the source of
+truth for cost/latency/logs and add a second set of limits for no net capability.
 
-- **Caching / rate limiting / retries / fallback** — owned by FerroGate's Pingora
-  data plane and provider/upstream layer.
-- **Logging / analytics / billing** — owned by FerroGate's observability +
-  billing pipeline (`docs/analytics-warehouse.md`, the billing ledger stores).
-- **Provider routing / BYOK** — owned by FerroGate's provider adapters and
-  secret-resolver (§5, §10.5).
+**That drop decision was superseded by #406**, which added the more surgical
+integration below instead of a full adapter.
 
-Layering FerroGate on top of AI Gateway would double the proxy hop, split the
-source of truth for cost/latency/logs across two systems, and add a second set of
-limits (e.g. the unified-billing endpoint's ~200 req / 60 s throttle) for no net
-capability. There is therefore **no FerroGate plug-in seam for AI Gateway** — §10
-does not list one.
+### What #406 added: optional per-provider pass-through routing
 
-### Scope-table footnote (important)
+`#406` added an opt-in, per-provider request-shaping layer on top of the existing
+provider dispatch path. When a provider sets
+`ProviderConfig.cloudflare_ai_gateway`
+(`crates/ferrogate-providers/src/types.rs:36`,
+`Option<CloudflareAiGatewayRouting>` — `crates/ferrogate-providers/src/cloudflare.rs:76`),
+the adapter first builds the `ProviderHttpRequest` exactly as today, then the
+registry calls `apply_cloudflare_ai_gateway_routing`
+(`crates/ferrogate-providers/src/cloudflare.rs:191`) to rewrite the outbound URL
+onto the gateway host and inject the `cf-aig-*` headers. Absent the field, the
+provider dispatches directly — the rewrite is fully opt-in and non-breaking.
 
-The foundation client's required-scope set (`crates/ferrogate-cloudflare/src/scopes.rs:33`)
-still enumerates an **AI Gateway (Read, Edit)** permission group from before this
-drop decision. The scopes table in §9 matches the code exactly (the code is the
-source of truth for the preflight), so it keeps that row. Granting an unused
-permission group is harmless; pruning it from the preflight set is a code
-follow-up, not a docs change.
+Two surfaces are selectable via `CloudflareAiGatewayMode`
+(`crates/ferrogate-providers/src/cloudflare.rs:44`):
+
+- **Compat** (default) — per-provider passthrough under
+  `.../{gateway_id}/{provider}/...`; the provider request shape and its native
+  auth header (BYOK `Authorization` / `x-api-key`) are forwarded verbatim, so
+  Cloudflare is a transparent pass-through and the normalized response is
+  unchanged.
+- **Unified** — the unified REST API under
+  `.../accounts/{account_id}/ai/v1/{surface}`, gateway selected by the
+  `cf-aig-gateway-id` header and the body `model` rewritten to `author/model`
+  form.
+
+The AI Gateway id/base URLs come from the global `[cloudflare]` block (#405); an
+authenticated gateway's token is injected as `cf-aig-authorization: Bearer`,
+resolved from `aig_token_secret_ref` through the existing secret path.
+
+### Why it stays optional (original rationale preserved)
+
+Because routing is opt-in and transparent, FerroGate keeps owning caching, limits,
+logging, and billing by default; a tenant enables AI-Gateway routing only when it
+specifically wants Cloudflare-side caching/observability in addition. That is the
+active-optional shape — **not** a default hard dependency on AI Gateway. The
+plug-in seam this rides on is §10.7.
 
 > Note: FerroGate's optional Llama Guard guardrail detector (§7) talks to
-> **Workers AI** (`/ai/run`), **not** AI Gateway — it has no AI-Gateway
-> dependency, consistent with this drop.
+> **Workers AI** (`/ai/run`), **not** AI Gateway — it is a distinct integration
+> from the optional provider routing above and carries no AI-Gateway dependency.
 
 ---
 
@@ -304,7 +329,7 @@ fronting-Worker pattern (§4).
 
 An **optional, opt-in** content-moderation detector (issue #422) that FerroGate
 composes with its native guardrail rules. **It does NOT depend on AI Gateway**
-(which was dropped, §1) — it calls Workers AI directly.
+(the optional provider routing in §1) — it calls Workers AI directly.
 
 ### Shape
 
@@ -414,9 +439,10 @@ copied verbatim from the code, in code order.
 
 Notes:
 
-- **AI Gateway** row is retained because the code still lists it (§1): the table
-  matches `scopes.rs`, not the current integration set. The integration is dropped;
-  the granted scope is harmless and pruning it is a code follow-up.
+- **AI Gateway** row backs the optional per-provider pass-through routing added by
+  #406 (§1, `ProviderConfig.cloudflare_ai_gateway`). Grant it when any provider
+  opts into AI-Gateway routing; a deployment that uses no AI-Gateway routing can
+  omit it (the table lists the full foundational set, per `scopes.rs`).
 - **Workflows** has no standalone permission group for the deploy path — managing
   Workflows requires **Workers Scripts Write/Edit** (the Workflow ships inside a
   Worker script), which is why the code names it `Workflows (Workers Scripts)`.
@@ -436,8 +462,8 @@ at startup when the token is missing/invalid; per-group enforcement surfaces via
 ## 10. FerroGate plug-in seams
 
 Each Cloudflare area plugs into an existing FerroGate seam. Citations are against
-current `main` and were grep-verified while writing. AI Gateway has **no seam**
-(dropped, §1).
+current `main` and were grep-verified while writing. AI Gateway plugs into the
+provider-adapter routing seam (§10.7).
 
 ### 10.1 R2 → asset object-store seam
 
@@ -520,11 +546,28 @@ current `main` and were grep-verified while writing. AI Gateway has **no seam**
 - **Fit:** the detector returns a verdict; policy composition decides enforcement
   (§7). No AI Gateway dependency.
 
+### 10.7 AI Gateway → provider-adapter routing seam
+
+- **Seam (exists today, #406):** `ProviderConfig.cloudflare_ai_gateway` —
+  `crates/ferrogate-providers/src/types.rs:36` (`Option<CloudflareAiGatewayRouting>`,
+  `crates/ferrogate-providers/src/cloudflare.rs:76`; mode enum
+  `CloudflareAiGatewayMode` at `:44`). The registry applies it after the adapter
+  builds the request, via `apply_cloudflare_ai_gateway_routing` —
+  `crates/ferrogate-providers/src/cloudflare.rs:191`.
+- **Config + wiring:** file-config `ProviderCloudflareAiGatewayConfig` —
+  `crates/ferrogate-cli/src/config/types.rs:1055`; validated by
+  `validate_cloudflare_ai_gateway_providers` (requires a `[cloudflare]` block, #405)
+  — `crates/ferrogate-cli/src/config/validate.rs:244`; resolved to routing at
+  `cloudflare_ai_gateway_routing` — `crates/ferrogate-cli/src/state_routing.rs:158`.
+- **Fit:** opt-in per-provider URL rewrite + `cf-aig-*` headers on the existing
+  `ProviderHttpRequest` (§1); body and BYOK auth preserved, so it is a transparent
+  pass-through. FerroGate stays the gateway of record.
+
 ### Seam summary
 
 | CF area | FerroGate seam | Exists today? |
 |---------|----------------|---------------|
-| AI Gateway | — (dropped, §1) | n/a — no seam |
+| AI Gateway | provider-adapter routing (`cloudflare_ai_gateway` + `apply_cloudflare_ai_gateway_routing`) | Yes (opt-in, #406) |
 | R2 static hosting | `AssetObjectStore` trait + `AssetBucketClient` | Yes |
 | Secrets Store | `SecretResolver` / `SecretRef::CfSecret` + `CloudflareSecretResolver` | Yes |
 | Managed agents | isolation-backend registry + fronting-Worker transport | Seam yes; CF backend no |
