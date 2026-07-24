@@ -217,10 +217,12 @@ fn admin_api_service_serves_the_admin_surface_with_gateway_parity() {
     );
     assert_eq!(response_json(&data_plane)["error"]["code"], "not_found");
 
-    // The service's own health endpoint answers locally.
+    // The service's own health endpoint answers locally, reporting the
+    // canonical FerroGate Control Plane API identity (#359) even when the
+    // process was launched via the deprecated `admin-api serve` alias.
     let health = http_request(&admin_api_addr, "GET", "/healthz", &[], "");
     assert!(
-        health.contains("HTTP/1.1 200") && health.contains("ferrogate-admin-api"),
+        health.contains("HTTP/1.1 200") && health.contains("ferrogate-control-plane-api"),
         "unexpected health response: {health}"
     );
 
@@ -393,7 +395,9 @@ fn raw_admin_api_request(addr: &str, raw: &str) -> String {
 
 /// Startup fail-closed: with no credential source at all (no [[api_keys]],
 /// no external auth service, no durable storage backend) the service
-/// refuses to start rather than running an open admin proxy.
+/// refuses to start rather than running an open control-plane proxy. Driven
+/// through the DEPRECATED `admin-api serve` + `[admin_api]` alias to prove
+/// the alias still reaches the identical fail-closed guard (#359).
 #[test]
 fn admin_api_refuses_to_start_without_a_credential_source() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,11 +423,153 @@ fn admin_api_refuses_to_start_without_a_credential_source() {
         .unwrap();
     assert!(
         !output.status.success(),
-        "an open admin proxy must refuse to start"
+        "an open control-plane proxy must refuse to start"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("refusing to start an open admin proxy"),
+        stderr.contains("refusing to start an open Control Plane API proxy"),
+        "unexpected startup error: {stderr}"
+    );
+}
+
+/// #359 canonical path: `ferrogate control-api serve` reading a `[control_api]`
+/// config section starts the FerroGate Control Plane API service, reports the
+/// canonical `/healthz` identity, and enforces the SAME fail-closed auth gate
+/// as the deprecated alias -- unauthenticated callers are refused locally
+/// (401) and a fully authorized caller passes the gate and only then reaches
+/// the (deliberately dead) upstream (502). No gateway is spawned: this proves
+/// the command dispatch, the `[control_api]` section wiring, and the canonical
+/// naming without the heavier full-parity flow.
+#[test]
+fn control_api_command_and_config_section_start_and_gate() {
+    let dead_gateway_addr = free_addr();
+    let control_api_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+listen = "{dead_gateway_addr}"
+
+[control_api]
+listen = "{control_api_addr}"
+gateway_url = "http://{dead_gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut control_api = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args([
+            "control-api",
+            "serve",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_gateway(&control_api_addr);
+
+    // Canonical health identity.
+    let health = http_request(&control_api_addr, "GET", "/healthz", &[], "");
+    assert!(
+        health.contains("HTTP/1.1 200") && health.contains("ferrogate-control-plane-api"),
+        "unexpected health response: {health}"
+    );
+
+    // Unauthenticated -> 401 at the Control Plane API layer.
+    let unauthenticated = http_request(
+        &control_api_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &["Content-Type: application/json"],
+        "",
+    );
+    assert!(
+        unauthenticated.contains("HTTP/1.1 401"),
+        "unauthenticated caller must be refused locally: {unauthenticated}"
+    );
+
+    // Authorized -> passes the gate, reaches the dead upstream -> 502.
+    let authorized = http_request(
+        &control_api_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        authorized.contains("HTTP/1.1 502"),
+        "authorized caller must reach forwarding through [control_api]: {authorized}"
+    );
+    assert_eq!(
+        response_json(&authorized)["error"]["code"],
+        "admin_upstream_unreachable"
+    );
+
+    let _ = control_api.kill();
+    let _ = control_api.wait();
+}
+
+/// #359 conflict guard: a config that sets BOTH the canonical `[control_api]`
+/// section and the deprecated `[admin_api]` alias is rejected at startup with
+/// a clear, actionable error rather than silently picking one.
+#[test]
+fn conflicting_control_api_and_admin_api_sections_refuse_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+listen = "{}"
+
+[control_api]
+listen = "{}"
+gateway_url = "http://127.0.0.1:1"
+
+[admin_api]
+listen = "{}"
+gateway_url = "http://127.0.0.1:1"
+
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#,
+            free_addr(),
+            free_addr(),
+            free_addr()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args([
+            "control-api",
+            "serve",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "conflicting control-plane config must refuse to start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting control-plane API configuration"),
         "unexpected startup error: {stderr}"
     );
 }

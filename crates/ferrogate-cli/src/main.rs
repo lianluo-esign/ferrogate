@@ -39,7 +39,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use std::sync::Arc;
 
 use crate::{
-    cli::{AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands},
+    cli::{AdminApiCommands, AuthCommands, BillingCommands, Cli, Commands, ControlApiCommands},
     config::Config,
     gateway::serve,
     lifecycle::{
@@ -110,13 +110,23 @@ fn main() -> AnyResult<()> {
                 })
             }
         },
+        // The standalone FerroGate Control Plane API service (issue #359,
+        // formerly #315's admin-api) loads the SAME config file the gateway
+        // runs from ([control_api] section, or the deprecated [admin_api]
+        // alias, plus the shared [[api_keys]]/[storage]/[limits] sections),
+        // so both processes agree on credentials and caps.
+        Commands::ControlApi(args) => match args.command {
+            ControlApiCommands::Serve(args) => {
+                admin_api::execute_control_api_serve(Config::load(&args.config)?)
+            }
+        },
+        // Deprecated alias retained for the migration window: identical
+        // behavior to `control-api serve`, preceded by an actionable
+        // deprecation notice.
         Commands::AdminApi(args) => match args.command {
-            // The standalone admin-console API service (issue #315) loads
-            // the SAME config file the gateway runs from ([admin_api]
-            // section plus the shared [[api_keys]]/[storage]/[limits]
-            // sections), so both processes agree on credentials and caps.
             AdminApiCommands::Serve(args) => {
-                admin_api::execute_admin_api_serve(Config::load(&args.config)?)
+                admin_api::emit_admin_api_command_deprecation();
+                admin_api::execute_control_api_serve(Config::load(&args.config)?)
             }
         },
         Commands::Billing(args) => match args.command {

@@ -270,10 +270,12 @@ runs, rather than separate binaries per service:
   [`docs/auth-service-contract.md`](docs/auth-service-contract.md).
 - `ferrogate billing serve` — the token-usage pricing and ledger REST API,
   in-memory by default or durable via `--supabase-dsn`.
-- `ferrogate admin-api serve` — the standalone admin-console API service: a
-  dedicated, fail-closed authenticated listener that proxies the
-  path-compatible `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway,
-  so admin control-plane traffic never rides the AI data-plane listener.
+- `ferrogate control-api serve` — the standalone **FerroGate Control Plane
+  API** service: a dedicated, fail-closed authenticated listener that proxies
+  the path-compatible `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway,
+  so control-plane traffic never rides the AI data-plane listener. Configured
+  under `[control_api]`. `ferrogate admin-api serve` and the `[admin_api]`
+  section remain a deprecated compatibility alias for the migration window.
   See [`docs/admin-api-service.md`](docs/admin-api-service.md).
 - `ferrogate storage migrate-to-supabase` — one-shot migration of legacy
   Postgres control-plane state into Supabase.
@@ -307,14 +309,15 @@ own port (`8092` above), not to the gateway's `/admin` or `/v1` surface.
 The admin console (`admin-console/`) is a standalone deployable: a
 static React SPA, not a `ferrogate` subcommand. It calls `ferrogate auth
 serve`'s `/v1/admin/*` endpoints for login/registration and, for everything
-else, the dedicated `ferrogate admin-api serve` service (issue #315) when
+else, the dedicated `ferrogate control-api serve` FerroGate Control Plane API
+service (issue #359, formerly `admin-api serve` from #315) when
 `ADMIN_API_BASE_URL` is set — falling back to the gateway's own
 `/admin/v1/*` surface (`GATEWAY_ADMIN_BASE_URL`) for backward
 compatibility. Both calls are cross-origin, so configure CORS for whatever
 origin the console is served from (the auth service's
 `--cors-allowed-origin` / `FERROGATE_AUTH_CORS_ALLOWED_ORIGIN`, plus
-`admin_api.cors_allowed_origin` and the gateway's
-`admin.cors_allowed_origin` config fields). See
+`control_api.cors_allowed_origin` — or the deprecated `admin_api.cors_allowed_origin` —
+and the gateway's `admin.cors_allowed_origin` config fields). See
 [`admin-console/README.md`](admin-console/README.md) to run it locally.
 
 ## Core Modules

@@ -1,4 +1,4 @@
-# Standalone admin-console API service (`ferrogate admin-api serve`)
+# Standalone FerroGate Control Plane API service (`ferrogate control-api serve`)
 
 > **Naming — FerroGate Control Plane API (issue #359).** This service is the
 > **FerroGate Control Plane API**: the supported, externally consumable REST
@@ -10,11 +10,17 @@
 > machine-readable contract for the service; it is not the service's product
 > name.
 >
-> The `admin-api` name — the `ferrogate admin-api serve` command, the
-> `[admin_api]` config section, the `FERROGATE_ADMIN_*` environment names, and
-> the `/admin/v1` path prefix — is retained as a **documented, deprecated
-> compatibility alias** for the migration window. The stable `/admin/v1` paths
-> are unchanged, so existing admin clients keep working byte-for-byte.
+> **Canonical entrypoints:** launch it with `ferrogate control-api serve` and
+> configure it under the `[control_api]` section. The `admin-api` name — the
+> `ferrogate admin-api serve` command and the `[admin_api]` config section (plus
+> the `FERROGATE_ADMIN_*` environment names and the `/admin/v1` path prefix) —
+> is retained as a **documented, deprecated compatibility alias** for the
+> migration window. `admin-api serve` still works and prints an actionable
+> deprecation notice; `[admin_api]` still loads (with a deprecation log) and
+> maps 1:1 onto `[control_api]`. **Setting both `[control_api]` and `[admin_api]`
+> is rejected at load** with a clear error rather than silently picking one. The
+> stable `/admin/v1` paths are unchanged, so existing admin clients keep working
+> byte-for-byte.
 >
 > **Stability contract.** Operations promoted into the versioned public-stable
 > surface carry `x-ferrogate-stability: "stable"` in the OpenAPI document and
@@ -33,13 +39,19 @@
 > their `admin` runtime visibility / admin-scope enforcement; the stability
 > marker is an external supportability promise, not a relaxation of auth.
 >
-> **Deferred to later slices of #359** (tracked on the open issue): the
-> canonical `ferrogate control-api serve` command with a deprecation notice on
-> `admin-api serve`; the non-breaking `admin_api` → control-plane config /
-> environment migration that rejects ambiguous old+new configuration; a second
-> URI namespace alias (only allowed once both paths are generated from one route
-> contract with tested behavior parity); and promotion of the remaining admin
-> resource families.
+> **Delivered in this slice of #359** (additive, non-breaking): the canonical
+> `ferrogate control-api serve` command; the `admin-api serve` deprecation
+> notice; the non-breaking `[admin_api]` → `[control_api]` config migration with
+> explicit rejection of a conflicting old+new configuration; and the
+> Control Plane API product naming across CLI help, startup logs, and the
+> service's own `/healthz` evidence.
+>
+> **Deferred to later slices of #359** (tracked on the open issue): a second URI
+> namespace alias such as `/control/v1` (only allowed once both paths are
+> generated from one route contract with tested behavior parity); promotion of
+> the remaining admin resource families; and the end-to-end acceptance flow
+> (Admin Console login + resource CRUD + CLI read/mutation) proven through the
+> canonical service, which is the test gate's box.
 
 Issue #315. The admin console used to call the gateway's `/admin/v1/*`
 surface directly, which meant admin control-plane traffic rode the same
@@ -92,22 +104,31 @@ The service loads the **same config file as the gateway** (shared
 `[[api_keys]]`, `[storage]`, `[limits]`) plus its own section:
 
 ```toml
-[admin_api]
+[control_api]
 listen = "127.0.0.1:8095"              # default
 gateway_url = "http://127.0.0.1:8080"  # internal gateway base URL (http:// only)
 upstream_timeout_millis = 30000
 # cors_allowed_origin = "https://admin.example.com"
-# tls_cert_path = "./certs/admin-api.crt"   # optional listener TLS,
-# tls_key_path  = "./certs/admin-api.key"   # both paths together
+# tls_cert_path = "./certs/control-api.crt"  # optional listener TLS,
+# tls_key_path  = "./certs/control-api.key"  # both paths together
 ```
 
-Run it:
+The deprecated `[admin_api]` section is still accepted for the migration window
+and maps field-for-field onto `[control_api]`; using it logs a deprecation
+notice. Setting **both** `[control_api]` and `[admin_api]` is rejected at load
+with a clear error (never silently resolved) — keep only one, and prefer
+`[control_api]`.
+
+Run it (canonical):
 
 ```sh
-ferrogate admin-api serve --config Ferrogate/ferrogate.toml
+ferrogate control-api serve --config Ferrogate/ferrogate.toml
 ```
 
-`GET /healthz` answers locally (`{"service":"ferrogate-admin-api"}`) and
+`ferrogate admin-api serve` remains a deprecated alias that behaves identically
+and prints a deprecation notice pointing at `control-api serve`.
+
+`GET /healthz` answers locally (`{"service":"ferrogate-control-plane-api"}`) and
 is intentionally not part of the gateway's OpenAPI contract.
 
 `gateway_url` is `http://` only, mirroring `auth_service.endpoint`: the
@@ -117,8 +138,8 @@ on the listener (`tls_cert_path`/`tls_key_path`) or at an Ingress.
 CORS: the OPTIONS preflight is answered locally (a preflight carries no
 Authorization header, so it never hits the auth gate); real responses
 carry the gateway's own CORS headers, so set the gateway's
-`admin.cors_allowed_origin` and `admin_api.cors_allowed_origin` to the
-same console origin.
+`admin.cors_allowed_origin` and `control_api.cors_allowed_origin` (or the
+deprecated `admin_api.cors_allowed_origin`) to the same console origin.
 
 Note on memory-only storage: with `storage.provider = "memory"` there is
 no shared durable backend, so virtual keys minted at runtime inside the
@@ -143,7 +164,17 @@ value) points the console at it.
   (data plane refused), scope mapping, `[limits]` cap resolution, and the
   fail-closed auth gate (401/403 codes identical to the gateway).
 - `crates/ferrogate-cli/tests/admin_api_service_e2e.rs` — gateway +
-  admin-api as real processes: console-shaped create/list with byte-equal
-  parity vs the gateway, cross-tenant denial through the proxy (#185),
-  data-plane 404, and a dead-upstream proof that 401/403/413 are produced
-  by the admin-api layer itself before any forwarding.
+  Control Plane API as real processes: console-shaped create/list with
+  byte-equal parity vs the gateway, cross-tenant denial through the proxy
+  (#185), data-plane 404, and a dead-upstream proof that 401/403/413 are
+  produced by the Control Plane API layer itself before any forwarding. Also
+  covers the canonical `control-api serve` + `[control_api]` startup/gate path
+  (`control_api_command_and_config_section_start_and_gate`), the deprecated
+  `admin-api serve` fail-closed path, and the conflicting-`[control_api]`+
+  `[admin_api]` startup rejection.
+- `crates/ferrogate-cli/src/config/validation_tests.rs` — `[control_api]`
+  (new-only), `[admin_api]` alias (old-only, maps identically), the
+  both-present conflict rejection, and migration idempotency.
+- `crates/ferrogate-cli/src/cli.rs` (`cli_parse_tests`) — the canonical
+  `control-api serve` command and the deprecated `admin-api serve` alias both
+  parse; the clap command tree is valid.

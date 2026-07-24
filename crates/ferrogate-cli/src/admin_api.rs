@@ -46,9 +46,29 @@ use crate::{
     config::Config,
 };
 
+/// Canonical wire/log identity of the standalone FerroGate Control Plane API
+/// service (issue #359). Emitted in the startup log, the connection-accept
+/// service label, and this service's own `/healthz` evidence, so operators
+/// see the promoted product name regardless of whether the process was
+/// launched via `control-api serve` or the deprecated `admin-api serve`
+/// alias. Not part of any REST contract (the `/healthz` probe is deliberately
+/// outside the OpenAPI surface).
+const CONTROL_PLANE_SERVICE_ID: &str = "ferrogate-control-plane-api";
+
 /// Downstream (console-facing) socket timeout, matching the auth service's
 /// #147 hardening value.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Print the actionable deprecation notice for the `ferrogate admin-api serve`
+/// command alias (issue #359). The command still runs the canonical FerroGate
+/// Control Plane API service; this only nudges operators toward the new name.
+pub(crate) fn emit_admin_api_command_deprecation() {
+    tracing::warn!(
+        "`ferrogate admin-api serve` is a deprecated alias for `ferrogate control-api serve` \
+         (FerroGate Control Plane API). It still works during the migration window; switch to \
+         `control-api serve` and rename the [admin_api] config section to [control_api]."
+    );
+}
 
 /// Header (and framing) headroom added on top of the largest configured
 /// per-path body cap when sizing the parser ceiling.
@@ -173,22 +193,22 @@ impl AdminApiService {
     }
 }
 
-pub(crate) fn execute_admin_api_serve(config: Config) -> anyhow::Result<()> {
-    // Fail closed at startup: this service must never be an open admin
+pub(crate) fn execute_control_api_serve(config: Config) -> anyhow::Result<()> {
+    // Fail closed at startup: this service must never be an open control-plane
     // proxy. The gateway's zero-config "auth disabled" convenience mode
     // (no api_keys, no external auth service) is deliberately NOT
-    // mirrored here -- an admin edge with no credential source at all is
-    // a misconfiguration, not a mode.
+    // mirrored here -- a control-plane edge with no credential source at all
+    // is a misconfiguration, not a mode.
     let has_durable_backend = matches!(
         config.storage.provider,
         StorageProviderKind::Postgres | StorageProviderKind::Supabase
     );
     if config.api_keys.is_empty() && !config.auth_service.enabled && !has_durable_backend {
         anyhow::bail!(
-            "refusing to start an open admin proxy: the config has no credential source \
-             (no [[api_keys]], no enabled [auth_service], and no durable Postgres/Supabase \
-             [storage] backend for virtual keys); the admin-api service authenticates every \
-             request before forwarding and cannot do so without one"
+            "refusing to start an open Control Plane API proxy: the config has no credential \
+             source (no [[api_keys]], no enabled [auth_service], and no durable Postgres/Supabase \
+             [storage] backend for virtual keys); the FerroGate Control Plane API service \
+             authenticates every request before forwarding and cannot do so without one"
         );
     }
 
@@ -214,20 +234,21 @@ pub(crate) fn execute_admin_api_serve(config: Config) -> anyhow::Result<()> {
     let tls_config = load_tls_config(&config)?;
     let listen = config.admin_api.listen.clone();
     let listener = TcpListener::bind(&listen)
-        .with_context(|| format!("failed to bind ferrogate-admin-api on {listen}"))?;
+        .with_context(|| format!("failed to bind {CONTROL_PLANE_SERVICE_ID} on {listen}"))?;
     let service = Arc::new(AdminApiService {
         config,
         durable_authenticator,
         request_ids: AtomicU64::new(1),
     });
     println!(
-        "ferrogate-admin-api listening on {listen} (tls: {}), proxying the admin surface to {}",
+        "{CONTROL_PLANE_SERVICE_ID} (FerroGate Control Plane API) listening on {listen} \
+         (tls: {}), proxying the control-plane surface to {}",
         tls_config.is_some(),
         service.config.admin_api.gateway_url
     );
     serve_connections(
         listener,
-        "ferrogate-admin-api",
+        CONTROL_PLANE_SERVICE_ID,
         Arc::new(move |stream| handle_connection(stream, tls_config.clone(), &service)),
     )
 }
@@ -337,7 +358,7 @@ fn route_request(request: &HttpRequest, service: &AdminApiService) -> Routed {
         // gateway's OpenAPI contract.
         return Routed::Local(HttpResponse::json(
             200,
-            json!({ "service": "ferrogate-admin-api", "status": "ok" }),
+            json!({ "service": CONTROL_PLANE_SERVICE_ID, "status": "ok" }),
         ));
     }
     let request_id = service.next_request_id();
@@ -345,8 +366,8 @@ fn route_request(request: &HttpRequest, service: &AdminApiService) -> Routed {
         return Routed::Local(error_response(
             404,
             "not_found",
-            "not an admin-console API endpoint; the AI data plane is not served by \
-             the admin-api listener",
+            "not a FerroGate Control Plane API endpoint; the AI data plane is not served by \
+             the Control Plane API listener",
             &request_id,
         ));
     };
@@ -407,12 +428,12 @@ fn forward_request<S: Read + Write>(
                 tracing::warn!(
                     method = %request.method,
                     path = %request.path,
-                    "admin-api upstream connect failed: {error:#}"
+                    "Control Plane API upstream connect failed: {error:#}"
                 );
                 let response = error_response(
                     502,
                     "admin_upstream_unreachable",
-                    "the gateway admin surface is unreachable from the admin-api service",
+                    "the gateway admin surface is unreachable from the Control Plane API service",
                     &request_id,
                 );
                 return stream
@@ -445,7 +466,12 @@ fn forward_request<S: Read + Write>(
                 .context("failed to relay the gateway response")?;
         }
     };
-    relay().map_err(|error| anyhow!("admin-api relay for {} failed: {error:#}", request.path))
+    relay().map_err(|error| {
+        anyhow!(
+            "Control Plane API relay for {} failed: {error:#}",
+            request.path
+        )
+    })
 }
 
 struct UpstreamConnection {

@@ -4,7 +4,7 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use anyhow::{Context, Result as AnyResult};
+use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_config::{
     is_caddyfile_path, load_caddyfile, parse_caddyfile, GatewayConfig, GatewayTlsAcmeConfig,
 };
@@ -28,6 +28,7 @@ impl Config {
 
         if is_caddyfile_path(path) {
             let mut config = Self::from_gateway_config(load_caddyfile(path)?);
+            config.migrate_control_plane_aliases()?;
             config.resolve_paths_relative_to(path.parent());
             config.materialize_skill_package_resources();
             config
@@ -39,6 +40,7 @@ impl Config {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let mut config: Self = parse_structured_config(path, &raw)?;
+        config.migrate_control_plane_aliases()?;
         config.resolve_paths_relative_to(path.parent());
         config.materialize_skill_package_resources();
         config
@@ -49,6 +51,7 @@ impl Config {
 
     pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
         let mut config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
+        config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
@@ -56,6 +59,7 @@ impl Config {
 
     pub(crate) fn from_yaml_str(raw: &str) -> AnyResult<Self> {
         let mut config: Self = serde_yaml::from_str(raw).context("failed to parse YAML config")?;
+        config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
@@ -63,9 +67,49 @@ impl Config {
 
     pub(crate) fn from_caddyfile_str(raw: &str, file: &str) -> AnyResult<Self> {
         let mut config = Self::from_gateway_config(parse_caddyfile(raw, file)?);
+        config.migrate_control_plane_aliases()?;
         config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
+    }
+
+    /// #359: resolve the effective FerroGate Control Plane API service config
+    /// from the canonical `[control_api]` section or the deprecated
+    /// `[admin_api]` alias.
+    ///
+    /// Non-breaking migration with an explicit conflict guard:
+    /// - canonical-only (`[control_api]`) is used directly;
+    /// - alias-only (`[admin_api]`) still works but logs an actionable
+    ///   migration notice;
+    /// - both present is rejected with a clear error rather than silently
+    ///   picking one;
+    /// - neither present leaves the built-in defaults in place.
+    ///
+    /// Idempotent: after resolution both raw inputs are cleared, so re-running
+    /// it (or running it on a cloned/already-resolved config) is a no-op that
+    /// never wipes the resolved value.
+    pub(crate) fn migrate_control_plane_aliases(&mut self) -> AnyResult<()> {
+        match (self.control_api.take(), self.admin_api_alias.take()) {
+            (Some(_), Some(_)) => bail!(
+                "conflicting control-plane API configuration: both the canonical [control_api] \
+                 section and the deprecated [admin_api] alias are set. They map to the same \
+                 FerroGate Control Plane API service, so keep only one -- prefer [control_api] \
+                 and remove [admin_api]."
+            ),
+            (Some(control_api), None) => {
+                self.admin_api = control_api;
+            }
+            (None, Some(admin_api)) => {
+                warn!(
+                    "the [admin_api] config section is a deprecated alias; rename it to \
+                     [control_api] (FerroGate Control Plane API). The [admin_api] alias still \
+                     works during the migration window and maps 1:1 onto [control_api]."
+                );
+                self.admin_api = admin_api;
+            }
+            (None, None) => {}
+        }
+        Ok(())
     }
 
     /// Map the Caddyfile intermediate model into the runtime config shape.
@@ -79,6 +123,11 @@ impl Config {
             auth_service: crate::config::AuthServiceConfig::default(),
             billing_service: crate::config::BillingServiceConfig::default(),
             admin_api: crate::config::AdminApiConfig::default(),
+            // #359: the Caddyfile bridge has no control-plane API section; the
+            // effective config stays at its default and neither alias input
+            // is present.
+            control_api: None,
+            admin_api_alias: None,
             tls: match (config.tls, config.tls_acme) {
                 (Some(tls), None) => TlsConfig {
                     enabled: true,

@@ -3959,6 +3959,112 @@ cors_allowed_origin = "https://admin.example.test"
 }
 
 // --------------------------------------------------------------------------
+// #359: FerroGate Control Plane API config migration. The canonical
+// `[control_api]` section and the deprecated `[admin_api]` alias both map onto
+// the same effective service config; having both is rejected explicitly rather
+// than silently resolved. `/admin/v1` stays stable -- this is a naming/config
+// change only.
+// --------------------------------------------------------------------------
+
+/// New-only: the canonical `[control_api]` section parses and maps onto the
+/// effective control-plane service config with every field carried through.
+#[test]
+fn control_api_section_maps_to_effective_config() {
+    let config = Config::from_toml_str(
+        r#"
+[control_api]
+listen = "0.0.0.0:9095"
+gateway_url = "http://ferrogate.internal:8080"
+upstream_timeout_millis = 12345
+cors_allowed_origin = "https://admin.example.test"
+"#,
+    )
+    .expect("control_api section must parse and validate");
+    assert_eq!(config.admin_api.listen, "0.0.0.0:9095");
+    assert_eq!(
+        config.admin_api.gateway_url,
+        "http://ferrogate.internal:8080"
+    );
+    assert_eq!(config.admin_api.upstream_timeout_millis, 12_345);
+    assert_eq!(
+        config.admin_api.cors_allowed_origin.as_deref(),
+        Some("https://admin.example.test")
+    );
+    // The raw alias inputs are consumed during migration.
+    assert!(config.control_api.is_none());
+    assert!(config.admin_api_alias.is_none());
+}
+
+/// Old-only: the deprecated `[admin_api]` alias still works and maps onto the
+/// identical effective config (byte-for-byte with `[control_api]`).
+#[test]
+fn admin_api_alias_section_still_maps_to_effective_config() {
+    let section = r#"
+listen = "0.0.0.0:9095"
+gateway_url = "http://ferrogate.internal:8080"
+upstream_timeout_millis = 12345
+cors_allowed_origin = "https://admin.example.test"
+"#;
+    let via_alias =
+        Config::from_toml_str(&format!("[admin_api]\n{section}")).expect("admin_api alias parses");
+    let via_canonical = Config::from_toml_str(&format!("[control_api]\n{section}"))
+        .expect("control_api canonical parses");
+    // The deprecated alias resolves to exactly the same effective config.
+    assert_eq!(via_alias.admin_api, via_canonical.admin_api);
+    assert_eq!(via_alias.admin_api.listen, "0.0.0.0:9095");
+    assert!(via_alias.control_api.is_none());
+    assert!(via_alias.admin_api_alias.is_none());
+}
+
+/// Conflict: both the canonical section and the deprecated alias present is a
+/// hard error (never silently pick one), with an actionable message.
+#[test]
+fn conflicting_control_api_and_admin_api_sections_are_rejected() {
+    let error = Config::from_toml_str(
+        r#"
+[control_api]
+listen = "0.0.0.0:9095"
+
+[admin_api]
+listen = "0.0.0.0:9096"
+"#,
+    )
+    .expect_err("both sections present must be rejected");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("conflicting control-plane API configuration")
+            && error.contains("[control_api]")
+            && error.contains("[admin_api]"),
+        "unexpected conflict error: {error}"
+    );
+}
+
+/// Neither section present leaves the built-in defaults in place, and running
+/// the migration a second time is a no-op (idempotent) that never wipes the
+/// resolved config.
+#[test]
+fn control_plane_alias_migration_is_idempotent_and_defaults_when_absent() {
+    let mut config = Config::from_toml_str("listen = \"127.0.0.1:8080\"\n")
+        .expect("config without either section parses");
+    assert_eq!(config.admin_api, AdminApiConfig::default());
+
+    // Re-running migration on an already-resolved config must not reset it.
+    let mut resolved = Config::from_toml_str("[control_api]\nlisten = \"0.0.0.0:9095\"\n")
+        .expect("control_api parses");
+    let before = resolved.admin_api.clone();
+    resolved
+        .migrate_control_plane_aliases()
+        .expect("idempotent re-run");
+    assert_eq!(resolved.admin_api, before);
+
+    // A default no-op re-run leaves defaults untouched too.
+    config
+        .migrate_control_plane_aliases()
+        .expect("idempotent re-run");
+    assert_eq!(config.admin_api, AdminApiConfig::default());
+}
+
+// --------------------------------------------------------------------------
 // #400: x402 wallet hold TTL must outlive the settlement confirmation window.
 // The wallet primitive refuses to capture a hold past its TTL and auto-releases
 // it, so a confirmed-on-chain payment whose hold already expired can no longer

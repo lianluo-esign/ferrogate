@@ -83,6 +83,22 @@ pub(crate) enum AuthCommands {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ControlApiArgs {
+    #[command(subcommand)]
+    pub(crate) command: ControlApiCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ControlApiCommands {
+    /// Run the standalone FerroGate Control Plane API service (issue #359):
+    /// a dedicated listener that authenticates control-plane callers and
+    /// proxies the path-compatible /admin/v1/* (+ /v1/assets/*) surface to
+    /// the gateway configured in the [control_api] config section (the
+    /// deprecated [admin_api] section is still accepted as an alias).
+    Serve(ConfigArgs),
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AdminApiArgs {
     #[command(subcommand)]
     pub(crate) command: AdminApiCommands,
@@ -90,10 +106,9 @@ pub(crate) struct AdminApiArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminApiCommands {
-    /// Run the standalone admin-console API service (issue #315): a
-    /// dedicated listener that authenticates admin callers and proxies the
-    /// path-compatible /admin/v1/* (+ /v1/assets/*) surface to the gateway
-    /// configured in the [admin_api] config section.
+    /// [DEPRECATED alias for `control-api serve`] Run the FerroGate Control
+    /// Plane API service. Retained for the migration window; prints a
+    /// deprecation notice and behaves identically to `control-api serve`.
     Serve(ConfigArgs),
 }
 
@@ -280,7 +295,10 @@ pub(crate) enum Commands {
     Run(RunArgs),
     /// Run the tenant and RBAC auth REST service.
     Auth(AuthArgs),
-    /// Run the standalone admin-console API service (issue #315).
+    /// Run the standalone FerroGate Control Plane API service (issue #359).
+    ControlApi(ControlApiArgs),
+    /// [DEPRECATED] Alias of `control-api`; run the FerroGate Control Plane
+    /// API service. Kept for the migration window.
     AdminApi(AdminApiArgs),
     /// Run the token-usage billing REST service.
     Billing(BillingArgs),
@@ -458,4 +476,45 @@ pub(crate) struct PlansAssignArgs {
     /// Plan id to assign to the tenant.
     #[arg(long)]
     pub(crate) plan_id: String,
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// The clap command tree (including the #359 `control-api` canonical
+    /// command and the deprecated `admin-api` alias) is internally valid.
+    #[test]
+    fn command_tree_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// #359: the canonical `control-api serve` command parses to the
+    /// dedicated Control Plane API dispatch.
+    #[test]
+    fn control_api_serve_parses() {
+        let cli = Cli::try_parse_from(["ferrogate", "control-api", "serve"])
+            .expect("control-api serve must parse");
+        match cli.command {
+            Commands::ControlApi(args) => match args.command {
+                ControlApiCommands::Serve(_) => {}
+            },
+            other => panic!("expected ControlApi, got {other:?}"),
+        }
+    }
+
+    /// #359: the deprecated `admin-api serve` alias still parses (kept for the
+    /// migration window), routing to its own dispatch arm.
+    #[test]
+    fn admin_api_serve_alias_still_parses() {
+        let cli = Cli::try_parse_from(["ferrogate", "admin-api", "serve"])
+            .expect("admin-api serve alias must still parse");
+        match cli.command {
+            Commands::AdminApi(args) => match args.command {
+                AdminApiCommands::Serve(_) => {}
+            },
+            other => panic!("expected AdminApi, got {other:?}"),
+        }
+    }
 }

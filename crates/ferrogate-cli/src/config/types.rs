@@ -28,12 +28,26 @@ pub(crate) struct Config {
     pub(crate) auth_service: AuthServiceConfig,
     #[serde(default)]
     pub(crate) billing_service: BillingServiceConfig,
-    /// #315: the standalone admin-console API service (`ferrogate admin-api
-    /// serve`) reads this section from the same config file the gateway
-    /// runs from, so both processes share one source of truth for keys,
-    /// storage, and limits.
-    #[serde(default)]
+    /// #359: effective FerroGate Control Plane API service config
+    /// (`ferrogate control-api serve`), resolved at load from the canonical
+    /// `[control_api]` section or the deprecated `[admin_api]` alias below
+    /// (never both -- a conflict is rejected). The Rust field keeps its
+    /// historical `admin_api` name so the ~150 in-tree accessors are
+    /// unchanged, but it is never populated directly from the config file
+    /// (`skip_deserializing`) and serializes under the canonical
+    /// `control_api` key.
+    #[serde(rename = "control_api", skip_deserializing)]
     pub(crate) admin_api: AdminApiConfig,
+    /// #359: raw canonical `[control_api]` input section. Resolved into
+    /// `admin_api` by `migrate_control_plane_aliases` at load; never
+    /// serialized (the effective config round-trips through `admin_api`).
+    #[serde(default, skip_serializing)]
+    pub(crate) control_api: Option<AdminApiConfig>,
+    /// #359: raw deprecated `[admin_api]` alias section, retained for the
+    /// migration window. Resolved into `admin_api` at load (with a
+    /// deprecation notice); rejected when `[control_api]` is also present.
+    #[serde(rename = "admin_api", default, skip_serializing)]
+    pub(crate) admin_api_alias: Option<AdminApiConfig>,
     #[serde(default)]
     pub(crate) providers: Vec<Provider>,
     #[serde(default)]
@@ -561,16 +575,17 @@ pub(crate) struct AdminConfig {
     pub(crate) cors_allowed_origin: Option<String>,
 }
 
-/// `[admin_api]` -- the standalone admin-console API service (issue #315,
-/// `ferrogate admin-api serve`). A dedicated listener that terminates the
-/// console's HTTP(S), authenticates the caller with the gateway's own
-/// admin-scope semantics, and reverse-proxies the path-compatible
-/// `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway over
-/// `gateway_url`, so admin control-plane traffic never rides the AI
+/// `[control_api]` (canonical; deprecated alias `[admin_api]`) -- the
+/// standalone FerroGate Control Plane API service (issue #359, formerly the
+/// #315 admin-api; `ferrogate control-api serve`). A dedicated listener that
+/// terminates the console's HTTP(S), authenticates the caller with the
+/// gateway's own admin-scope semantics, and reverse-proxies the
+/// path-compatible `/admin/v1/*` (+ `/v1/assets/*`) surface to the gateway
+/// over `gateway_url`, so control-plane traffic never rides the AI
 /// data-plane listener.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AdminApiConfig {
-    /// Address the admin-api service listens on.
+    /// Address the Control Plane API service listens on.
     #[serde(default = "default_admin_api_listen")]
     pub(crate) listen: String,
     /// Internal base URL of the running gateway the admin surface is
@@ -2709,6 +2724,8 @@ impl Default for Config {
             auth_service: AuthServiceConfig::default(),
             billing_service: BillingServiceConfig::default(),
             admin_api: AdminApiConfig::default(),
+            control_api: None,
+            admin_api_alias: None,
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),
