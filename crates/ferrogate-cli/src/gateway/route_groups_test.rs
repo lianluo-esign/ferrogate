@@ -42,6 +42,7 @@ fn every_previously_flat_route_still_resolves_to_a_group() {
         "/v1/responses",
         "/admin/status",
         "/admin/v1/status",
+        "/admin/v1/overview",
         "/admin/v1/request-logs",
         "/admin/v1/agent-runs",
         "/admin/v1/agent-runs/run-1",

@@ -132,6 +132,16 @@ pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[
         owner: "asset family (#363)",
         reason: "asset visibility-promotion verb not yet implemented; tracked as #363 follow-up",
     },
+    // Scoped control-plane overview read (#339): a single aggregate read whose
+    // consumer is the admin-console dashboard (#343), not an operator CLI verb.
+    // A `ctl overview` convenience verb, if wanted, is orthogonal follow-up work;
+    // excluded here so the server-side endpoint does not falsely read as CLI
+    // contract drift. Owner: control-plane console track (#343).
+    ReviewedExclusion {
+        operation_id: "getAdminOverview",
+        owner: "control-plane console (#343)",
+        reason: "dashboard-facing control-plane overview aggregate; ctl verb is optional follow-up, tracked with the #343 console UI",
+    },
     // Runtime data-plane traffic is NOT excluded here. Two families of runtime
     // AI-traffic operations that were once parked in this allowlist now leave the
     // coverable Control-Plane surface *structurally* via the

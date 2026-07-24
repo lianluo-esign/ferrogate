@@ -394,6 +394,18 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
         self.list_usage_monthly_rollups().await
     }
 
+    /// Override the trait default (#339): push every count/sum into the
+    /// database instead of streaming whole control-plane tables back to fold in
+    /// the gateway.
+    async fn overview_aggregate(
+        &self,
+        tenant_scope: Option<&str>,
+        current_period_month: &str,
+    ) -> Result<ControlPlaneOverviewAggregate, StorageError> {
+        self.overview_aggregate_pushdown(tenant_scope, current_period_month)
+            .await
+    }
+
     async fn append_billing_ledger_entry(
         &self,
         entry: &ferrogate_billing::LedgerEntry,
@@ -1605,5 +1617,184 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
     ) -> Result<PaymentAttemptTransition, StorageError> {
         self.transition_payment_attempt(op_name, id, allowed_from, to_state, evidence, now_unix)
             .await
+    }
+}
+
+/// Inherent COUNT/SUM aggregation backing the #339 control-plane overview. Kept
+/// out of `lib.rs` (module-layout cap, #429/#433); reuses the same
+/// pool-acquire + `search_path`-pinned transaction shape as the surrounding
+/// control-plane reads.
+impl PostgresControlPlaneStore {
+    /// Bounded COUNT/SUM pushdown backing [`ControlPlaneStore::overview_aggregate`]
+    /// (#339). Every table is aggregated in the database — no control-plane
+    /// collection is streamed back to be counted in the gateway. `$1` is the
+    /// tenant scope: `NULL` for the platform-operator global view, otherwise the
+    /// caller's own tenant id (so a tenant-scoped console can never read another
+    /// tenant's counts). Token totals sum only `scope_type = 'tenant'` rollup
+    /// rows so the tenant/project/workspace/key fan-out never multiplies a
+    /// request; `$2` selects the current calendar month for the month window.
+    pub(crate) async fn overview_aggregate_pushdown(
+        &self,
+        tenant_scope: Option<&str>,
+        current_period_month: &str,
+    ) -> Result<ControlPlaneOverviewAggregate, StorageError> {
+        let operation = self.tenancy_operation("control-plane overview aggregate");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        // Pin `search_path` to the configured `postgres_schema` (#239) so every
+        // aggregate below resolves its table in the control-plane schema.
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let scope: Option<&str> = tenant_scope;
+
+        let tenants = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM tenants WHERE ($1::text IS NULL OR id = $1)",
+            scope,
+        )
+        .await?;
+        let projects = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM projects WHERE ($1::text IS NULL OR tenant_id = $1)",
+            scope,
+        )
+        .await?;
+        let workspaces = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM workspaces WHERE ($1::text IS NULL OR tenant_id = $1)",
+            scope,
+        )
+        .await?;
+        let virtual_keys = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM api_keys WHERE ($1::text IS NULL OR tenant_id = $1)",
+            scope,
+        )
+        .await?;
+
+        let assets_row = transaction
+            .query_one(
+                "SELECT COUNT(*)::bigint, COALESCE(SUM(size_bytes), 0)::bigint \
+                 FROM stored_assets WHERE ($1::text IS NULL OR tenant_id = $1)",
+                &[&scope],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let assets = nonnegative_u64(assets_row.get::<_, i64>(0));
+        let asset_storage_bytes = nonnegative_u64(assets_row.get::<_, i64>(1));
+
+        let (agent_runs, agent_runs_by_status) = Self::overview_status_histogram(
+            &transaction,
+            "SELECT status, COUNT(*)::bigint FROM agent_runs \
+             WHERE ($1::text IS NULL OR tenant = $1) GROUP BY status",
+            scope,
+        )
+        .await?;
+        let (self_hosted_workers, self_hosted_workers_by_status) = Self::overview_status_histogram(
+            &transaction,
+            "SELECT status, COUNT(*)::bigint FROM self_hosted_worker_registrations \
+             WHERE ($1::text IS NULL OR tenant = $1) GROUP BY status",
+            scope,
+        )
+        .await?;
+
+        let usage_row = transaction
+            .query_one(
+                "SELECT \
+                    COALESCE(SUM(prompt_tokens), 0)::bigint, \
+                    COALESCE(SUM(completion_tokens), 0)::bigint, \
+                    COALESCE(SUM(total_tokens), 0)::bigint, \
+                    COALESCE(SUM(cost_usd), 0)::double precision, \
+                    COALESCE(SUM(request_count), 0)::bigint, \
+                    COALESCE(SUM(error_count), 0)::bigint, \
+                    COALESCE(SUM(prompt_tokens) FILTER (WHERE period_month = $2), 0)::bigint, \
+                    COALESCE(SUM(completion_tokens) FILTER (WHERE period_month = $2), 0)::bigint, \
+                    COALESCE(SUM(total_tokens) FILTER (WHERE period_month = $2), 0)::bigint, \
+                    COALESCE(SUM(cost_usd) FILTER (WHERE period_month = $2), 0)::double precision, \
+                    COALESCE(SUM(request_count) FILTER (WHERE period_month = $2), 0)::bigint, \
+                    COALESCE(SUM(error_count) FILTER (WHERE period_month = $2), 0)::bigint \
+                 FROM usage_monthly_rollups \
+                 WHERE scope_type = 'tenant' AND ($1::text IS NULL OR scope_id = $1)",
+                &[&scope, &current_period_month],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let usage_lifetime = OverviewUsageTotals {
+            prompt_tokens: nonnegative_u64(usage_row.get::<_, i64>(0)),
+            completion_tokens: nonnegative_u64(usage_row.get::<_, i64>(1)),
+            total_tokens: nonnegative_u64(usage_row.get::<_, i64>(2)),
+            cost_usd: usage_row.get::<_, f64>(3),
+            request_count: nonnegative_u64(usage_row.get::<_, i64>(4)),
+            error_count: nonnegative_u64(usage_row.get::<_, i64>(5)),
+        };
+        let usage_current_month = OverviewUsageTotals {
+            prompt_tokens: nonnegative_u64(usage_row.get::<_, i64>(6)),
+            completion_tokens: nonnegative_u64(usage_row.get::<_, i64>(7)),
+            total_tokens: nonnegative_u64(usage_row.get::<_, i64>(8)),
+            cost_usd: usage_row.get::<_, f64>(9),
+            request_count: nonnegative_u64(usage_row.get::<_, i64>(10)),
+            error_count: nonnegative_u64(usage_row.get::<_, i64>(11)),
+        };
+
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(ControlPlaneOverviewAggregate {
+            tenants,
+            projects,
+            workspaces,
+            virtual_keys,
+            assets,
+            asset_storage_bytes,
+            agent_runs,
+            agent_runs_by_status,
+            self_hosted_workers,
+            self_hosted_workers_by_status,
+            usage_lifetime,
+            usage_current_month,
+        })
+    }
+
+    /// Reads a single-row scalar `COUNT(*)::bigint` aggregate (bound param
+    /// `$1` is the tenant scope) for the overview pushdown.
+    async fn overview_scalar_count(
+        transaction: &deadpool_postgres::Transaction<'_>,
+        sql: &'static str,
+        scope: Option<&str>,
+    ) -> Result<u64, StorageError> {
+        let row = transaction
+            .query_one(sql, &[&scope])
+            .await
+            .map_err(postgres_error)?;
+        Ok(nonnegative_u64(row.get::<_, i64>(0)))
+    }
+
+    /// Runs one `SELECT status, COUNT(*) ... GROUP BY status` histogram query
+    /// and returns `(total, status -> count)`. Keeping the status buckets a
+    /// database GROUP BY (rather than hardcoded status strings) means new
+    /// run/worker states surface in the overview without a schema change.
+    async fn overview_status_histogram(
+        transaction: &deadpool_postgres::Transaction<'_>,
+        sql: &'static str,
+        scope: Option<&str>,
+    ) -> Result<(u64, std::collections::BTreeMap<String, u64>), StorageError> {
+        let rows = transaction
+            .query(sql, &[&scope])
+            .await
+            .map_err(postgres_error)?;
+        let mut total = 0_u64;
+        let mut by_status = std::collections::BTreeMap::new();
+        for row in &rows {
+            let status: String = row.get(0);
+            let count = nonnegative_u64(row.get::<_, i64>(1));
+            total = total.saturating_add(count);
+            by_status.insert(status, count);
+        }
+        Ok((total, by_status))
     }
 }

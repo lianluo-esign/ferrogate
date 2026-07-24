@@ -12648,6 +12648,58 @@ pub struct StoredUsageMonthlyRollup {
     pub updated_at_unix: i64,
 }
 
+/// Aggregated token/cost/request/error totals for one time window in the
+/// control-plane overview (#339). Summed from the durable
+/// `usage_monthly_rollups` aggregate table (one row per scope per calendar
+/// month), NEVER from raw per-request usage rows — so a lifetime total is a
+/// bounded `SUM` over the rollup table, not a full-history scan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct OverviewUsageTotals {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+    pub request_count: u64,
+    pub error_count: u64,
+}
+
+impl OverviewUsageTotals {
+    fn accumulate(&mut self, rollup: &StoredUsageMonthlyRollup) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(rollup.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(rollup.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(rollup.total_tokens);
+        self.cost_usd += rollup.cost_usd;
+        self.request_count = self.request_count.saturating_add(rollup.request_count);
+        self.error_count = self.error_count.saturating_add(rollup.error_count);
+    }
+}
+
+/// Bounded, backend-computed control-plane inventory + usage aggregate for
+/// `GET /admin/v1/overview` (#339). Every field is produced by a COUNT/SUM
+/// aggregation (Postgres pushdown) or an in-process fold over the same
+/// repositories the individual list endpoints read (in-memory / D1 default),
+/// never by streaming full collections back to the handler. A tenant-scoped
+/// caller sees only its own tenant's rows; the token totals are summed only
+/// over `scope_type = tenant` rollup rows so the per-scope fan-out (tenant +
+/// project + workspace + key) can never double-count a request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ControlPlaneOverviewAggregate {
+    pub tenants: u64,
+    pub projects: u64,
+    pub workspaces: u64,
+    pub virtual_keys: u64,
+    pub assets: u64,
+    pub asset_storage_bytes: u64,
+    pub agent_runs: u64,
+    pub agent_runs_by_status: std::collections::BTreeMap<String, u64>,
+    pub self_hosted_workers: u64,
+    pub self_hosted_workers_by_status: std::collections::BTreeMap<String, u64>,
+    pub usage_lifetime: OverviewUsageTotals,
+    pub usage_current_month: OverviewUsageTotals,
+}
+
 /// Deterministic id for a monthly rollup row, mirroring [`quota_policy_id`].
 pub fn usage_monthly_rollup_id(
     period_month: &str,
@@ -14114,6 +14166,22 @@ impl RuntimeStorageRepositories {
             .await
     }
 
+    /// Bounded control-plane inventory + durable-usage aggregate for the #339
+    /// `GET /admin/v1/overview` endpoint. `tenant_scope = Some(tenant_id)`
+    /// restricts every count/sum to that tenant (no cross-scope leakage);
+    /// `None` is the platform-operator global view. `current_period_month` is
+    /// the `YYYY-MM` UTC month feeding the current-month token totals.
+    pub async fn overview_aggregate(
+        &self,
+        tenant_scope: Option<&str>,
+        current_period_month: &str,
+    ) -> Result<ControlPlaneOverviewAggregate, StorageError> {
+        self.control_plane
+            .store()
+            .overview_aggregate(tenant_scope, current_period_month)
+            .await
+    }
+
     /// Persist a settled billing ledger entry (issue #129). Idempotent on the
     /// entry id; returns `true` when newly inserted. Supabase/Postgres-only.
     pub async fn append_billing_ledger_entry(
@@ -15190,6 +15258,10 @@ impl<T> StoragePage<T> {
 #[cfg(test)]
 #[path = "usage_aggregate_sum_test.rs"]
 mod usage_aggregate_sum_test;
+
+#[cfg(test)]
+#[path = "overview_aggregate_test.rs"]
+mod overview_aggregate_test;
 
 #[cfg(test)]
 #[path = "schema_validation_test.rs"]

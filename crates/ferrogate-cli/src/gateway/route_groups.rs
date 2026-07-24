@@ -428,6 +428,11 @@ impl FerroGateway {
             self.handle_admin_status(session, ctx, &req.headers).await?;
             return Ok(true);
         }
+        if req.path == "/admin/v1/overview" {
+            self.handle_admin_overview(session, ctx, &req.headers)
+                .await?;
+            return Ok(true);
+        }
         if req.path == "/admin/v1/observability" {
             self.handle_admin_observability(session, ctx, &req.headers)
                 .await?;

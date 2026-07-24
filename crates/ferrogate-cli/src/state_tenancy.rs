@@ -57,6 +57,23 @@ impl AppState {
         Ok(self.repositories.list_projects().await?)
     }
 
+    /// Bounded control-plane inventory + durable-usage aggregate for the #339
+    /// `GET /admin/v1/overview` endpoint. `tenant_scope = Some(tenant_id)`
+    /// restricts every count/sum to that tenant (a tenant-scoped console can
+    /// never read another tenant's totals); `None` is the platform-operator
+    /// global view. Backed by COUNT/SUM pushdown on Postgres and an in-process
+    /// fold over the same repositories elsewhere.
+    pub(crate) async fn control_plane_overview_aggregate(
+        &self,
+        tenant_scope: Option<&str>,
+        current_period_month: &str,
+    ) -> anyhow::Result<ferrogate_storage::ControlPlaneOverviewAggregate> {
+        Ok(self
+            .repositories
+            .overview_aggregate(tenant_scope, current_period_month)
+            .await?)
+    }
+
     pub(crate) async fn get_project(&self, id: &str) -> anyhow::Result<Option<StoredProject>> {
         Ok(self.repositories.get_project(id).await?)
     }

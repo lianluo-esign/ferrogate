@@ -560,6 +560,42 @@
         }
       }
     },
+    "/admin/v1/overview": {
+      "get": {
+        "operationId": "getAdminOverview",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Scoped control-plane overview: inventory counts, durable token totals, and bounded critical alerts.",
+        "description": "Returns the dashboard's global control-plane overview in one bounded request. Counts and token totals are produced by bounded repository aggregation (COUNT/SUM pushdown on Postgres, in-process fold elsewhere), never by loading whole collections. A platform-operator key sees every tenant; a tenant-scoped key is confined to its own tenant. Each section carries an explicit available/unavailable state so a storage failure is reported honestly instead of as a fabricated zero.",
+        "responses": {
+          "200": {
+            "description": "Control-plane overview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminOverview"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/status": {
       "get": {
         "operationId": "getAdminStatus",
@@ -13273,6 +13309,96 @@
           }
         },
         "additionalProperties": false
+      },
+      "AdminOverviewSection": {
+        "type": "object",
+        "description": "A read section of the control-plane overview that is either fresh data or an explicit unavailable/error state. `data` is absent whenever `status` is not `ok`, so a failed section is never reported as a fabricated zero.",
+        "required": [
+          "status",
+          "source"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unavailable"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Where this section was computed from, e.g. `runtime_config` or `control_plane_store`."
+          },
+          "generated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error": {
+            "type": "string",
+            "description": "Present only when `status` is `unavailable`."
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Section payload; present only when `status` is `ok`."
+          }
+        }
+      },
+      "AdminOverview": {
+        "type": "object",
+        "description": "Scoped control-plane overview (issue #339). Inventory counts and durable token totals are produced by bounded repository aggregation; each section reports its own availability so a partial storage failure never becomes a false zero.",
+        "required": [
+          "object",
+          "generated_at_unix",
+          "scope",
+          "runtime",
+          "control_plane",
+          "usage",
+          "alerts"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "control_plane.overview"
+            ]
+          },
+          "generated_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scope": {
+            "type": "object",
+            "description": "Effective visibility scope. `global` for a platform-operator key; `tenant` (with `tenant_id`) for a tenant-scoped key.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "global",
+                  "tenant"
+                ]
+              },
+              "tenant_id": {
+                "type": "string"
+              }
+            }
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/AdminOverviewSection"
+          },
+          "control_plane": {
+            "$ref": "#/components/schemas/AdminOverviewSection"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/AdminOverviewSection"
+          },
+          "alerts": {
+            "$ref": "#/components/schemas/AdminOverviewSection"
+          }
+        }
       },
       "AdminStatus": {
         "type": "object",

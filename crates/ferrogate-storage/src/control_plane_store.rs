@@ -240,6 +240,27 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
     async fn list_usage_monthly_rollups(
         &self,
     ) -> Result<Vec<StoredUsageMonthlyRollup>, StorageError>;
+
+    /// Bounded control-plane inventory + usage aggregate for the `#339`
+    /// overview endpoint. The default implementation composes the existing
+    /// repository reads and folds them in process — correct for every backend
+    /// and used as-is by the in-memory and Cloudflare-D1 stores (their rows
+    /// live in memory / are already fetched through fan-out-correct list
+    /// methods). The Postgres backend OVERRIDES this with COUNT/SUM pushdown so
+    /// a large deployment never streams whole tables to count them.
+    ///
+    /// `tenant_scope = Some(tenant_id)` narrows every count/sum to that tenant
+    /// (no cross-scope leakage); `None` is the platform-operator global view.
+    /// `current_period_month` is the `YYYY-MM` UTC month whose rollups feed the
+    /// current-month token totals; lifetime totals sum every month.
+    async fn overview_aggregate(
+        &self,
+        tenant_scope: Option<&str>,
+        current_period_month: &str,
+    ) -> Result<ControlPlaneOverviewAggregate, StorageError> {
+        overview_aggregate_from_repository_reads(self, tenant_scope, current_period_month).await
+    }
+
     async fn append_billing_ledger_entry(
         &self,
         entry: &ferrogate_billing::LedgerEntry,
@@ -814,6 +835,125 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
     fn pool_metrics_snapshot(&self) -> PostgresPoolMetricsSnapshot {
         PostgresPoolMetricsSnapshot::default()
     }
+}
+
+/// Backend-agnostic default for [`ControlPlaneStore::overview_aggregate`]:
+/// compose the existing repository reads and fold them in process. Correct for
+/// every backend; the Postgres store overrides `overview_aggregate` with
+/// COUNT/SUM pushdown, so this fold only ever runs where the rows are already
+/// in memory (Memory) or already fetched through fan-out-correct list methods
+/// (D1). Tenant scoping is applied uniformly here so the pushdown and the fold
+/// return identical numbers.
+pub(crate) async fn overview_aggregate_from_repository_reads<S>(
+    store: &S,
+    tenant_scope: Option<&str>,
+    current_period_month: &str,
+) -> Result<ControlPlaneOverviewAggregate, StorageError>
+where
+    S: ControlPlaneStore + ?Sized,
+{
+    fn in_scope(scope: Option<&str>, row_tenant: &str) -> bool {
+        scope.is_none_or(|tenant| tenant == row_tenant)
+    }
+
+    let tenants = store.list_tenant_accounts().await?;
+    let tenants = tenants
+        .iter()
+        .filter(|account| in_scope(tenant_scope, &account.id))
+        .count() as u64;
+
+    let projects = store.list_projects().await?;
+    let projects = projects
+        .iter()
+        .filter(|project| in_scope(tenant_scope, &project.tenant_id))
+        .count() as u64;
+
+    let workspaces = store.list_workspaces().await?;
+    let workspaces = workspaces
+        .iter()
+        .filter(|workspace| in_scope(tenant_scope, &workspace.tenant_id))
+        .count() as u64;
+
+    let virtual_keys = store.list_api_key_records().await?;
+    let virtual_keys = virtual_keys
+        .iter()
+        .filter(|key| in_scope(tenant_scope, &key.tenant_id))
+        .count() as u64;
+
+    let assets = store.list_all_assets().await?;
+    let mut asset_count = 0_u64;
+    let mut asset_storage_bytes = 0_u64;
+    for asset in &assets {
+        if in_scope(tenant_scope, &asset.tenant_id) {
+            asset_count += 1;
+            asset_storage_bytes = asset_storage_bytes.saturating_add(asset.size_bytes);
+        }
+    }
+
+    let mut agent_runs = 0_u64;
+    let mut agent_runs_by_status: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    for run in store.agent_runs().await {
+        if in_scope(
+            tenant_scope,
+            run.tenant.organization_id.as_deref().unwrap_or_default(),
+        ) {
+            agent_runs += 1;
+            *agent_runs_by_status.entry(run.status.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut self_hosted_workers = 0_u64;
+    let mut self_hosted_workers_by_status: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    for registration in store.self_hosted_worker_registrations().await {
+        if in_scope(
+            tenant_scope,
+            registration
+                .tenant
+                .organization_id
+                .as_deref()
+                .unwrap_or_default(),
+        ) {
+            self_hosted_workers += 1;
+            *self_hosted_workers_by_status
+                .entry(registration.status.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let mut usage_lifetime = OverviewUsageTotals::default();
+    let mut usage_current_month = OverviewUsageTotals::default();
+    for rollup in store.list_usage_monthly_rollups().await? {
+        // Only the `tenant`-scope rollups are summed: every settled request
+        // fans out into up to four rows (tenant/project/workspace/key), so
+        // summing all scope kinds would multiply the same tokens.
+        if rollup.scope_type != QuotaScopeKind::Tenant {
+            continue;
+        }
+        if !in_scope(tenant_scope, &rollup.scope_id) {
+            continue;
+        }
+        usage_lifetime.accumulate(&rollup);
+        if rollup.period_month == current_period_month {
+            usage_current_month.accumulate(&rollup);
+        }
+    }
+
+    Ok(ControlPlaneOverviewAggregate {
+        tenants,
+        projects,
+        workspaces,
+        virtual_keys,
+        assets: asset_count,
+        asset_storage_bytes,
+        agent_runs,
+        agent_runs_by_status,
+        self_hosted_workers,
+        self_hosted_workers_by_status,
+        usage_lifetime,
+        usage_current_month,
+    })
 }
 
 /// The in-memory control-plane backend (#425).

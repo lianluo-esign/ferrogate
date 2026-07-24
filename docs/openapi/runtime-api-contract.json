@@ -31,6 +31,10 @@
       "group": "admin_overview"
     },
     {
+      "pattern": "/admin/v1/overview",
+      "group": "admin_overview"
+    },
+    {
       "pattern": "/admin/v1/observability",
       "group": "admin_overview"
     },
@@ -614,6 +618,17 @@
       "path": "/admin/v1/status",
       "method": "get",
       "operation_id": "getAdminStatus",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/overview",
+      "method": "get",
+      "operation_id": "getAdminOverview",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",
