@@ -3136,11 +3136,7 @@ impl ProviderRoutingMetric {
         let total_requests = self
             .successful_requests
             .saturating_add(self.failed_requests);
-        let average_latency_ms = if self.successful_requests == 0 {
-            None
-        } else {
-            Some(self.total_latency_ms / self.successful_requests)
-        };
+        let average_latency_ms = self.total_latency_ms.checked_div(self.successful_requests);
         ProviderRoutingScore {
             average_latency_ms,
             failure_rate: if total_requests == 0 {

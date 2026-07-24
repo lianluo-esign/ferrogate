@@ -284,8 +284,7 @@ fn parse_minisign_public_key(text: &str) -> Result<([u8; 8], VerifyingKey), Stri
     let line = text
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("untrusted comment:"))
-        .next_back()
+        .rfind(|line| !line.is_empty() && !line.starts_with("untrusted comment:"))
         .ok_or_else(|| "minisign public key is empty".to_string())?;
     let bytes = BASE64_STANDARD
         .decode(line)

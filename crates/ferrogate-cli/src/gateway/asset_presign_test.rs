@@ -86,10 +86,7 @@ fn spawn_scripted_mock(responses: Vec<ScriptedResponse>) -> (String, Arc<Mutex<V
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            loop {
-                let Some(method) = read_one_request(&mut stream) else {
-                    break;
-                };
+            while let Some(method) = read_one_request(&mut stream) {
                 recorder.lock().unwrap().push(method);
                 let response = &responses[idx];
                 let head = format!(
