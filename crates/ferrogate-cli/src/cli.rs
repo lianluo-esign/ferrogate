@@ -315,6 +315,88 @@ pub(crate) enum Commands {
     Assets(AssetsArgs),
     /// Create/list/assign sellable subscription plans (issue #168).
     Plans(PlansArgs),
+    /// Manage named Control Plane API client contexts (issue #360): endpoint,
+    /// default scope, TLS policy, and credential source (never a token value).
+    Context(ContextArgs),
+    /// Inspect the Control Plane API through the shared typed client (issue
+    /// #360). The first vertical slice: `ops status`.
+    Ops(OpsArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ContextArgs {
+    #[command(subcommand)]
+    pub(crate) command: ContextCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ContextCommands {
+    /// Create (or, with --overwrite, replace) a named context.
+    Create(Box<ContextCreateArgs>),
+    /// List defined contexts; the current one is marked with `*`.
+    List,
+    /// Show one context's non-secret settings.
+    Show(ContextRefArgs),
+    /// Select the default context used when no --context/env override is given.
+    Use(ContextRefArgs),
+    /// Delete a named context.
+    Delete(ContextRefArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ContextCreateArgs {
+    /// Context name (e.g. production).
+    pub(crate) name: String,
+    /// Control Plane API base URL, for example https://control.example.com.
+    #[arg(long)]
+    pub(crate) endpoint: String,
+    /// Default tenant applied to commands that accept one.
+    #[arg(long)]
+    pub(crate) tenant: Option<String>,
+    /// Default project.
+    #[arg(long)]
+    pub(crate) project: Option<String>,
+    /// Default workspace.
+    #[arg(long)]
+    pub(crate) workspace: Option<String>,
+    /// Name of the environment variable holding the bearer token, read at call
+    /// time. The token value is never stored in the context.
+    #[arg(long, value_name = "VAR", conflicts_with = "token_stdin")]
+    pub(crate) token_env: Option<String>,
+    /// Read the bearer token from stdin at call time instead of an env var.
+    #[arg(long)]
+    pub(crate) token_stdin: bool,
+    /// Skip TLS certificate verification for this context (opt-in, insecure;
+    /// intended for local self-signed dev endpoints only).
+    #[arg(long)]
+    pub(crate) insecure_skip_tls_verify: bool,
+    /// After creating, select this context as the current one.
+    #[arg(long = "use")]
+    pub(crate) use_now: bool,
+    /// Overwrite an existing context with the same name.
+    #[arg(long)]
+    pub(crate) overwrite: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ContextRefArgs {
+    /// Context name.
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OpsArgs {
+    #[command(flatten)]
+    pub(crate) global: ferrogate_cli_core::args::GlobalArgs,
+    #[command(subcommand)]
+    pub(crate) command: OpsCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum OpsCommands {
+    /// Show Control Plane API system status (GET /admin/v1/status) through the
+    /// shared typed client.
+    Status,
 }
 
 #[derive(Debug, Args)]

@@ -1192,6 +1192,7 @@ dependencies = [
  "ferrogate-admin",
  "ferrogate-auth",
  "ferrogate-billing",
+ "ferrogate-cli-core",
  "ferrogate-cloudflare",
  "ferrogate-config",
  "ferrogate-core",

@@ -36,6 +36,7 @@ ed25519-dalek.workspace = true
 ferrogate-admin = { path = "../ferrogate-admin" }
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
+ferrogate-cli-core = { path = "../ferrogate-cli-core" }
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }

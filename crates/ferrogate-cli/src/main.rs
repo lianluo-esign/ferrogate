@@ -15,6 +15,7 @@ mod budget_alerts;
 mod builtin_tools;
 mod cli;
 mod config;
+mod ctl;
 mod dashboard;
 mod extensions;
 mod gateway;
@@ -166,6 +167,12 @@ fn main() -> AnyResult<()> {
         }
         Commands::Assets(args) => assets_cli::execute_assets_command(args.command),
         Commands::Plans(args) => plans_cli::execute_plans_command(args.command),
+        // The #360 Control Plane API client commands own their own diagnostics
+        // (rendered to stderr) and map every outcome onto a stable exit-code
+        // class, so they terminate the process directly rather than returning
+        // an `anyhow` error into the generic `?` path.
+        Commands::Context(args) => std::process::exit(ctl::run_context(args.command)),
+        Commands::Ops(args) => std::process::exit(ctl::run_ops(args)),
     }
 }
 
