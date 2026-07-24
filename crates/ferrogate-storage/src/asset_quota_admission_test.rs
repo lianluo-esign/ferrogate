@@ -785,3 +785,206 @@ fn live_high_contention_first_push_losers_are_all_typed_already_exists() {
         "exactly one immutable row survives each version's first-push race: {listed:?}",
     );
 }
+
+// -------- Live Postgres: the #371 joint-overflow quota-admission race ---------
+//
+// The bounded live proof acceptance Box 2 asks for (identical in shape to the
+// #369 first-push proof above, but exercising the QUOTA guard instead of the
+// create-if-absent guard): two CONCURRENT `create_asset_within_quota` inserts
+// for DIFFERENT immutable versions whose sizes each fit alone but whose JOINT
+// size exceeds the remaining tenant quota, released together on a barrier
+// against a REAL database. This is the exact defect #371 closes -- the former
+// admission read `tenant_asset_storage_bytes_used` then did a separate insert,
+// so two commits for two DIFFERENT asset ids could both observe the same
+// remaining capacity, both pass, and jointly overshoot the quota. Here exactly
+// one push is `Admitted` and the other receives the typed `OverQuota` rejection
+// (never a silent overshoot, and -- distinct ids -- never a create-if-absent
+// `AlreadyExists`); the durable tenant usage reflects ONLY the single winner's
+// bytes, so the quota is never oversold. This is the live analog of the
+// in-memory `two_concurrent_pushes_that_jointly_exceed_the_quota_admit_exactly_one`
+// above and the #371 sibling of the #369 `live_concurrent_first_pushes_...`.
+//
+// Mirrors the #378 `live_promotion_cas_fires_only_from_pending` / #369 patterns
+// exactly: DSN-gated (skips cleanly when `FERROGATE_TEST_POSTGRES_DSN` is
+// unset), serialized against the shared pooler, unique per-run schema with RAII
+// drop, two pooled connections so both pushes genuinely hit Postgres at once.
+// Bounded: two inserts, two re-reads, one listing, one usage read -- no load or
+// stress. The gate environment has live credentials and runs it on re-entry.
+// ---------------------------------------------------------------------------
+#[test]
+fn live_concurrent_joint_overflow_admits_exactly_one_and_rejects_the_other_over_quota() {
+    let Ok(dsn) = std::env::var("FERROGATE_TEST_POSTGRES_DSN") else {
+        eprintln!(
+            "skipping live_concurrent_joint_overflow_admits_exactly_one_and_rejects_the_other_over_quota: \
+             FERROGATE_TEST_POSTGRES_DSN is not set"
+        );
+        return;
+    };
+
+    // Quota 100; two 60-byte pushes for DIFFERENT versions. Each fits alone
+    // (60 <= 100) but 60 + 60 = 120 > 100 jointly overflows, so at most one may
+    // be admitted -- the quota guard must pick exactly one winner.
+    const QUOTA: u64 = 100;
+    const SIZE: u64 = 60;
+
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_asset_joint_overflow_quota_test");
+    let _guard = SchemaGuard::new(&dsn, &schema);
+
+    run_sql(
+        &dsn,
+        &format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; CREATE SCHEMA \"{schema}\"; \
+             SET search_path TO \"{schema}\"; {POSTGRES_SCHEMA_SQL} \
+             INSERT INTO \"{schema}\".tenants (id, name, slug) \
+             VALUES ('{RACE_TENANT}', 'joint-overflow tenant', '{RACE_TENANT}') \
+             ON CONFLICT (id) DO NOTHING;"
+        ),
+    );
+
+    let config = PostgresStorageConfig {
+        dsn: dsn.clone(),
+        // Two connections so both joint-overflow pushes can genuinely hit
+        // Postgres at once; the folded quota guard is the single admission
+        // point that must pick exactly one winner.
+        pool_size: 2,
+        pool_acquire_timeout_millis: 30_000,
+        tls_mode: PostgresTlsMode::Disable,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 20,
+        statement_timeout_millis: 30_000,
+        schema: Some(schema.clone()),
+        search_path: Vec::new(),
+    };
+    let repositories = Arc::new(
+        RuntimeStorageRepositories::postgres_for_migration(config, false, false)
+            .expect("open the postgres control plane against the test DSN"),
+    );
+
+    // Two DIFFERENT immutable versions (distinct id AND distinct composite key)
+    // so the ONLY thing that can reject the loser is the quota guard -- never a
+    // create-if-absent conflict. Each carries a DISTINCT content fingerprint
+    // (keyed off `fill`) so the durable winner is identifiable.
+    let attempts: [(&str, u8); 2] = [("1.0.0", 0xAA), ("2.0.0", 0xBB)];
+    let barrier = Arc::new(Barrier::new(attempts.len() + 1));
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::new();
+
+    for (version, fill) in attempts {
+        let repositories = Arc::clone(&repositories);
+        let barrier = Arc::clone(&barrier);
+        let tx = tx.clone();
+        handles.push(thread::spawn(move || {
+            let id = stored_asset_id(RACE_TENANT, RACE_ASSET_TYPE, RACE_NAME, version);
+            let mut candidate = race_candidate(&id, fill, SIZE);
+            candidate.version = version.to_string();
+            barrier.wait();
+            let outcome = block_on(repositories.create_asset_within_quota(candidate, Some(QUOTA)))
+                .expect("concurrent joint-overflow admission");
+            tx.send((version, fill, outcome)).expect("report outcome");
+        }));
+    }
+    drop(tx);
+    barrier.wait();
+
+    let outcomes: Vec<(&str, u8, AssetQuotaAdmission)> = rx.into_iter().collect();
+    for handle in handles {
+        handle.join().expect("joint-overflow worker");
+    }
+
+    // Exactly one is admitted; the other gets the typed over-quota rejection --
+    // no silent overshoot, and (distinct ids) never an `AlreadyExists` conflict.
+    let winners: Vec<&(&str, u8, AssetQuotaAdmission)> = outcomes
+        .iter()
+        .filter(|(_, _, outcome)| *outcome == AssetQuotaAdmission::Admitted)
+        .collect();
+    let over_quota: Vec<&(&str, u8, AssetQuotaAdmission)> = outcomes
+        .iter()
+        .filter(|(_, _, outcome)| matches!(outcome, AssetQuotaAdmission::OverQuota { .. }))
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one of two jointly-over-quota pushes may be admitted: {outcomes:?}",
+    );
+    assert_eq!(
+        over_quota.len(),
+        1,
+        "the other jointly-over-quota push must get the typed OverQuota rejection, \
+         never a silent overshoot: {outcomes:?}",
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|(_, _, outcome)| *outcome == AssetQuotaAdmission::AlreadyExists),
+        "distinct-id pushes race on the quota guard, never on create-if-absent: {outcomes:?}",
+    );
+
+    // The typed rejection reports the tenant's real usage at the guard: the
+    // winner's bytes are already durable (used == SIZE), the loser attempted
+    // SIZE more, and the quota bound is echoed back verbatim. This arm is only
+    // reachable when the quota guard failed (`quota_ok == false`), i.e. the
+    // winner had already committed -- so `used_bytes` is exactly the winner's.
+    assert_eq!(
+        over_quota[0].2,
+        AssetQuotaAdmission::OverQuota {
+            used_bytes: SIZE,
+            attempted_bytes: SIZE,
+            quota_bytes: QUOTA,
+        },
+        "the loser's typed rejection reflects the durable winner's reservation: {outcomes:?}",
+    );
+
+    let (winner_version, winner_fill, _) = *winners[0];
+    let winner_id = stored_asset_id(RACE_TENANT, RACE_ASSET_TYPE, RACE_NAME, winner_version);
+
+    // Only the winner's row is durable; the over-quota loser reserved nothing.
+    let winner = block_on(repositories.get_asset(&winner_id))
+        .expect("re-read the durable winner")
+        .expect("the winning version must be visible");
+    assert_eq!(winner.id, winner_id);
+    assert_eq!(
+        winner.size_bytes, SIZE,
+        "the visible row's size must be the winner's own size",
+    );
+    assert_eq!(
+        winner.content_hash,
+        format!("{winner_fill:064x}"),
+        "the visible row's metadata hash must be the winner's own hash",
+    );
+
+    let loser_version = attempts
+        .iter()
+        .map(|(version, _)| *version)
+        .find(|version| *version != winner_version)
+        .expect("a losing version distinct from the winner");
+    let loser_id = stored_asset_id(RACE_TENANT, RACE_ASSET_TYPE, RACE_NAME, loser_version);
+    assert!(
+        block_on(repositories.get_asset(&loser_id))
+            .expect("re-read the rejected loser")
+            .is_none(),
+        "the over-quota loser must not persist a row",
+    );
+
+    // The listing surface agrees: exactly one row survives the joint-overflow
+    // race, and the durable tenant usage reflects ONLY the winner's bytes -- the
+    // quota is never oversold by the two concurrent commits.
+    let listed = block_on(repositories.list_assets(RACE_TENANT, Some(RACE_ASSET_TYPE)))
+        .expect("list the tenant's assets");
+    assert_eq!(
+        listed.len(),
+        1,
+        "exactly one row survives the joint-overflow quota race: {listed:?}",
+    );
+    assert_eq!(listed[0].id, winner_id);
+
+    let used = block_on(repositories.tenant_asset_storage_bytes_used(RACE_TENANT)).expect("usage");
+    assert_eq!(
+        used, SIZE,
+        "durable usage reflects exactly the single winner's bytes",
+    );
+    assert!(
+        used <= QUOTA,
+        "concurrent joint-overflow admission never lets durable usage exceed the quota",
+    );
+}
