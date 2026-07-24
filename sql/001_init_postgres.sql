@@ -682,6 +682,14 @@ ALTER TABLE tenant_contexts
 CREATE INDEX IF NOT EXISTS idx_tenant_contexts_org_project
     ON tenant_contexts(organization_id, project_id);
 
+-- #452 (deferred from #373): the #330 committed-token point-sum
+-- `sum_api_key_committed_tokens` filters this table by `api_key_id`
+-- (JOIN tenant_contexts t ... WHERE t.api_key_id = $1), so this
+-- single-column index (already present since #92 for the Supabase billing
+-- evidence path) lets the planner point-lookup the matching tenant_contexts
+-- rows instead of scanning the table. Kept under its existing name so the
+-- `validate_postgres_schema` index roster stays stable; a separate
+-- idx_tenant_contexts_api_key_id would only duplicate the same column.
 CREATE INDEX IF NOT EXISTS idx_tenant_contexts_api_key
     ON tenant_contexts(api_key_id);
 
