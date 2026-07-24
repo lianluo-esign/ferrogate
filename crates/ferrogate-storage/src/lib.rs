@@ -4046,7 +4046,7 @@ impl PostgresControlPlaneStore {
                 .await
                 .map_err(postgres_error)?;
         }
-        let inserted = transaction
+        let inserted = match transaction
             .execute(
                 Self::CREATE_ASSET_IF_ABSENT_QUERY,
                 &[
@@ -4069,7 +4069,21 @@ impl PostgresControlPlaneStore {
                 ],
             )
             .await
-            .map_err(postgres_error)?;
+        {
+            Ok(rows) => rows,
+            // #369: a rival first-push of the SAME immutable version committed
+            // between our snapshot and this INSERT. `ON CONFLICT (id) DO NOTHING`
+            // suppresses only the id collision; the composite
+            // `(tenant_id, asset_type, name, version, variant)` unique index --
+            // which encodes the SAME logical asset as the id -- still raises
+            // SQLSTATE 23505 on the loser. The row provably exists, so this is an
+            // idempotent no-op (`Ok(false)`), exactly like the id-conflict loser,
+            // never a `StorageError::Postgres` the gateway would map to a 503
+            // instead of the typed 409. The aborted transaction is rolled back on
+            // drop (nothing was inserted), so no commit fence is crossed.
+            Err(error) if is_unique_violation(&error) => return Ok(false),
+            Err(error) => return Err(postgres_error(error)),
+        };
         operation.begin_commit("before transaction commit")?;
         let commit_result = transaction.commit().await.map_err(|error| {
             tracing::warn!(
@@ -4147,7 +4161,7 @@ impl PostgresControlPlaneStore {
                 .await
                 .map_err(postgres_error)?;
         }
-        let row = transaction
+        let row = match transaction
             .query_one(
                 Self::CREATE_ASSET_WITHIN_QUOTA_QUERY,
                 &[
@@ -4171,7 +4185,22 @@ impl PostgresControlPlaneStore {
                 ],
             )
             .await
-            .map_err(postgres_error)?;
+        {
+            Ok(row) => row,
+            // #369: same race as `create_asset_if_absent`. A rival first push of
+            // the SAME immutable version committed between our guard snapshot and
+            // the CTE INSERT. `ON CONFLICT (id) DO NOTHING` suppresses the id
+            // collision, but the composite unique index (the SAME logical asset)
+            // still raises SQLSTATE 23505 on the loser. The row provably exists, so
+            // this is a typed `AlreadyExists` conflict (-> 409), never a raw
+            // `StorageError::Postgres` (-> 503). Nothing was inserted, so the
+            // aborted transaction is rolled back on drop and no commit fence is
+            // crossed; no bytes are reserved for the loser.
+            Err(error) if is_unique_violation(&error) => {
+                return Ok(AssetQuotaAdmission::AlreadyExists)
+            }
+            Err(error) => return Err(postgres_error(error)),
+        };
         let id_exists: bool = row.get("id_exists");
         let used_bytes = nonnegative_u64(row.get::<_, i64>("used_bytes"));
         let quota_ok: bool = row.get("quota_ok");
@@ -15132,6 +15161,18 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
 
 fn postgres_error(error: tokio_postgres::Error) -> StorageError {
     StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
+}
+
+/// A `tokio_postgres` error is a unique-key violation (SQLSTATE 23505) exactly
+/// when its SQLSTATE is `unique_violation`. Used by the immutable-asset create
+/// paths (#369): the loser of a genuine concurrent first-push of the SAME version
+/// can trip the composite `(tenant_id, asset_type, name, version, variant)` unique
+/// index -- which the single `ON CONFLICT (id)` arbiter does NOT suppress -- and
+/// that must resolve to the typed `AlreadyExists` conflict (-> 409), not a raw
+/// storage error (-> 503). Only this one SQLSTATE is treated as "already exists";
+/// every other Postgres error still propagates unchanged.
+fn is_unique_violation(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
 }
 
 fn asset_transaction_commit_outcome_unknown(operation: &StorageOperation) -> StorageError {
