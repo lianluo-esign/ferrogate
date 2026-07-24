@@ -19,8 +19,8 @@ use chrono_tz::Tz;
 use croner::Cron;
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// How a schedule's firing cadence is expressed.
@@ -796,43 +796,20 @@ impl RuntimeStorageRepositories {
         &self,
         schedule: StoredAgentSchedule,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                control_plane
-                    .lock()
-                    .map_err(|_| {
-                        StorageError::Runtime("agent schedule repository lock poisoned".into())
-                    })?
-                    .upsert_agent_schedule(schedule);
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_agent_schedule(&schedule).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_agent_schedule"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .upsert_agent_schedule(schedule)
+            .await
     }
 
     pub async fn get_agent_schedule(
         &self,
         schedule_id: &str,
     ) -> Result<Option<StoredAgentSchedule>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .get_agent_schedule(schedule_id)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_agent_schedule(schedule_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_agent_schedule"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .get_agent_schedule(schedule_id)
+            .await
     }
 
     pub async fn list_agent_schedules(
@@ -840,58 +817,23 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         workspace_id: Option<&str>,
     ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .list_agent_schedules(tenant_id, workspace_id)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_agent_schedules(tenant_id, workspace_id)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_agent_schedules"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_agent_schedules(tenant_id, workspace_id)
+            .await
     }
 
     /// Lists every agent schedule across all tenants (platform-operator admin
     /// list). Tenant-scoped callers use [`Self::list_agent_schedules`] instead.
     pub async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .list_all_agent_schedules()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_all_agent_schedules().await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_all_agent_schedules"),
-            ),
-        }
+        self.control_plane.store().list_all_agent_schedules().await
     }
 
     pub async fn delete_agent_schedule(&self, schedule_id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .delete_agent_schedule(schedule_id)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_agent_schedule(schedule_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("delete_agent_schedule"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .delete_agent_schedule(schedule_id)
+            .await
     }
 
     pub async fn list_due_agent_schedules(
@@ -899,22 +841,10 @@ impl RuntimeStorageRepositories {
         now_unix: i64,
         limit: i64,
     ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .list_due_agent_schedules(now_unix, limit.max(0) as usize)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_due_agent_schedules(now_unix, limit)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_due_agent_schedules"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_due_agent_schedules(now_unix, limit)
+            .await
     }
 
     /// Idempotently record a fire; `true` iff this caller won the slot. See
@@ -923,20 +853,10 @@ impl RuntimeStorageRepositories {
         &self,
         fire: StoredAgentScheduleFire,
     ) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .insert_agent_schedule_fire(fire)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.insert_agent_schedule_fire(&fire).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("insert_agent_schedule_fire"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .insert_agent_schedule_fire(fire)
+            .await
     }
 
     pub async fn list_agent_schedule_fires(
@@ -944,22 +864,10 @@ impl RuntimeStorageRepositories {
         schedule_id: &str,
         limit: i64,
     ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("agent schedule repository lock poisoned".into())
-                })?
-                .list_agent_schedule_fires(schedule_id, limit.max(0) as usize)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_agent_schedule_fires(schedule_id, limit)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_agent_schedule_fires"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_agent_schedule_fires(schedule_id, limit)
+            .await
     }
 }
 

@@ -35,11 +35,25 @@ use super::*;
 ///   uniform forwarding shape used here. A D1 backend implements
 ///   `McpCredentialRepository`'s postgres-side inherent methods and adds arms
 ///   in that one module.
-/// * The per-entity modules outside the #425 groups (wallet, payment
-///   attempts, RBAC, agent schedules, site domains, budget alerts, workflow
-///   budgets, observed agent presence, metadata rollups, guardrail evidence,
-///   asset lifecycle transactions) keep their own backend dispatch; they were
-///   not part of the #419/#425 surface and are tracked for follow-up work.
+/// * `GuardrailEvaluationRepository` (in `guardrail_evidence.rs`) also stays
+///   SEPARATE and enum-dispatched (#437): its Memory path does NOT touch the
+///   control-plane backend at all — it borrows the in-memory
+///   `RuntimeStorageRepositories::guardrail_evidence` append store directly,
+///   and its Postgres path threads the store-level
+///   `guardrail_evaluation_retention_records` count into the durable write.
+///   Neither reduces to the `self.store()...` forwarding shape (the evidence
+///   store is a `RuntimeStorageRepositories` field shared across all backends,
+///   not owned by any one `ControlPlaneStore`), so a D1 backend implements the
+///   postgres-side inherent guardrail methods and adds arms in that one module,
+///   exactly like `McpCredentialRepository`.
+/// * The remaining per-entity modules (wallet, payment attempts, RBAC, agent
+///   schedules, site domains, budget alerts, workflow budgets, observed agent
+///   presence, metadata rollups) ARE routed onto this trait as of #437 — their
+///   `RuntimeStorageRepositories` methods now call `self.store()...` with the
+///   same forwarding contract as the #425 surfaces. The asset-lifecycle
+///   transactions were already on this trait (the asset/channel CRUD methods
+///   above); `asset_lifecycle.rs` itself is pure retention-planning helpers
+///   with no backend dispatch.
 #[async_trait::async_trait]
 pub(crate) trait ControlPlaneStore: Send + Sync {
     async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError>;
@@ -538,6 +552,257 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         dispatch: StoredSelfHostedRunDispatch,
     ) -> Result<(), StorageError>;
     async fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch>;
+
+    // --- Per-entity module surfaces (#437) ---
+    //
+    // Relocated here from the per-module `RuntimeStorageRepositories`
+    // backend-enum dispatch (wallet, payment attempts, RBAC, agent schedules,
+    // site domains, budget alerts, workflow budgets, observed agent presence,
+    // metadata rollups). Same forwarding contract as the #425 surfaces above:
+    // Postgres forwards to its inherent SQL method, Memory locks its
+    // `RuntimeControlPlaneState`, and the D1 backend returns the typed
+    // `unimplemented-backend-surface` error until a proxy-Worker impl fills it.
+    // `guardrail_evidence` and `mcp_identity` stay SEPARATE and enum-dispatched
+    // (see the keep-separate notes above / in `guardrail_evidence.rs`).
+
+    // Site domains (#265).
+    async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError>;
+    async fn get_site_domain(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomain>, StorageError>;
+    async fn list_site_domains(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomain>, StorageError>;
+    async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError>;
+
+    // Per-metadata usage rollups (#171).
+    async fn list_usage_metadata_rollups(
+        &self,
+        metadata_key: &str,
+        organization_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError>;
+
+    // Observed-agent presence (#357).
+    async fn touch_observed_agent_presence(
+        &self,
+        touch: ObservedAgentPresenceTouch,
+    ) -> Result<(), StorageError>;
+    async fn list_observed_agent_presence_since(
+        &self,
+        tenant_scope: Option<&str>,
+        since_unix: i64,
+    ) -> Result<Vec<StoredObservedAgentPresence>, StorageError>;
+
+    // Budget-alert idempotency ledger (#170).
+    async fn record_budget_alert_notification(
+        &self,
+        notification: StoredBudgetAlertNotification,
+    ) -> Result<(), StorageError>;
+    async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError>;
+    async fn list_budget_alert_notifications(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError>;
+
+    // Workflow-run execution budgets (#279).
+    #[allow(clippy::too_many_arguments)]
+    async fn open_workflow_run_budget(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        run_id: &str,
+        tenant_id: &str,
+        caps: WorkflowRunBudgetCaps,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError>;
+    async fn debit_workflow_run_budget(
+        &self,
+        id: &str,
+        cost_credits: i64,
+        tokens: i64,
+        tool_calls: i64,
+        now_unix: i64,
+    ) -> Result<WorkflowBudgetDebit, StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn topup_workflow_run_budget(
+        &self,
+        id: &str,
+        add_cost_credits: i64,
+        add_tokens: i64,
+        add_tool_calls: i64,
+        extend_deadline_unix: Option<i64>,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError>;
+    async fn get_workflow_run_budget(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredWorkflowRunBudget>, StorageError>;
+    async fn list_workflow_run_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError>;
+
+    // Tenant RBAC entitlements (#182).
+    async fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError>;
+    async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError>;
+    async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError>;
+    async fn delete_permission(&self, id: &str) -> Result<bool, StorageError>;
+    async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError>;
+    async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError>;
+    async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError>;
+    async fn delete_role(&self, id: &str) -> Result<bool, StorageError>;
+    async fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError>;
+    async fn list_tenant_role_bindings(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredTenantRoleBinding>, StorageError>;
+    async fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError>;
+
+    // Agent schedules + fires (#356/#426).
+    async fn upsert_agent_schedule(
+        &self,
+        schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError>;
+    async fn get_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError>;
+    async fn list_agent_schedules(
+        &self,
+        tenant_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError>;
+    async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError>;
+    async fn delete_agent_schedule(&self, schedule_id: &str) -> Result<bool, StorageError>;
+    async fn list_due_agent_schedules(
+        &self,
+        now_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError>;
+    async fn insert_agent_schedule_fire(
+        &self,
+        fire: StoredAgentScheduleFire,
+    ) -> Result<bool, StorageError>;
+    async fn list_agent_schedule_fires(
+        &self,
+        schedule_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError>;
+
+    // Wallets, reservations + payment methods (#169/#281).
+    async fn settle_wallet_balance(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError>;
+    async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError>;
+    async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError>;
+    async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError>;
+    async fn adjust_wallet_balance(
+        &self,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError>;
+    async fn set_wallet_dunning(
+        &self,
+        tenant_id: &str,
+        dunning: bool,
+        now_unix: i64,
+    ) -> Result<(), StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn reserve_wallet_credits(
+        &self,
+        reservation_id: &str,
+        tenant_id: &str,
+        amount_credits: i64,
+        expires_at_unix: i64,
+        now_unix: i64,
+    ) -> Result<WalletReservationResult, StorageError>;
+    async fn settle_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<WalletReservationSettlement, StorageError>;
+    async fn release_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<StoredWalletReservation, StorageError>;
+    async fn sweep_expired_wallet_reservations(
+        &self,
+        now_unix: i64,
+    ) -> Result<Vec<String>, StorageError>;
+    async fn list_wallet_reservations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWalletReservation>, StorageError>;
+    async fn upsert_payment_method(
+        &self,
+        payment_method: StoredPaymentMethod,
+    ) -> Result<(), StorageError>;
+    async fn list_payment_methods(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentMethod>, StorageError>;
+    async fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError>;
+    async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError>;
+
+    // Payment attempts + the single CAS transition seam (#352/#354/#399).
+    async fn create_payment_attempt(
+        &self,
+        attempt: StoredPaymentAttempt,
+    ) -> Result<PaymentAttemptCreation, StorageError>;
+    async fn get_payment_attempt(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentAttempt>, StorageError>;
+    async fn list_payment_attempts(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError>;
+    async fn get_payment_attempt_links(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<PaymentAttemptLinks>, StorageError>;
+    async fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError>;
+    async fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError>;
+    /// The one CAS seam every typed payment-attempt transition edge routes
+    /// through (#399). `op_name` labels the Postgres StorageOperation; the
+    /// Memory backend ignores it. `evidence` is the write-once column bundle
+    /// (`super::payment_attempt::TransitionEvidence`).
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_payment_attempt(
+        &self,
+        op_name: &'static str,
+        id: &str,
+        allowed_from: &[&str],
+        to_state: &str,
+        evidence: &super::payment_attempt::TransitionEvidence<'_>,
+        now_unix: i64,
+    ) -> Result<PaymentAttemptTransition, StorageError>;
 
     // --- Backend introspection (#425) ---
     //

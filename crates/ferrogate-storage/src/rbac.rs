@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     deserialize_storage_document, serialize_storage_document, PostgresControlPlaneStore,
-    PostgresRow, Repository, RuntimeControlPlaneBackend, RuntimeControlPlaneState,
-    RuntimeStorageRepositories, StorageError, StorageOperation,
+    PostgresRow, Repository, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    StorageOperation,
 };
 
 /// A dynamically-definable, finest-grained capability unit (issue #182).
@@ -528,125 +528,40 @@ impl RuntimeStorageRepositories {
         &self,
         permission: StoredPermission,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_permission(permission);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_permission(&permission).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_permission"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .upsert_permission(permission)
+            .await
     }
 
     pub async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_permission(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_permission(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_permission"),
-            ),
-        }
+        self.control_plane.store().get_permission(id).await
     }
 
     pub async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_permissions())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_permissions().await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_permissions"),
-            ),
-        }
+        self.control_plane.store().list_permissions().await
     }
 
     pub async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_permission(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_permission(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("delete_permission"),
-            ),
-        }
+        self.control_plane.store().delete_permission(id).await
     }
 
     /// Creates or replaces a role (issue #182): a named, horizontally
     /// extensible bundle of permission keys. Shared/global, like plans.
     pub async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_role(role);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_role(&role).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_role"),
-            ),
-        }
+        self.control_plane.store().upsert_role(role).await
     }
 
     pub async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_role(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_role(id).await,
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_role"),
-            ),
-        }
+        self.control_plane.store().get_role(id).await
     }
 
     pub async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_roles())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_roles().await,
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_roles"),
-            ),
-        }
+        self.control_plane.store().list_roles().await
     }
 
     pub async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_role(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_role(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("delete_role"),
-            ),
-        }
+        self.control_plane.store().delete_role(id).await
     }
 
     /// Binds a role to a tenant (issue #182) -- the tenant's effective
@@ -657,38 +572,17 @@ impl RuntimeStorageRepositories {
         &self,
         binding: StoredTenantRoleBinding,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.bind_tenant_role(binding);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.bind_tenant_role(&binding).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("bind_tenant_role"),
-            ),
-        }
+        self.control_plane.store().bind_tenant_role(binding).await
     }
 
     pub async fn list_tenant_role_bindings(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_tenant_role_bindings(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_tenant_role_bindings(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_tenant_role_bindings"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_tenant_role_bindings(tenant_id)
+            .await
     }
 
     pub async fn unbind_tenant_role(
@@ -696,17 +590,9 @@ impl RuntimeStorageRepositories {
         tenant_id: &str,
         role_id: &str,
     ) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.unbind_tenant_role(tenant_id, role_id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.unbind_tenant_role(tenant_id, role_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("unbind_tenant_role"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .unbind_tenant_role(tenant_id, role_id)
+            .await
     }
 }

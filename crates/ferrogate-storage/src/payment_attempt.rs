@@ -14,9 +14,9 @@
 // see `wallet.rs`/`workflow_budget.rs` for the pattern this mirrors.
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
-    StoredWalletReservation, StoredWalletSettlement,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation, StoredWalletReservation,
+    StoredWalletSettlement,
 };
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ pub enum PaymentAttemptTransition {
 /// (`COALESCE(new, old)` in Postgres); a `Some` that would overwrite a differing
 /// stored value on an idempotent replay fails closed as a `Conflict`.
 #[derive(Debug, Clone, Default)]
-struct TransitionEvidence<'a> {
+pub(crate) struct TransitionEvidence<'a> {
     submitted_at_unix: Option<i64>,
     transaction_signature: Option<&'a str>,
     settled_atomic_amount: Option<&'a str>,
@@ -499,7 +499,7 @@ impl PostgresControlPlaneStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn transition_payment_attempt(
+    pub(super) async fn transition_payment_attempt(
         &self,
         op_name: &'static str,
         id: &str,
@@ -838,7 +838,7 @@ impl RuntimeControlPlaneState {
         Ok(PaymentAttemptCreation::Created(attempt))
     }
 
-    fn transition_payment_attempt(
+    pub(super) fn transition_payment_attempt(
         &mut self,
         id: &str,
         allowed_from: &[&str],
@@ -973,26 +973,10 @@ macro_rules! payment_attempt_transitions {
                     let $ev = &evidence_args;
                     let evidence: TransitionEvidence<'_> = $build;
                     const ALLOWED: &[&str] = &[$($from),+];
-                    match &self.control_plane {
-                        RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                            .lock()
-                            .map_err(|_| StorageError::Runtime(
-                                "memory control-plane lock poisoned".into(),
-                            ))?
-                            .transition_payment_attempt(id, ALLOWED, $to, &evidence, now_unix),
-                        RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                            control_plane
-                                .transition_payment_attempt(
-                                    $op, id, ALLOWED, $to, &evidence, now_unix,
-                                )
-                                .await
-                        }
-                        RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                            super::control_plane_store_d1::unimplemented_surface(
-                                "transition_payment_attempt",
-                            ),
-                        ),
-                    }
+                    self.control_plane
+                        .store()
+                        .transition_payment_attempt($op, id, ALLOWED, $to, &evidence, now_unix)
+                        .await
                 }
             )+
         }
@@ -1093,36 +1077,17 @@ impl RuntimeStorageRepositories {
         &self,
         attempt: StoredPaymentAttempt,
     ) -> Result<PaymentAttemptCreation, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .create_payment_attempt(attempt),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.create_payment_attempt(&attempt).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("create_payment_attempt"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .create_payment_attempt(attempt)
+            .await
     }
 
     pub async fn get_payment_attempt(
         &self,
         id: &str,
     ) -> Result<Option<StoredPaymentAttempt>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_payment_attempt(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_payment_attempt(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_payment_attempt"),
-            ),
-        }
+        self.control_plane.store().get_payment_attempt(id).await
     }
 
     /// Lists a tenant's attempts newest-first for admin inspect (issue #352).
@@ -1131,18 +1096,10 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_payment_attempts(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_payment_attempts(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_payment_attempts"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_payment_attempts(tenant_id)
+            .await
     }
 
     /// Joins an attempt to its wallet hold and captured settlement, enforcing
@@ -1153,18 +1110,10 @@ impl RuntimeStorageRepositories {
         id: &str,
         tenant_id: &str,
     ) -> Result<Option<PaymentAttemptLinks>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_payment_attempt_links(id, tenant_id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_payment_attempt_links(id, tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_payment_attempt_links"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .get_payment_attempt_links(id, tenant_id)
+            .await
     }
 
     /// Bounded TTL sweep read (#354): up to `limit` attempts still in a
@@ -1178,22 +1127,10 @@ impl RuntimeStorageRepositories {
         due_at_or_before_unix: i64,
         limit: usize,
     ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .list_expirable_due_payment_attempts(due_at_or_before_unix, limit)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_expirable_due_payment_attempts(due_at_or_before_unix, limit as i64)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "list_expirable_due_payment_attempts",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .list_expirable_due_payment_attempts(due_at_or_before_unix, limit)
+            .await
     }
 
     /// Bounded reconcile read (#354): up to `limit` post-submission attempts in
@@ -1209,21 +1146,9 @@ impl RuntimeStorageRepositories {
         checked_at_or_before_unix: i64,
         limit: usize,
     ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit as i64)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "list_reconcilable_payment_attempts",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit)
+            .await
     }
 }

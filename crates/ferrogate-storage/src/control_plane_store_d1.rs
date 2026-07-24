@@ -2226,6 +2226,396 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Vec::new()
     }
 
+    // --- Per-entity module surfaces (#437, UNIMPLEMENTED) ---
+    //
+    // These families are not part of the first D1 slice (issue #420); each
+    // returns the typed `unimplemented-backend-surface` error a proxy-Worker
+    // impl will later replace. Same contract as the erroring surfaces above.
+
+    async fn upsert_site_domain(&self, _domain: StoredSiteDomain) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_site_domain"))
+    }
+
+    async fn get_site_domain(
+        &self,
+        _hostname: &str,
+    ) -> Result<Option<StoredSiteDomain>, StorageError> {
+        Err(unimplemented_surface("get_site_domain"))
+    }
+
+    async fn list_site_domains(
+        &self,
+        _tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomain>, StorageError> {
+        Err(unimplemented_surface("list_site_domains"))
+    }
+
+    async fn delete_site_domain(&self, _hostname: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_site_domain"))
+    }
+
+    async fn list_usage_metadata_rollups(
+        &self,
+        _metadata_key: &str,
+        _organization_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
+        Err(unimplemented_surface("list_usage_metadata_rollups"))
+    }
+
+    async fn touch_observed_agent_presence(
+        &self,
+        _touch: ObservedAgentPresenceTouch,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("touch_observed_agent_presence"))
+    }
+
+    async fn list_observed_agent_presence_since(
+        &self,
+        _tenant_scope: Option<&str>,
+        _since_unix: i64,
+    ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
+        Err(unimplemented_surface("list_observed_agent_presence_since"))
+    }
+
+    async fn record_budget_alert_notification(
+        &self,
+        _notification: StoredBudgetAlertNotification,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("record_budget_alert_notification"))
+    }
+
+    async fn budget_alert_already_notified(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("budget_alert_already_notified"))
+    }
+
+    async fn list_budget_alert_notifications(
+        &self,
+        _scope_type: QuotaScopeKind,
+        _scope_id: &str,
+        _period_month: &str,
+    ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
+        Err(unimplemented_surface("list_budget_alert_notifications"))
+    }
+
+    async fn open_workflow_run_budget(
+        &self,
+        _workflow_id: &str,
+        _workflow_version: u32,
+        _run_id: &str,
+        _tenant_id: &str,
+        _caps: WorkflowRunBudgetCaps,
+        _now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        Err(unimplemented_surface("open_workflow_run_budget"))
+    }
+
+    async fn debit_workflow_run_budget(
+        &self,
+        _id: &str,
+        _cost_credits: i64,
+        _tokens: i64,
+        _tool_calls: i64,
+        _now_unix: i64,
+    ) -> Result<WorkflowBudgetDebit, StorageError> {
+        Err(unimplemented_surface("debit_workflow_run_budget"))
+    }
+
+    async fn topup_workflow_run_budget(
+        &self,
+        _id: &str,
+        _add_cost_credits: i64,
+        _add_tokens: i64,
+        _add_tool_calls: i64,
+        _extend_deadline_unix: Option<i64>,
+        _now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        Err(unimplemented_surface("topup_workflow_run_budget"))
+    }
+
+    async fn get_workflow_run_budget(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
+        Err(unimplemented_surface("get_workflow_run_budget"))
+    }
+
+    async fn list_workflow_run_budgets(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
+        Err(unimplemented_surface("list_workflow_run_budgets"))
+    }
+
+    async fn upsert_permission(&self, _permission: StoredPermission) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_permission"))
+    }
+
+    async fn get_permission(&self, _id: &str) -> Result<Option<StoredPermission>, StorageError> {
+        Err(unimplemented_surface("get_permission"))
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+        Err(unimplemented_surface("list_permissions"))
+    }
+
+    async fn delete_permission(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_permission"))
+    }
+
+    async fn upsert_role(&self, _role: StoredRole) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_role"))
+    }
+
+    async fn get_role(&self, _id: &str) -> Result<Option<StoredRole>, StorageError> {
+        Err(unimplemented_surface("get_role"))
+    }
+
+    async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+        Err(unimplemented_surface("list_roles"))
+    }
+
+    async fn delete_role(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_role"))
+    }
+
+    async fn bind_tenant_role(
+        &self,
+        _binding: StoredTenantRoleBinding,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("bind_tenant_role"))
+    }
+
+    async fn list_tenant_role_bindings(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
+        Err(unimplemented_surface("list_tenant_role_bindings"))
+    }
+
+    async fn unbind_tenant_role(
+        &self,
+        _tenant_id: &str,
+        _role_id: &str,
+    ) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("unbind_tenant_role"))
+    }
+
+    async fn upsert_agent_schedule(
+        &self,
+        _schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_agent_schedule"))
+    }
+
+    async fn get_agent_schedule(
+        &self,
+        _schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("get_agent_schedule"))
+    }
+
+    async fn list_agent_schedules(
+        &self,
+        _tenant_id: &str,
+        _workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_agent_schedules"))
+    }
+
+    async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_all_agent_schedules"))
+    }
+
+    async fn delete_agent_schedule(&self, _schedule_id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_agent_schedule"))
+    }
+
+    async fn list_due_agent_schedules(
+        &self,
+        _now_unix: i64,
+        _limit: i64,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Err(unimplemented_surface("list_due_agent_schedules"))
+    }
+
+    async fn insert_agent_schedule_fire(
+        &self,
+        _fire: StoredAgentScheduleFire,
+    ) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("insert_agent_schedule_fire"))
+    }
+
+    async fn list_agent_schedule_fires(
+        &self,
+        _schedule_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
+        Err(unimplemented_surface("list_agent_schedule_fires"))
+    }
+
+    async fn settle_wallet_balance(
+        &self,
+        _settlement_id: &str,
+        _tenant_id: &str,
+        _delta_credits: i64,
+        _now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        Err(unimplemented_surface("settle_wallet_balance"))
+    }
+
+    async fn upsert_wallet(&self, _wallet: StoredWallet) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_wallet"))
+    }
+
+    async fn get_wallet(&self, _tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("get_wallet"))
+    }
+
+    async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("list_wallets"))
+    }
+
+    async fn adjust_wallet_balance(
+        &self,
+        _tenant_id: &str,
+        _delta_credits: i64,
+        _now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        Err(unimplemented_surface("adjust_wallet_balance"))
+    }
+
+    async fn set_wallet_dunning(
+        &self,
+        _tenant_id: &str,
+        _dunning: bool,
+        _now_unix: i64,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("set_wallet_dunning"))
+    }
+
+    async fn reserve_wallet_credits(
+        &self,
+        _reservation_id: &str,
+        _tenant_id: &str,
+        _amount_credits: i64,
+        _expires_at_unix: i64,
+        _now_unix: i64,
+    ) -> Result<WalletReservationResult, StorageError> {
+        Err(unimplemented_surface("reserve_wallet_credits"))
+    }
+
+    async fn settle_wallet_reservation(
+        &self,
+        _reservation_id: &str,
+        _now_unix: i64,
+    ) -> Result<WalletReservationSettlement, StorageError> {
+        Err(unimplemented_surface("settle_wallet_reservation"))
+    }
+
+    async fn release_wallet_reservation(
+        &self,
+        _reservation_id: &str,
+        _now_unix: i64,
+    ) -> Result<StoredWalletReservation, StorageError> {
+        Err(unimplemented_surface("release_wallet_reservation"))
+    }
+
+    async fn sweep_expired_wallet_reservations(
+        &self,
+        _now_unix: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        Err(unimplemented_surface("sweep_expired_wallet_reservations"))
+    }
+
+    async fn list_wallet_reservations(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredWalletReservation>, StorageError> {
+        Err(unimplemented_surface("list_wallet_reservations"))
+    }
+
+    async fn upsert_payment_method(
+        &self,
+        _payment_method: StoredPaymentMethod,
+    ) -> Result<(), StorageError> {
+        Err(unimplemented_surface("upsert_payment_method"))
+    }
+
+    async fn list_payment_methods(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
+        Err(unimplemented_surface("list_payment_methods"))
+    }
+
+    async fn get_payment_method(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        Err(unimplemented_surface("get_payment_method"))
+    }
+
+    async fn delete_payment_method(&self, _id: &str) -> Result<bool, StorageError> {
+        Err(unimplemented_surface("delete_payment_method"))
+    }
+
+    async fn create_payment_attempt(
+        &self,
+        _attempt: StoredPaymentAttempt,
+    ) -> Result<PaymentAttemptCreation, StorageError> {
+        Err(unimplemented_surface("create_payment_attempt"))
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        _id: &str,
+    ) -> Result<Option<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("get_payment_attempt"))
+    }
+
+    async fn list_payment_attempts(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_payment_attempts"))
+    }
+
+    async fn get_payment_attempt_links(
+        &self,
+        _id: &str,
+        _tenant_id: &str,
+    ) -> Result<Option<PaymentAttemptLinks>, StorageError> {
+        Err(unimplemented_surface("get_payment_attempt_links"))
+    }
+
+    async fn list_expirable_due_payment_attempts(
+        &self,
+        _due_at_or_before_unix: i64,
+        _limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_expirable_due_payment_attempts"))
+    }
+
+    async fn list_reconcilable_payment_attempts(
+        &self,
+        _checked_at_or_before_unix: i64,
+        _limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Err(unimplemented_surface("list_reconcilable_payment_attempts"))
+    }
+
+    async fn transition_payment_attempt(
+        &self,
+        _op_name: &'static str,
+        _id: &str,
+        _allowed_from: &[&str],
+        _to_state: &str,
+        _evidence: &super::payment_attempt::TransitionEvidence<'_>,
+        _now_unix: i64,
+    ) -> Result<PaymentAttemptTransition, StorageError> {
+        Err(unimplemented_surface("transition_payment_attempt"))
+    }
+
     // schema_evidence / pool_metrics_snapshot: trait defaults (no durable
     // schema evidence probe on this slice; no Postgres pool to report).
 }

@@ -14,8 +14,8 @@
 // for the pattern this mirrors.
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// A tenant's prepaid-credit balance (issue #169). Balances are integer
@@ -1330,20 +1330,10 @@ impl RuntimeStorageRepositories {
         delta_credits: i64,
         now_unix: i64,
     ) -> Result<WalletSettlementOutcome, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("settle_wallet_balance"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
+            .await
     }
 
     /// Creates or replaces a wallet's configuration (issue #169). Use
@@ -1351,50 +1341,15 @@ impl RuntimeStorageRepositories {
     /// read-modify-write through this method -- it's the atomic,
     /// race-safe path.
     pub async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_wallet(wallet);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_wallet(&wallet).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_wallet"),
-            ),
-        }
+        self.control_plane.store().upsert_wallet(wallet).await
     }
 
     pub async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_wallet(tenant_id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_wallet(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_wallet"),
-            ),
-        }
+        self.control_plane.store().get_wallet(tenant_id).await
     }
 
     pub async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_wallets())
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_wallets().await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_wallets"),
-            ),
-        }
+        self.control_plane.store().list_wallets().await
     }
 
     /// Atomically applies `delta_credits` to an existing wallet (negative
@@ -1407,22 +1362,10 @@ impl RuntimeStorageRepositories {
         delta_credits: i64,
         now_unix: i64,
     ) -> Result<Option<StoredWallet>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| {
-                    control_plane.adjust_wallet_balance(tenant_id, delta_credits, now_unix)
-                })
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .adjust_wallet_balance(tenant_id, delta_credits, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("adjust_wallet_balance"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+            .await
     }
 
     pub async fn set_wallet_dunning(
@@ -1431,22 +1374,10 @@ impl RuntimeStorageRepositories {
         dunning: bool,
         now_unix: i64,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.set_wallet_dunning(tenant_id, dunning, now_unix);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .set_wallet_dunning(tenant_id, dunning, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("set_wallet_dunning"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .set_wallet_dunning(tenant_id, dunning, now_unix)
+            .await
     }
 
     /// Places an exact-amount durable hold against a wallet's available balance
@@ -1460,32 +1391,16 @@ impl RuntimeStorageRepositories {
         expires_at_unix: i64,
         now_unix: i64,
     ) -> Result<WalletReservationResult, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .reserve_wallet_credits(
-                    reservation_id,
-                    tenant_id,
-                    amount_credits,
-                    expires_at_unix,
-                    now_unix,
-                ),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .reserve_wallet_credits(
-                        reservation_id,
-                        tenant_id,
-                        amount_credits,
-                        expires_at_unix,
-                        now_unix,
-                    )
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("reserve_wallet_credits"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .reserve_wallet_credits(
+                reservation_id,
+                tenant_id,
+                amount_credits,
+                expires_at_unix,
+                now_unix,
+            )
+            .await
     }
 
     /// Captures an active hold into a real, idempotent wallet debit whose ledger
@@ -1495,20 +1410,10 @@ impl RuntimeStorageRepositories {
         reservation_id: &str,
         now_unix: i64,
     ) -> Result<WalletReservationSettlement, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .settle_wallet_reservation(reservation_id, now_unix),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .settle_wallet_reservation(reservation_id, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("settle_wallet_reservation"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .settle_wallet_reservation(reservation_id, now_unix)
+            .await
     }
 
     /// Cancels an active hold, restoring its credits (issue #281).
@@ -1517,20 +1422,10 @@ impl RuntimeStorageRepositories {
         reservation_id: &str,
         now_unix: i64,
     ) -> Result<StoredWalletReservation, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .release_wallet_reservation(reservation_id, now_unix),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .release_wallet_reservation(reservation_id, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("release_wallet_reservation"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .release_wallet_reservation(reservation_id, now_unix)
+            .await
     }
 
     /// Releases holds past their TTL and returns the swept ids (issue #281).
@@ -1541,22 +1436,10 @@ impl RuntimeStorageRepositories {
         &self,
         now_unix: i64,
     ) -> Result<Vec<String>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .sweep_expired_wallet_reservations(now_unix)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .sweep_expired_wallet_reservations(now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "sweep_expired_wallet_reservations",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .sweep_expired_wallet_reservations(now_unix)
+            .await
     }
 
     /// Lists a tenant's holds newest-first for admin inspect/metrics (issue #281).
@@ -1564,88 +1447,40 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredWalletReservation>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_wallet_reservations(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_wallet_reservations(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_wallet_reservations"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_wallet_reservations(tenant_id)
+            .await
     }
 
     pub async fn upsert_payment_method(
         &self,
         payment_method: StoredPaymentMethod,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.upsert_payment_method(payment_method);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_payment_method(&payment_method).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_payment_method"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .upsert_payment_method(payment_method)
+            .await
     }
 
     pub async fn list_payment_methods(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_payment_methods(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_payment_methods(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_payment_methods"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_payment_methods(tenant_id)
+            .await
     }
 
     pub async fn get_payment_method(
         &self,
         id: &str,
     ) -> Result<Option<StoredPaymentMethod>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_payment_method(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_payment_method(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_payment_method"),
-            ),
-        }
+        self.control_plane.store().get_payment_method(id).await
     }
 
     pub async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|mut control_plane| control_plane.delete_payment_method(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_payment_method(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("delete_payment_method"),
-            ),
-        }
+        self.control_plane.store().delete_payment_method(id).await
     }
 }

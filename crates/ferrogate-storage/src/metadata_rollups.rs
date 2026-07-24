@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 
 use super::{
     nonnegative_u64, postgres_error, saturating_i64, PostgresControlPlaneStore, PostgresRow,
-    Repository, RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories,
-    StorageError, StorageOperation, TenantContext, UsageMonthlyDelta,
+    Repository, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
+    StorageOperation, TenantContext, UsageMonthlyDelta,
 };
 
 /// The tenant (organization) a metadata rollup belongs to, derived from the
@@ -295,21 +295,9 @@ impl RuntimeStorageRepositories {
         metadata_key: &str,
         organization_id: Option<&str>,
     ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| {
-                    control_plane.list_usage_metadata_rollups(metadata_key, organization_id)
-                })
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_usage_metadata_rollups(metadata_key, organization_id)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_usage_metadata_rollups"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_usage_metadata_rollups(metadata_key, organization_id)
+            .await
     }
 }

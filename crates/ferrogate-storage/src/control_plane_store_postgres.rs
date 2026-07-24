@@ -1189,4 +1189,421 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
             .await
             .unwrap_or_default()
     }
+
+    // --- Per-entity module surfaces (#437): forward to inherent SQL ---
+
+    async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
+        self.upsert_site_domain(&domain).await
+    }
+
+    async fn get_site_domain(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomain>, StorageError> {
+        self.get_site_domain(hostname).await
+    }
+
+    async fn list_site_domains(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomain>, StorageError> {
+        self.list_site_domains(tenant_id).await
+    }
+
+    async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError> {
+        self.delete_site_domain(hostname).await
+    }
+
+    async fn list_usage_metadata_rollups(
+        &self,
+        metadata_key: &str,
+        organization_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
+        self.list_usage_metadata_rollups(metadata_key, organization_id)
+            .await
+    }
+
+    async fn touch_observed_agent_presence(
+        &self,
+        touch: ObservedAgentPresenceTouch,
+    ) -> Result<(), StorageError> {
+        self.touch_observed_agent_presence(&touch).await
+    }
+
+    async fn list_observed_agent_presence_since(
+        &self,
+        tenant_scope: Option<&str>,
+        since_unix: i64,
+    ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
+        self.list_observed_agent_presence_since(tenant_scope, since_unix)
+            .await
+    }
+
+    async fn record_budget_alert_notification(
+        &self,
+        notification: StoredBudgetAlertNotification,
+    ) -> Result<(), StorageError> {
+        self.record_budget_alert_notification(&notification).await
+    }
+
+    async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
+        self.budget_alert_already_notified(id).await
+    }
+
+    async fn list_budget_alert_notifications(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
+        self.list_budget_alert_notifications(scope_type, scope_id, period_month)
+            .await
+    }
+
+    async fn open_workflow_run_budget(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        run_id: &str,
+        tenant_id: &str,
+        caps: WorkflowRunBudgetCaps,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        self.open_workflow_run_budget(
+            workflow_id,
+            workflow_version,
+            run_id,
+            tenant_id,
+            caps,
+            now_unix,
+        )
+        .await
+    }
+
+    async fn debit_workflow_run_budget(
+        &self,
+        id: &str,
+        cost_credits: i64,
+        tokens: i64,
+        tool_calls: i64,
+        now_unix: i64,
+    ) -> Result<WorkflowBudgetDebit, StorageError> {
+        self.debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
+            .await
+    }
+
+    async fn topup_workflow_run_budget(
+        &self,
+        id: &str,
+        add_cost_credits: i64,
+        add_tokens: i64,
+        add_tool_calls: i64,
+        extend_deadline_unix: Option<i64>,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        self.topup_workflow_run_budget(
+            id,
+            add_cost_credits,
+            add_tokens,
+            add_tool_calls,
+            extend_deadline_unix,
+            now_unix,
+        )
+        .await
+    }
+
+    async fn get_workflow_run_budget(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
+        self.get_workflow_run_budget(id).await
+    }
+
+    async fn list_workflow_run_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
+        self.list_workflow_run_budgets(tenant_id).await
+    }
+
+    async fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError> {
+        self.upsert_permission(&permission).await
+    }
+
+    async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+        self.get_permission(id).await
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+        self.list_permissions().await
+    }
+
+    async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_permission(id).await
+    }
+
+    async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
+        self.upsert_role(&role).await
+    }
+
+    async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+        self.get_role(id).await
+    }
+
+    async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+        self.list_roles().await
+    }
+
+    async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_role(id).await
+    }
+
+    async fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError> {
+        self.bind_tenant_role(&binding).await
+    }
+
+    async fn list_tenant_role_bindings(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
+        self.list_tenant_role_bindings(tenant_id).await
+    }
+
+    async fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError> {
+        self.unbind_tenant_role(tenant_id, role_id).await
+    }
+
+    async fn upsert_agent_schedule(
+        &self,
+        schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError> {
+        self.upsert_agent_schedule(&schedule).await
+    }
+
+    async fn get_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError> {
+        self.get_agent_schedule(schedule_id).await
+    }
+
+    async fn list_agent_schedules(
+        &self,
+        tenant_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        self.list_agent_schedules(tenant_id, workspace_id).await
+    }
+
+    async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        self.list_all_agent_schedules().await
+    }
+
+    async fn delete_agent_schedule(&self, schedule_id: &str) -> Result<bool, StorageError> {
+        self.delete_agent_schedule(schedule_id).await
+    }
+
+    async fn list_due_agent_schedules(
+        &self,
+        now_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        self.list_due_agent_schedules(now_unix, limit).await
+    }
+
+    async fn insert_agent_schedule_fire(
+        &self,
+        fire: StoredAgentScheduleFire,
+    ) -> Result<bool, StorageError> {
+        self.insert_agent_schedule_fire(&fire).await
+    }
+
+    async fn list_agent_schedule_fires(
+        &self,
+        schedule_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
+        self.list_agent_schedule_fires(schedule_id, limit).await
+    }
+
+    async fn settle_wallet_balance(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        self.settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
+            .await
+    }
+
+    async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
+        self.upsert_wallet(&wallet).await
+    }
+
+    async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+        self.get_wallet(tenant_id).await
+    }
+
+    async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        self.list_wallets().await
+    }
+
+    async fn adjust_wallet_balance(
+        &self,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        self.adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+            .await
+    }
+
+    async fn set_wallet_dunning(
+        &self,
+        tenant_id: &str,
+        dunning: bool,
+        now_unix: i64,
+    ) -> Result<(), StorageError> {
+        self.set_wallet_dunning(tenant_id, dunning, now_unix).await
+    }
+
+    async fn reserve_wallet_credits(
+        &self,
+        reservation_id: &str,
+        tenant_id: &str,
+        amount_credits: i64,
+        expires_at_unix: i64,
+        now_unix: i64,
+    ) -> Result<WalletReservationResult, StorageError> {
+        self.reserve_wallet_credits(
+            reservation_id,
+            tenant_id,
+            amount_credits,
+            expires_at_unix,
+            now_unix,
+        )
+        .await
+    }
+
+    async fn settle_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<WalletReservationSettlement, StorageError> {
+        self.settle_wallet_reservation(reservation_id, now_unix)
+            .await
+    }
+
+    async fn release_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<StoredWalletReservation, StorageError> {
+        self.release_wallet_reservation(reservation_id, now_unix)
+            .await
+    }
+
+    async fn sweep_expired_wallet_reservations(
+        &self,
+        now_unix: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        self.sweep_expired_wallet_reservations(now_unix).await
+    }
+
+    async fn list_wallet_reservations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWalletReservation>, StorageError> {
+        self.list_wallet_reservations(tenant_id).await
+    }
+
+    async fn upsert_payment_method(
+        &self,
+        payment_method: StoredPaymentMethod,
+    ) -> Result<(), StorageError> {
+        self.upsert_payment_method(&payment_method).await
+    }
+
+    async fn list_payment_methods(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
+        self.list_payment_methods(tenant_id).await
+    }
+
+    async fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        self.get_payment_method(id).await
+    }
+
+    async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete_payment_method(id).await
+    }
+
+    async fn create_payment_attempt(
+        &self,
+        attempt: StoredPaymentAttempt,
+    ) -> Result<PaymentAttemptCreation, StorageError> {
+        self.create_payment_attempt(&attempt).await
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentAttempt>, StorageError> {
+        self.get_payment_attempt(id).await
+    }
+
+    async fn list_payment_attempts(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        self.list_payment_attempts(tenant_id).await
+    }
+
+    async fn get_payment_attempt_links(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<PaymentAttemptLinks>, StorageError> {
+        self.get_payment_attempt_links(id, tenant_id).await
+    }
+
+    async fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        self.list_expirable_due_payment_attempts(due_at_or_before_unix, limit as i64)
+            .await
+    }
+
+    async fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        self.list_reconcilable_payment_attempts(checked_at_or_before_unix, limit as i64)
+            .await
+    }
+
+    async fn transition_payment_attempt(
+        &self,
+        op_name: &'static str,
+        id: &str,
+        allowed_from: &[&str],
+        to_state: &str,
+        evidence: &super::payment_attempt::TransitionEvidence<'_>,
+        now_unix: i64,
+    ) -> Result<PaymentAttemptTransition, StorageError> {
+        self.transition_payment_attempt(op_name, id, allowed_from, to_state, evidence, now_unix)
+            .await
+    }
 }

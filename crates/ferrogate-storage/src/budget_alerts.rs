@@ -10,8 +10,7 @@
 
 use super::{
     postgres_error, PostgresControlPlaneStore, PostgresRow, QuotaScopeKind, Repository,
-    RuntimeControlPlaneBackend, RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
-    StorageOperation,
+    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// One "tenant X was notified it crossed tier Y of its budget for period Z"
@@ -223,41 +222,17 @@ impl RuntimeStorageRepositories {
         &self,
         notification: StoredBudgetAlertNotification,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.record_budget_alert_notification(notification);
-                }
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .record_budget_alert_notification(&notification)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "record_budget_alert_notification",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .record_budget_alert_notification(notification)
+            .await
     }
 
     pub async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.budget_alert_already_notified(id))
-                .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.budget_alert_already_notified(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "budget_alert_already_notified",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .budget_alert_already_notified(id)
+            .await
     }
 
     pub async fn list_budget_alert_notifications(
@@ -266,27 +241,9 @@ impl RuntimeStorageRepositories {
         scope_id: &str,
         period_month: &str,
     ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| {
-                    control_plane.list_budget_alert_notifications(
-                        scope_type,
-                        scope_id,
-                        period_month,
-                    )
-                })
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_budget_alert_notifications(scope_type, scope_id, period_month)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "list_budget_alert_notifications",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .list_budget_alert_notifications(scope_type, scope_id, period_month)
+            .await
     }
 }

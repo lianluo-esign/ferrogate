@@ -15,8 +15,8 @@
 // "one business entity per file" convention (mirrors `agent_schedule.rs`).
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// A durable presence row for one virtual API key, keyed by
@@ -225,27 +225,10 @@ impl RuntimeStorageRepositories {
         &self,
         touch: ObservedAgentPresenceTouch,
     ) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                control_plane
-                    .lock()
-                    .map_err(|_| {
-                        StorageError::Runtime(
-                            "observed agent presence repository lock poisoned".into(),
-                        )
-                    })?
-                    .touch_observed_agent_presence(&touch);
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.touch_observed_agent_presence(&touch).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "touch_observed_agent_presence",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .touch_observed_agent_presence(touch)
+            .await
     }
 
     /// List durable presence rows whose most recent touch is within the window
@@ -255,24 +238,10 @@ impl RuntimeStorageRepositories {
         tenant_scope: Option<&str>,
         since_unix: i64,
     ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| {
-                    StorageError::Runtime("observed agent presence repository lock poisoned".into())
-                })?
-                .list_observed_agent_presence_since(tenant_scope, since_unix)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .list_observed_agent_presence_since(tenant_scope, since_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => {
-                Err(super::control_plane_store_d1::unimplemented_surface(
-                    "list_observed_agent_presence_since",
-                ))
-            }
-        }
+        self.control_plane
+            .store()
+            .list_observed_agent_presence_since(tenant_scope, since_unix)
+            .await
     }
 }
 

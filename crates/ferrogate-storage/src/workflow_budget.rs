@@ -13,8 +13,8 @@
 // the "one business entity per file" convention.
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// A run whose envelope still has budget and accepts debits.
@@ -677,34 +677,17 @@ impl RuntimeStorageRepositories {
         caps: WorkflowRunBudgetCaps,
         now_unix: i64,
     ) -> Result<StoredWorkflowRunBudget, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .open_workflow_run_budget(
-                    workflow_id,
-                    workflow_version,
-                    run_id,
-                    tenant_id,
-                    caps,
-                    now_unix,
-                ),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .open_workflow_run_budget(
-                        workflow_id,
-                        workflow_version,
-                        run_id,
-                        tenant_id,
-                        caps,
-                        now_unix,
-                    )
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("open_workflow_run_budget"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .open_workflow_run_budget(
+                workflow_id,
+                workflow_version,
+                run_id,
+                tenant_id,
+                caps,
+                now_unix,
+            )
+            .await
     }
 
     /// Atomically debits one step's spend against a run's envelope, fail-closed
@@ -717,20 +700,10 @@ impl RuntimeStorageRepositories {
         tool_calls: i64,
         now_unix: i64,
     ) -> Result<WorkflowBudgetDebit, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("debit_workflow_run_budget"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
+            .await
     }
 
     /// Raises an exhausted run's caps and reactivates it so it resumes after a
@@ -744,52 +717,24 @@ impl RuntimeStorageRepositories {
         extend_deadline_unix: Option<i64>,
         now_unix: i64,
     ) -> Result<StoredWorkflowRunBudget, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
-                .topup_workflow_run_budget(
-                    id,
-                    add_cost_credits,
-                    add_tokens,
-                    add_tool_calls,
-                    extend_deadline_unix,
-                    now_unix,
-                ),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane
-                    .topup_workflow_run_budget(
-                        id,
-                        add_cost_credits,
-                        add_tokens,
-                        add_tool_calls,
-                        extend_deadline_unix,
-                        now_unix,
-                    )
-                    .await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("topup_workflow_run_budget"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .topup_workflow_run_budget(
+                id,
+                add_cost_credits,
+                add_tokens,
+                add_tool_calls,
+                extend_deadline_unix,
+                now_unix,
+            )
+            .await
     }
 
     pub async fn get_workflow_run_budget(
         &self,
         id: &str,
     ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.get_workflow_run_budget(id))
-                .unwrap_or(None)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_workflow_run_budget(id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_workflow_run_budget"),
-            ),
-        }
+        self.control_plane.store().get_workflow_run_budget(id).await
     }
 
     /// Lists a tenant's run budgets newest-first for the admin budget view
@@ -798,17 +743,9 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map(|control_plane| control_plane.list_workflow_run_budgets(tenant_id))
-                .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_workflow_run_budgets(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_workflow_run_budgets"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_workflow_run_budgets(tenant_id)
+            .await
     }
 }

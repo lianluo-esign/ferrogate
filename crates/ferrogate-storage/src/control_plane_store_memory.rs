@@ -1676,6 +1676,581 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .map(|dispatches| dispatches.list())
             .unwrap_or_default()
     }
+
+    // --- Per-entity module surfaces (#437): lock the control-plane state ---
+    //
+    // Each body is the pre-#437 Memory match-arm verbatim (same lock-poison
+    // fallbacks), with `control_plane.lock()` now `self.lock()`.
+
+    async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
+            .upsert_site_domain(domain);
+        Ok(())
+    }
+
+    async fn get_site_domain(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomain>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
+            .get_site_domain(hostname))
+    }
+
+    async fn list_site_domains(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomain>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
+            .list_site_domains(tenant_id))
+    }
+
+    async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
+            .delete_site_domain(hostname))
+    }
+
+    async fn list_usage_metadata_rollups(
+        &self,
+        metadata_key: &str,
+        organization_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageMetadataRollup>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| {
+                control_plane.list_usage_metadata_rollups(metadata_key, organization_id)
+            })
+            .unwrap_or_default())
+    }
+
+    async fn touch_observed_agent_presence(
+        &self,
+        touch: ObservedAgentPresenceTouch,
+    ) -> Result<(), StorageError> {
+        self.lock()
+            .map_err(|_| {
+                StorageError::Runtime("observed agent presence repository lock poisoned".into())
+            })?
+            .touch_observed_agent_presence(&touch);
+        Ok(())
+    }
+
+    async fn list_observed_agent_presence_since(
+        &self,
+        tenant_scope: Option<&str>,
+        since_unix: i64,
+    ) -> Result<Vec<StoredObservedAgentPresence>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| {
+                StorageError::Runtime("observed agent presence repository lock poisoned".into())
+            })?
+            .list_observed_agent_presence_since(tenant_scope, since_unix))
+    }
+
+    async fn record_budget_alert_notification(
+        &self,
+        notification: StoredBudgetAlertNotification,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.record_budget_alert_notification(notification);
+        }
+        Ok(())
+    }
+
+    async fn budget_alert_already_notified(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.budget_alert_already_notified(id))
+            .unwrap_or(false))
+    }
+
+    async fn list_budget_alert_notifications(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> Result<Vec<StoredBudgetAlertNotification>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| {
+                control_plane.list_budget_alert_notifications(scope_type, scope_id, period_month)
+            })
+            .unwrap_or_default())
+    }
+
+    async fn open_workflow_run_budget(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        run_id: &str,
+        tenant_id: &str,
+        caps: WorkflowRunBudgetCaps,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .open_workflow_run_budget(
+                workflow_id,
+                workflow_version,
+                run_id,
+                tenant_id,
+                caps,
+                now_unix,
+            )
+    }
+
+    async fn debit_workflow_run_budget(
+        &self,
+        id: &str,
+        cost_credits: i64,
+        tokens: i64,
+        tool_calls: i64,
+        now_unix: i64,
+    ) -> Result<WorkflowBudgetDebit, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .debit_workflow_run_budget(id, cost_credits, tokens, tool_calls, now_unix)
+    }
+
+    async fn topup_workflow_run_budget(
+        &self,
+        id: &str,
+        add_cost_credits: i64,
+        add_tokens: i64,
+        add_tool_calls: i64,
+        extend_deadline_unix: Option<i64>,
+        now_unix: i64,
+    ) -> Result<StoredWorkflowRunBudget, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .topup_workflow_run_budget(
+                id,
+                add_cost_credits,
+                add_tokens,
+                add_tool_calls,
+                extend_deadline_unix,
+                now_unix,
+            )
+    }
+
+    async fn get_workflow_run_budget(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredWorkflowRunBudget>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_workflow_run_budget(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_workflow_run_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWorkflowRunBudget>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_workflow_run_budgets(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn upsert_permission(&self, permission: StoredPermission) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_permission(permission);
+        }
+        Ok(())
+    }
+
+    async fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_permission(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<StoredPermission>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_permissions())
+            .unwrap_or_default())
+    }
+
+    async fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_permission(id))
+            .unwrap_or(false))
+    }
+
+    async fn upsert_role(&self, role: StoredRole) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_role(role);
+        }
+        Ok(())
+    }
+
+    async fn get_role(&self, id: &str) -> Result<Option<StoredRole>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_role(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_roles(&self) -> Result<Vec<StoredRole>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_roles())
+            .unwrap_or_default())
+    }
+
+    async fn delete_role(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_role(id))
+            .unwrap_or(false))
+    }
+
+    async fn bind_tenant_role(&self, binding: StoredTenantRoleBinding) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.bind_tenant_role(binding);
+        }
+        Ok(())
+    }
+
+    async fn list_tenant_role_bindings(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredTenantRoleBinding>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_tenant_role_bindings(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.unbind_tenant_role(tenant_id, role_id))
+            .unwrap_or(false))
+    }
+
+    async fn upsert_agent_schedule(
+        &self,
+        schedule: StoredAgentSchedule,
+    ) -> Result<(), StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .upsert_agent_schedule(schedule);
+        Ok(())
+    }
+
+    async fn get_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<StoredAgentSchedule>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .get_agent_schedule(schedule_id))
+    }
+
+    async fn list_agent_schedules(
+        &self,
+        tenant_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .list_agent_schedules(tenant_id, workspace_id))
+    }
+
+    async fn list_all_agent_schedules(&self) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .list_all_agent_schedules())
+    }
+
+    async fn delete_agent_schedule(&self, schedule_id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .delete_agent_schedule(schedule_id))
+    }
+
+    async fn list_due_agent_schedules(
+        &self,
+        now_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentSchedule>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .list_due_agent_schedules(now_unix, limit.max(0) as usize))
+    }
+
+    async fn insert_agent_schedule_fire(
+        &self,
+        fire: StoredAgentScheduleFire,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .insert_agent_schedule_fire(fire))
+    }
+
+    async fn list_agent_schedule_fires(
+        &self,
+        schedule_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredAgentScheduleFire>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent schedule repository lock poisoned".into()))?
+            .list_agent_schedule_fires(schedule_id, limit.max(0) as usize))
+    }
+
+    async fn settle_wallet_balance(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix)
+    }
+
+    async fn upsert_wallet(&self, wallet: StoredWallet) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_wallet(wallet);
+        }
+        Ok(())
+    }
+
+    async fn get_wallet(&self, tenant_id: &str) -> Result<Option<StoredWallet>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_wallet(tenant_id))
+            .unwrap_or(None))
+    }
+
+    async fn list_wallets(&self) -> Result<Vec<StoredWallet>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_wallets())
+            .unwrap_or_default())
+    }
+
+    async fn adjust_wallet_balance(
+        &self,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<Option<StoredWallet>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| {
+                control_plane.adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+            })
+            .unwrap_or(None))
+    }
+
+    async fn set_wallet_dunning(
+        &self,
+        tenant_id: &str,
+        dunning: bool,
+        now_unix: i64,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.set_wallet_dunning(tenant_id, dunning, now_unix);
+        }
+        Ok(())
+    }
+
+    async fn reserve_wallet_credits(
+        &self,
+        reservation_id: &str,
+        tenant_id: &str,
+        amount_credits: i64,
+        expires_at_unix: i64,
+        now_unix: i64,
+    ) -> Result<WalletReservationResult, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .reserve_wallet_credits(
+                reservation_id,
+                tenant_id,
+                amount_credits,
+                expires_at_unix,
+                now_unix,
+            )
+    }
+
+    async fn settle_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<WalletReservationSettlement, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .settle_wallet_reservation(reservation_id, now_unix)
+    }
+
+    async fn release_wallet_reservation(
+        &self,
+        reservation_id: &str,
+        now_unix: i64,
+    ) -> Result<StoredWalletReservation, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .release_wallet_reservation(reservation_id, now_unix)
+    }
+
+    async fn sweep_expired_wallet_reservations(
+        &self,
+        now_unix: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .sweep_expired_wallet_reservations(now_unix))
+    }
+
+    async fn list_wallet_reservations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredWalletReservation>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_wallet_reservations(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn upsert_payment_method(
+        &self,
+        payment_method: StoredPaymentMethod,
+    ) -> Result<(), StorageError> {
+        if let Ok(mut control_plane) = self.lock() {
+            control_plane.upsert_payment_method(payment_method);
+        }
+        Ok(())
+    }
+
+    async fn list_payment_methods(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentMethod>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_payment_methods(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_payment_method(id))
+            .unwrap_or(None))
+    }
+
+    async fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map(|mut control_plane| control_plane.delete_payment_method(id))
+            .unwrap_or(false))
+    }
+
+    async fn create_payment_attempt(
+        &self,
+        attempt: StoredPaymentAttempt,
+    ) -> Result<PaymentAttemptCreation, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .create_payment_attempt(attempt)
+    }
+
+    async fn get_payment_attempt(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentAttempt>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_payment_attempt(id))
+            .unwrap_or(None))
+    }
+
+    async fn list_payment_attempts(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.list_payment_attempts(tenant_id))
+            .unwrap_or_default())
+    }
+
+    async fn get_payment_attempt_links(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<PaymentAttemptLinks>, StorageError> {
+        Ok(self
+            .lock()
+            .map(|control_plane| control_plane.get_payment_attempt_links(id, tenant_id))
+            .unwrap_or(None))
+    }
+
+    async fn list_expirable_due_payment_attempts(
+        &self,
+        due_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .list_expirable_due_payment_attempts(due_at_or_before_unix, limit))
+    }
+
+    async fn list_reconcilable_payment_attempts(
+        &self,
+        checked_at_or_before_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredPaymentAttempt>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .list_reconcilable_payment_attempts(checked_at_or_before_unix, limit))
+    }
+
+    async fn transition_payment_attempt(
+        &self,
+        _op_name: &'static str,
+        id: &str,
+        allowed_from: &[&str],
+        to_state: &str,
+        evidence: &super::payment_attempt::TransitionEvidence<'_>,
+        now_unix: i64,
+    ) -> Result<PaymentAttemptTransition, StorageError> {
+        self.lock()
+            .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+            .transition_payment_attempt(id, allowed_from, to_state, evidence, now_unix)
+    }
 }
 
 impl MemoryControlPlaneStore {

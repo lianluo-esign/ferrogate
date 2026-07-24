@@ -10,8 +10,8 @@
 // the "one business entity per file" convention (mirrors `agent_schedule.rs`).
 
 use super::{
-    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
-    RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError, StorageOperation,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneState,
+    RuntimeStorageRepositories, StorageError, StorageOperation,
 };
 
 /// One hostname -> static-site binding. `hostname` is stored normalized
@@ -201,41 +201,14 @@ impl RuntimeControlPlaneState {
 
 impl RuntimeStorageRepositories {
     pub async fn upsert_site_domain(&self, domain: StoredSiteDomain) -> Result<(), StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => {
-                control_plane
-                    .lock()
-                    .map_err(|_| {
-                        StorageError::Runtime("site domain repository lock poisoned".into())
-                    })?
-                    .upsert_site_domain(domain);
-                Ok(())
-            }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_site_domain(&domain).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("upsert_site_domain"),
-            ),
-        }
+        self.control_plane.store().upsert_site_domain(domain).await
     }
 
     pub async fn get_site_domain(
         &self,
         hostname: &str,
     ) -> Result<Option<StoredSiteDomain>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
-                .get_site_domain(hostname)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_site_domain(hostname).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("get_site_domain"),
-            ),
-        }
+        self.control_plane.store().get_site_domain(hostname).await
     }
 
     /// Lists bindings, optionally narrowed to one tenant. `None` is the
@@ -245,32 +218,16 @@ impl RuntimeStorageRepositories {
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredSiteDomain>, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
-                .list_site_domains(tenant_id)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_site_domains(tenant_id).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("list_site_domains"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .list_site_domains(tenant_id)
+            .await
     }
 
     pub async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError> {
-        match &self.control_plane {
-            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
-                .lock()
-                .map_err(|_| StorageError::Runtime("site domain repository lock poisoned".into()))?
-                .delete_site_domain(hostname)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete_site_domain(hostname).await
-            }
-            RuntimeControlPlaneBackend::CloudflareD1(_) => Err(
-                super::control_plane_store_d1::unimplemented_surface("delete_site_domain"),
-            ),
-        }
+        self.control_plane
+            .store()
+            .delete_site_domain(hostname)
+            .await
     }
 }
