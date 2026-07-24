@@ -29,13 +29,23 @@ Code map:
 - A container class is `class X extends Container` (`@cloudflare/containers`),
   backed by a Durable Object; the image is built/pushed by Wrangler and the
   Worker is deployed via `PUT`. There is **no public REST lifecycle** — the
-  low-level surface is only reachable from Worker code via `this.ctx.container`:
-  `start({ env, entrypoint, enableInternet })`, `signal(SIGTERM|SIGKILL)`,
-  `exec(cmd)`, `monitor()` (resolves on exit), `destroy()`,
-  `getTcpPort(p).fetch()`, and a `running` boolean.
-- The **Sandbox SDK** (`@cloudflare/sandbox`): `getSandbox(env.Sandbox, id)` →
-  `exec`, `createCodeContext` + `runCode`, file ops, `.stop()` — ideal for
-  untrusted agent-generated code, the primary use of this tier.
+  low-level surface is only reachable from Worker code. On the `Container` base:
+  `start({ envVars, entrypoint, enableInternet, labels })`, **`stop(signal)`**
+  (signal ∈ `'SIGTERM' | 'SIGKILL' | 'SIGINT'` or an integer; default SIGTERM),
+  `destroy()` (SIGKILL teardown), `getState()`, and the egress controls
+  `enableInternet` (a class field), `setAllowedHosts(hosts)` /
+  `setDeniedHosts(hosts)`. There is **no `signal(...)` method** and **no
+  `configureEgress(...)`** — those two fabricated calls were the #415 live
+  crashes.
+- The **Sandbox SDK** (`@cloudflare/sandbox@0.12.4`): `getSandbox(ns, id)`
+  returns the fully-typed `Sandbox` DO stub →
+  `exec(cmd, { timeout? })`, `runCode(src, { language, timeout? })`,
+  `createSession` / `getSession`, `setEnvVars`, `listFiles`, `exposePort` /
+  `unexposePort`, `stop(signal)`, `destroy()` — ideal for untrusted
+  agent-generated code, the primary use of this tier. A non-zero / abnormal exit
+  takes the session shell down and surfaces as a thrown **`SessionTerminatedError`**
+  (a real export carrying `.exitCode`), which the Worker catches and maps to a
+  governed exec result rather than a 5xx.
 - **Workers Paid only**; instances scale to zero; instance tiers
   `lite`→`standard-4` (≤ 4 vCPU / 12 GiB).
 
@@ -54,10 +64,10 @@ per-instance Durable Object isolation **is** tenant isolation.
 | `POST /container/prepare`   | `{ instance, container: { image, tier, workspacePath? } }` | validate + pin image/tier (create is lazy) |
 | `POST /container/start`     | `{ instance, entrypoint?, env?, enableInternet?, egressAllowlist? }` | launch with governed egress |
 | `POST /container/exec`      | `{ instance, step: { mode, command?/language?+source?, timeoutMillis? } }` | run a command or code step; capture stdout/stderr/exit |
-| `POST /container/stop`      | `{ instance, signal }` | SIGTERM/SIGKILL |
-| `POST /container/logs`      | `{ instance, tail? }` | recent instance logs |
-| `POST /container/artifacts` | `{ instance, path? }` | list files under the workspace |
-| `POST /container/cleanup`   | `{ instance }` | destroy the instance |
+| `POST /container/stop`      | `{ instance, signal }` | `Sandbox.stop(SIGTERM/SIGKILL)`, time-bounded |
+| `POST /container/logs`      | `{ instance, tail? }` | recent instance logs (empty tail: the session surface has no aggregate log RPC) |
+| `POST /container/artifacts` | `{ instance, path? }` | `Sandbox.listFiles` under the workspace |
+| `POST /container/cleanup`   | `{ instance }` | `Sandbox.destroy()` in **bounded time** (see below) |
 
 Error vocabulary (mapped to typed Rust errors by `ContainerControlClient`):
 `invalid_spec` → 422, `container_unbound` → 501, `not_running` → 409, plus
@@ -65,13 +75,28 @@ Error vocabulary (mapped to typed Rust errors by `ContainerControlClient`):
 
 ## Fail-closed by construction
 
-- **Egress is deny-by-default.** The runtime `IsolationNetworkPolicy` never
-  grants direct public egress for a managed worker (it fail-closes in
-  `validate`), which maps to `enableInternet=false`. Any egress must ride a
-  **governed allowlist** (mirroring the #117 function-egress broker):
-  `enableInternet=true` with an empty `egressAllowlist` is rejected
-  **client-side before any HTTP** (`ContainerControlError::EgressNotGoverned`)
-  and again on the Worker (422 `invalid_spec`, defense in depth).
+- **Egress is deny-by-default.** The `@cloudflare/containers` base defaults
+  `enableInternet = true` (full internet), so the Worker **subclasses** the SDK
+  `Sandbox` as `AgentSandbox` and pins `enableInternet = false` (see
+  `src/index.ts`). Every container start — including the lazy auto-start on the
+  first `exec` — is therefore sealed. Any egress must ride a **governed
+  allowlist** (mirroring the #117 function-egress broker), applied at runtime via
+  `sandbox.setAllowedHosts(allowlist)` (the Container base grants those hosts
+  egress even while `enableInternet` stays false). The allowlist path needs the
+  Worker to export `ContainerProxy` from `@cloudflare/sandbox` (done in
+  `src/index.ts`) so the DO can build outbound-interception fetchers via
+  `ctx.exports.ContainerProxy`. Defense in depth: `enableInternet=true` with an
+  empty `egressAllowlist` is rejected **client-side before any HTTP**
+  (`ContainerControlError::EgressNotGoverned`) and again on the Worker (422
+  `invalid_spec`).
+- **Cleanup is bounded (resource-leak fix).** `Sandbox.destroy()` coalesces
+  concurrent teardowns and, per the SDK's own docs, can **hang until the Durable
+  Object is evicted** when the Containers control plane is unresponsive. So
+  `/container/cleanup` races `destroy()` against a hard timeout and returns
+  success either way (`destroyed:false` when unconfirmed) — a wedged instance is
+  reported cleaned in bounded time and reclaimed by platform idle-sleep, instead
+  of burning paid resources while the route blocks 60–90s. `/container/stop`
+  is likewise time-bounded.
 - **Capability gating.** `cloudflare_container_capabilities()` is the single
   source of truth and advertises a **strict subset** of the implemented
   lifecycle ops. `snapshot_or_checkpoint` is advertised `false` (Cloudflare
@@ -88,9 +113,11 @@ Error vocabulary (mapped to typed Rust errors by `ContainerControlClient`):
   opt-in via `AGENT_WORKER_ENABLE_CF_CONTAINER_BACKEND=1`.
 - **Optional binding.** The Worker's `CONTAINER_SANDBOX` DO binding is optional
   (like the semantic-memory pilot's `VECTORIZE`/`AI`). Absent it, every verb
-  fails closed with `container_unbound` (501). The SDK surface is declared
-  **structurally** in `container.ts`, so `tsc --noEmit` needs neither
-  `@cloudflare/sandbox` nor `@cloudflare/containers` as a build dependency.
+  fails closed with `container_unbound` (501). `container.ts` binds the **real**
+  `@cloudflare/sandbox@0.12.4` `Sandbox` type via `getSandbox(...)`, so
+  `tsc --noEmit` type-checks every lifecycle call against the installed SDK — a
+  fabricated method (e.g. the old `configureEgress`/`signal`) now fails the
+  build instead of only crashing live.
 
 ## Lifecycle mapping
 
@@ -136,7 +163,16 @@ agent-worker (environment):
   (`backends_test.rs`); and `tsc --noEmit` for `container.ts`.
 - **Not-tested (LIVE-CF, the test gate owns it):** the end-to-end run of a code
   step in a real Cloudflare sandbox capturing stdout/exit needs a bound
-  `CONTAINER_SANDBOX` + a Workers-Paid account + network.
+  `CONTAINER_SANDBOX` + a Workers-Paid account + network. After the #415 rework
+  the gate must re-run, against a real CF sandbox: (1) `/container/start` no
+  longer throws `configureEgress`; (2) `/container/exec` of a step that exits
+  non-zero returns a governed result with the propagated `exitCode` (no
+  `SessionTerminatedError` 5xx); (3) `/container/stop` no longer throws `signal`
+  and stops the instance; (4) `/container/cleanup` on an instance whose session
+  terminated abnormally completes in **bounded time** (≤ the cleanup timeout, not
+  60–90s); (5) sealed-by-default egress (`enableInternet=false`) blocks internet
+  and a governed `egressAllowlist` opens only the allowed hosts (verify the
+  container image trusts the interception CA so `setAllowedHosts` enforces).
 - **Remaining (follow-up slice):** wiring the backend into the agent-worker
   management **remote-provisioning dispatch** (constructing it from a production
   `BlockingHttpControlTransport` and driving it from `lifecycle.rs` with

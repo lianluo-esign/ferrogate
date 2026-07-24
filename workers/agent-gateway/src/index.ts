@@ -8,6 +8,7 @@
 //   agent operation FerroGate drives is fronted by THIS Worker.
 
 import { Agent, routeAgentRequest, getAgentByName } from "agents";
+import { Sandbox, ContainerProxy } from "@cloudflare/sandbox";
 
 import { json, requireBearer } from "./auth";
 import {
@@ -32,11 +33,27 @@ import type { ScheduleKind } from "./schedule";
 import { handleContainer } from "./container";
 
 // Container/sandbox class for the CONTAINER_SANDBOX binding (issue #415).
-// Deploy-time enablement (test gate, live validation): re-export the
-// `@cloudflare/sandbox` Sandbox class under the name wrangler.toml registers;
-// the prebuilt docker.io/cloudflare/sandbox image backs it, so no local Docker
-// build is needed. Absent the binding, /container/* stays fail-closed (501).
-export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
+// Deploy-time enablement (test gate, live validation): the prebuilt
+// docker.io/cloudflare/sandbox image backs this class, so no local Docker build
+// is needed. Absent the binding, /container/* stays fail-closed (501).
+//
+// DENY-BY-DEFAULT EGRESS: the SDK's `Sandbox` (via the `@cloudflare/containers`
+// base) defaults `enableInternet = true`, which would grant untrusted agent
+// code FULL internet. We subclass it and pin the field to `false`, so EVERY
+// container start — including the lazy auto-start on the first `exec` — is
+// sealed. A governed allowlist opens specific hosts at runtime via
+// `sandbox.setAllowedHosts(...)` (container.ts `/container/start`), which the
+// Container base grants egress to even while `enableInternet` stays false.
+export class AgentSandbox extends Sandbox {
+  enableInternet = false;
+}
+
+// `ContainerProxy` MUST be exported from the Worker entrypoint: the Sandbox DO
+// constructs outbound-interception fetchers via `ctx.exports.ContainerProxy`
+// when a governed egress allowlist is applied (`setAllowedHosts`). Without this
+// export, allowlist configuration throws "ctx.exports.ContainerProxy is
+// undefined" at runtime. The sealed (no-allowlist) path never needs it.
+export { ContainerProxy };
 
 /**
  * Worker bindings. `AGENT_GATEWAY` is the Durable Object namespace for the
@@ -67,8 +84,11 @@ export interface Env {
    * `/container/*` routes address a per-tenant instance BY NAME through it.
    * OPTIONAL — absent it, every container verb fails closed with
    * `container_unbound` (HTTP 501). Bind it in wrangler.toml to enable the tier.
+   * Typed as a `Sandbox` namespace so `getSandbox(...)` in container.ts resolves
+   * the real, fully-typed SDK stub (the bound class {@link AgentSandbox} is a
+   * `Sandbox` subclass).
    */
-  CONTAINER_SANDBOX?: DurableObjectNamespace;
+  CONTAINER_SANDBOX?: DurableObjectNamespace<Sandbox>;
   /** Cap on captured container stdout/stderr bytes; defaults to 1_000_000. */
   CONTAINER_MAX_OUTPUT_BYTES?: string;
 }

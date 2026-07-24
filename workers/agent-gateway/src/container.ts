@@ -3,37 +3,46 @@
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-24
 // description: FerroGate container/sandbox isolation routes (issue #415): governed
-//   prepare/start/exec/stop/logs/artifacts/cleanup over a per-tenant Cloudflare Container or
-//   @cloudflare/sandbox instance. Cloudflare exposes NO public container lifecycle REST API, so
-//   these bearer-gated Worker routes are the only tethered path FerroGate drives the tier through,
-//   with egress deny-by-default (enableInternet=false unless a governed allowlist is provided).
+//   prepare/start/exec/stop/logs/artifacts/cleanup over a per-tenant Cloudflare
+//   @cloudflare/sandbox instance. Cloudflare exposes NO public container lifecycle REST
+//   API, so these bearer-gated Worker routes are the only tethered path FerroGate drives
+//   the tier through, with egress deny-by-default (the `AgentSandbox` DO class pins
+//   `enableInternet=false`; egress is opened only for a governed allowlist).
+//
+//   REWORK (gate re-test of #415): the earlier draft drove a GUESSED structural RPC
+//   surface (`configureEgress`, `signal`, `runCode`/`listFiles`/`readLogs` on a hand-rolled
+//   interface) that diverged from the REAL `@cloudflare/sandbox@0.12.4` API and crashed
+//   live. This module now binds the ACTUAL `Sandbox` type via `getSandbox(...)` and calls
+//   only real methods, so `tsc` type-checks the surface against the installed SDK.
+
+import { getSandbox, SessionTerminatedError } from "@cloudflare/sandbox";
+import type { Sandbox } from "@cloudflare/sandbox";
 
 import { json, requireBearer } from "./auth";
 import type { Env } from "./index";
 
 // ---------------------------------------------------------------------------
-// Cloudflare container/sandbox facts (verify against the pinned SDK at deploy)
-// ---------------------------------------------------------------------------
+// Real `@cloudflare/sandbox@0.12.4` surface these routes drive (verified against
+// node_modules/@cloudflare/sandbox/dist/*.d.ts + @cloudflare/containers):
 //
-// * Containers GA (Apr 2026): a `class X extends Container` (Durable
-//   Object–backed) exposes a LOW-LEVEL lifecycle from Worker code via
-//   `this.ctx.container`: `start({ env, entrypoint, enableInternet })`,
-//   `signal(SIGTERM|SIGKILL)`, `exec(cmd)`, `monitor()`, `destroy()`,
-//   `getTcpPort(p).fetch()`, and a `running` boolean. There is NO public REST
-//   lifecycle — everything is driven from a fronting Worker (this one).
-// * Sandbox SDK (`@cloudflare/sandbox`): `getSandbox(env.Sandbox, id)` →
-//   `exec`, `createCodeContext` + `runCode`, file ops, `.stop()` — ideal for
-//   untrusted agent-generated code, which is the primary use of this tier.
-// * Workers Paid only; scales to zero; tiers lite→standard-4 (≤4 vCPU/12 GiB).
+//   getSandbox(ns, id): Sandbox               — resolve the per-tenant DO stub.
+//   sandbox.setEnvVars(env): Promise<void>    — inject governed env vars.
+//   sandbox.setAllowedHosts(hosts): Promise<void>
+//   sandbox.setDeniedHosts(hosts): Promise<void>   — governed egress allow/deny lists;
+//         allowed hosts get egress even while enableInternet=false (Container base).
+//   sandbox.exec(cmd, { timeout? }): Promise<ExecResult>   — untrusted-command path.
+//   sandbox.runCode(src, { language, timeout? }): Promise<ExecutionResult>  — code path.
+//   sandbox.stop(signal?: 'SIGTERM'|'SIGKILL'|'SIGINT'|number): Promise<void>  — signal.
+//   sandbox.destroy(): Promise<void>          — SIGKILL teardown (coalesced; can HANG if
+//         the control plane is unresponsive — callers MUST apply their own timeout).
+//   sandbox.listFiles(path, opts?): Promise<ListFilesResult>   — artifact collection.
+//   sandbox.getState(): Promise<State>        — inherited running/stopped status.
 //
-// This module addresses the per-tenant instance BY NAME through the
-// CONTAINER_SANDBOX binding (a Sandbox/Container DO namespace) — the instance
-// name is minted by the Rust side (`fg.{tenant}.{session}.{run}`), so
-// per-instance DO isolation IS tenant isolation. The binding is OPTIONAL (like
-// the #427 semantic-memory pilot's VECTORIZE/AI): absent it, every verb fails
-// closed with `container_unbound` (HTTP 501). The low-level SDK surface is
-// declared STRUCTURALLY below so this module — and `tsc --noEmit` — needs
-// neither `@cloudflare/sandbox` nor `@cloudflare/containers` as a build dep.
+// There is NO `configureEgress` and NO `signal` method (the two live crashes).
+// Egress is a Container-level property: `enableInternet` (pinned false on the
+// `AgentSandbox` subclass in index.ts) + `setAllowedHosts`/`setDeniedHosts`, NOT an RPC.
+// Non-zero / abnormal exits surface as a thrown `SessionTerminatedError` (a real export,
+// carrying `.exitCode`) — caught below and mapped to a governed result, never a 5xx.
 
 /** GA instance tiers (≤ 4 vCPU / 12 GiB). */
 const VALID_TIERS = new Set([
@@ -45,71 +54,39 @@ const VALID_TIERS = new Set([
   "standard-4",
 ]);
 
+/** Languages accepted by the Sandbox code interpreter (`runCode`). */
+const CODE_LANGUAGES = new Set(["python", "javascript", "typescript"]);
+type CodeLanguage = "python" | "javascript" | "typescript";
+
 /** Default writable workspace mount inside the instance. */
 const DEFAULT_WORKSPACE = "/workspace";
 
 /** Cap on captured stdout/stderr bytes returned over the wire. */
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 
-/** One process/code execution result from the underlying sandbox. */
-export interface SandboxExecResult {
-  exitCode?: number | null;
-  stdout?: string;
-  stderr?: string;
-}
-
-/** One file discovered under the instance workspace. */
-export interface SandboxFileEntry {
-  path?: string;
-  name?: string;
-  size?: number;
-  contentType?: string;
-}
-
 /**
- * Structural view of a Cloudflare Container / `@cloudflare/sandbox` instance —
- * the subset of primitives these routes drive. Satisfied in production by
- * `getSandbox(env.CONTAINER_SANDBOX, instance)` (or a `Container` DO's
- * `this.ctx.container`). Declared structurally so no SDK is a build dependency;
- * optional members are probed defensively so a minimal binding still typechecks.
+ * Hard ceiling on how long `cleanup` waits for `destroy()` before returning.
+ * `Sandbox.destroy()` coalesces concurrent teardowns and, per the SDK's own
+ * docs, "can HANG until the Durable Object is evicted" when the Containers
+ * control plane is unresponsive. Racing it against this timeout is THE
+ * resource-leak fix: a wedged instance is reported cleaned in bounded time
+ * (the platform reclaims it via idle-sleep) instead of blocking 60-90s.
  */
-export interface SandboxHandle {
-  /** Inject/replace the instance environment (governed key/values). */
-  setEnvVars?(env: Record<string, string>): Promise<void> | void;
-  /** Apply the governed egress posture; absent → the platform default (sealed). */
-  configureEgress?(enableInternet: boolean, allowlist: string[]): Promise<void> | void;
-  /** Run a shell command; the untrusted-command path. */
-  exec(command: string, options?: { timeout?: number; cwd?: string }): Promise<SandboxExecResult>;
-  /** Run a code step (createCodeContext + runCode); the untrusted-code path. */
-  runCode?(
-    code: string,
-    options?: { language?: string; timeout?: number },
-  ): Promise<SandboxExecResult>;
-  /** List files under a workspace path (artifact collection). */
-  listFiles?(path: string): Promise<SandboxFileEntry[]>;
-  /** Read recent instance logs. */
-  readLogs?(tail?: number): Promise<string[]>;
-  /** Whether the instance is currently running. */
-  readonly running?: boolean;
-  /** Graceful/forced stop (signal). */
-  signal?(signal: "SIGTERM" | "SIGKILL"): Promise<void> | void;
-  /** Graceful stop (Sandbox SDK `.stop()`). */
-  stop?(): Promise<void> | void;
-  /** Tear down the instance and free resources. */
-  destroy?(): Promise<void> | void;
-}
+const CLEANUP_TIMEOUT_MS = 10_000;
+
+/** Timeout guarding the `stop` signal so a wedged instance can't hang the route. */
+const STOP_TIMEOUT_MS = 10_000;
 
 /**
  * Resolve the per-tenant sandbox for `instance`, or `null` when no
  * CONTAINER_SANDBOX binding is configured (fail closed → `container_unbound`).
- * In production `getSandbox(env.CONTAINER_SANDBOX, instance)` returns the stub;
- * here we address the DO by name and treat it as the structural handle.
+ * `getSandbox` returns the real, fully-typed `Sandbox` DO stub — every method
+ * call below is checked by `tsc` against the installed SDK, not a local shape.
  */
-export function resolveSandbox(env: Env, instance: string): SandboxHandle | null {
+export function resolveSandbox(env: Env, instance: string): Sandbox | null {
   const ns = env.CONTAINER_SANDBOX;
   if (!ns) return null;
-  const stub = ns.get(ns.idFromName(instance));
-  return stub as unknown as SandboxHandle;
+  return getSandbox(ns, instance);
 }
 
 /** Parse the `CONTAINER_MAX_OUTPUT_BYTES` var, falling back to the default. */
@@ -119,6 +96,22 @@ export function containerMaxOutputBytes(raw: string | undefined): number {
     return DEFAULT_MAX_OUTPUT_BYTES;
   }
   return parsed;
+}
+
+/**
+ * Race `work` against a timeout. On timeout the returned promise REJECTS with a
+ * sentinel so callers can distinguish "bounded-out" from a real teardown error.
+ * The underlying `work` promise is abandoned (it may still settle later inside
+ * the DO), but the route no longer waits on it.
+ */
+const CLEANUP_TIMED_OUT = Symbol("cleanup_timed_out");
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<T>((_resolve, reject) => {
+      setTimeout(() => reject(CLEANUP_TIMED_OUT), ms);
+    }),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +198,16 @@ interface StartBody {
 }
 
 /**
- * Start the instance with governed egress. `enableInternet` with an EMPTY
- * `egressAllowlist` is rejected (defense-in-depth: the Rust client blocks it
- * client-side too) — open public egress is deny-by-default.
+ * Configure the instance for a governed run: inject env and apply the egress
+ * posture. `enableInternet` with an EMPTY `egressAllowlist` is rejected
+ * (defense-in-depth: the Rust client blocks it client-side too) — open public
+ * egress is deny-by-default.
+ *
+ * Deny-by-default is enforced structurally by the `AgentSandbox` DO class
+ * (`enableInternet = false`, index.ts), so every container start — including the
+ * lazy auto-start on the first `exec` — is sealed. A governed allowlist opens a
+ * specific set of hosts via `setAllowedHosts`, which the Container base grants
+ * egress to even while `enableInternet` stays false.
  */
 export async function containerStart(
   env: Env,
@@ -234,16 +234,17 @@ export async function containerStart(
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
   try {
-    if (typeof sandbox.setEnvVars === "function") {
-      await sandbox.setEnvVars(envVars);
+    await sandbox.setEnvVars(envVars);
+    // Egress: the base posture is sealed (AgentSandbox pins enableInternet=false).
+    // Only when a governed allowlist is provided do we enable per-host egress via
+    // interception; the sealed path stays free of any interception dependency so
+    // it fails closed even if the container image lacks the interception CA.
+    if (allowlist.length > 0) {
+      await sandbox.setAllowedHosts(allowlist);
     }
-    if (typeof sandbox.configureEgress === "function") {
-      await sandbox.configureEgress(enableInternet, allowlist);
-    }
-    const running = sandbox.running !== false;
-    return { ok: true, instance: body.instance, instanceId: body.instance, running };
+    return { ok: true, instance: body.instance, instanceId: body.instance, running: true };
   } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
+    return fail("container_error", errMessage(err));
   }
 }
 
@@ -280,47 +281,78 @@ export async function containerExec(
   if (!sandbox) {
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
-  if (sandbox.running === false) {
-    return fail("not_running", "container instance is not running");
-  }
   const max = containerMaxOutputBytes(env.CONTAINER_MAX_OUTPUT_BYTES);
+
+  // Validate the step shape BEFORE touching the instance so a bad spec is a 422.
+  let exitCode: number | null;
+  let rawStdout: string;
+  let rawStderr: string;
   try {
-    let result: SandboxExecResult;
     if (step.mode === "command") {
       if (!Array.isArray(step.command) || step.command.length === 0) {
         return fail("invalid_spec", "step.command must be a non-empty argv array");
       }
       const argv = (step.command as unknown[]).map((x) => String(x));
-      // The sandbox `exec` takes a command string; join the argv. A live
-      // deployment may prefer a structured `startProcess({ cmd, args })`.
-      result = await sandbox.exec(argv.join(" "), { timeout });
+      // The sandbox `exec` takes a command string; join the argv.
+      const result = await sandbox.exec(argv.join(" "), timeout !== undefined ? { timeout } : undefined);
+      exitCode = result.exitCode;
+      rawStdout = result.stdout;
+      rawStderr = result.stderr;
     } else if (step.mode === "code") {
-      if (typeof step.language !== "string" || step.language.trim().length === 0) {
-        return fail("invalid_spec", "step.language must be a non-empty string");
+      if (typeof step.language !== "string" || !CODE_LANGUAGES.has(step.language)) {
+        return fail("invalid_spec", "step.language must be one of python|javascript|typescript");
       }
       if (typeof step.source !== "string") {
         return fail("invalid_spec", "step.source must be a string");
       }
-      if (typeof sandbox.runCode !== "function") {
-        return fail("container_error", "sandbox does not support runCode");
+      const language = step.language as CodeLanguage;
+      // `runCode` returns an ExecutionResult (interpreter logs + optional error);
+      // there is no POSIX exit code, so we derive one from the error presence.
+      const result = await sandbox.runCode(
+        step.source,
+        timeout !== undefined ? { language, timeout } : { language },
+      );
+      rawStdout = result.logs.stdout.join("");
+      rawStderr = result.logs.stderr.join("");
+      if (result.error) {
+        exitCode = 1;
+        const trace = result.error.traceback?.length ? `\n${result.error.traceback.join("\n")}` : "";
+        rawStderr = `${rawStderr}${rawStderr ? "\n" : ""}${result.error.name}: ${result.error.message}${trace}`;
+      } else {
+        exitCode = 0;
       }
-      result = await sandbox.runCode(step.source, { language: step.language, timeout });
     } else {
       return fail("invalid_spec", "step.mode must be command or code");
     }
-    const stdout = capOutput(result.stdout, max);
-    const stderr = capOutput(result.stderr, max);
-    return {
-      ok: true,
-      instance: body.instance,
-      exitCode: result.exitCode ?? null,
-      stdout: stdout.text,
-      stderr: stderr.text,
-      truncated: stdout.truncated || stderr.truncated,
-    };
   } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
+    // A non-zero / abnormal exit takes the shell down and the SDK raises
+    // SessionTerminatedError. This is a GOVERNED outcome, not a crash: map it to
+    // a normal exec result carrying the propagated exit code so the caller sees
+    // exitCode != 0 instead of a 5xx. (Live defect #2/#3/#4.)
+    if (err instanceof SessionTerminatedError) {
+      const stderr = capOutput(err.message, max);
+      return {
+        ok: true,
+        instance: body.instance,
+        exitCode: err.exitCode,
+        stdout: "",
+        stderr: stderr.text,
+        truncated: stderr.truncated,
+      };
+    }
+    return fail("container_error", errMessage(err));
   }
+
+  const stdout = capOutput(rawStdout, max);
+  const stderr = capOutput(rawStderr, max);
+  return {
+    ok: true,
+    instance: body.instance,
+    exitCode,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    truncated: stdout.truncated || stderr.truncated,
+  };
 }
 
 interface StopBody {
@@ -328,25 +360,27 @@ interface StopBody {
   signal?: unknown;
 }
 
-/** Stop the running instance with SIGTERM/SIGKILL. */
+/** Stop the running instance with SIGTERM/SIGKILL (real `Sandbox.stop(signal)`). */
 export async function containerStop(
   env: Env,
   body: StopBody,
 ): Promise<ContainerResult<{ instance: string; signal: string; running: boolean }>> {
-  const signal = body.signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
+  const signal: "SIGTERM" | "SIGKILL" = body.signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
   const sandbox = resolveSandbox(env, body.instance);
   if (!sandbox) {
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
   try {
-    if (typeof sandbox.signal === "function") {
-      await sandbox.signal(signal);
-    } else if (typeof sandbox.stop === "function") {
-      await sandbox.stop();
-    }
+    // Bounded: a wedged instance must not hang the route. `stop` sends the signal;
+    // an already-stopped/terminated session is a successful no-op for our purposes.
+    await withTimeout(sandbox.stop(signal), STOP_TIMEOUT_MS);
     return { ok: true, instance: body.instance, signal, running: false };
   } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
+    if (err === CLEANUP_TIMED_OUT || err instanceof SessionTerminatedError) {
+      // Signal issued (or session already gone); the instance is no longer usable.
+      return { ok: true, instance: body.instance, signal, running: false };
+    }
+    return fail("container_error", errMessage(err));
   }
 }
 
@@ -355,23 +389,22 @@ interface LogsBody {
   tail?: unknown;
 }
 
-/** Collect recent instance logs. */
+/**
+ * Collect recent instance logs. The session-based `@cloudflare/sandbox` surface
+ * has no aggregate container-log tail (only per-process `getProcessLogs` /
+ * `streamProcessLogs`); the governed `exec` path already returns each step's
+ * stdout/stderr inline. So this verb returns an empty tail rather than inventing
+ * a method that does not exist on the real SDK.
+ */
 export async function containerLogs(
   env: Env,
   body: LogsBody,
 ): Promise<ContainerResult<{ instance: string; lines: string[] }>> {
-  const tail =
-    Number.isInteger(body.tail) && (body.tail as number) > 0 ? (body.tail as number) : undefined;
   const sandbox = resolveSandbox(env, body.instance);
   if (!sandbox) {
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
-  try {
-    const lines = typeof sandbox.readLogs === "function" ? await sandbox.readLogs(tail) : [];
-    return { ok: true, instance: body.instance, lines };
-  } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
-  }
+  return { ok: true, instance: body.instance, lines: [] };
 }
 
 interface ArtifactsBody {
@@ -395,15 +428,22 @@ export async function containerArtifacts(
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
   try {
-    const entries = typeof sandbox.listFiles === "function" ? await sandbox.listFiles(path) : [];
-    const artifacts = entries.map((entry) => ({
-      path: entry.path ?? `${path}/${entry.name ?? ""}`,
-      sizeBytes: typeof entry.size === "number" ? entry.size : 0,
-      contentType: entry.contentType ?? null,
-    }));
+    const result = await sandbox.listFiles(path);
+    const artifacts = result.files
+      .filter((entry) => entry.type === "file")
+      .map((entry) => ({
+        path: entry.absolutePath,
+        sizeBytes: typeof entry.size === "number" ? entry.size : 0,
+        // FileInfo carries no MIME type; the artifact content type is unknown here.
+        contentType: null as string | null,
+      }));
     return { ok: true, instance: body.instance, artifacts };
   } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
+    if (err instanceof SessionTerminatedError) {
+      // Session gone (e.g. after an abnormal exit): nothing to enumerate.
+      return { ok: true, instance: body.instance, artifacts: [] };
+    }
+    return fail("container_error", errMessage(err));
   }
 }
 
@@ -411,7 +451,14 @@ interface CleanupBody {
   instance: string;
 }
 
-/** Destroy the instance and free its resources. */
+/**
+ * Destroy the instance and free its resources in BOUNDED time. This is the
+ * resource-leak fix: the earlier draft could hang 60-90s on a wedged instance
+ * (its `signal`/`configureEgress` calls crashed, leaving the container running
+ * until platform idle-sleep). `destroy()` is the real SIGKILL teardown; we race
+ * it against `CLEANUP_TIMEOUT_MS` and report success either way, so cleanup is
+ * idempotent and never hangs on an already-dead / unresponsive instance.
+ */
 export async function containerCleanup(
   env: Env,
   body: CleanupBody,
@@ -421,15 +468,27 @@ export async function containerCleanup(
     return fail("container_unbound", "no CONTAINER_SANDBOX binding is configured");
   }
   try {
-    if (typeof sandbox.destroy === "function") {
-      await sandbox.destroy();
-    } else if (typeof sandbox.stop === "function") {
-      await sandbox.stop();
-    }
+    await withTimeout(sandbox.destroy(), CLEANUP_TIMEOUT_MS);
     return { ok: true, instance: body.instance, destroyed: true };
   } catch (err) {
-    return fail("container_error", (err as Error).message ?? String(err));
+    if (err === CLEANUP_TIMED_OUT) {
+      // Teardown did not confirm within the bound. We return success (not a 5xx)
+      // so the run cleanup completes; the platform reclaims the wedged instance
+      // via idle-sleep. `destroyed: false` signals "unconfirmed" to the caller.
+      return { ok: true, instance: body.instance, destroyed: false };
+    }
+    if (err instanceof SessionTerminatedError) {
+      // The session was already gone; the instance is effectively torn down.
+      return { ok: true, instance: body.instance, destroyed: true };
+    }
+    return fail("container_error", errMessage(err));
   }
+}
+
+/** Best-effort message extraction (thrown values are not guaranteed Errors). */
+function errMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -452,13 +511,13 @@ function containerResponse(result: ContainerResultLike): Response {
  * query strings) carry the instance name, since names embed tenant identity:
  *
  *   POST /container/prepare   { instance, container }              pin image/tier
- *   POST /container/start     { instance, entrypoint?, env?,       launch (egress
+ *   POST /container/start     { instance, entrypoint?, env?,       configure (egress
  *                               enableInternet?, egressAllowlist? }  deny-by-default)
  *   POST /container/exec      { instance, step }                   run cmd/code
  *   POST /container/stop      { instance, signal }                 SIGTERM/SIGKILL
  *   POST /container/logs      { instance, tail? }                  recent logs
  *   POST /container/artifacts { instance, path? }                  list workspace
- *   POST /container/cleanup   { instance }                         destroy
+ *   POST /container/cleanup   { instance }                         destroy (bounded)
  *
  * Cloudflare has NO public container lifecycle REST API — the low-level surface
  * is only reachable from Worker code — so these routes are the sole tethered
@@ -506,6 +565,6 @@ export async function handleContainer(request: Request, env: Env, url: URL): Pro
         return json({ error: `unknown container verb: ${verb}` }, 404);
     }
   } catch (err) {
-    return json({ error: `container call failed: ${(err as Error).message}` }, 502);
+    return json({ error: `container call failed: ${errMessage(err)}` }, 502);
   }
 }
