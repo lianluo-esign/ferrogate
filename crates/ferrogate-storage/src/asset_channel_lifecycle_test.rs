@@ -4,8 +4,8 @@
 // description: Repository-level coverage for the atomic channel/version
 // lifecycle coordination (#367). Proves move/yank/unyank/variant-delete keep the
 // invariant "every channel points at a resolvable version" as one step, and that
-// a concurrent move-vs-yank race can never strand a channel -- using a barrier,
-// not a timing sleep.
+// a concurrent move-vs-yank race and a concurrent move-vs-variant-delete race can
+// never strand a channel -- using a barrier, not a timing sleep.
 
 use std::sync::{Arc, Barrier};
 
@@ -296,6 +296,88 @@ fn concurrent_move_and_yank_never_strand_a_channel() {
         match (&move_outcome, &yank_outcome) {
             (ChannelMoveOutcome::Moved { .. }, VersionYankOutcome::ReferencedByChannel) => {}
             (ChannelMoveOutcome::TargetNotResolvable, VersionYankOutcome::Applied { .. }) => {}
+            other => panic!("iteration {iteration}: inconsistent race outcome {other:?}"),
+        }
+    }
+}
+
+/// The second #367 race proof: a move and a variant delete racing on the same
+/// version -- the delete removing that version's last resolvable variant --
+/// started together on a barrier (never a timing sleep), can never leave the
+/// channel pointing at a version whose only variant was deleted. Whichever wins
+/// the single serialization point the other observes: move-then-delete leaves
+/// the channel on the version and rejects the delete as `BlockedByChannel` (the
+/// variant survives); delete-then-move removes the last variant and rejects the
+/// move as `TargetNotResolvable` (no channel is written). Either way a channel
+/// on 1.0.0 implies its variant is still present, and a deleted variant implies
+/// no channel points at 1.0.0.
+#[test]
+fn concurrent_move_and_variant_delete_never_strand_a_channel() {
+    let repositories = Arc::new(repositories());
+    let channel_id = asset_channel_id(TENANT, ASSET_TYPE, NAME, CHANNEL);
+    let variant_id = stored_asset_variant_id(TENANT, ASSET_TYPE, NAME, "1.0.0", "");
+
+    for iteration in 0..200 {
+        // Reset to a resolvable, single-variant, unreferenced version.
+        upsert(&repositories, asset("1.0.0", "", false));
+        block_on(repositories.delete_asset_channel(&channel_id)).expect("reset channel");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mover = {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                block_on(repositories.move_asset_channel_if_resolvable(channel("1.0.0")))
+                    .expect("concurrent move")
+            })
+        };
+        let deleter = {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            let variant_id = variant_id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                block_on(repositories.delete_asset_variant_if_unreferenced(
+                    &variant_id,
+                    TENANT,
+                    ASSET_TYPE,
+                    NAME,
+                    "1.0.0",
+                ))
+                .expect("concurrent delete")
+            })
+        };
+        let move_outcome = mover.join().expect("mover thread");
+        let delete_outcome = deleter.join().expect("deleter thread");
+
+        let channel_points_at = channel_version(&repositories);
+        let variant_present = block_on(repositories.get_asset(&variant_id))
+            .expect("read variant")
+            .is_some();
+
+        // The invariant: a channel on 1.0.0 implies its variant is still present
+        // (resolvable), and a deleted variant implies no channel points at it.
+        if channel_points_at.as_deref() == Some("1.0.0") {
+            assert!(
+                variant_present,
+                "iteration {iteration}: channel points at 1.0.0 but its only variant was deleted \
+                 (move={move_outcome:?}, delete={delete_outcome:?})"
+            );
+        }
+        if !variant_present {
+            assert_ne!(
+                channel_points_at.as_deref(),
+                Some("1.0.0"),
+                "iteration {iteration}: variant deleted but channel still points at it \
+                 (move={move_outcome:?}, delete={delete_outcome:?})"
+            );
+        }
+
+        // Exactly one of the two operations wins; the outcomes are consistent.
+        match (&move_outcome, &delete_outcome) {
+            (ChannelMoveOutcome::Moved { .. }, VariantDeleteOutcome::BlockedByChannel) => {}
+            (ChannelMoveOutcome::TargetNotResolvable, VariantDeleteOutcome::Deleted) => {}
             other => panic!("iteration {iteration}: inconsistent race outcome {other:?}"),
         }
     }
