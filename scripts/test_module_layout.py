@@ -80,25 +80,25 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_baseline_covers_pre_existing_offender(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            self.write_crate(root, "ferrogate-storage", 21_000)
+            self.write_crate(root, "ferrogate-storage", 18_400)
             result = self.run_checker("--root", str(root))
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_baseline_still_bounds_new_growth(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            self.write_crate(root, "ferrogate-storage", 21_501)
+            self.write_crate(root, "ferrogate-storage", 18_601)
             result = self.run_checker("--root", str(root))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("21500-line cap", result.stderr)
+        self.assertIn("18600-line cap", result.stderr)
 
     def test_stale_baseline_is_flagged_for_removal(self) -> None:
         # A baselined crate refactored under the default cap should surface a
         # ratchet note so the stale entry gets deleted (as happened for
-        # ferrogate-secrets after #425).
+        # ferrogate-secrets after #423 and ferrogate-mcp after #432).
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            self.write_crate(root, "ferrogate-mcp", 500)
+            self.write_crate(root, "ferrogate-guardrails", 500)
             result = self.run_checker("--root", str(root))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("stale and should be removed", result.stdout)
