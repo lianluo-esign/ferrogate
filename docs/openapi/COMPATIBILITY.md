@@ -42,8 +42,10 @@ FerroGate API.
    actual auth scope. `rbac_action` may contain a database permission action
    key, never a role name. Roles and tenant bindings remain database data.
    Runtime **data-plane** operations (OpenAI-compatible inference, MCP/tool
-   execution) stay `public` — they are publicly reachable — but additionally
-   carry the operation-level `x-ferrogate-data-plane: true` marker. This is an
+   execution, and agent-runtime invoke/messaging — `invokeAgent`,
+   `sendAgentMessage`, `streamAgentMessage`) stay `public` — they are publicly
+   reachable — but additionally carry the operation-level
+   `x-ferrogate-data-plane: true` marker. This is an
    orthogonal axis to `visibility`: it moves the operation off the Control-Plane
    CLI parity surface (they move AI traffic, not configuration), so the
    OpenAPI-to-CLI parity gate does not require a management verb for them

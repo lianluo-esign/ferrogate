@@ -6717,6 +6717,7 @@
     "/v1/agents/{name}": {
       "post": {
         "operationId": "invokeAgent",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -11173,6 +11174,7 @@
     "/v1/agents/{name}/message:send": {
       "post": {
         "operationId": "sendAgentMessage",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],
@@ -11232,6 +11234,7 @@
     "/v1/agents/{name}/message:stream": {
       "post": {
         "operationId": "streamAgentMessage",
+        "x-ferrogate-data-plane": true,
         "tags": [
           "gateway"
         ],

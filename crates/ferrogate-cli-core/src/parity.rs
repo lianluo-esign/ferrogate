@@ -23,10 +23,12 @@
 //!
 //!    Runtime **data-plane** operations are excluded on a second axis. The
 //!    OpenAI-compatible inference and MCP/tool-execution endpoints
-//!    (`createChatCompletion`, `executeTool`, `mcpJsonRpc`, …) are publicly
-//!    reachable — their HTTP `visibility` is legitimately `public` — but they
-//!    *move AI traffic* rather than *manage Control-Plane configuration*. A
-//!    management CLI verb for live inference would be wrong, not missing, so
+//!    (`createChatCompletion`, `executeTool`, `mcpJsonRpc`, …) and the
+//!    agent-runtime invoke/messaging endpoints (`invokeAgent`,
+//!    `sendAgentMessage`, `streamAgentMessage`) are publicly reachable — their
+//!    HTTP `visibility` is legitimately `public` — but they *move AI traffic*
+//!    rather than *manage Control-Plane configuration*. A management CLI verb
+//!    for live inference or agent invocation would be wrong, not missing, so
 //!    these ops carry the operation-level [`DATA_PLANE_MARKER`] extension and
 //!    are placed structurally outside the coverable surface (issue #390). The
 //!    marker is a parity-gate concern read only here: it does not overload the
@@ -117,46 +119,39 @@ pub const REVIEWED_EXCLUSIONS: &[ReviewedExclusion] = &[
         owner: "agent family (#362)",
         reason: "agent skill/discovery read verbs not yet implemented; tracked as #362 follow-up",
     },
-
     // Self-hosted worker registration verb — not yet built. Owner: worker family track (#362 follow-up).
     ReviewedExclusion {
         operation_id: "registerAdminSelfHostedWorker",
         owner: "worker family (#362)",
-        reason: "self-hosted worker registration verb not yet implemented; tracked as #362 follow-up",
+        reason:
+            "self-hosted worker registration verb not yet implemented; tracked as #362 follow-up",
     },
-
     // Asset visibility promotion verb — not yet built. Owner: asset family track (#363 follow-up).
     ReviewedExclusion {
         operation_id: "promoteAssetVisibility",
         owner: "asset family (#363)",
         reason: "asset visibility-promotion verb not yet implemented; tracked as #363 follow-up",
     },
-
-    // Agent runtime messaging/invocation — data-plane traffic operations exposed on the admin surface; these move AI traffic rather than manage configuration, so whether the management CLI should bind them is an open product decision. Owner: agent family track (#362 follow-up).
-    ReviewedExclusion {
-        operation_id: "invokeAgent",
-        owner: "agent family (#362)",
-        reason: "agent runtime invoke/message operation; data-plane traffic, not a management verb; CLI binding deferred pending product decision (#362/#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "sendAgentMessage",
-        owner: "agent family (#362)",
-        reason: "agent runtime invoke/message operation; data-plane traffic, not a management verb; CLI binding deferred pending product decision (#362/#365)",
-    },
-    ReviewedExclusion {
-        operation_id: "streamAgentMessage",
-        owner: "agent family (#362)",
-        reason: "agent runtime invoke/message operation; data-plane traffic, not a management verb; CLI binding deferred pending product decision (#362/#365)",
-    },
-
-    // OpenAI-compatible inference and MCP/tool execution (createChatCompletion,
-    // createEmbedding, createImage, createMessage, createResponse,
-    // executeFunction, executeMcpTool, executeTool, listModels, listTools,
-    // mcpJsonRpc) are NOT excluded here. As of #390 they carry the
-    // `x-ferrogate-data-plane` OpenAPI extension and so leave the coverable
-    // Control-Plane surface structurally (see `DATA_PLANE_MARKER` /
-    // `parse_openapi_surface`), not via this ad-hoc allowlist. Excluding them
-    // here as well would be a stale, redundant row.
+    // Runtime data-plane traffic is NOT excluded here. Two families of runtime
+    // AI-traffic operations that were once parked in this allowlist now leave the
+    // coverable Control-Plane surface *structurally* via the
+    // `x-ferrogate-data-plane` OpenAPI extension (see `DATA_PLANE_MARKER` /
+    // `parse_openapi_surface`), not via this ad-hoc list:
+    //   - OpenAI-compatible inference + MCP/tool execution: createChatCompletion,
+    //     createEmbedding, createImage, createMessage, createResponse,
+    //     executeFunction, executeMcpTool, executeTool, listModels, listTools,
+    //     mcpJsonRpc.
+    //   - Agent-runtime invoke/messaging (A2A): invokeAgent, sendAgentMessage,
+    //     streamAgentMessage — these move AI traffic to a configured agent
+    //     upstream (request body `AiRequest`, scope `agents.invoke`), the direct
+    //     analog of createMessage/createResponse, so classifying them off the
+    //     parity surface is the same #390 decision applied uniformly. A management
+    //     CLI configures agents (create/update/delete), it does not proxy live
+    //     invocation; a future data-plane *client* convenience for them would be
+    //     orthogonal to this Control-Plane parity surface, exactly as for
+    //     createChatCompletion.
+    // Excluding any of these here as well would be a stale, redundant row that the
+    // stale-exclusion check would (correctly) reject.
 ];
 
 /// The coverable and non-coverable operation sets parsed from an OpenAPI

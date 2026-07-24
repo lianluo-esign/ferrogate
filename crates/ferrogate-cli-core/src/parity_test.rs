@@ -104,9 +104,10 @@ fn internal_operations_are_not_coverable() {
 }
 
 /// Runtime data-plane operations (OpenAI-compatible inference, MCP/tool
-/// execution) are AI-traffic, not Control-Plane management verbs, so they are
-/// classified out of the coverable surface via the `x-ferrogate-data-plane`
-/// marker — even though their HTTP visibility is legitimately `public` (#390).
+/// execution, and agent-runtime invoke/messaging) are AI-traffic, not
+/// Control-Plane management verbs, so they are classified out of the coverable
+/// surface via the `x-ferrogate-data-plane` marker — even though their HTTP
+/// visibility is legitimately `public` (#390).
 #[test]
 fn data_plane_operations_are_not_coverable() {
     let surface = parse_openapi_surface(&openapi_document()).unwrap();
@@ -122,6 +123,11 @@ fn data_plane_operations_are_not_coverable() {
         "listModels",
         "listTools",
         "mcpJsonRpc",
+        // Agent-runtime invoke/messaging (A2A) traffic, classified data-plane
+        // alongside the OpenAI-compatible surface (#390, uniform completion).
+        "invokeAgent",
+        "sendAgentMessage",
+        "streamAgentMessage",
     ] {
         assert!(
             surface.data_plane.contains(op),
