@@ -54,6 +54,51 @@ pub(crate) fn http_request_addr(
     http_request_addr_after_write(addr, method, path, headers, body, || {})
 }
 
+/// Binary-body variant of [`http_request_addr`] for payloads that are not
+/// valid UTF-8 (e.g. zip bundles pushed to the assets surface).
+pub(crate) fn http_request_addr_bytes(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &[u8],
+) -> Result<HttpResponse> {
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("failed to connect to {addr} for {method} {path}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    )
+    .with_context(|| format!("failed to write request line to {addr} for {method} {path}"))?;
+    for header in headers {
+        write!(stream, "{header}\r\n")
+            .with_context(|| format!("failed to write header to {addr} for {method} {path}"))?;
+    }
+    write!(stream, "\r\n")
+        .with_context(|| format!("failed to end headers to {addr} for {method} {path}"))?;
+    stream
+        .write_all(body)
+        .with_context(|| format!("failed to write request body to {addr} for {method} {path}"))?;
+    stream
+        .flush()
+        .with_context(|| format!("failed to flush request to {addr} for {method} {path}"))?;
+
+    let raw = read_http_response(&mut stream, addr, method, path)?;
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("HTTP response missing status: {raw}"))?;
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    Ok(HttpResponse { status, body, raw })
+}
+
 pub(crate) fn http_request_addr_after_write(
     addr: &str,
     method: &str,

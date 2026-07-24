@@ -44,6 +44,8 @@ pub(crate) enum Commands {
     FunctionEgressApi(LocalArgs),
     /// Run the Cloudflare Worker branch of the function egress broker E2E (#435).
     FunctionEgressCloudflareApi(LocalArgs),
+    /// Run the static-site publish/serve/per-file E2E family (#441).
+    StaticSiteApi(LocalArgs),
     /// Run local Supabase-compatible Postgres restart durability coverage.
     SupabaseRestart(LocalArgs),
     /// Opt-in live Supabase connection, migration, status, and minimal persistence smoke.
@@ -215,6 +217,7 @@ pub(crate) struct Dispatch {
     pub(crate) gateway_billing_chain: fn(&LocalArgs) -> Result<()>,
     pub(crate) function_egress: fn(&LocalArgs) -> Result<()>,
     pub(crate) function_egress_cloudflare: fn(&LocalArgs) -> Result<()>,
+    pub(crate) static_site: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_live_smoke: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_live_restart: fn(&SupabaseLiveRestartArgs) -> Result<()>,
@@ -237,7 +240,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, function-egress-cloudflare-api, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, api-contract, component-compliance, component-compliance-supabase (live Supabase required), ci, function-egress-cloudflare-api, static-site-api, guardrail-supabase (live Supabase required), guardrail-workers-ai-llama-guard, mcp-identity-supabase (live Supabase required), target-capability-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -260,6 +263,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::GatewayBillingChain(args) => (dispatch.gateway_billing_chain)(&args),
         Commands::FunctionEgressApi(args) => (dispatch.function_egress)(&args),
         Commands::FunctionEgressCloudflareApi(args) => (dispatch.function_egress_cloudflare)(&args),
+        Commands::StaticSiteApi(args) => (dispatch.static_site)(&args),
         Commands::SupabaseRestart(args) => (dispatch.supabase_restart)(&args),
         Commands::SupabaseLiveSmoke(args) => (dispatch.supabase_live_smoke)(&args),
         Commands::SupabaseLiveRestart(args) => (dispatch.supabase_live_restart)(&args),

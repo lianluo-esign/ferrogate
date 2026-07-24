@@ -21,6 +21,7 @@ mod mcp_identity;
 mod mocks;
 mod provider_compliance;
 mod scenarios;
+mod static_site;
 mod storage;
 mod supabase_schema;
 mod target_capability;
@@ -36,6 +37,7 @@ use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
     run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
 };
+use static_site::run_static_site_api;
 use storage::{
     run_postgres_restart, run_postgres_tls_restart, run_supabase_live_restart,
     run_supabase_live_smoke, run_supabase_live_token4ai_provider, run_supabase_migration,
@@ -55,6 +57,7 @@ fn main() -> Result<()> {
         gateway_billing_chain: run_gateway_billing_chain,
         function_egress: run_function_egress_api,
         function_egress_cloudflare: run_function_egress_cloudflare_api,
+        static_site: run_static_site_api,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
         supabase_live_restart: run_supabase_live_restart,
@@ -90,6 +93,7 @@ fn main() -> Result<()> {
             run_gateway_api(local)?;
             run_function_egress_api(local)?;
             run_function_egress_cloudflare_api(local)?;
+            run_static_site_api(local)?;
             run_workers_ai_llama_guard(local)?;
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
