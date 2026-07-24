@@ -1,0 +1,505 @@
+// Bespoke browser-contract mocks for the assets registry GATEWAY surface
+// (issue #344). The assets page (src/pages/assets.tsx) does NOT talk to the
+// Admin API (`/admin/v1/*`) that installAuthenticatedAdminApi covers — it
+// fetches the tenant gateway paths `/v1/assets`, `/v1/assets/storage/summary`,
+// `/v1/assets/{type}/{name}/manifest`, the presign upload/commit endpoints, and
+// the channel/yank/delete mutation endpoints, all against GATEWAY_ADMIN_BASE_URL
+// (`http://localhost:8080` in tests). #348 flagged that the shared admin mock
+// leaves those unmocked, so this module supplies faithful, STATEFUL mocks whose
+// shapes match the generated OpenAPI contract (AssetSummary / AssetManifest /
+// AssetStorageSummary / AssetPresignUploadIntentResponse / ...).
+//
+// State is rebuilt fresh per install() call so each test is isolated. Mutations
+// (yank/unyank, channel move/delete, permanent delete, presign commit) mutate
+// the in-memory manifest so a subsequent manifest/list refetch — which the page
+// triggers via invalidateQueries — reflects the change (a yanked badge appears,
+// a moved channel repoints, a deleted version disappears). That lets the spec
+// assert real post-conditions, not just fire-and-forget request sends.
+import type { Page, Route } from "@playwright/test";
+import type { components } from "../../src/lib/api-types.generated";
+
+type AssetSummary = components["schemas"]["AssetSummary"];
+type AssetManifest = components["schemas"]["AssetManifest"];
+type AssetManifestVersion = components["schemas"]["AssetManifestVersion"];
+type AssetChannelSummary = components["schemas"]["AssetChannelSummary"];
+type AssetStorageSummary = components["schemas"]["AssetStorageSummary"];
+
+export interface GatewayAssetsOptions {
+  /**
+   * Exact gateway pathnames to answer with a 503 partial failure (an isolated
+   * SECTION error, e.g. the storage-summary card, so the page's partial-error
+   * surface can be exercised without blanking the healthy registry list).
+   */
+  failPaths?: string[];
+  /**
+   * Hold the direct-to-bucket PUT open this many ms so the presigned upload's
+   * "Uploading to storage…" phase + progress bar are observable by a web-first
+   * assertion. Zero (default) resolves the PUT immediately.
+   */
+  uploadHoldMs?: number;
+}
+
+const GATEWAY_ORIGIN = "http://localhost:8080";
+const BUCKET_PREFIX = "/e2e-bucket/";
+
+const HASH_A = "1".repeat(64);
+const HASH_B = "2".repeat(64);
+const HASH_C = "3".repeat(64);
+const HASH_D = "4".repeat(64);
+const HASH_E = "5".repeat(64);
+
+interface AssetsState {
+  /** Flat per-version summary rows backing GET /v1/assets (the registry list). */
+  summaries: AssetSummary[];
+  /** Registry manifests keyed by `${asset_type}/${name}`. */
+  manifests: Map<string, AssetManifest>;
+  uploadCounter: number;
+}
+
+function manifestKey(assetType: string, name: string): string {
+  return `${assetType}/${name}`;
+}
+
+/**
+ * Fresh fixture per test: a multi-version, multi-variant, multi-channel registry
+ * with a YANKED target (deploy-cli@1.0.0) plus a second logical resource so the
+ * list is non-trivial. deploy-cli@2.0.0 is the latest, bucket-backed, and has a
+ * second platform variant; deploy-cli@1.5.0 is inline. Channels: stable->1.5.0,
+ * canary->2.0.0.
+ */
+function buildState(): AssetsState {
+  const deployCliVersions: AssetManifestVersion[] = [
+    {
+      version: "2.0.0",
+      yanked: false,
+      variants: [
+        {
+          variant: "",
+          content_type: "application/gzip",
+          content_hash: HASH_A,
+          size_bytes: 734_003_200,
+          storage_backed: true,
+        },
+        {
+          variant: "linux-arm64",
+          content_type: "application/gzip",
+          content_hash: HASH_B,
+          size_bytes: 712_003_584,
+          storage_backed: true,
+        },
+      ],
+    },
+    {
+      version: "1.5.0",
+      yanked: false,
+      variants: [
+        {
+          variant: "",
+          content_type: "application/gzip",
+          content_hash: HASH_C,
+          size_bytes: 1_048_576,
+          storage_backed: false,
+        },
+      ],
+    },
+    {
+      version: "1.0.0",
+      yanked: true,
+      variants: [
+        {
+          variant: "",
+          content_type: "application/gzip",
+          content_hash: HASH_D,
+          size_bytes: 524_288,
+          storage_backed: false,
+        },
+      ],
+    },
+  ];
+
+  const deployCliManifest: AssetManifest = {
+    object: "asset_manifest",
+    asset_type: "cli_tool",
+    name: "deploy-cli",
+    channels: [
+      { channel: "stable", version: "1.5.0", updated_at_unix: 1_752_000_500 },
+      { channel: "canary", version: "2.0.0", updated_at_unix: 1_752_000_900 },
+    ],
+    versions: deployCliVersions,
+  };
+
+  const incidentToolsManifest: AssetManifest = {
+    object: "asset_manifest",
+    asset_type: "mcp_manifest",
+    name: "incident-tools",
+    channels: [],
+    versions: [
+      {
+        version: "0.9.0",
+        yanked: false,
+        variants: [
+          {
+            variant: "",
+            content_type: "application/json",
+            content_hash: HASH_E,
+            size_bytes: 4_096,
+            storage_backed: false,
+          },
+        ],
+      },
+    ],
+  };
+
+  const summaries: AssetSummary[] = [
+    {
+      id: "asset_deploy_cli_200",
+      asset_type: "cli_tool",
+      name: "deploy-cli",
+      version: "2.0.0",
+      content_type: "application/gzip",
+      content_hash: HASH_A,
+      size_bytes: 734_003_200,
+      storage_backed: true,
+      created_at_unix: 1_752_000_000,
+      updated_at_unix: 1_752_000_900,
+    },
+    {
+      id: "asset_deploy_cli_150",
+      asset_type: "cli_tool",
+      name: "deploy-cli",
+      version: "1.5.0",
+      content_type: "application/gzip",
+      content_hash: HASH_C,
+      size_bytes: 1_048_576,
+      storage_backed: false,
+      created_at_unix: 1_751_900_000,
+      updated_at_unix: 1_752_000_500,
+    },
+    {
+      id: "asset_deploy_cli_100",
+      asset_type: "cli_tool",
+      name: "deploy-cli",
+      version: "1.0.0",
+      content_type: "application/gzip",
+      content_hash: HASH_D,
+      size_bytes: 524_288,
+      storage_backed: false,
+      created_at_unix: 1_751_800_000,
+      updated_at_unix: 1_751_850_000,
+    },
+    {
+      id: "asset_incident_tools_090",
+      asset_type: "mcp_manifest",
+      name: "incident-tools",
+      version: "0.9.0",
+      content_type: "application/json",
+      content_hash: HASH_E,
+      size_bytes: 4_096,
+      storage_backed: false,
+      created_at_unix: 1_751_700_000,
+      updated_at_unix: 1_751_760_000,
+    },
+  ];
+
+  const manifests = new Map<string, AssetManifest>([
+    [manifestKey("cli_tool", "deploy-cli"), deployCliManifest],
+    [manifestKey("mcp_manifest", "incident-tools"), incidentToolsManifest],
+  ]);
+
+  return { summaries, manifests, uploadCounter: 0 };
+}
+
+function storageSummary(): AssetStorageSummary {
+  return {
+    object: "asset_storage_summary",
+    used_bytes: 1_572_864_000,
+    quota_bytes: 5_368_709_120,
+    remaining_bytes: 3_795_845_120,
+    inline_upload_max_bytes: 5_242_880,
+    presigned_upload: {
+      enabled: true,
+      max_object_bytes: 5_368_709_120,
+      url_ttl_seconds: 900,
+    },
+  };
+}
+
+async function fulfillJson(route: Route, status: number, body: unknown): Promise<void> {
+  await route.fulfill({
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+}
+
+async function fail503(route: Route): Promise<void> {
+  await fulfillJson(route, 503, {
+    error: {
+      code: "e2e_forced_failure",
+      message: "forced browser-contract failure (assets gateway)",
+    },
+  });
+}
+
+async function notMocked(route: Route, method: string, pathname: string): Promise<void> {
+  await fulfillJson(route, 501, {
+    error: {
+      code: "unmocked_e2e_route",
+      message: `${method} ${pathname} is not mocked by the assets gateway contract`,
+    },
+  });
+}
+
+/** Summary rows for one logical version (there may be several across variants). */
+function summariesForVersion(
+  state: AssetsState,
+  assetType: string,
+  name: string,
+  version: string,
+): AssetSummary[] {
+  return state.summaries.filter(
+    (row) => row.asset_type === assetType && row.name === name && row.version === version,
+  );
+}
+
+async function handleAssetsRequest(
+  route: Route,
+  state: AssetsState,
+  options: GatewayAssetsOptions,
+): Promise<void> {
+  const request = route.request();
+  const method = request.method();
+  const url = new URL(request.url());
+  const pathname = url.pathname;
+
+  if (options.failPaths?.includes(pathname)) {
+    await fail503(route);
+    return;
+  }
+
+  // GET /v1/assets — the flat registry list. The contract declares NO query
+  // params here (type/search filtering is client-side over the grouped rows),
+  // so there is nothing to honor; the page never paginates this endpoint.
+  if (method === "GET" && pathname === "/v1/assets") {
+    await fulfillJson(route, 200, { object: "list", data: state.summaries });
+    return;
+  }
+
+  // GET /v1/assets/storage/summary — authoritative quota + presign constraints.
+  if (method === "GET" && pathname === "/v1/assets/storage/summary") {
+    await fulfillJson(route, 200, storageSummary());
+    return;
+  }
+
+  const segments = pathname
+    .slice("/v1/assets".length)
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .map((segment) => decodeURIComponent(segment));
+
+  // POST /v1/assets/presign/upload/{asset_type}/{name}/{version}
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[0] === "presign" &&
+    segments[1] === "upload"
+  ) {
+    const [, , assetType, name, version] = segments;
+    const body = (request.postDataJSON() ?? {}) as {
+      size_bytes?: number;
+      sha256?: string;
+    };
+    state.uploadCounter += 1;
+    const uploadId = `upload_${state.uploadCounter}`;
+    await fulfillJson(route, 200, {
+      object: "asset_upload_intent",
+      key: `${assetType}/${name}/${version}`,
+      upload_id: uploadId,
+      upload_url: `${GATEWAY_ORIGIN}${BUCKET_PREFIX}staging/${uploadId}`,
+      method: "PUT",
+      expires_in_seconds: 900,
+      size_bytes: body.size_bytes ?? 0,
+      sha256: body.sha256 ?? "",
+    });
+    return;
+  }
+
+  // POST /v1/assets/presign/commit/{asset_type}/{name}/{version}
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[0] === "presign" &&
+    segments[1] === "commit"
+  ) {
+    const [, , assetType, name, version] = segments;
+    const body = (request.postDataJSON() ?? {}) as {
+      size_bytes?: number;
+      sha256?: string;
+      content_type?: string | null;
+    };
+    const asset: AssetSummary = {
+      id: `asset_${assetType}_${name}_${version}`.replace(/[^a-z0-9_]/gi, "_"),
+      asset_type: assetType,
+      name,
+      version,
+      content_type: body.content_type ?? "application/octet-stream",
+      content_hash: body.sha256 ?? HASH_A,
+      size_bytes: body.size_bytes ?? 0,
+      storage_backed: true,
+      created_at_unix: 1_752_100_000,
+      updated_at_unix: 1_752_100_000,
+    };
+    // Register the committed version so a subsequent list refetch reflects it.
+    state.summaries = [asset, ...state.summaries];
+    await fulfillJson(route, 200, { object: "asset", asset });
+    return;
+  }
+
+  // GET /v1/assets/{asset_type}/{name}/manifest
+  if (method === "GET" && segments.length === 3 && segments[2] === "manifest") {
+    const [assetType, name] = segments;
+    const manifest = state.manifests.get(manifestKey(assetType, name));
+    if (!manifest) {
+      await fulfillJson(route, 404, {
+        error: { code: "asset_not_found", message: "manifest not found" },
+      });
+      return;
+    }
+    await fulfillJson(route, 200, manifest);
+    return;
+  }
+
+  // PUT|DELETE /v1/assets/{asset_type}/{name}/channels/{channel}
+  if (segments.length === 4 && segments[2] === "channels") {
+    const [assetType, name, , channel] = segments;
+    const manifest = state.manifests.get(manifestKey(assetType, name));
+    if (!manifest) {
+      await fulfillJson(route, 404, {
+        error: { code: "asset_not_found", message: "asset not found" },
+      });
+      return;
+    }
+    if (method === "PUT") {
+      const version = url.searchParams.get("version") ?? "";
+      const next: AssetChannelSummary = {
+        channel,
+        version,
+        updated_at_unix: 1_752_200_000,
+      };
+      const existing = manifest.channels.find((entry) => entry.channel === channel);
+      if (existing) existing.version = version;
+      else manifest.channels.push(next);
+      manifest.channels.sort((a, b) => a.channel.localeCompare(b.channel));
+      await fulfillJson(route, 200, {
+        object: "asset_channel",
+        asset_type: assetType,
+        name,
+        channel: next,
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      manifest.channels = manifest.channels.filter((entry) => entry.channel !== channel);
+      await fulfillJson(route, 200, {
+        object: "asset_channel",
+        id: `${assetType}/${name}/channels/${channel}`,
+        deleted: true,
+      });
+      return;
+    }
+  }
+
+  // POST|DELETE /v1/assets/{asset_type}/{name}/{version}/yank
+  if (segments.length === 4 && segments[3] === "yank") {
+    const [assetType, name, version] = segments;
+    const manifest = state.manifests.get(manifestKey(assetType, name));
+    const target = manifest?.versions.find((entry) => entry.version === version);
+    if (!manifest || !target) {
+      await fulfillJson(route, 404, {
+        error: { code: "asset_not_found", message: "version not found" },
+      });
+      return;
+    }
+    if (method === "POST" || method === "DELETE") {
+      target.yanked = method === "POST";
+      await fulfillJson(route, 200, {
+        object: "list",
+        data: summariesForVersion(state, assetType, name, version),
+      });
+      return;
+    }
+  }
+
+  // /v1/assets/{asset_type}/{name}/{version} — GET download, DELETE purge.
+  if (
+    segments.length === 3 &&
+    segments[2] !== "manifest" &&
+    segments[2] !== "channels"
+  ) {
+    const [assetType, name, version] = segments;
+
+    if (method === "GET") {
+      // The download action: the page issues this GET, wraps the bytes in an
+      // object URL, and clicks a synthetic <a download>. Any body suffices; the
+      // spec asserts the request/action, not the saved file.
+      await route.fulfill({
+        status: 200,
+        contentType: "application/gzip",
+        body: Buffer.from(`e2e-asset-bytes:${assetType}/${name}/${version}`),
+      });
+      return;
+    }
+
+    if (method === "DELETE") {
+      const manifest = state.manifests.get(manifestKey(assetType, name));
+      if (manifest) {
+        manifest.versions = manifest.versions.filter(
+          (entry) => entry.version !== version,
+        );
+      }
+      state.summaries = state.summaries.filter(
+        (row) => !(row.asset_type === assetType && row.name === name && row.version === version),
+      );
+      await fulfillJson(route, 200, {
+        object: "asset",
+        id: `${assetType}/${name}/${version}`,
+        deleted: true,
+      });
+      return;
+    }
+  }
+
+  await notMocked(route, method, pathname);
+}
+
+/**
+ * Installs the assets gateway mocks. Pair with installAuthenticatedAdminApi
+ * (which seeds the session + Admin API shell). Registers two routes: the
+ * `/v1/assets*` gateway surface, and the presigned direct-to-bucket PUT target
+ * the intent hands back (kept off the gateway `/v1/assets` namespace, exactly
+ * as the real flow bypasses the gateway body).
+ */
+export async function installGatewayAssets(
+  page: Page,
+  options: GatewayAssetsOptions = {},
+): Promise<void> {
+  const state = buildState();
+
+  await page.route(
+    (url) => url.pathname === "/v1/assets" || url.pathname.startsWith("/v1/assets/"),
+    (route) => handleAssetsRequest(route, state, options),
+  );
+
+  // The presigned bucket PUT (putPresignedObject): direct-to-storage, no gateway
+  // Authorization header. Succeed after the optional hold so the "uploading"
+  // progress phase is observable.
+  await page.route(
+    (url) => url.pathname.startsWith(BUCKET_PREFIX),
+    async (route) => {
+      if (options.uploadHoldMs && options.uploadHoldMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, options.uploadHoldMs));
+      }
+      await route.fulfill({ status: 200, contentType: "text/plain", body: "" });
+    },
+  );
+}
