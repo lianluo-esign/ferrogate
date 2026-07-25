@@ -1,6 +1,6 @@
 ---
 name: ferrogate-code-review
-description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "Ready" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). The review methodology itself is this session's to define. Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
+description: Use when running the FerroGate code-review role of the three-agent board loop — the session that watches the GitHub Project "In review" lane, judges what the dev agent handed off, and either advances the item to "Testing" or bounces it back to "Ready" with findings (e.g. "run the review agent", "work the In review lane", "review what the dev loop landed"). Covers the fixed lane/edges, the board handles, the review methodology (acceptance-box audit first, static verification over rebuild, report-never-edit, `review-rejected` on bounce), and the shared discipline (GraphQL quota rationing, cached lane tooling, worktree isolation, never build in the main worktree). Neighbouring roles: ferrogate-dev-loop (upstream) and ferrogate-test (downstream); all three at once: ferrogate-multi-agent-loop.
 ---
 
 # FerroGate Code-Review Agent
@@ -29,29 +29,104 @@ proves it end-to-end in **Testing**.
 4. **Never move a card past `Testing`.** Done belongs to the test gate.
 5. The shared discipline below applies to this session like any other.
 
-## What is TBD by this session
+## The review method (v1 — defined by this session 2026-07-25)
 
-Everything about the review *method* is undefined and **must not be invented by
-another session**. This session defines it and then documents it here:
+The method below was previously marked TBD-by-this-session. It is now decided.
+Other sessions do not change it; this session may revise it and re-document it
+here.
 
-- **TBD by the code-review session:** what it actually inspects (diff-only vs
-  whole feature, which AGENTS.md rules it enforces, security/observability
-  checks, acceptance-box verification, …).
-- **TBD by the code-review session:** review depth and stop conditions — how
-  much it re-verifies of the dev agent's `cargo build`/`cargo test` evidence,
-  whether it builds at all.
-- **TBD by the code-review session:** whether it may edit product code itself or
-  may only report findings and bounce.
-- **TBD by the code-review session:** its pass criteria, and whether a FAIL
-  carries a label (the test gate uses `gate-rejected`; nothing obliges this
-  session to reuse it).
-- **TBD by the code-review session:** its lane tooling and cache file.
-  `gate-lane "In review"` reads the lane today; that session may want its own
-  mover and its own cache path (see the discipline below — do **not** reuse
-  `/tmp/board.json` or `/tmp/dev-board.json`).
+### What it inspects — the acceptance list is the contract
 
-Until those are decided, say so explicitly in issue comments rather than
-implying a bar that was never agreed.
+The **acceptance-box audit is primary**, not the diff. For every checkbox in the
+issue body (and every `## Scope` bullet, which the dev agent treats as binding),
+find the landed artifact on `origin/main` that satisfies it or record it UNMET
+with a reason. The diff is read *second*, to check that what landed matches what
+was claimed — a diff can look excellent and still not deliver the issue.
+
+Then, in the diff itself, hunt the recurring failure modes this repo actually
+produces:
+
+- stubs / TODOs presented as done; a `Not-tested:` trailer covering an
+  **acceptance box** (that is an admission of an unmet box, not an excuse);
+- tests that assert nothing, assert only a mock, or merely restate the
+  implementation's own arithmetic;
+- numbers claimed as *measured* or *sourced* that are estimates or invented
+  (an acceptance box saying "not an estimate" means exactly that);
+- **missing data reported as `0` where it must read as unavailable** — the
+  honesty rule from #458/#464;
+- swallowed errors, `unwrap()`/panic on a request path, secrets in logs or
+  error strings;
+- a second implementation of a governed decision path with no conformance proof
+  that both sides decide identically (the #188/#397/#383 divergence class).
+
+Plus `AGENTS.md` commit hygiene: issue-referenced subject, Lore trailers.
+
+### Depth and stop condition — read, don't rebuild
+
+Default to **static verification**: read the code and read the tests. This
+session does **not** re-run the dev agent's `cargo build`/`cargo test` as a
+matter of course — that evidence is cheap to fake and expensive to reproduce,
+and a test that *passes* while asserting nothing is exactly the defect being
+hunted, which reading catches and re-running does not. Build only when a claim
+genuinely cannot be checked by reading, and then only the narrowest
+`cargo test -p <crate> <filter>` with `CARGO_INCREMENTAL=0`, in this session's
+own worktree.
+
+Do **not** stop at the first defect. Complete the acceptance sweep so one bounce
+carries the whole list — the dev agent reworks from the comment alone, and a
+partial list guarantees a second bounce.
+
+### The PASS/FAIL boundary — do not do the test agent's job
+
+The downstream test agent owns **all** end-to-end and live proof.
+
+- **Never FAIL an item merely because a live/E2E run has not been performed.**
+  That is the next lane's work, and bouncing for it stalls the pipeline.
+- **DO FAIL** when the code, artifact, test, or harness wiring that a box
+  requires is **missing, stubbed, or dishonest**.
+
+The line is: *this session proves the artifact exists and is honest; the test
+agent proves it works.*
+
+### Product code — report, never edit
+
+This session **does not write or edit product code**, not even a one-line fix.
+It reports and bounces. Three sessions share one checkout; a reviewer that
+edits both authors and approves its own work, and races the dev agent's tree.
+
+### Pass criteria and the FAIL label
+
+PASS requires all of: every acceptance box has a landed, inspectable artifact;
+no defect found that makes the feature wrong; commit hygiene per `AGENTS.md`;
+and the dev agent's handoff-comment claims spot-check as true.
+
+A FAIL carries the **`review-rejected`** label — deliberately *not* the test
+gate's `gate-rejected`, so the dev agent can tell which stage bounced it and
+which comment to work from. Remove it when the item re-enters and passes.
+
+### Lane tooling
+
+`~/.local/bin/review-lane` — this session's own tool and cache.
+
+```bash
+review-lane                 # refresh + list "In review" (~5-10 GraphQL pts)
+review-lane --cached        # zero GraphQL
+review-lane --lanes         # lane histogram only
+review-lane pass <issue>    # -> Testing   (one mutation, no board read)
+review-lane fail <issue>    # -> Ready     (one mutation, no board read)
+```
+
+Cache: **`/tmp/review-board.json`** (never `/tmp/board.json`, the gate's, nor
+`/tmp/dev-board.json`, the dev session's). It appends to the shared stable
+issue→item-id map `/tmp/item_ids.json`, so `pass`/`fail` need no board read.
+
+### Fan-out
+
+Up to **3 review sub-agents in parallel**, one issue each, sharing this
+session's single worktree. They are read-only, are forbidden from touching the
+board, and return a structured verdict (VERDICT / BOXES / DEFECTS / COMMITS /
+BOUNCE_COMMENT). The main session — never a sub-agent — posts comments, applies
+labels, and moves cards.
 
 ## Board handles
 
@@ -96,9 +171,9 @@ implying a bar that was never agreed.
 ## Loop prompt (code-review session)
 
 Start this session's cron with `/loop 5m` and the directive below. Lane and both
-edges are fixed by the project owner; the review **methodology** is this
-session's to define (see "What is TBD by this session" above) — extend the
-prompt as that gets decided, but do not change the lane or the edges.
+edges are fixed by the project owner; the review **methodology** is defined
+above ("The review method (v1)") — extend the prompt as that method is revised,
+but do not change the lane or the edges.
 
 ```
 请读取 GitHub Project 看板中 In review 泳道的 issues 持续做代码评审。

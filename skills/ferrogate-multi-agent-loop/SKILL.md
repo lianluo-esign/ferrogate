@@ -18,8 +18,8 @@ neighbouring roles will do with your output. Each role also has a focused skill:
 | --- | --- | --- | --- |
 | Watches | Backlog / **Ready** (incl. bounced items) / In progress | **In review** only | **Testing** only |
 | Produces | code on `main`; slices parked in "In review" | Testing (pass) or Ready + findings (fail) | Done (pass) or Ready + `gate-rejected` (fail) |
-| Proof it owns | `cargo build` / `cargo test` + the repo's local gates | TBD by the code-review session | full `ferrogate-test` **end-to-end** coverage |
-| Never does | self-review; E2E; the Testing/Done transitions | moves cards past Testing; product code (TBD) | writes product code; moves cards left past Ready |
+| Proof it owns | `cargo build` / `cargo test` + the repo's local gates | acceptance-box audit + defect read of the landed diff | full `ferrogate-test` **end-to-end** coverage |
+| Never does | self-review; E2E; the Testing/Done transitions | writes product code; E2E; moves cards past Testing | writes product code; moves cards left past Ready |
 | Skill | `ferrogate-dev-loop` | `ferrogate-code-review` | `ferrogate-test` |
 
 The board is their **only** message bus. No two of them move the same card in
@@ -47,14 +47,19 @@ fresh work.
   The dev role writes the E2E-facing surface (harness scenario, Admin API,
   Playwright flow) but never *runs* end-to-end — that is the test agent's job.
 - **Review → test:** on pass the code-review agent moves the item to
-  **Testing**. Its pass bar is **TBD by the code-review session**.
+  **Testing**. Its bar: every acceptance box has a landed, inspectable artifact
+  on `origin/main`, no defect makes the feature wrong, and the handoff comment's
+  claims spot-check as true. It proves the artifact *exists and is honest*; the
+  test agent proves it *works* — so it never bounces an item merely for a
+  missing live/E2E run.
 - **Test → Done:** the gate passes an item only when the `ferrogate-test`
   harness covers the feature end-to-end. If the scenario is missing, the **gate
   writes it** (harness is gate-owned) — it does not bounce the item for that.
 - **Anyone → dev:** on FAIL the item goes back to **Ready** with a comment
-  listing exactly what failed; the test gate also adds the **`gate-rejected`**
-  label. The dev driver treats such a Ready item as the next slice — read the
-  comment, fix only what failed, do not redo landed work.
+  listing exactly what failed, plus a label naming the stage that bounced it —
+  **`review-rejected`** from the code-review agent, **`gate-rejected`** from the
+  test gate. The dev driver treats such a Ready item as the next slice — read
+  the comment, fix only what failed, do not redo landed work.
 
 ## Shared discipline (all three agents)
 

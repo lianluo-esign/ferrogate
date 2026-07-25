@@ -54,8 +54,8 @@ Ready ───┘        ▲                                        │        
 | --- | --- | --- | --- |
 | Watches | Backlog / Ready (incl. returned items) / In progress | In review only | Testing only |
 | Produces | code on `main` + slices parked in "In review" | Testing (pass) or Ready + findings (fail) | Done (pass) or Ready + `gate-rejected` (fail) |
-| Proof it owns | `cargo build` / `cargo test` + the repo's local gates | code review of the landed diff (bar: TBD, see below) | full `ferrogate-test` end-to-end harness coverage |
-| Never does | self-review, E2E, the Testing/Done transitions | writes product code (TBD), moves cards past Testing | writes product code, moves cards left past Ready |
+| Proof it owns | `cargo build` / `cargo test` + the repo's local gates | acceptance-box audit + defect read of the landed diff | full `ferrogate-test` end-to-end harness coverage |
+| Never does | self-review, E2E, the Testing/Done transitions | writes product code, E2E, moves cards past Testing | writes product code, moves cards left past Ready |
 | Board writes | move slice → In review (one mutation/slice) | move item → Testing or → Ready (one mutation/item) | move item → Done or → Ready (one mutation/item) |
 
 ## Goal and boundary
@@ -161,9 +161,10 @@ third recurring board read — the per-tick budget got tighter, not looser.
     default to the old `In review & Test` lane name and must be pointed at
     `Testing` now** (`gate-lane "Testing"`; `board-test-lane` hard-codes the
     name and needs editing) — the test gate no longer watches `df73e18b`.
-  - Code review: the lane tool it uses is **TBD by the code-review session**.
-    `gate-lane "In review"` already works read-only; whether that session gets
-    its own cache file and mover is its call.
+  - Code review: `~/.local/bin/review-lane` — `[lane]`, `--cached`, `--lanes`,
+    `--id <n>`, `pass <n>` (→ Testing), `fail <n>` (→ Ready). Caches to
+    `/tmp/review-board.json`; `pass`/`fail` resolve the item id from
+    `/tmp/item_ids.json` and cost one mutation with no board read.
 - **Each agent uses its own cache file.** The gate owns `/tmp/board.json`; the
   driver owns `/tmp/dev-board.json` (they clobbered each other when they shared
   a path) — a code-review session must likewise not reuse either path. All may
@@ -321,12 +322,16 @@ binding, re-pointed at the new lane:
 
 ### → Testing (code-review agent hands off)
 
-The pass bar for leaving **In review** is **TBD by the code-review session**.
-Fixed by the project owner: that session watches In review, moves passing items
-to **Testing** (`74839551`), and returns failing ones to **Ready** with its
-findings in an issue comment. What it inspects, how deep it goes, and what
-counts as a pass are that session's to define and document — no other session
-may invent them here.
+An item leaves **In review** for **Testing** (`74839551`) when **every**
+acceptance box has a landed, inspectable artifact on `origin/main`, no defect
+was found that makes the feature wrong, commit hygiene holds, and the dev
+agent's handoff-comment claims spot-check as true. Failing items return to
+**Ready** (`61e4505c`) with the `review-rejected` label and a findings comment.
+
+Crucially, the review agent does **not** bounce an item for lacking a live/E2E
+run — that is the next lane's work. It proves the artifact *exists and is
+honest*; the test agent proves it *works*. Full method:
+`skills/ferrogate-code-review`.
 
 ### → Done (test agent)
 
@@ -360,11 +365,25 @@ has fixed, and what every other session may rely on:
   worktree isolation + immediate cleanup, never build in the primary working
   directory.
 
-**Everything else is TBD by the code-review session** — what it inspects, how
-deep the review goes, whether it may edit code or only report, its lane tooling
-and cache file, and what exactly counts as a pass. No other session may invent
-that contract; the review session defines it and documents it in
-`skills/ferrogate-code-review`.
+The review **method** was the review session's to define; it did so on
+2026-07-25 and documents it in `skills/ferrogate-code-review` (v1). In brief:
+
+- **The acceptance list is the contract.** The audit is box-by-box against
+  landed artifacts on `origin/main`; the diff is read second, to confirm what
+  landed matches what was claimed.
+- **Static verification over rebuild.** It reads code and tests rather than
+  re-running the dev agent's `cargo` evidence — a test that passes while
+  asserting nothing is precisely the defect being hunted, and reading catches
+  that where re-running does not. It builds only when a claim cannot be checked
+  by reading, and then narrowly, in its own worktree.
+- **It never edits product code.** Three sessions share one checkout; a
+  reviewer that edits both authors and approves its own work.
+- **It does not do the test agent's job.** Never a bounce for a missing live/E2E
+  run — only for artifacts that are missing, stubbed, or dishonest.
+- **A FAIL carries `review-rejected`**, deliberately distinct from the test
+  gate's `gate-rejected`, so the dev agent knows which stage bounced it.
+- It fans out to at most **3 read-only review sub-agents**; only the main
+  session comments, labels, and moves cards.
 
 ## The test agent (gate side)
 
