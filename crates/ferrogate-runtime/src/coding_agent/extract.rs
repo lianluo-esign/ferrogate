@@ -14,13 +14,19 @@
 //! explicitly advisory and carries no authority over what the diff contains.
 //!
 //! [`WorkProduct::product_id`] is derived, not assigned:
-//! `sha256(tenant|run_id|base_commit|diff_digest)`. Two consequences worth
-//! having on purpose:
+//! `sha256(tenant|run_id|repo_id|base_commit|diff_digest)`. Three consequences
+//! worth having on purpose:
 //!
 //! * The same run re-extracting the same tree yields the same id (idempotent
 //!   retry).
 //! * A work product cannot be re-attributed to a different run without the id
 //!   changing, so [`WorkProduct::attributed_to`] is a check, not a convention.
+//! * **Which repository the diff came from is checkable, not asserted.** The
+//!   repo's canonical id is inside the derivation, so relabelling
+//!   [`WorkProduct::repo`] from repo A to repo B breaks
+//!   [`WorkProduct::id_is_consistent`] exactly as relabelling the run does.
+//!   That property is the one reason this type exists, so it may not rest on a
+//!   field nobody re-derives.
 //!
 //! An empty diff is refused by [`WorkProduct::assemble`]. "The agent changed
 //! nothing" is a real and reportable outcome — it must surface as *no work
@@ -35,7 +41,7 @@ use crate::opaque_reference_fingerprint;
 
 /// Contract label for how [`WorkProduct::product_id`] is derived, so a
 /// consumer can verify attribution instead of trusting it.
-pub const WORK_PRODUCT_ID_CONTRACT: &str = "sha256(tenant|run|base_commit|diff_digest)";
+pub const WORK_PRODUCT_ID_CONTRACT: &str = "sha256(tenant|run|repo|base_commit|diff_digest)";
 
 /// Default inline-diff ceiling. Above it the patch belongs in the artifact
 /// channel (the #415 container artifact collection), referenced by digest.
@@ -236,7 +242,7 @@ impl WorkProduct {
                 ));
             }
         }
-        let product_id = derive_product_id(&run, &base, diff.digest());
+        let product_id = derive_product_id(&run, &repo, &base, diff.digest());
         Ok(Self {
             product_id,
             run,
@@ -257,22 +263,34 @@ impl WorkProduct {
     /// Whether this product belongs to `run_id`. Verified against the derived
     /// id, so a relabelled `run` field cannot fake attribution.
     pub fn attributed_to(&self, run_id: &str) -> bool {
-        self.run.run_id == run_id
-            && self.product_id == derive_product_id(&self.run, &self.base, self.diff.digest())
+        self.run.run_id == run_id && self.id_is_consistent()
+    }
+
+    /// Whether this product came from `repo`. Verified against the derived id
+    /// for the same reason [`Self::attributed_to`] is: the repo is inside the
+    /// derivation, so a relabelled `repo` field cannot fake provenance.
+    pub fn extracted_from(&self, repo: &RepoCoordinates) -> bool {
+        self.repo.canonical_id() == repo.canonical_id() && self.id_is_consistent()
     }
 
     /// Re-derive the id from the current fields; a mismatch means the record
     /// was edited after extraction.
     pub fn id_is_consistent(&self) -> bool {
-        self.product_id == derive_product_id(&self.run, &self.base, self.diff.digest())
+        self.product_id == derive_product_id(&self.run, &self.repo, &self.base, self.diff.digest())
     }
 }
 
-fn derive_product_id(run: &CodingRunIdentity, base: &PinnedRef, diff_digest: &str) -> String {
+fn derive_product_id(
+    run: &CodingRunIdentity,
+    repo: &RepoCoordinates,
+    base: &PinnedRef,
+    diff_digest: &str,
+) -> String {
     opaque_reference_fingerprint(&format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         run.tenant_id,
         run.run_id,
+        repo.canonical_id(),
         base.commit_id(),
         diff_digest
     ))

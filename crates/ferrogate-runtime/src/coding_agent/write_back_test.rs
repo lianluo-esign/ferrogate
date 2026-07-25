@@ -88,6 +88,79 @@ fn a_run_with_no_grant_cannot_write_back() {
     );
 }
 
+/// Defect 3 from the #472 review: the grant bound only `run_id` + `repo_id`.
+/// `run_id` is unique only inside a tenant, so a grant issued in tenant A
+/// authorized a same-named run in tenant B against the same repo, and the #475
+/// implementer inherited no tenant check from the contract at all.
+#[test]
+fn a_grant_cannot_carry_a_write_back_across_a_tenant_boundary() {
+    // The grant takes its tenant from the granting principal, so it is
+    // `tenant-a`'s grant for `run-1`.
+    let grant = grant();
+    assert_eq!(grant.tenant_id(), "tenant-a");
+
+    // Same run id, same repo, different tenant: refused, and refused as a
+    // tenant mismatch rather than sliding through to the run check.
+    let mut other_tenant = request();
+    other_tenant.run = CodingRunIdentity::new("tenant-b", "session-1", "run-1");
+    let tenant_b = ActingPrincipal {
+        tenant_id: "tenant-b".to_string(),
+        ..principal()
+    };
+    let authorization =
+        authorize_write_back(Some(&grant), &other_tenant, &tenant_b, &context(), 1_100)
+            .expect("evaluable");
+    assert!(!authorization.is_allowed());
+    assert_eq!(
+        authorization.decision().code(),
+        write_back_codes::TENANT_MISMATCH
+    );
+    assert_eq!(authorization.audit_outcome().as_str(), "rejected");
+
+    // A principal acting outside the run's tenant is refused before the grant
+    // is even consulted, so a valid grant cannot repair it.
+    let authorization =
+        authorize_write_back(Some(&grant), &request(), &tenant_b, &context(), 1_100)
+            .expect("evaluable");
+    assert!(!authorization.is_allowed());
+    assert_eq!(
+        authorization.decision().code(),
+        write_back_codes::PRINCIPAL_TENANT_MISMATCH
+    );
+    assert_eq!(
+        authorization.receipt().identity.action,
+        VCS_WRITE_BACK_ACTION
+    );
+
+    // An untenanted principal cannot issue a grant at all — otherwise the
+    // tenant field would be empty and the binding would collapse back to two
+    // parts.
+    let untenanted = WriteBackGrant::issue(
+        "grant-wb-2",
+        "run-1",
+        &repo(),
+        operations(&[WriteBackOperation::PushBranch]),
+        "ferrogate/run-",
+        ActingPrincipal {
+            tenant_id: "  ".to_string(),
+            ..principal()
+        },
+        1_000,
+        1_600,
+    );
+    assert!(untenanted.is_err());
+
+    // The receipt carries the tenant so an audit join on run_id is unambiguous.
+    let authorized =
+        authorize_write_back(Some(&grant), &request(), &principal(), &context(), 1_100)
+            .expect("evaluable")
+            .into_authorized()
+            .expect("granted");
+    let receipt =
+        WriteBackReceipt::from_authorized(&authorized, None, 1_220, WriteBackOutcome::Completed);
+    assert_eq!(receipt.tenant_id, "tenant-a");
+}
+
 #[test]
 fn every_grant_mismatch_is_its_own_recorded_denial() {
     let grant = grant();

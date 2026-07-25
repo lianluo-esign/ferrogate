@@ -87,7 +87,10 @@ impl CodingAgentCapabilities {
     }
 
     /// Fail-closed preflight for a materialization request.
-    pub fn preflight(&self, request: &RepoMaterializationRequest) -> Result<(), CodingAgentError> {
+    pub fn preflight(
+        &self,
+        request: &RepoMaterializationRequest<'_>,
+    ) -> Result<(), CodingAgentError> {
         if !self.materialize_repo {
             return Err(CodingAgentError::Unsupported {
                 phase: CodingAgentPhase::Materialize,
@@ -150,9 +153,13 @@ pub trait CodingAgentAdapter {
     /// repo-scoped credential grant. Implementations must verify the checkout
     /// landed on the pin ([`MaterializedWorkspace::verify`]) and must not
     /// persist the credential anywhere the agent can read.
+    ///
+    /// The grant is *borrowed*: the caller keeps ownership and surrenders it
+    /// once, at [`Self::finalize`]. An adapter cannot consume or retain the
+    /// run's only credential handle.
     fn materialize_repo(
         &mut self,
-        request: RepoMaterializationRequest,
+        request: RepoMaterializationRequest<'_>,
     ) -> Result<MaterializedWorkspace, CodingAgentError>;
 
     /// **Phase 2.** Launch the coding agent against the workspace with the task

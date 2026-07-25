@@ -13,6 +13,9 @@ use crate::ActingPrincipal;
 
 const SHA_A: &str = "1111111111111111111111111111111111111111";
 const SHA_B: &str = "2222222222222222222222222222222222222222";
+/// The governed gateway host the instance is tethered to. A brokered
+/// credential callback is only valid on this host.
+const GATEWAY_HOST: &str = "gateway.example";
 
 fn repo() -> RepoCoordinates {
     RepoCoordinates::new("github", "github.com", "acme", "widget").expect("valid coordinates")
@@ -205,64 +208,75 @@ fn the_grant_carries_no_key_material() {
 
 #[test]
 fn ephemeral_file_delivery_is_kept_out_of_the_workspace_and_off_group_world() {
-    let request = |delivery: CredentialDelivery| RepoMaterializationRequest {
-        run: CodingRunIdentity::new("tenant-a", "session-1", "run-1"),
-        repo: repo(),
-        pinned_ref: PinnedRef::new(SHA_A).expect("pin"),
-        workspace_path: "/workspace".to_string(),
-        credential: grant(RepoCredentialScope::read_only(&repo()), delivery),
-        fetch_depth: None,
-        include_submodules: false,
-    };
+    let held =
+        |delivery: CredentialDelivery| grant(RepoCredentialScope::read_only(&repo()), delivery);
+    fn request(credential: &RepoCredentialGrant) -> RepoMaterializationRequest<'_> {
+        RepoMaterializationRequest {
+            run: CodingRunIdentity::new("tenant-a", "session-1", "run-1"),
+            repo: repo(),
+            pinned_ref: PinnedRef::new(SHA_A).expect("pin"),
+            workspace_path: "/workspace".to_string(),
+            credential,
+            governed_gateway_host: GATEWAY_HOST.to_string(),
+            fetch_depth: None,
+            include_submodules: false,
+        }
+    }
 
-    let inside = request(CredentialDelivery::EphemeralFile {
+    let inside_grant = held(CredentialDelivery::EphemeralFile {
         path: "/workspace/.git-credentials".to_string(),
         mode: 0o600,
     });
     assert!(matches!(
-        inside.validate(1_100),
+        request(&inside_grant).validate(1_100),
         Err(CodingAgentError::CredentialRejected { .. })
     ));
 
-    let loose = request(CredentialDelivery::EphemeralFile {
+    let loose_grant = held(CredentialDelivery::EphemeralFile {
         path: "/run/secrets/git".to_string(),
         mode: 0o644,
     });
     assert!(matches!(
-        loose.validate(1_100),
+        request(&loose_grant).validate(1_100),
         Err(CodingAgentError::CredentialRejected { .. })
     ));
 
-    let ok = request(CredentialDelivery::EphemeralFile {
+    let ok_grant = held(CredentialDelivery::EphemeralFile {
         path: "/run/secrets/git".to_string(),
         mode: 0o600,
     });
-    ok.validate(1_100).expect("delivery outside the workspace");
+    request(&ok_grant)
+        .validate(1_100)
+        .expect("delivery outside the workspace");
     // ...but it is still recorded as readable from inside the instance.
-    assert!(ok.credential.delivery().readable_in_instance());
+    assert!(ok_grant.delivery().readable_in_instance());
 }
 
 #[test]
 fn materialization_rejects_a_foreign_repo_run_or_expired_grant() {
-    let base = RepoMaterializationRequest {
+    // A fresh request each time: the grant is linear, so there is no `.clone()`
+    // to mutate a copy of.
+    let held = grant(RepoCredentialScope::read_only(&repo()), brokered());
+    let base = || RepoMaterializationRequest {
         run: CodingRunIdentity::new("tenant-a", "session-1", "run-1"),
         repo: repo(),
         pinned_ref: PinnedRef::new(SHA_A).expect("pin"),
         workspace_path: "/workspace".to_string(),
-        credential: grant(RepoCredentialScope::read_only(&repo()), brokered()),
+        credential: &held,
+        governed_gateway_host: GATEWAY_HOST.to_string(),
         fetch_depth: None,
         include_submodules: false,
     };
-    base.validate(1_100).expect("well-formed request");
+    base().validate(1_100).expect("well-formed request");
 
     // Expired.
     assert!(matches!(
-        base.validate(1_600),
+        base().validate(1_600),
         Err(CodingAgentError::CredentialRejected { .. })
     ));
 
     // Grant issued for another run.
-    let mut foreign_run = base.clone();
+    let mut foreign_run = base();
     foreign_run.run = CodingRunIdentity::new("tenant-a", "session-1", "run-2");
     assert!(matches!(
         foreign_run.validate(1_100),
@@ -270,7 +284,7 @@ fn materialization_rejects_a_foreign_repo_run_or_expired_grant() {
     ));
 
     // Grant scoped to another repo.
-    let mut foreign_repo = base.clone();
+    let mut foreign_repo = base();
     foreign_repo.repo =
         RepoCoordinates::new("github", "github.com", "acme", "other").expect("coordinates");
     assert!(matches!(
@@ -279,12 +293,56 @@ fn materialization_rejects_a_foreign_repo_run_or_expired_grant() {
     ));
 
     // Relative workspace path.
-    let mut relative = base;
+    let mut relative = base();
     relative.workspace_path = "workspace".to_string();
     assert!(matches!(
         relative.validate(1_100),
         Err(CodingAgentError::InvalidRequest { .. })
     ));
+}
+
+/// Defect 6 from the #472 review: the strongest delivery — the one whose whole
+/// claim is "the credential never enters the instance" — was validated only as
+/// `https://`, so the git credential helper could be pointed anywhere.
+#[test]
+fn a_brokered_callback_is_refused_off_the_governed_gateway_host() {
+    let validate = |broker_url: &str| {
+        let credential = grant(
+            RepoCredentialScope::read_only(&repo()),
+            CredentialDelivery::BrokeredPerOperation {
+                broker_url: broker_url.to_string(),
+            },
+        );
+        RepoMaterializationRequest {
+            run: CodingRunIdentity::new("tenant-a", "session-1", "run-1"),
+            repo: repo(),
+            pinned_ref: PinnedRef::new(SHA_A).expect("pin"),
+            workspace_path: "/workspace".to_string(),
+            credential: &credential,
+            governed_gateway_host: GATEWAY_HOST.to_string(),
+            fetch_depth: None,
+            include_submodules: false,
+        }
+        .validate(1_100)
+    };
+
+    // The case the review named: https, well-formed, and off-platform.
+    let error = validate("https://attacker.example/git-credential")
+        .expect_err("an off-gateway broker must be refused");
+    assert!(matches!(error, CodingAgentError::CredentialRejected { .. }));
+
+    // Userinfo must not be readable as the host.
+    assert!(validate("https://gateway.example@attacker.example/cb").is_err());
+    // A suffix of the gateway host is a different host.
+    assert!(validate("https://evilgateway.example/cb").is_err());
+    // Not https at all.
+    assert!(validate("http://gateway.example/cb").is_err());
+
+    // The governed host itself is accepted, with or without a port, in any case.
+    validate("https://gateway.example/git-credential")
+        .expect("the governed gateway host is the one accepted host");
+    validate("https://GATEWAY.example:8443/git-credential")
+        .expect("host comparison is case-insensitive and port-insensitive");
 }
 
 #[test]
@@ -325,26 +383,57 @@ fn repo_coordinates_reject_ambiguous_components_and_expose_one_canonical_id() {
 
 #[test]
 fn revocation_receipt_reports_failure_instead_of_swallowing_it() {
-    let grant = grant(RepoCredentialScope::read_only(&repo()), brokered());
+    let reference = grant(RepoCredentialScope::read_only(&repo()), brokered());
+    let fingerprint = reference.credential_ref().fingerprint();
+    let endpoint = reference.revocation_point().endpoint.clone();
     let failed = CredentialRevocation::for_grant(
-        &grant,
+        reference,
         1_500,
         RevocationOutcome::Failed {
             code: "revoke_endpoint_unreachable".to_string(),
         },
     );
-    assert!(!failed.outcome.is_credential_neutralized());
+    assert!(!failed.is_credential_neutralized());
     assert_eq!(failed.grant_id, "grant-1");
-    assert_eq!(
-        failed.credential_fingerprint,
-        grant.credential_ref().fingerprint()
-    );
+    assert_eq!(failed.credential_fingerprint, fingerprint);
+    // The record names the endpoint the attempt was made against, copied off
+    // the surrendered grant rather than supplied by the caller.
+    assert_eq!(failed.revocation_endpoint, endpoint);
 
     for outcome in [
         RevocationOutcome::Revoked,
         RevocationOutcome::AlreadyExpired,
     ] {
-        let receipt = CredentialRevocation::for_grant(&grant, 1_500, outcome);
-        assert!(receipt.outcome.is_credential_neutralized());
+        let receipt = CredentialRevocation::for_grant(
+            grant(RepoCredentialScope::read_only(&repo()), brokered()),
+            1_500,
+            outcome,
+        );
+        assert!(receipt.is_credential_neutralized());
     }
+}
+
+/// Defect 4 from the #472 review: `#[must_use]` plus by-value passing bought no
+/// linearity while the grant was `Clone`. It is now neither `Clone` nor
+/// `Deserialize`, so a caller cannot keep a usable handle past revocation — by
+/// copy *or* by JSON round-trip.
+#[test]
+fn a_credential_grant_cannot_be_duplicated_or_reparsed() {
+    // The absence of `Clone`/`Deserialize` is enforced by the compiler, not by
+    // this test: `credential.clone()` and `serde_json::from_str::<
+    // RepoCredentialGrant>(..)` no longer compile. What is checkable at
+    // runtime is that the escape hatch a `Serialize + Deserialize` pair would
+    // have opened is closed, and that surrender is the only exit.
+    let held = grant(RepoCredentialScope::read_only(&repo()), brokered());
+    // A grant serializes (it holds a reference, not material) but the emitted
+    // JSON is not accepted back as a grant, so `Serialize + Deserialize` cannot
+    // stand in for the `Clone` that was removed.
+    let json = serde_json::to_string(&held).expect("grants serialize for the control plane");
+    assert!(json.contains("repo-creds/acme-widget"), "json: {json}");
+    assert!(!json.to_ascii_lowercase().contains("token"), "json: {json}");
+    assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+
+    // The only exit is surrender.
+    let revocation = CredentialRevocation::for_grant(held, 1_500, RevocationOutcome::Revoked);
+    assert_eq!(revocation.grant_id, "grant-1");
 }

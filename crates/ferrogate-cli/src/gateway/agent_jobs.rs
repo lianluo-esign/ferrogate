@@ -20,7 +20,7 @@
 //! | submit | `POST /v1/agent-jobs` | `agent_runs` row + the self-hosted lease queue (#414 dispatch transport) |
 //! | status | `GET /v1/agent-jobs/{run_id}` | `AppState::agent_run_timeline` + `AppState::self_hosted_run_timeline` |
 //! | events | `GET /v1/agent-jobs/{run_id}/events` | the existing agent-run timeline (`agent_run_events`) |
-//! | result | `GET /v1/agent-jobs/{run_id}/result` | the same timeline + worker-reported artifact events |
+//! | result | `GET /v1/agent-jobs/{run_id}/result` | the same timeline + worker-reported artifact events, including #472 coding-agent work products |
 //! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | a `cancel_run` dispatch (#414) + run terminalization |
 //!
 //! **Durability.** Submission writes the `agent_runs` row through the same
@@ -51,7 +51,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ferrogate_runtime::{SelfHostedRunAction, SelfHostedRunDispatch};
+use ferrogate_runtime::{
+    coding_agent::WorkProductView, SelfHostedRunAction, SelfHostedRunDispatch,
+};
 use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
 use http::{HeaderMap, Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -222,6 +224,17 @@ struct AgentJobResultResponse {
     /// Artifact evidence the runtime reported for this run (for a coding agent
     /// this is where the diff/PR reference lands, #472).
     artifacts: Vec<AgentJobArtifact>,
+    /// The #472 coding-agent work products carried by those artifact events,
+    /// decoded and **re-verified** against the `run_id` in the path. This is
+    /// the "retrievable through the control plane" half of #472's acceptance,
+    /// and it deliberately rides this route rather than adding a parallel
+    /// `/admin/v1/.../work-products/{id}` surface: a work product has no life
+    /// outside its run, and the run timeline is already the durable,
+    /// tenant-scoped evidence store this handler reads.
+    ///
+    /// Empty for every non-coding job — the projection skips artifacts it does
+    /// not recognise rather than failing the read.
+    work_products: Vec<WorkProductView>,
     request_count: usize,
     billing_event_count: usize,
     completed_at_unix: Option<u64>,
@@ -710,6 +723,21 @@ impl FerroGateway {
             turns_executed: timeline.run.as_ref().map_or(0, |run| run.turns_executed),
             output_recorded: timeline.run.as_ref().is_some_and(|run| run.output_recorded),
             output: agent_job_output(&timeline),
+            // Decoded from the SAME already-tenant-scoped events, and verified
+            // against the `run_id` the caller asked about rather than the one
+            // the worker-reported payload claims.
+            work_products: runtime_timeline
+                .as_ref()
+                .map(|runtime| {
+                    WorkProductView::from_timeline_events(
+                        runtime
+                            .events
+                            .iter()
+                            .map(|event| (event.kind.as_str(), event.event_json.as_str())),
+                        run_id,
+                    )
+                })
+                .unwrap_or_default(),
             artifacts: runtime_timeline
                 .as_ref()
                 .map(|runtime| {

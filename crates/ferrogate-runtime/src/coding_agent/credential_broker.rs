@@ -867,7 +867,10 @@ impl ContainerGitEnvironment {
 /// is authorized against all of them, counted against the run's budget, and
 /// answered with a [`BrokerDecision`] plus a material-free
 /// [`GitCredentialAuditEvent`].
-#[derive(Debug, Clone)]
+/// Not `Clone`: it owns the run's [`RepoCredentialGrant`], which is linear.
+/// Two brokers bound to one grant would be two independent operation budgets
+/// over the same credential.
+#[derive(Debug)]
 pub struct GitCredentialBroker {
     tenant_id: String,
     repo: RepoCoordinates,
@@ -948,6 +951,16 @@ impl GitCredentialBroker {
 
     pub fn grant(&self) -> &RepoCredentialGrant {
         &self.grant
+    }
+
+    /// Surrender the grant so it can be closed out.
+    ///
+    /// Consuming the broker is the point: once the grant has been handed to
+    /// [`crate::coding_agent::RunFinalization`] for revocation, no further
+    /// callback can be authorized against it, and the type system says so.
+    #[must_use = "the surrendered grant must be revoked through CodingAgentAdapter::finalize"]
+    pub fn into_grant(self) -> RepoCredentialGrant {
+        self.grant
     }
 
     /// The revocation point this run's grant must be closed at.

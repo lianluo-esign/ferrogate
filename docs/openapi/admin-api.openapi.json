@@ -18022,6 +18022,7 @@
           "output_recorded",
           "output",
           "artifacts",
+          "work_products",
           "request_count",
           "billing_event_count",
           "completed_at_unix",
@@ -18060,6 +18061,13 @@
               "$ref": "#/components/schemas/AgentJobArtifact"
             },
             "description": "Artifact evidence the runtime reported for this run."
+          },
+          "work_products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodingAgentWorkProduct"
+            },
+            "description": "Coding-agent work products (#472) decoded from this run's artifact events and re-verified against the run_id in the path. Empty for non-coding jobs."
           },
           "request_count": {
             "type": "integer",
@@ -27173,6 +27181,175 @@
           "attempt_count": {
             "type": "integer",
             "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodingAgentWorkProduct": {
+        "type": "object",
+        "description": "One reviewable diff produced by a coding run (#472), projected from the run timeline. attribution_verified/repo_verified are re-derived from the content-addressed product id rather than copied from the worker-reported record.",
+        "required": [
+          "object",
+          "product_id",
+          "run_id",
+          "tenant_id",
+          "repo_id",
+          "base_commit",
+          "diff_digest",
+          "diff_byte_len",
+          "diff_carrier",
+          "stats",
+          "extracted_at_unix",
+          "attribution_verified",
+          "repo_verified"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "coding_agent_work_product"
+          },
+          "product_id": {
+            "type": "string",
+            "description": "sha256(tenant|run|repo|base_commit|diff_digest)."
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string",
+            "description": "provider:host/namespace/name."
+          },
+          "base_commit": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "head_commit": {
+            "type": "string"
+          },
+          "diff_digest": {
+            "type": "string"
+          },
+          "diff_byte_len": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "diff_carrier": {
+            "type": "string",
+            "enum": [
+              "inline",
+              "artifact"
+            ],
+            "description": "Where the patch bytes are. They are never inlined into this projection."
+          },
+          "diff_artifact_ref": {
+            "type": "string"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/CodingAgentDiffStats"
+          },
+          "summary": {
+            "type": "string",
+            "description": "Advisory agent prose. Never a substitute for reading the diff."
+          },
+          "extracted_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "attribution_verified": {
+            "type": "boolean",
+            "description": "True only when the derived product id matches this run. False means the record was relabelled after extraction."
+          },
+          "repo_verified": {
+            "type": "boolean"
+          },
+          "published": {
+            "$ref": "#/components/schemas/CodingAgentPublishedChange"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodingAgentDiffStats": {
+        "type": "object",
+        "required": [
+          "files_changed",
+          "insertions",
+          "deletions"
+        ],
+        "properties": {
+          "files_changed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "insertions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deletions": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodingAgentPublishedChange": {
+        "type": "object",
+        "description": "What left the platform for this work product, and whether the receipt actually describes publishing it.",
+        "required": [
+          "operation",
+          "branch",
+          "head_commit",
+          "outcome",
+          "grant_id",
+          "action_fingerprint",
+          "completed_at_unix",
+          "matches_work_product"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "push_branch",
+              "open_pull_request",
+              "update_pull_request",
+              "push_tag"
+            ]
+          },
+          "branch": {
+            "type": "string"
+          },
+          "head_commit": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "refused",
+              "failed"
+            ]
+          },
+          "review_reference": {
+            "type": "string"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "action_fingerprint": {
+            "type": "string",
+            "description": "Target-level fingerprint of the vcs.write_back ActionIdentity, for the audit join."
+          },
+          "completed_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "matches_work_product": {
+            "type": "boolean",
+            "description": "True only when the receipt's tenant, run, repo, branch and head commit all match the work product it names."
           }
         },
         "additionalProperties": false

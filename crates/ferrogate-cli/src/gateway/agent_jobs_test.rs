@@ -364,3 +364,109 @@ fn only_single_segment_run_ids_are_addressable() {
     assert!(!is_addressable_run_id(""));
     assert!(!is_addressable_run_id("job-abc/events/extra"));
 }
+
+/// #472's "retrievable through the control plane" rides THIS route rather than
+/// a parallel work-product surface: the diff is published as one artifact event
+/// on the run timeline the result verb already reads, and the read re-derives
+/// attribution instead of trusting the worker-reported payload.
+#[test]
+fn a_coding_runs_work_product_is_retrievable_from_the_job_result_and_is_tenant_scoped() {
+    use ferrogate_runtime::coding_agent::{
+        CodingRunIdentity, DiffStats, PinnedRef, ProducedBranch, RepoCoordinates, UnifiedDiff,
+        WorkProduct, WorkProductArtifact, WorkProductView, WORK_PRODUCT_ARTIFACT_EVENT_KIND,
+    };
+
+    const BASE: &str = "1111111111111111111111111111111111111111";
+    const HEAD: &str = "3333333333333333333333333333333333333333";
+
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "fix-the-widget");
+    let repo = RepoCoordinates::new("github", "github.com", "acme", "widget").expect("repo");
+    let product = WorkProduct::assemble(
+        CodingRunIdentity::new("tenant-a", "session-1", &run_id),
+        repo,
+        PinnedRef::new(BASE).expect("pin"),
+        Some(
+            ProducedBranch::new(
+                "ferrogate/run-fix",
+                HEAD,
+                PinnedRef::new(BASE).expect("pin"),
+            )
+            .expect("branch"),
+        ),
+        UnifiedDiff::inline("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n").expect("diff"),
+        DiffStats {
+            files_changed: 1,
+            insertions: 1,
+            deletions: 1,
+        },
+        None,
+        1_200,
+    )
+    .expect("work product");
+    let envelope = WorkProductArtifact::new(product.clone(), None)
+        .to_event_json()
+        .expect("envelope");
+
+    let (worker, _secret) = state
+        .register_self_hosted_worker(crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+            tenant: tenant("tenant-a"),
+            workspace_id: "ws-1".to_string(),
+            worker_name: "coding-worker".to_string(),
+            identity_fingerprint: "sha256:worker".to_string(),
+            identity_expires_at_unix: None,
+            orchestration_enabled: true,
+            capability_envelope_json: None,
+        })
+        .expect("worker registers");
+
+    // `artifact` is already an accepted telemetry kind, so publishing a work
+    // product needs no new event kind, no new table, and no new route.
+    for (kind, event_json) in [
+        (WORK_PRODUCT_ARTIFACT_EVENT_KIND, envelope.as_str()),
+        // An artifact on the same run that is not a work product must be
+        // skipped, not fail the read.
+        ("artifact", r#"{"object":"container.artifact"}"#),
+        ("lifecycle", r#"{"state":"completed"}"#),
+    ] {
+        state
+            .record_self_hosted_worker_telemetry_event(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+                    session_id: "session-1".to_string(),
+                    run_id: run_id.clone(),
+                    kind: kind.to_string(),
+                    occurred_at_unix: Some(120),
+                    event_json: Some(event_json.to_string()),
+                },
+                ferrogate_runtime::SelfHostedRunEvidenceCorrelation::default(),
+            )
+            .expect("telemetry event is accepted");
+    }
+
+    // Exactly the expression `handle_agent_job_result` evaluates.
+    let timeline = state
+        .self_hosted_run_timeline(&run_id, Some("tenant-a"))
+        .expect("the owning tenant sees its own run");
+    let work_products = WorkProductView::from_timeline_events(
+        timeline
+            .events
+            .iter()
+            .map(|event| (event.kind.as_str(), event.event_json.as_str())),
+        &run_id,
+    );
+    assert_eq!(work_products.len(), 1);
+    let view = &work_products[0];
+    assert_eq!(view.product_id, product.product_id());
+    assert_eq!(view.repo_id, "github:github.com/acme/widget");
+    assert_eq!(view.head_commit.as_deref(), Some(HEAD));
+    assert!(view.attribution_verified, "the id re-derives for this run");
+    assert!(view.repo_verified);
+    assert!(view.published.is_none(), "nothing was pushed");
+
+    // Tenant isolation is the timeline read's, applied before anything is
+    // shaped: another tenant gets no timeline, so no work product.
+    assert!(state
+        .self_hosted_run_timeline(&run_id, Some("tenant-b"))
+        .is_none());
+}

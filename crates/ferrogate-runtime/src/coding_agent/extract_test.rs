@@ -66,7 +66,7 @@ fn the_product_id_is_derived_and_checkable() {
     let extracted = product(run());
     assert_eq!(
         WORK_PRODUCT_ID_CONTRACT,
-        "sha256(tenant|run|base_commit|diff_digest)"
+        "sha256(tenant|run|repo|base_commit|diff_digest)"
     );
     assert!(crate::is_canonical_action_fingerprint(
         extracted.product_id()
@@ -90,6 +90,50 @@ fn relabelling_the_run_breaks_attribution_instead_of_faking_it() {
     assert!(!product.id_is_consistent());
     assert!(!product.attributed_to("run-2"));
     assert!(!product.attributed_to("run-1"));
+}
+
+/// Defect 1 from the #472 review: `repo` was a public field left *out* of the
+/// derivation, so a diff extracted from repo A could be relabelled to repo B
+/// and `id_is_consistent()` still returned `true`. "Which repository this diff
+/// came from" is the one property this type exists to provide, so it must break
+/// the id exactly as relabelling the run does.
+#[test]
+fn relabelling_the_repo_breaks_provenance_instead_of_faking_it() {
+    let mut product = product(run());
+    assert!(product.extracted_from(&repo()));
+
+    let other = RepoCoordinates::new("github", "github.com", "acme", "other").expect("coordinates");
+    product.repo = other.clone();
+    assert!(!product.id_is_consistent());
+    assert!(!product.extracted_from(&other));
+    assert!(!product.extracted_from(&repo()));
+    // Attribution is derived from the same id, so it fails too.
+    assert!(!product.attributed_to("run-1"));
+
+    // ...and two identical diffs from two repos are two products.
+    let from_other = WorkProduct::assemble(
+        run(),
+        other,
+        base(),
+        None,
+        UnifiedDiff::inline(PATCH).expect("diff"),
+        DiffStats::default(),
+        None,
+        1_200,
+    )
+    .expect("work product");
+    let from_repo = WorkProduct::assemble(
+        run(),
+        repo(),
+        base(),
+        None,
+        UnifiedDiff::inline(PATCH).expect("diff"),
+        DiffStats::default(),
+        None,
+        1_200,
+    )
+    .expect("work product");
+    assert_ne!(from_other.product_id(), from_repo.product_id());
 }
 
 #[test]

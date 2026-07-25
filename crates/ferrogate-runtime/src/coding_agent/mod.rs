@@ -4,7 +4,8 @@
 // Created: 2026-07-25
 // description: Token4AI Cloud, FerroGate AI Gateway, coding-agent adapter contract (issue #472):
 //   the five-phase contract (materialize -> bootstrap -> run -> extract -> write-back) for
-//   running a repo-aware coding agent in a governed container. Types + trait + doc only.
+//   running a repo-aware coding agent in a governed container, the container-backed
+//   implementation of it, and the control-plane read path for the diff it produces.
 
 //! # The coding-agent adapter contract (issue #472)
 //!
@@ -14,8 +15,12 @@
 //! lifecycle (#414), memory (#427), cost governance (#428). What did not exist
 //! is the contract that turns those into a reviewable change.
 //!
-//! This module is **types, a trait, and this document**. It starts no
-//! container, opens no socket, resolves no secret, and integrates no specific
+//! This module is the contract — types, a trait, and this document — **plus**
+//! the container-backed implementation that keeps the contract from being
+//! vacuous ([`ContainerCodingAgentAdapter`], which drives `git` through #415's
+//! `/container/exec`) and the read path that makes a run's diff retrievable
+//! through the control plane ([`WorkProductArtifact`], projected onto #474's
+//! `GET /v1/agent-jobs/{run_id}/result`). It still integrates no specific
 //! coding agent. See [What this module deliberately does not
 //! decide](#what-this-module-deliberately-does-not-decide).
 //!
@@ -33,21 +38,45 @@
 //! discharges phase 1's credential obligation. It is not a sixth feature; it is
 //! the reason phase 1 is safe.
 //!
+//! ## The implementation and the read path
+//!
+//! [`ContainerCodingAgentAdapter`] runs all five phases against a #415
+//! Cloudflare Container: `git init`/`config`/`remote add`/`fetch <commit>`/
+//! `checkout --detach`, then `rev-parse HEAD` read back and checked against the
+//! pin. It is agent-agnostic — the coding agent is argv on
+//! [`CodingAgentImage::entrypoint`] — so the second one is a different image,
+//! not a second adapter.
+//!
+//! Retrieval reuses evidence the platform already keeps rather than adding a
+//! parallel store: a work product is published as one `artifact` event on the
+//! run timeline carrying a [`WorkProductArtifact`], and #474's
+//! `GET /v1/agent-jobs/{run_id}/result` decodes those into
+//! [`WorkProductView`]s — re-deriving attribution against the `run_id` in the
+//! path rather than trusting the worker-reported payload.
+//!
 //! ## Five invariants, carried by types rather than by discipline
 //!
 //! 1. **A branch is not a pin.** [`PinnedRef`] accepts only a full commit id,
 //!    and [`MaterializedWorkspace::verify`] makes "the clone landed elsewhere"
 //!    a hard failure. Every artifact downstream is attributed to the pin.
-//! 2. **Credentials are references, never material.** [`CredentialReference`]
-//!    holds a secret-store URI, refuses bare values, and specifically refuses
-//!    `env://` — a container running model-authored code can read its own
-//!    environment (#475). There is no field in this contract that can hold a
-//!    token, so no implementation can log, persist, or bake one into an image
-//!    by accident. [`CredentialDelivery`] has no `EnvVar` variant; adding one
-//!    would be a contract change, which is the point.
-//! 3. **Write capability cannot be self-granted.**
+//! 2. **Credentials are references, never material, and the grant is linear.**
+//!    [`CredentialReference`] holds a secret-store URI, refuses bare values,
+//!    and specifically refuses `env://` — a container running model-authored
+//!    code can read its own environment (#475). There is no field in this
+//!    contract that can hold a token, so no implementation can log, persist, or
+//!    bake one into an image by accident. [`CredentialDelivery`] has no
+//!    `EnvVar` variant; adding one would be a contract change, which is the
+//!    point, and its `BrokeredPerOperation` callback must be on the governed
+//!    gateway host, so the strongest delivery cannot be aimed off-platform.
+//!    [`RepoCredentialGrant`] is neither `Clone` nor `Deserialize`, is lent to
+//!    materialization by reference, and is *consumed* by
+//!    [`CredentialRevocation::for_grant`] — so no usable handle survives its
+//!    own close-out record.
+//! 3. **Write capability cannot be self-granted, and is tenant-bound.**
 //!    [`RepoCredentialScope::with_write_back`] requires a [`WriteBackGrant`] by
 //!    reference, so a write-capable credential is unconstructible without one.
+//!    A grant binds `(tenant_id, run_id, repo_id)` — taking its tenant from the
+//!    granting principal — because `run_id` is unique only inside a tenant.
 //!    [`CodingAgentAdapter::write_back`] accepts only an
 //!    [`AuthorizedWriteBack`], which has private fields, no public constructor,
 //!    and no `Deserialize` — it cannot be forged from JSON, and the only mint
@@ -55,8 +84,12 @@
 //!    the allow path *and* the deny path.
 //! 4. **The deliverable is a diff, not a chat completion.**
 //!    [`WorkProduct::product_id`] is derived —
-//!    `sha256(tenant|run|base_commit|diff_digest)` — so attribution is
-//!    checkable ([`WorkProduct::attributed_to`]) rather than asserted. An empty
+//!    `sha256(tenant|run|repo|base_commit|diff_digest)` — so attribution
+//!    ([`WorkProduct::attributed_to`]) *and* provenance
+//!    ([`WorkProduct::extracted_from`]) are checkable rather than asserted:
+//!    relabelling the repo breaks the id exactly as relabelling the run does.
+//!    [`CodingRunReceipt::assemble`] additionally checks that the commit a
+//!    write-back says it published is the commit the work product produced. An empty
 //!    diff is refused: "the agent changed nothing" surfaces as *no work
 //!    product*, never as an empty patch that reads like a reviewable change.
 //!    Agent prose is [`WorkProduct::summary`] and is explicitly advisory.
@@ -116,10 +149,15 @@
 //! * **Egress enforcement mechanics.** Whether the platform can actually pin an
 //!   allowlist is #471/#475. This contract makes the posture declarable,
 //!   derivable, and auditable; it cannot make Cloudflare enforce it.
-//! * **Persistence and the control-plane read path.** Storing work products and
-//!   serving `GET /admin/v1/.../work-products/{id}` is a separate slice; the
-//!   types here are serde-ready for it, but no repository trait is frozen yet
-//!   on the strength of a guess about the query shape.
+//! * **A dedicated work-product store or route.** Retrieval rides #474's
+//!   `GET /v1/agent-jobs/{run_id}/result` over the existing run timeline (see
+//!   [`work_product_artifact`]). No repository trait, no table, and no
+//!   `/admin/v1/.../work-products/{id}` route was frozen: a work product has no
+//!   life outside its run, and a second surface would mean a second durable
+//!   store and a second tenant-isolation implementation to keep consistent.
+//! * **Opening a pull request.** That is a provider API call, not a git verb.
+//!   [`ContainerCodingAgentAdapter`] advertises `pull_request: false` and
+//!   refuses it rather than downgrading it to a push.
 //! * **Approval workflow.** [`WriteBackGrant::approval_reference`] links to the
 //!   existing approval machinery; this contract does not re-implement it.
 //! * **Prompt construction.** [`TaskBrief`] carries the requester's instruction
@@ -128,17 +166,23 @@
 
 mod adapter;
 mod bootstrap;
+mod container_adapter;
 mod credential_broker;
 mod error;
 mod extract;
 mod materialize;
 mod run;
+mod work_product_artifact;
 mod write_back;
 
 pub use adapter::{CodingAgentAdapter, CodingAgentCapabilities, CodingAgentDescriptor};
 pub use bootstrap::{
     AgentBootstrapRequest, BootstrappedAgent, CodingAgentImage, EgressEnforcement, EgressPosture,
     GovernedLlmEgress, TaskBrief, UnenforcedEgressAcknowledgement,
+};
+pub use container_adapter::{
+    container_coding_agent_capabilities, ContainerCodingAgentAdapter, RepoCredentialRevoker,
+    BROKERED_CREDENTIAL_HELPER,
 };
 pub use credential_broker::{
     broker_audience, broker_capability_fingerprint, broker_deny_codes, git_helper_config_lines,
@@ -163,6 +207,10 @@ pub use materialize::{
 pub use run::{
     CodingRunIdentity, CodingRunOutcome, CodingRunReceipt, CodingRunRequest, CodingRunStatus,
     RunBudgetBinding, RunFinalization,
+};
+pub use work_product_artifact::{
+    PublishedChange, WorkProductArtifact, WorkProductView, WORK_PRODUCT_ARTIFACT_EVENT_KIND,
+    WORK_PRODUCT_ARTIFACT_OBJECT,
 };
 pub use write_back::{
     authorize_write_back, canonical_write_back_target, write_back_codes, AuthorizedWriteBack,

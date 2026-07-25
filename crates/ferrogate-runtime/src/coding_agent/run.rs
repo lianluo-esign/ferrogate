@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use crate::coding_agent::bootstrap::{BootstrappedAgent, EgressEnforcement, EgressPosture};
 use crate::coding_agent::error::{CodingAgentError, CodingAgentPhase};
 use crate::coding_agent::extract::WorkProduct;
-use crate::coding_agent::materialize::{CredentialRevocation, RepoCredentialGrant};
+use crate::coding_agent::materialize::{
+    CredentialRevocation, RepoCredentialGrant, RevocationOutcome,
+};
 use crate::coding_agent::write_back::WriteBackReceipt;
 use crate::{AgentCostAttribution, AgentInstanceIdentity, AuditOutcome};
 
@@ -183,9 +185,9 @@ impl CodingRunOutcome {
     }
 }
 
-/// Close-out input. Consumes the credential grant by value: the grant ends
-/// here, in the same call that revokes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Close-out input. Owns the credential grant by value: the grant ends here,
+/// in the same call that revokes it. Not `Clone`, because the grant is not.
+#[derive(Debug, PartialEq, Eq)]
 pub struct RunFinalization {
     pub run: CodingRunIdentity,
     pub outcome: CodingRunOutcome,
@@ -225,24 +227,36 @@ pub struct CodingRunReceipt {
 }
 
 impl CodingRunReceipt {
-    /// Assemble the terminal record. Cross-checks that everything attributed to
-    /// this run actually belongs to it.
+    /// Assemble the terminal record, **consuming** the finalization — and with
+    /// it the credential grant, which is turned into the mandatory
+    /// [`CredentialRevocation`] here rather than accepted alongside it. The
+    /// old shape took the revocation as a separate argument and compared grant
+    /// ids; minting it from the surrendered grant makes the mismatch it was
+    /// guarding against unrepresentable.
+    ///
+    /// Cross-checks that everything attributed to this run actually belongs to
+    /// it — including that the commit the write-back says it published is the
+    /// commit the work product actually produced.
     pub fn assemble(
-        finalization: &RunFinalization,
-        revocation: CredentialRevocation,
+        finalization: RunFinalization,
+        revocation_outcome: RevocationOutcome,
     ) -> Result<Self, CodingAgentError> {
-        let run_id = finalization.run.run_id.as_str();
-        if finalization.credential.run_id() != run_id {
+        let RunFinalization {
+            run,
+            outcome,
+            credential,
+            work_product,
+            write_back,
+            egress_posture,
+            finalized_at_unix,
+        } = finalization;
+        let run_id = run.run_id.as_str();
+        if credential.run_id() != run_id {
             return Err(CodingAgentError::credential(
                 "finalization presented a credential grant from another run",
             ));
         }
-        if revocation.grant_id != finalization.credential.grant_id() {
-            return Err(CodingAgentError::credential(
-                "revocation receipt does not match the credential grant being closed",
-            ));
-        }
-        if let Some(product) = &finalization.work_product {
+        if let Some(product) = &work_product {
             if !product.attributed_to(run_id) {
                 return Err(CodingAgentError::invalid(
                     CodingAgentPhase::Finalize,
@@ -251,42 +265,25 @@ impl CodingRunReceipt {
                 ));
             }
         }
-        if let Some(receipt) = &finalization.write_back {
-            if receipt.run_id != run_id {
-                return Err(CodingAgentError::invalid(
-                    CodingAgentPhase::Finalize,
-                    "write_back",
-                    "write-back receipt belongs to another run",
-                ));
-            }
-            match &finalization.work_product {
-                Some(product) if product.product_id() == receipt.work_product_id => {}
-                _ => {
-                    return Err(CodingAgentError::invalid(
-                        CodingAgentPhase::Finalize,
-                        "write_back",
-                        "write-back published a work product this run did not extract",
-                    ))
-                }
-            }
+        if let Some(receipt) = &write_back {
+            check_write_back_publishes(&run, work_product.as_ref(), receipt)?;
         }
+        let credential_readable_in_instance = credential.delivery().readable_in_instance();
+        let credential_revocation =
+            CredentialRevocation::for_grant(credential, finalized_at_unix, revocation_outcome);
         Ok(Self {
-            run: finalization.run.clone(),
-            status: finalization.outcome.status,
-            work_product_id: finalization
-                .work_product
+            work_product_id: work_product
                 .as_ref()
                 .map(|product| product.product_id().to_string()),
-            write_back: finalization.write_back.clone(),
-            credential_revocation: revocation,
-            egress_posture: finalization.egress_posture.as_str().to_string(),
-            egress_enforcement: finalization.egress_posture.enforcement(),
-            credential_readable_in_instance: finalization
-                .credential
-                .delivery()
-                .readable_in_instance(),
-            started_at_unix: finalization.outcome.started_at_unix,
-            finalized_at_unix: finalization.finalized_at_unix,
+            status: outcome.status,
+            started_at_unix: outcome.started_at_unix,
+            run,
+            write_back,
+            credential_revocation,
+            egress_posture: egress_posture.as_str().to_string(),
+            egress_enforcement: egress_posture.enforcement(),
+            credential_readable_in_instance,
+            finalized_at_unix,
         })
     }
 
@@ -297,4 +294,63 @@ impl CodingRunReceipt {
             .outcome
             .is_credential_neutralized()
     }
+}
+
+/// Check that a write-back receipt describes publishing *this* run's work
+/// product — not merely one whose id it quotes.
+///
+/// Matching `work_product_id` alone is not enough. A receipt could carry the
+/// right product id and an unrelated `head_commit`, and the terminal record
+/// would honestly state "work product X was published" while the commit that
+/// actually reached the remote has nothing to do with X. So the branch, the
+/// head commit, the repo and the tenant are all checked against the product.
+fn check_write_back_publishes(
+    run: &CodingRunIdentity,
+    work_product: Option<&WorkProduct>,
+    receipt: &WriteBackReceipt,
+) -> Result<(), CodingAgentError> {
+    let mismatch = |detail: &str| {
+        CodingAgentError::invalid(CodingAgentPhase::Finalize, "write_back", detail.to_string())
+    };
+    if receipt.run_id != run.run_id {
+        return Err(mismatch("write-back receipt belongs to another run"));
+    }
+    if receipt.tenant_id != run.tenant_id {
+        return Err(mismatch("write-back receipt belongs to another tenant"));
+    }
+    let Some(product) = work_product else {
+        return Err(mismatch(
+            "write-back published a work product this run did not extract",
+        ));
+    };
+    if product.product_id() != receipt.work_product_id {
+        return Err(mismatch(
+            "write-back published a work product this run did not extract",
+        ));
+    }
+    if receipt.repo_id != product.repo.canonical_id() {
+        return Err(mismatch(
+            "write-back names a different repository than the work product came from",
+        ));
+    }
+    // A work product with no produced branch is a bare diff: there is no
+    // commit in it for a push to have published. Accepting a receipt here
+    // would be accepting an unverifiable head commit.
+    let Some(branch) = &product.branch else {
+        return Err(mismatch(
+            "write-back published a commit for a work product that produced no branch; \
+             there is nothing to check the pushed head against",
+        ));
+    };
+    if receipt.head_commit != branch.head_commit {
+        return Err(mismatch(
+            "write-back published a head commit that is not the work product's head commit",
+        ));
+    }
+    if receipt.branch != branch.name {
+        return Err(mismatch(
+            "write-back published a branch that is not the work product's branch",
+        ));
+    }
+    Ok(())
 }

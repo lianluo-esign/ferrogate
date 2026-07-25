@@ -28,10 +28,24 @@
 //!    [`RepoCredentialScope::with_write_back`]. Read-only is the only scope you
 //!    can build from nothing.
 //!
+//! 4. **The grant is linear.** [`RepoCredentialGrant`] is not `Clone` and not
+//!    `Deserialize`, is `#[must_use]`, is moved into
+//!    [`crate::coding_agent::RunFinalization`] by value, and is *consumed* by
+//!    [`CredentialRevocation::for_grant`]. A caller therefore cannot hold a
+//!    usable grant past its own revocation record — which `#[must_use]` and
+//!    by-value passing did not achieve on their own while the type was
+//!    cloneable.
+//!
 //! The grant carries an explicit [`RevocationPoint`], and the terminal run
 //! record ([`crate::coding_agent::CodingRunReceipt`]) cannot be constructed
-//! without a [`CredentialRevocation`] — so "revoked on success and failure
-//! alike" is structural rather than a code-review promise.
+//! without a [`CredentialRevocation`] — so "a close-out record exists on the
+//! success path and the failure path alike" is structural rather than a
+//! code-review promise.
+//!
+//! What that record does **not** claim is that the remote honoured the call.
+//! No in-process type can attest to that; [`RevocationOutcome::Failed`] and
+//! [`CredentialRevocation::is_credential_neutralized`] exist because sometimes
+//! it did not. See [`CredentialRevocation`] for the exact accounting.
 
 use std::fmt;
 
@@ -369,6 +383,13 @@ pub enum CredentialDelivery {
     /// authorizes the operation, and answers. Every use is audited and nothing
     /// rests in the container. This is the only delivery that survives an
     /// untrusted-process threat model (issue #475).
+    ///
+    /// `broker_url` must be on the **governed gateway host** — the same host
+    /// [`crate::coding_agent::GovernedLlmEgress::gateway_host`] pins and the
+    /// only host an [`crate::coding_agent::EgressPosture::Allowlist`] is
+    /// required to admit. Validating it as "some https URL" would let the
+    /// strongest delivery be pointed at an arbitrary endpoint, which is a
+    /// credential-helper callback aimed off-platform.
     BrokeredPerOperation { broker_url: String },
     /// A short-lived credential is written to a file at instance start,
     /// outside the workspace, and removed at finalize. Defense in depth only:
@@ -391,13 +412,38 @@ impl CredentialDelivery {
         matches!(self, Self::EphemeralFile { .. })
     }
 
-    fn validate(&self, workspace_path: &str) -> Result<(), CodingAgentError> {
+    /// Validate the delivery against the workspace it serves and the governed
+    /// gateway host the instance is tethered to.
+    ///
+    /// `governed_gateway_host` is not decoration: it is what stops
+    /// [`Self::BrokeredPerOperation`] — the delivery whose whole claim is "the
+    /// credential never enters the instance" — from pointing the git
+    /// credential helper at `https://attacker.example/git-credential`.
+    pub fn validate(
+        &self,
+        workspace_path: &str,
+        governed_gateway_host: &str,
+    ) -> Result<(), CodingAgentError> {
         match self {
             Self::BrokeredPerOperation { broker_url } => {
-                if !broker_url.starts_with("https://") {
+                let expected = governed_gateway_host.trim().to_ascii_lowercase();
+                if expected.is_empty() {
+                    return Err(CodingAgentError::credential(
+                        "the governed gateway host must be known before a brokered \
+                         credential callback can be validated against it",
+                    ));
+                }
+                let Some(host) = https_url_host(broker_url) else {
                     return Err(CodingAgentError::credential(
                         "credential broker URL must be https",
                     ));
+                };
+                if host != expected {
+                    return Err(CodingAgentError::credential(format!(
+                        "credential broker host {host} is not the governed gateway \
+                         host {expected}; the credential helper would call back to \
+                         an endpoint FerroGate does not govern"
+                    )));
                 }
                 Ok(())
             }
@@ -424,6 +470,31 @@ impl CredentialDelivery {
     }
 }
 
+/// Host component of an `https://` URL, lowercased, with any userinfo and port
+/// removed. `None` for anything that is not `https://`.
+///
+/// Userinfo is stripped rather than tolerated because
+/// `https://gateway.example@attacker.example/` has host `attacker.example`,
+/// and a naive `starts_with` check would read it the other way round.
+fn https_url_host(url: &str) -> Option<String> {
+    let rest = url.trim().strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = match authority.rsplit_once('@') {
+        Some((_userinfo, host_port)) => host_port,
+        None => authority,
+    };
+    // IPv6 literals keep their brackets; anything else drops a `:port`.
+    let host = if host_port.starts_with('[') {
+        host_port.split(']').next().map(|h| format!("{h}]"))?
+    } else {
+        host_port.split(':').next()?.to_string()
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
 /// Where a grant is revoked. Named explicitly so "revoke it" is a location in
 /// the system, not an intention.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,11 +506,19 @@ pub struct RevocationPoint {
 
 /// A short-lived, repo-scoped credential grant.
 ///
-/// `#[must_use]` and consumed by value in
-/// [`crate::coding_agent::RunFinalization`], so dropping it without revoking is
-/// visible at the call site.
+/// **Linear by construction.** The grant deliberately does **not** implement
+/// `Clone`: it is `#[must_use]`, it is moved into
+/// [`crate::coding_agent::RunFinalization`] by value, and
+/// [`CredentialRevocation::for_grant`] *consumes* it. There is therefore no way
+/// to keep a usable copy past the point where the credential is closed, which
+/// is what `#[must_use]` plus by-value passing alone did **not** buy while the
+/// type was `Clone` — a caller could simply clone it first.
+///
+/// It is likewise not `Deserialize`: a grant is issued, not parsed from a
+/// request body. `Serialize` remains, because the grant holds a reference
+/// rather than key material and the control plane records it.
 #[must_use = "a repo credential grant must be revoked through CodingAgentAdapter::finalize"]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RepoCredentialGrant {
     grant_id: String,
     run_id: String,
@@ -560,45 +639,88 @@ impl RevocationOutcome {
     }
 }
 
-/// Receipt proving the credential opened in phase 1 was closed.
+/// Record of the close-out attempt for the credential opened in phase 1.
+///
+/// **What this type buys, stated exactly.** It is a *record*, and a record is
+/// not proof that a remote honoured a call — no in-process type can be. What
+/// it does buy is:
+///
+/// * The grant is **surrendered** to mint it ([`Self::for_grant`] takes it by
+///   value and `RepoCredentialGrant` is not `Clone` and not `Deserialize`), so
+///   a credential handle cannot outlive its own revocation record.
+/// * A terminal [`crate::coding_agent::CodingRunReceipt`] cannot be assembled
+///   without one, so the record exists on the success path and the failure
+///   path alike.
+/// * The record names the [`RevocationPoint`] the attempt was made against, so
+///   "revoked" is attributable to an endpoint rather than to a claim.
+/// * A failed revocation is [`RevocationOutcome::Failed`] and
+///   [`Self::is_credential_neutralized`] is `false` — the incident is in the
+///   data, not swallowed.
+///
+/// It does **not** attest that the remote returned success. That is the
+/// caller's `outcome`, and `Failed` exists because sometimes it did not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialRevocation {
     pub grant_id: String,
     pub credential_fingerprint: String,
+    /// The [`RevocationPoint::endpoint`] the attempt was made against, copied
+    /// off the surrendered grant so it cannot name a different endpoint than
+    /// the one the grant obliged.
+    pub revocation_endpoint: String,
     pub revoked_at_unix: u64,
     pub outcome: RevocationOutcome,
 }
 
 impl CredentialRevocation {
+    /// Consume the grant and record the close-out attempt.
+    ///
+    /// By value on purpose: after this call the caller no longer holds a grant
+    /// it could keep using, and (since the grant is neither `Clone` nor
+    /// `Deserialize`) it has no way to have kept one.
     pub fn for_grant(
-        grant: &RepoCredentialGrant,
+        grant: RepoCredentialGrant,
         revoked_at_unix: u64,
         outcome: RevocationOutcome,
     ) -> Self {
         Self {
-            grant_id: grant.grant_id.clone(),
+            grant_id: grant.grant_id,
             credential_fingerprint: grant.credential_ref.fingerprint(),
+            revocation_endpoint: grant.revocation.endpoint,
             revoked_at_unix,
             outcome,
         }
+    }
+
+    pub fn is_credential_neutralized(&self) -> bool {
+        self.outcome.is_credential_neutralized()
     }
 }
 
 /// Phase-1 request: clone `repo` at `pinned_ref` into `workspace_path` using
 /// `credential`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoMaterializationRequest {
+///
+/// The credential is **borrowed**, not owned: materialization *uses* the grant,
+/// it does not end it. Ownership stays with the control plane that issued it
+/// and is surrendered exactly once, at
+/// [`crate::coding_agent::RunFinalization`]. An adapter therefore cannot
+/// consume, retain or drop the run's only credential handle.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RepoMaterializationRequest<'a> {
     pub run: CodingRunIdentity,
     pub repo: RepoCoordinates,
     pub pinned_ref: PinnedRef,
     pub workspace_path: String,
-    pub credential: RepoCredentialGrant,
+    pub credential: &'a RepoCredentialGrant,
+    /// The governed gateway host the instance is tethered to — the same value
+    /// [`crate::coding_agent::GovernedLlmEgress::gateway_host`] carries in
+    /// phase 2. A brokered credential callback is only accepted on this host.
+    pub governed_gateway_host: String,
     /// Shallow-clone depth; `None` for a full clone.
     pub fetch_depth: Option<u32>,
     pub include_submodules: bool,
 }
 
-impl RepoMaterializationRequest {
+impl RepoMaterializationRequest<'_> {
     /// Structural validation, performed before any side effect: the credential
     /// belongs to this run, is scoped to this repo, has not already expired,
     /// and is delivered in a way that does not put it inside the workspace.
@@ -633,7 +755,9 @@ impl RepoMaterializationRequest {
                 self.credential.expires_at_unix()
             )));
         }
-        self.credential.delivery().validate(&self.workspace_path)?;
+        self.credential
+            .delivery()
+            .validate(&self.workspace_path, &self.governed_gateway_host)?;
         Ok(())
     }
 }

@@ -25,6 +25,13 @@
 //! * Every call — allow *and* deny — returns an [`ActionReceipt`] carrying the
 //!   canonical [`ActionIdentity`], the [`ActionDecision`], and an
 //!   [`AuditOutcome`]. There is no authorization path that produces no evidence.
+//! * The binding is `(tenant_id, run_id, repo_id)`. `run_id` is unique only
+//!   within a tenant, so a two-part binding would let a grant issued in one
+//!   tenant authorize a same-named run in another against the same repo.
+//!   [`WriteBackGrant`] takes its tenant from the *granting principal*, and
+//!   [`authorize_write_back`] refuses both a cross-tenant grant and a
+//!   cross-tenant acting principal — the latter before the grant is consulted
+//!   at all.
 //!
 //! **Two-level fingerprints**, per the `action_identity` module contract:
 //! the [`ActionIdentity::action_fingerprint`] is the target-level fingerprint
@@ -62,6 +69,14 @@ pub const MAX_WRITE_BACK_GRANT_TTL_SECS: u64 = 86_400;
 pub mod write_back_codes {
     /// No grant was presented at all — the default for every run.
     pub const NOT_GRANTED: &str = "write_back_not_granted";
+    /// The grant was issued in a different tenant. Checked *before* the run
+    /// match, because `run_id` is only unique within a tenant: without this,
+    /// a grant issued for `run-7` in tenant A authorizes a same-named `run-7`
+    /// in tenant B against the same repo.
+    pub const TENANT_MISMATCH: &str = "write_back_tenant_mismatch";
+    /// The acting principal is not in the run's tenant. A grant cannot repair
+    /// a principal that is acting across a tenant boundary.
+    pub const PRINCIPAL_TENANT_MISMATCH: &str = "write_back_principal_tenant_mismatch";
     /// The grant belongs to a different run.
     pub const RUN_MISMATCH: &str = "write_back_run_mismatch";
     /// The grant is for a different repository.
@@ -104,14 +119,23 @@ impl WriteBackOperation {
     }
 }
 
-/// An explicit, per-run, time-boxed authorization to mutate one repository.
+/// An explicit, per-tenant, per-run, time-boxed authorization to mutate one
+/// repository.
 ///
 /// There is no `Default`, no builder that fills in operations, and no
 /// constructor that derives a grant from a run request. Granting is an act by
 /// a principal, recorded as [`Self::granted_by`].
+///
+/// The binding is `(tenant_id, run_id, repo_id)`, not `(run_id, repo_id)`.
+/// `run_id` is only unique *within* a tenant — `CodingRunIdentity` carries a
+/// tenant precisely because ids are tenant-scoped — so a two-part binding lets
+/// a grant issued in one tenant authorize a same-named run in another against
+/// the same repository. The tenant is taken from the granting principal, so a
+/// grant cannot be issued into a tenant its issuer does not act in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteBackGrant {
     grant_id: String,
+    tenant_id: String,
     run_id: String,
     repo_id: String,
     operations: BTreeSet<WriteBackOperation>,
@@ -164,6 +188,13 @@ impl WriteBackGrant {
         if granted_by.subject.trim().is_empty() {
             return Err(field("granted_by.subject", "granting is an act by someone"));
         }
+        if granted_by.tenant_id.trim().is_empty() {
+            return Err(field(
+                "granted_by.tenant_id",
+                "granting is an act by someone inside a tenant; an untenanted \
+                 grant binds only run_id + repo_id, which is not unique",
+            ));
+        }
         if expires_at_unix <= granted_at_unix {
             return Err(field(
                 "expires_at_unix",
@@ -178,6 +209,9 @@ impl WriteBackGrant {
         }
         Ok(Self {
             grant_id,
+            // Taken from the issuer, never passed in: a principal cannot issue
+            // a grant into a tenant it does not itself act in.
+            tenant_id: granted_by.tenant_id.trim().to_string(),
             run_id,
             repo_id: repo.canonical_id(),
             operations,
@@ -196,6 +230,12 @@ impl WriteBackGrant {
 
     pub fn grant_id(&self) -> &str {
         &self.grant_id
+    }
+
+    /// Tenant the grant was issued in. Half of the identity a `run_id` needs
+    /// to be unique.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
     }
 
     pub fn run_id(&self) -> &str {
@@ -394,10 +434,34 @@ pub fn authorize_write_back(
         Some(DecisionReason::new(code).with_detail(detail))
     };
 
+    // Checked before the grant is even consulted: a principal acting outside
+    // the run's tenant is refused whatever grant it presents, so a grant can
+    // never be the thing that carries a caller across a tenant boundary.
+    if principal.tenant_id != request.run.tenant_id {
+        let reason =
+            DecisionReason::new(write_back_codes::PRINCIPAL_TENANT_MISMATCH).with_detail(format!(
+                "principal acts in tenant {} but the run belongs to tenant {}",
+                principal.tenant_id, request.run.tenant_id
+            ));
+        return Ok(deny(identity, reason));
+    }
+
     let denial = match grant {
         None => refusal(
             write_back_codes::NOT_GRANTED,
             "no write-back grant was issued for this run".to_string(),
+        ),
+        // Tenant before run: `run_id` is unique only within a tenant, so
+        // matching it first would let a cross-tenant grant reach the repo
+        // check on a same-named run.
+        Some(grant) if grant.tenant_id() != request.run.tenant_id => refusal(
+            write_back_codes::TENANT_MISMATCH,
+            format!(
+                "grant {} was issued in tenant {}, not {}",
+                grant.grant_id(),
+                grant.tenant_id(),
+                request.run.tenant_id
+            ),
         ),
         Some(grant) if grant.run_id() != request.run.run_id => refusal(
             write_back_codes::RUN_MISMATCH,
@@ -449,19 +513,7 @@ pub fn authorize_write_back(
     };
 
     if let Some(reason) = denial {
-        let decision = ActionDecision::Deny { reason };
-        let receipt = ActionReceipt {
-            identity,
-            decision: decision.clone(),
-            output_disposition: OutputDisposition::Withheld,
-            latency_ms: None,
-            attempt: 1,
-        };
-        return Ok(WriteBackAuthorization {
-            decision,
-            receipt,
-            authorized: None,
-        });
+        return Ok(deny(identity, reason));
     }
 
     let grant = grant.expect("denial arm covers the None case");
@@ -503,10 +555,31 @@ pub fn authorize_write_back(
     })
 }
 
+/// Build the recorded denial. Every refusal path routes through here, so no
+/// denial can be added later that forgets its [`ActionReceipt`].
+fn deny(identity: ActionIdentity, reason: DecisionReason) -> WriteBackAuthorization {
+    let decision = ActionDecision::Deny { reason };
+    let receipt = ActionReceipt {
+        identity,
+        decision: decision.clone(),
+        output_disposition: OutputDisposition::Withheld,
+        latency_ms: None,
+        attempt: 1,
+    };
+    WriteBackAuthorization {
+        decision,
+        receipt,
+        authorized: None,
+    }
+}
+
 /// What actually happened at the remote, attributable to the run and to the
 /// grant that permitted it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteBackReceipt {
+    /// Tenant the run — and therefore the grant — belongs to. Carried so an
+    /// audit join on `run_id` is not ambiguous across tenants.
+    pub tenant_id: String,
     pub run_id: String,
     pub grant_id: String,
     pub operation: WriteBackOperation,
@@ -569,6 +642,7 @@ impl WriteBackReceipt {
     ) -> Self {
         let request = authorized.request();
         Self {
+            tenant_id: request.run.tenant_id.clone(),
             run_id: request.run.run_id.clone(),
             grant_id: authorized.grant_id().to_string(),
             operation: request.operation,

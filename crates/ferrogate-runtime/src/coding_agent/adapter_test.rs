@@ -15,9 +15,9 @@ use crate::coding_agent::bootstrap::{
 use crate::coding_agent::error::CodingAgentError;
 use crate::coding_agent::extract::{DiffStats, ProducedBranch, UnifiedDiff, WorkProduct};
 use crate::coding_agent::materialize::{
-    CredentialDelivery, CredentialReference, CredentialRevocation, MaterializedWorkspace,
-    PinnedRef, RepoCoordinates, RepoCredentialGrant, RepoCredentialScope,
-    RepoMaterializationRequest, RevocationOutcome, RevocationPoint,
+    CredentialDelivery, CredentialReference, MaterializedWorkspace, PinnedRef, RepoCoordinates,
+    RepoCredentialGrant, RepoCredentialScope, RepoMaterializationRequest, RevocationOutcome,
+    RevocationPoint,
 };
 use crate::coding_agent::run::{
     CodingRunIdentity, CodingRunOutcome, CodingRunReceipt, CodingRunRequest, CodingRunStatus,
@@ -91,7 +91,7 @@ impl CodingAgentAdapter for MockCodingAgent {
 
     fn materialize_repo(
         &mut self,
-        request: RepoMaterializationRequest,
+        request: RepoMaterializationRequest<'_>,
     ) -> Result<MaterializedWorkspace, CodingAgentError> {
         self.descriptor.capabilities.preflight(&request)?;
         request.validate(1_100)?;
@@ -189,12 +189,9 @@ impl CodingAgentAdapter for MockCodingAgent {
         self.vcs
             .revoked_grants
             .push(finalization.credential.grant_id().to_string());
-        let revocation = CredentialRevocation::for_grant(
-            &finalization.credential,
-            finalization.finalized_at_unix,
-            self.revocation.clone(),
-        );
-        CodingRunReceipt::assemble(&finalization, revocation)
+        // The grant is surrendered here: `assemble` consumes the finalization
+        // and turns the grant into the mandatory revocation record.
+        CodingRunReceipt::assemble(finalization, self.revocation.clone())
     }
 }
 
@@ -249,7 +246,7 @@ fn credential(scope: RepoCredentialScope) -> RepoCredentialGrant {
     .expect("credential grant")
 }
 
-fn materialization(credential: RepoCredentialGrant) -> RepoMaterializationRequest {
+fn materialization(credential: &RepoCredentialGrant) -> RepoMaterializationRequest<'_> {
     RepoMaterializationRequest {
         run: run(),
         repo: repo(),
@@ -258,6 +255,7 @@ fn materialization(credential: RepoCredentialGrant) -> RepoMaterializationReques
             .resolved_from("refs/heads/main"),
         workspace_path: "/workspace".to_string(),
         credential,
+        governed_gateway_host: "gateway.example".to_string(),
         fetch_depth: Some(1),
         include_submodules: false,
     }
@@ -303,10 +301,10 @@ fn drive(
         Some(grant) => RepoCredentialScope::with_write_back(&repo(), grant)?,
         None => RepoCredentialScope::read_only(&repo()),
     };
+    // One grant for the whole run: lent to materialization, surrendered at
+    // finalize. There is no `.clone()` because there is no second handle.
     let credential = credential(scope);
-    let kept = credential.clone();
-
-    let workspace = adapter.materialize_repo(materialization(credential))?;
+    let workspace = adapter.materialize_repo(materialization(&credential))?;
     let agent = adapter.bootstrap(bootstrap_request(workspace.clone()))?;
     let outcome = adapter.run(CodingRunRequest {
         run: run(),
@@ -350,7 +348,7 @@ fn drive(
     adapter.finalize(RunFinalization {
         run: run(),
         outcome,
-        credential: kept,
+        credential,
         work_product: product,
         write_back,
         egress_posture: agent.egress_posture.clone(),
@@ -470,7 +468,8 @@ fn a_run_that_changed_nothing_yields_no_work_product() {
 #[test]
 fn capability_preflight_fails_closed_before_a_credential_is_used() {
     let mut adapter = MockCodingAgent::new(CodingAgentCapabilities::diff_only());
-    let mut request = materialization(credential(RepoCredentialScope::read_only(&repo())));
+    let held = credential(RepoCredentialScope::read_only(&repo()));
+    let mut request = materialization(&held);
     request.fetch_depth = None;
     request.include_submodules = true;
     let error = adapter
@@ -487,9 +486,9 @@ fn capability_preflight_fails_closed_before_a_credential_is_used() {
     // `materialization` asks for a shallow clone, which this adapter also does
     // not implement — refused, not silently upgraded to a full clone.
     let error = adapter
-        .materialize_repo(materialization(credential(RepoCredentialScope::read_only(
-            &repo(),
-        ))))
+        .materialize_repo(materialization(&credential(
+            RepoCredentialScope::read_only(&repo()),
+        )))
         .expect_err("shallow clone is not implemented");
     assert_eq!(
         error,
@@ -501,7 +500,8 @@ fn capability_preflight_fails_closed_before_a_credential_is_used() {
 
     // The brokered-credential delivery is likewise refused rather than
     // downgraded to a credential file the agent could read.
-    let mut plain = materialization(credential(RepoCredentialScope::read_only(&repo())));
+    let plain_held = credential(RepoCredentialScope::read_only(&repo()));
+    let mut plain = materialization(&plain_held);
     plain.fetch_depth = None;
     let error = adapter
         .materialize_repo(plain)
@@ -545,7 +545,7 @@ fn finalize_refuses_evidence_that_does_not_belong_to_the_run() {
         .finalize(RunFinalization {
             run: run(),
             outcome: outcome.clone(),
-            credential: credential.clone(),
+            credential,
             work_product: Some(foreign),
             write_back: None,
             egress_posture: EgressPosture::GatewayProxied,
@@ -589,7 +589,7 @@ fn an_open_egress_run_cannot_claim_the_gateway_was_enforced() {
     let mut adapter = MockCodingAgent::full();
     let credential = credential(RepoCredentialScope::read_only(&repo()));
     let workspace = adapter
-        .materialize_repo(materialization(credential.clone()))
+        .materialize_repo(materialization(&credential))
         .expect("workspace");
 
     let acknowledgement = UnenforcedEgressAcknowledgement::new(
@@ -623,7 +623,7 @@ fn an_allowlist_that_cannot_reach_the_gateway_is_refused() {
     let mut adapter = MockCodingAgent::full();
     let credential = credential(RepoCredentialScope::read_only(&repo()));
     let workspace = adapter
-        .materialize_repo(materialization(credential))
+        .materialize_repo(materialization(&credential))
         .expect("workspace");
 
     let mut hosts = BTreeSet::new();
@@ -677,4 +677,143 @@ fn the_run_identity_projects_onto_the_shared_instance_and_cost_keys() {
 
     let invalid = CodingRunIdentity::new("tenant a", "session-1", "run-1");
     assert!(invalid.instance_name().is_err());
+}
+
+/// Defect 2 from the #472 review: the finalize cross-check compared only
+/// `receipt.work_product_id == product.product_id()`. A terminal run receipt
+/// could therefore honestly claim "work product X was published" while the
+/// commit actually pushed had nothing to do with X.
+#[test]
+fn finalize_refuses_a_write_back_whose_commit_is_not_the_work_products() {
+    let product = WorkProduct::assemble(
+        run(),
+        repo(),
+        PinnedRef::new(BASE).expect("pin"),
+        Some(
+            ProducedBranch::new(
+                "ferrogate/run-1-fix",
+                HEAD,
+                PinnedRef::new(BASE).expect("pin"),
+            )
+            .expect("branch"),
+        ),
+        UnifiedDiff::inline(PATCH).expect("diff"),
+        DiffStats::default(),
+        None,
+        1_200,
+    )
+    .expect("work product");
+
+    // Right product id, arbitrary head commit — the case the review named.
+    let forged = |mutate: &dyn Fn(&mut WriteBackRequest)| {
+        let mut request = WriteBackRequest {
+            run: run(),
+            repo: repo(),
+            operation: WriteBackOperation::PushBranch,
+            branch: "ferrogate/run-1-fix".to_string(),
+            work_product_id: product.product_id().to_string(),
+            head_commit: HEAD.to_string(),
+            title: None,
+            body: None,
+        };
+        mutate(&mut request);
+        let authorized = authorize_write_back(
+            Some(&write_back_grant()),
+            &request,
+            &principal(),
+            &context(),
+            1_210,
+        )
+        .expect("evaluable")
+        .into_authorized()
+        .expect("the grant covers this push");
+        WriteBackReceipt::from_authorized(&authorized, None, 1_220, WriteBackOutcome::Completed)
+    };
+
+    let finalize = |receipt: WriteBackReceipt, product: Option<WorkProduct>| {
+        CodingRunReceipt::assemble(
+            RunFinalization {
+                run: run(),
+                outcome: CodingRunOutcome {
+                    run: run(),
+                    status: CodingRunStatus::Completed,
+                    started_at_unix: 1_120,
+                    finished_at_unix: 1_180,
+                    steps: 3,
+                    failure_detail: None,
+                },
+                credential: credential(RepoCredentialScope::read_only(&repo())),
+                work_product: product,
+                write_back: Some(receipt),
+                egress_posture: EgressPosture::GatewayProxied,
+                finalized_at_unix: 1_300,
+            },
+            RevocationOutcome::Revoked,
+        )
+    };
+
+    // An unrelated head commit is refused.
+    let wrong_commit = forged(&|request| {
+        request.head_commit = "4444444444444444444444444444444444444444".to_string();
+    });
+    assert!(matches!(
+        finalize(wrong_commit, Some(product.clone())).expect_err("unrelated commit"),
+        CodingAgentError::InvalidRequest { .. }
+    ));
+
+    // ...as is a branch the work product did not produce. The grant's namespace
+    // check passes, so nothing before finalize catches this.
+    let wrong_branch = forged(&|request| {
+        request.branch = "ferrogate/run-1-other".to_string();
+    });
+    assert!(matches!(
+        finalize(wrong_branch, Some(product.clone())).expect_err("unrelated branch"),
+        CodingAgentError::InvalidRequest { .. }
+    ));
+
+    // A work product with no produced branch has no commit to have published.
+    let branchless = WorkProduct::assemble(
+        run(),
+        repo(),
+        PinnedRef::new(BASE).expect("pin"),
+        None,
+        UnifiedDiff::inline(PATCH).expect("diff"),
+        DiffStats::default(),
+        None,
+        1_200,
+    )
+    .expect("work product");
+    let quoting_branchless = {
+        let mut request = WriteBackRequest {
+            run: run(),
+            repo: repo(),
+            operation: WriteBackOperation::PushBranch,
+            branch: "ferrogate/run-1-fix".to_string(),
+            work_product_id: branchless.product_id().to_string(),
+            head_commit: HEAD.to_string(),
+            title: None,
+            body: None,
+        };
+        request.work_product_id = branchless.product_id().to_string();
+        let authorized = authorize_write_back(
+            Some(&write_back_grant()),
+            &request,
+            &principal(),
+            &context(),
+            1_210,
+        )
+        .expect("evaluable")
+        .into_authorized()
+        .expect("granted");
+        WriteBackReceipt::from_authorized(&authorized, None, 1_220, WriteBackOutcome::Completed)
+    };
+    assert!(matches!(
+        finalize(quoting_branchless, Some(branchless)).expect_err("no branch to check against"),
+        CodingAgentError::InvalidRequest { .. }
+    ));
+
+    // The honest receipt still assembles.
+    let honest = forged(&|_| {});
+    let receipt = finalize(honest, Some(product)).expect("a matching receipt is accepted");
+    assert_eq!(receipt.write_back.expect("push").head_commit, HEAD);
 }
