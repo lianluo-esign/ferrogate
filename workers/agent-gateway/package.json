@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "teardown": "wrangler delete"
   },
   "dependencies": {
@@ -16,8 +17,10 @@
     "agents": "0.0.109"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.8",
     "@cloudflare/workers-types": "4.20250620.0",
     "typescript": "5.5.4",
+    "vitest": "4.1.10",
     "wrangler": "^4.114.0"
   }
 }

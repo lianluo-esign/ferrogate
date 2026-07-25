@@ -79,6 +79,17 @@ for worker in "${WORKERS[@]}"; do
   npm run typecheck \
     || { echo "ERROR: workers/$worker: typecheck failed" >&2; exit 1; }
 
+  # Docker-free Worker E2E: a Worker that ships a vitest.config.ts is booted in
+  # workerd via @cloudflare/vitest-pool-workers (miniflare) — NO Docker, NO live
+  # Cloudflare account. agent-gateway (#413) proves its control routes' auth gate
+  # + name-addressed DO RPC round-trip this way. Only runs for workers that opt in
+  # by committing a vitest.config.ts, so mcp-server / d1-proxy stay typecheck-only.
+  if [ -f vitest.config.ts ]; then
+    echo "-- worker E2E (vitest run, workerd/miniflare — no docker)"
+    npm test \
+      || { echo "ERROR: workers/$worker: worker E2E failed" >&2; exit 1; }
+  fi
+
   echo "workers/$worker: OK"
 done
 
