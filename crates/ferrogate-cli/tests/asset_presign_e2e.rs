@@ -34,6 +34,12 @@ const ACCESS_KEY_ID: &str = "AKIDPRESIGNE2E";
 const SECRET_ACCESS_KEY: &str = "presign-e2e-secret-access-key";
 const SECRET_ENV: &str = "FERROGATE_TEST_PRESIGN_BUCKET_SECRET";
 const PRESIGN_TTL_SECS: u64 = 120;
+/// The canonical EICAR anti-malware test signature. `screen_asset_push`
+/// fast-rejects any content embedding it (`asset_scan::contains_eicar`),
+/// independent of the pluggable scanner backend, so it is the deterministic
+/// "malware is detected and rejected" payload for a docker-free E2E.
+const EICAR_PAYLOAD: &str =
+    r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SignatureKind {
@@ -521,6 +527,22 @@ fn assert_json_error(response: &str, status: u16, code: &str) {
         body["error"]["request_id"].is_string(),
         "typed errors must carry request_id: {body}"
     );
+}
+
+fn status_code(response: &str) -> u16 {
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
+fn error_code(response: &str) -> String {
+    response_json(response)["error"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn assert_no_bucket_location_fields(value: &serde_json::Value) {
@@ -1123,4 +1145,374 @@ fn presigned_asset_lifecycle_closes_through_typed_registry_and_direct_download()
     assert!(!bucket.objects.contains_key(&second_staging_path));
     assert_eq!(bucket.objects.len(), 1);
     drop(bucket);
+}
+
+/// #366 content-rule parity: inline and presigned publication reach the SAME
+/// typed decision for malicious content. The built-in EICAR check lives in
+/// `validate_asset_content`, which both the inline push and the presigned
+/// commit run, so this pins that the two transports never diverge on a
+/// content-policy rejection -- the SAME EICAR payload is refused with the
+/// byte-for-byte SAME 422 `asset_rejected` on BOTH paths, the presigned
+/// rejection fails closed (staging deleted, no durable row), and it is audited
+/// as `rejected_commit`.
+///
+/// NOTE: the content check pre-dates #366 on the presigned path (#368 commit
+/// verification also runs `validate_asset_content`); the control-plane gates
+/// that #366 specifically added to the presigned path -- signature requirement,
+/// cross-tenant publish approval, pluggable scanner -- are isolated separately
+/// in `inline_and_presigned_publication_apply_identical_cross_tenant_gate`.
+#[test]
+fn inline_and_presigned_publication_apply_identical_eicar_screening() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    let sha256 = sha256_hex(EICAR_PAYLOAD.as_bytes());
+
+    // (A) The inline PUT path refuses EICAR before anything is durably written.
+    // `text/plain` is an allowed cli_tool content-type, so the rejection is the
+    // malware gate, not the content-type allowlist.
+    let inline = http_request(
+        &gateway_addr,
+        "PUT",
+        "/v1/assets/cli_tool/eicar-inline/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: text/plain",
+        ],
+        EICAR_PAYLOAD,
+    );
+    assert_json_error(&inline, 422, "asset_rejected");
+    let inline_decision = (status_code(&inline), error_code(&inline));
+
+    // (B) The presigned path stages the identical bytes directly at the bucket
+    // (which performs NO content screening) and then commits. The commit is the
+    // only place trust screening can run for this path -- it must run there and
+    // reach the same decision the inline push did.
+    let intent_body = format!(
+        r#"{{"size_bytes":{},"sha256":"{sha256}"}}"#,
+        EICAR_PAYLOAD.len()
+    );
+    let intent = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/eicar-presign/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &intent_body,
+    ));
+    let upload_id = intent["upload_id"]
+        .as_str()
+        .expect("upload intent must include upload_id")
+        .to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload intent must include upload_url")
+        .to_string();
+    let staging_path = object_path_from_url(&upload_url);
+
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        EICAR_PAYLOAD.as_bytes(),
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+    assert_eq!(
+        bucket_state
+            .lock()
+            .unwrap()
+            .objects
+            .get(&staging_path)
+            .map(Vec::as_slice),
+        Some(EICAR_PAYLOAD.as_bytes()),
+        "the EICAR bytes must be staged at the bucket before commit screening runs"
+    );
+
+    let commit_body = format!(
+        r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"text/plain"}}"#,
+        EICAR_PAYLOAD.len()
+    );
+    let presigned = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/eicar-presign/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &commit_body,
+    );
+    assert_json_error(&presigned, 422, "asset_rejected");
+
+    // The core parity proof: both publication paths produced the identical
+    // typed decision for identical malicious bytes.
+    assert_eq!(
+        (status_code(&presigned), error_code(&presigned)),
+        inline_decision,
+        "the presigned commit must reach the SAME screening decision as the inline push"
+    );
+
+    // Fail-closed at the bucket: the rejected commit deleted its staging object
+    // and never wrote a final object -- staging was the only object, now gone.
+    {
+        let bucket = bucket_state.lock().unwrap();
+        assert!(
+            !bucket.objects.contains_key(&staging_path),
+            "a rejected commit must delete the staging object: {:?}",
+            bucket.requests
+        );
+        assert!(
+            bucket
+                .requests
+                .iter()
+                .any(|request| { request.method == "DELETE" && request.path == staging_path }),
+            "a rejected commit must issue a staging DELETE: {:?}",
+            bucket.requests
+        );
+        assert!(
+            bucket.objects.is_empty(),
+            "a rejected commit must leave no durable object behind: {:?}",
+            bucket.objects.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // Fail-closed in the registry: neither the inline nor the presigned EICAR
+    // push created an asset row.
+    let list = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/cli_tool",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    ));
+    assert_eq!(
+        list["data"].as_array().map(Vec::len),
+        Some(0),
+        "a screened-out EICAR push on either path must create no asset row: {list}"
+    );
+
+    // The presigned rejection is audited as `rejected_commit` on `asset.push`
+    // (the inline path fails before the durable step, so only the presigned
+    // path records this specific outcome).
+    let audit = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit["data"]
+        .as_array()
+        .expect("audit-events must return a data array");
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["action"] == "asset.push" && event["outcome"] == "rejected_commit" }),
+        "a rejected presigned commit must record a rejected_commit audit event: {audit}"
+    );
+}
+
+/// #366 control-plane parity (the bypass #366 actually closes): the presigned
+/// commit must apply the cross-tenant publish approval gate that the inline
+/// `PUT /v1/assets` path applies. This gate is a #366 addition to the presigned
+/// path -- before #366 the commit re-checked only size/SHA-256 + built-in
+/// content validation, so a cross-tenant (`public`/`shared`) publish with NO
+/// durable approval that the inline path refuses with 403
+/// `cross_tenant_publish_denied` could be laundered in through presign+commit
+/// and published tenant-wide. Unlike the EICAR content rule (also enforced by
+/// #368 commit verification), this gate is reachable ONLY through
+/// `screen_asset_push`, so it isolates the #366 fix. The content here is benign
+/// -- the rejection is purely the approval gate -- and it is request-scoped
+/// (visibility header / commit field), so it needs no process-global env and is
+/// safe under parallel test execution.
+#[test]
+fn inline_and_presigned_publication_apply_identical_cross_tenant_gate() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    let content = b"#!/bin/sh\necho cross-tenant publish parity\n";
+    let sha256 = sha256_hex(content);
+
+    // (A) The inline path refuses a cross-tenant publish that carries no durable
+    // approval, before anything is written. The content is well-formed, so the
+    // rejection is purely the cross-tenant approval gate.
+    let inline = http_request(
+        &gateway_addr,
+        "PUT",
+        "/v1/assets/cli_tool/cross-inline/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: text/plain",
+            "x-asset-visibility: public",
+        ],
+        std::str::from_utf8(content).unwrap(),
+    );
+    assert_json_error(&inline, 403, "cross_tenant_publish_denied");
+    let inline_decision = (status_code(&inline), error_code(&inline));
+
+    // (B) The presigned path stages the well-formed bytes (which pass #368
+    // commit verification) and then commits requesting the SAME cross-tenant
+    // visibility with NO approval. Only #366 screening applies this gate on the
+    // presigned path; it must reach the identical decision.
+    let intent_body = format!(r#"{{"size_bytes":{},"sha256":"{sha256}"}}"#, content.len());
+    let intent = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/cross-presign/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &intent_body,
+    ));
+    let upload_id = intent["upload_id"]
+        .as_str()
+        .expect("upload intent must include upload_id")
+        .to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload intent must include upload_url")
+        .to_string();
+    let staging_path = object_path_from_url(&upload_url);
+
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+
+    let commit_body = format!(
+        r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"text/plain","visibility":"public"}}"#,
+        content.len()
+    );
+    let presigned = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/cross-presign/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &commit_body,
+    );
+    assert_json_error(&presigned, 403, "cross_tenant_publish_denied");
+
+    // The core #366 proof: identical control-plane decision for identical
+    // publish intent across both transports.
+    assert_eq!(
+        (status_code(&presigned), error_code(&presigned)),
+        inline_decision,
+        "the presigned commit must apply the SAME cross-tenant approval gate as the inline push"
+    );
+
+    // Fail-closed at the bucket: staging deleted, no final object written.
+    {
+        let bucket = bucket_state.lock().unwrap();
+        assert!(
+            !bucket.objects.contains_key(&staging_path),
+            "a gated commit must delete the staging object: {:?}",
+            bucket.requests
+        );
+        assert!(
+            bucket
+                .requests
+                .iter()
+                .any(|request| { request.method == "DELETE" && request.path == staging_path }),
+            "a gated commit must issue a staging DELETE: {:?}",
+            bucket.requests
+        );
+        assert!(
+            bucket.objects.is_empty(),
+            "a gated commit must leave no durable object behind: {:?}",
+            bucket.objects.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // Fail-closed in the registry: neither path created an asset row.
+    let list = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/cli_tool",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    ));
+    assert_eq!(
+        list["data"].as_array().map(Vec::len),
+        Some(0),
+        "a cross-tenant publish denied on either path must create no asset row: {list}"
+    );
+
+    // The presigned rejection is audited as `rejected_commit` on `asset.push`.
+    let audit = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit["data"]
+        .as_array()
+        .expect("audit-events must return a data array");
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["action"] == "asset.push" && event["outcome"] == "rejected_commit" }),
+        "a gated presigned commit must record a rejected_commit audit event: {audit}"
+    );
 }
