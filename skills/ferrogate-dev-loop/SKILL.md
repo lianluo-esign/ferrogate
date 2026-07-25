@@ -83,7 +83,8 @@ authoritative wording for the **dev** role — code generation only, stops at
 ```
 请读取 GitHub Project 看板中 Backlog 与 Ready 两个泳道的 issues 持续迭代开发。
 Ready 里含被 code review / test agent 打回的返工项，优先处理（评论里有对方给出的问题）。
-开发完成后把 sub issue 移动到 In review 泳道为止，不要移到 Testing 或 Done ——
+开工时先把该 sub issue 移动到 In progress 泳道（让看板反映正在进行的工作），
+开发完成后再移动到 In review 泳道为止，不要移到 Testing 或 Done ——
 In review 由 code review agent 负责，Testing 与 Done 由 test agent 负责。
 1- 最多 3 个 sub agent 并行开发代码。
 2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，超出后整个 Project 不可用）；
