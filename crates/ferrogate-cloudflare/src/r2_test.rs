@@ -242,6 +242,46 @@ fn create_bucket_already_exists_code_is_absorbed_regardless_of_status() {
 }
 
 #[test]
+fn create_bucket_already_exists_code_10004_without_409_status_maps_to_ok() {
+    // Non-vacuity guard for `R2_BUCKET_ALREADY_EXISTS_CODES` membership.
+    // The account REST API (`client/v4`) can answer a duplicate create with
+    // HTTP 200 + `success: false` carrying code 10004 -- i.e. WITHOUT an HTTP
+    // 409. The sibling `code_10004_maps_to_ok` test uses status 409, so the
+    // `status == 409` fast-path in `is_bucket_already_exists` subsumes it and
+    // it would still pass even if 10004 were dropped from the code list. This
+    // case removes the 409 crutch so the code-list membership itself is pinned:
+    // drop 10004 from `R2_BUCKET_ALREADY_EXISTS_CODES` and this test fails.
+    let transport = Arc::new(RecordingTransport::new(vec![ok(
+        200,
+        r#"{ "success": false, "errors": [ { "code": 10004,
+            "message": "The bucket you tried to create already exists, and you own it." } ] }"#,
+    )]));
+    let client = cf_client(transport);
+
+    let outcome = runtime()
+        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
+        .expect("code 10004 at HTTP 200 must map to Ok via the already-exists code list");
+    assert_eq!(outcome, R2BucketCreation::AlreadyExists);
+}
+
+#[test]
+fn create_bucket_already_exists_code_10073_without_409_status_maps_to_ok() {
+    // Companion non-vacuity guard for the S3-sibling code 10073, again at a
+    // non-409 status so the assertion exercises the code list rather than the
+    // `status == 409` fast-path.
+    let transport = Arc::new(RecordingTransport::new(vec![ok(
+        200,
+        r#"{ "success": false, "errors": [ { "code": 10073, "message": "Bucket name already exists." } ] }"#,
+    )]));
+    let client = cf_client(transport);
+
+    let outcome = runtime()
+        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
+        .expect("code 10073 at HTTP 200 must map to Ok via the already-exists code list");
+    assert_eq!(outcome, R2BucketCreation::AlreadyExists);
+}
+
+#[test]
 fn list_buckets_decodes_wrapped_buckets_array() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         200,
