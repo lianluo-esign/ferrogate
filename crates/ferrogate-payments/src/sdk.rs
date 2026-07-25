@@ -35,12 +35,14 @@ pub const SDK_VERDICT: SdkVerdict = SdkVerdict::NotUsableYet;
 /// One-line evidence summary (full record in the crate README).
 pub const SDK_EVIDENCE: &str =
     "solana-pay-kit 0.2.0 (default-features=false, features=[\"x402\"]) \
-     fails `cargo +1.88.0 check`: 16 mandatory transitive packages require \
-     rustc >= 1.89 (solana-address 2.6.1, solana-pubkey 4.2.0, solana-message \
-     4.4.0, wincode 0.5.5, ...; cargo-platform 0.3.3 requires 1.91) with no \
-     1.88-compatible pin, and the minimal feature set still locks 553 \
+     fails `cargo +1.88.0 check`: its mandatory transitive tree requires \
+     rustc >= 1.89 (solana-address, solana-pubkey, solana-message, wincode, \
+     ...; cargo-platform requires 1.91) with no 1.88-compatible pin \
+     (solana-account-info needs solana-address ^2.2, solana-client needs \
+     solana-pubkey ^4.2), and the minimal feature set still locks ~555 \
      packages including the full Solana RPC client stack (solana-client, \
-     solana-rpc-client are non-optional).";
+     solana-rpc-client, solana-keychain and tokio are non-optional). \
+     Re-verified 2026-07-25.";
 
 /// The error any SDK-backed code path returns in this build.
 pub fn sdk_unavailable() -> PaymentError {

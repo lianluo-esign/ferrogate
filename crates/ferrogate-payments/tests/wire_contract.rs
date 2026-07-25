@@ -41,7 +41,9 @@ fn header_fixtures_encode_their_json_twins() {
     for name in [
         "payment_required_mainnet",
         "payment_required_devnet",
+        "payment_required_sponsored",
         "payment_signature_svm",
+        "payment_signature_sponsored",
         "payment_response_success",
         "payment_response_failure",
     ] {
@@ -134,6 +136,178 @@ fn challenge_hash_is_deterministic_and_input_sensitive() {
     assert_ne!(a.challenge_hash, c.challenge_hash);
 }
 
+/// The challenge hash is persisted by #352 and bound into #353's spend
+/// authorization, so its value is part of the frozen contract. Changing the
+/// hashed tuple MUST bump `CHALLENGE_HASH_DOMAIN` and this golden.
+///
+/// The pinned digest below was cross-checked against an independent
+/// implementation of the documented rule — SHA-256 over
+/// `domain, "exact", caip2, mint, payTo, feePayer, amount, timeout, url`
+/// each followed by `0x00`, then `0x01 || memo` (or `0x00` when absent),
+/// then a final `0x00` — so it verifies the rule, not just the code.
+#[test]
+fn challenge_hash_golden_is_pinned() {
+    assert_eq!(
+        ferrogate_payments::CHALLENGE_HASH_DOMAIN,
+        "ferrogate-x402-challenge-v1"
+    );
+    let required = parse_payment_required(&fixture("payment_required_mainnet.header")).unwrap();
+    let selected = select_requirement(&required, &RequirementFilter::default()).unwrap();
+    assert_eq!(
+        selected.challenge_hash_hex(),
+        "68dfeb509749893767994aa9bb578fa1b8a74eb7882d0507c04fb3e0ec87f777",
+        "challenge hash changed; bump CHALLENGE_HASH_DOMAIN if intentional"
+    );
+}
+
+/// Two challenges that differ only in `extra.memo` (the seller's invoice
+/// reference) or `extra.feePayer` (the sponsor that co-signs) are DIFFERENT
+/// payments and must not share an idempotency key.
+#[test]
+fn challenge_hash_separates_memo_and_fee_payer() {
+    let base: serde_json::Value = serde_json::from_slice(
+        &B64.decode(fixture("payment_required_devnet.header"))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let hash_of = |doc: &serde_json::Value| {
+        let header = B64.encode(serde_json::to_vec(doc).unwrap());
+        let required = parse_payment_required(&header).unwrap();
+        select_requirement(&required, &RequirementFilter::default())
+            .unwrap()
+            .challenge_hash
+    };
+
+    let no_memo = hash_of(&base);
+
+    let mut empty_memo = base.clone();
+    empty_memo["accepts"][0]["extra"]["memo"] = serde_json::json!("");
+    let mut invoice_a = base.clone();
+    invoice_a["accepts"][0]["extra"]["memo"] = serde_json::json!("inv_a");
+    let mut invoice_b = base.clone();
+    invoice_b["accepts"][0]["extra"]["memo"] = serde_json::json!("inv_b");
+    let mut other_sponsor = base.clone();
+    other_sponsor["accepts"][0]["extra"]["feePayer"] = serde_json::json!(USDC_MAINNET);
+
+    // An absent memo and an empty memo are distinguishable.
+    assert_ne!(no_memo, hash_of(&empty_memo));
+    assert_ne!(hash_of(&invoice_a), hash_of(&invoice_b));
+    assert_ne!(no_memo, hash_of(&other_sponsor));
+}
+
+/// A blockhash refresh between retries of the same logical challenge must NOT
+/// change the idempotency key, or #352 would open a second attempt per retry.
+#[test]
+fn challenge_hash_ignores_transient_blockhash_hints() {
+    let base: serde_json::Value = serde_json::from_slice(
+        &B64.decode(fixture("payment_required_sponsored.header"))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let hash_of = |doc: &serde_json::Value| {
+        let header = B64.encode(serde_json::to_vec(doc).unwrap());
+        let required = parse_payment_required(&header).unwrap();
+        select_requirement(&required, &RequirementFilter::default())
+            .unwrap()
+            .challenge_hash
+    };
+
+    let mut refreshed = base.clone();
+    refreshed["accepts"][0]["extra"]["recentBlockhash"] = serde_json::json!(USDC_MAINNET);
+    refreshed["accepts"][0]["extra"]["lastValidBlockHeight"] = serde_json::json!("291470999");
+    assert_eq!(hash_of(&base), hash_of(&refreshed));
+
+    let mut no_hints = base.clone();
+    let extra = no_hints["accepts"][0]["extra"].as_object_mut().unwrap();
+    extra.remove("recentBlockhash");
+    extra.remove("lastValidBlockHeight");
+    assert_eq!(hash_of(&base), hash_of(&no_hints));
+}
+
+/// `extra.recentBlockhash` / `extra.lastValidBlockHeight` are signer input
+/// under the SVM `exact` scheme and must reach `SvmTransferIntent` without the
+/// signer re-parsing the raw requirement.
+#[test]
+fn sponsored_challenge_carries_blockhash_hints_into_the_intent() {
+    let required = parse_payment_required(&fixture("payment_required_sponsored.header")).unwrap();
+    let selected = select_requirement(&required, &RequirementFilter::default()).unwrap();
+
+    assert_eq!(selected.network, SolanaNetwork::Devnet);
+    assert_eq!(selected.atomic_amount, 750);
+    assert_eq!(selected.memo.as_deref(), Some("inv_2026_07_0001"));
+    assert_eq!(
+        selected.recent_blockhash.as_deref(),
+        Some("EZ3rST5dvHmbanh75jc4PuLfV96vp9fEYBVeNk4FfM1k")
+    );
+    assert_eq!(selected.last_valid_block_height, Some(291_470_237));
+
+    let intent = SvmTransferIntent::from_selected(&selected);
+    assert_eq!(intent.recent_blockhash, selected.recent_blockhash);
+    assert_eq!(
+        intent.last_valid_block_height,
+        selected.last_valid_block_height
+    );
+
+    // Absent hints stay absent: the signer must then fetch its own blockhash.
+    let plain = parse_payment_required(&fixture("payment_required_devnet.header")).unwrap();
+    let plain = select_requirement(&plain, &RequirementFilter::default()).unwrap();
+    assert_eq!(plain.recent_blockhash, None);
+    assert_eq!(plain.last_valid_block_height, None);
+}
+
+/// Spec: `lastValidBlockHeight` is "ignored when `recentBlockhash` is absent",
+/// so an orphaned (even malformed) height must not fail the payment.
+#[test]
+fn orphan_last_valid_block_height_is_ignored() {
+    let mut doc: serde_json::Value = serde_json::from_slice(
+        &B64.decode(fixture("payment_required_sponsored.header"))
+            .unwrap(),
+    )
+    .unwrap();
+    let extra = doc["accepts"][0]["extra"].as_object_mut().unwrap();
+    extra.remove("recentBlockhash");
+    extra.insert(
+        "lastValidBlockHeight".to_string(),
+        serde_json::json!("not-a-number"),
+    );
+
+    let header = B64.encode(serde_json::to_vec(&doc).unwrap());
+    let required = parse_payment_required(&header).unwrap();
+    let selected = select_requirement(&required, &RequirementFilter::default()).unwrap();
+    assert_eq!(selected.recent_blockhash, None);
+    assert_eq!(selected.last_valid_block_height, None);
+}
+
+/// x402 V2 §5.1.2: servers advertise `extensions` and clients "must include at
+/// least the info received" when echoing them in the `PaymentPayload`.
+#[test]
+fn server_extensions_are_echoed_into_the_payment_payload() {
+    let required = parse_payment_required(&fixture("payment_required_sponsored.header")).unwrap();
+    assert!(required.extensions.is_some(), "challenge advertises bazaar");
+    let selected = select_requirement(&required, &RequirementFilter::default()).unwrap();
+
+    let header = build_payment_signature(&selected, &SponsoredSigner).unwrap();
+    let built: serde_json::Value = serde_json::from_slice(&B64.decode(header).unwrap()).unwrap();
+    let golden: serde_json::Value = serde_json::from_slice(
+        &B64.decode(fixture("payment_signature_sponsored.header"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(built, golden);
+    assert_eq!(built["extensions"], required.extensions.unwrap());
+
+    // A challenge without extensions must not invent an empty object.
+    let plain = parse_payment_required(&fixture("payment_required_devnet.header")).unwrap();
+    assert_eq!(plain.extensions, None);
+    let plain = select_requirement(&plain, &RequirementFilter::default()).unwrap();
+    let plain_header = build_payment_signature(&plain, &SponsoredSigner).unwrap();
+    let plain_built: serde_json::Value =
+        serde_json::from_slice(&B64.decode(plain_header).unwrap()).unwrap();
+    assert!(plain_built.get("extensions").is_none());
+}
+
 #[test]
 fn selection_honours_network_and_mint_filters() {
     let required = parse_payment_required(&fixture("payment_required_mainnet.header")).unwrap();
@@ -175,6 +349,19 @@ impl SvmTransferSigner for FakeSigner {
         assert_eq!(intent.fee_payer, FEE_PAYER);
         assert_eq!(intent.atomic_amount, 1000);
         Ok(self.tx.clone())
+    }
+}
+
+/// Signer for the sponsored golden: emits the fixed 128-byte transaction the
+/// `payment_signature_sponsored` fixture encodes.
+struct SponsoredSigner;
+
+impl SvmTransferSigner for SponsoredSigner {
+    fn payer_address(&self) -> String {
+        PAY_TO.to_string()
+    }
+    fn sign_transfer(&self, _intent: &SvmTransferIntent) -> Result<Vec<u8>, String> {
+        Ok(vec![9u8; 128])
     }
 }
 

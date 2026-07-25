@@ -22,7 +22,8 @@
 //!    with a deterministic challenge hash.
 //! 3. [`build_payment_signature`] — build the `PAYMENT-SIGNATURE` proof,
 //!    with all transaction construction and signing behind the injected
-//!    [`SvmTransferSigner`] trait.
+//!    [`SvmTransferSigner`] trait. Server-advertised `extensions` are echoed
+//!    verbatim, as the spec requires of clients.
 //! 4. [`parse_payment_response`] — decode settlement evidence from the
 //!    `PAYMENT-RESPONSE` header.
 //!
@@ -53,7 +54,7 @@ pub use wire::{
     base58_decode, parse_atomic_amount, parse_payment_required, parse_payment_response,
     select_requirement, validate_solana_address, PaymentRequired, RequirementFilter,
     SelectedPayment, SettlementEvidence, SolanaNetwork, CAIP2_SOLANA_DEVNET, CAIP2_SOLANA_MAINNET,
-    HEADER_PAYMENT_REQUIRED, HEADER_PAYMENT_RESPONSE, HEADER_PAYMENT_SIGNATURE,
-    MAX_ACCEPTS_ENTRIES, MAX_HEADER_BYTES, MAX_MEMO_BYTES, MAX_SVM_TRANSACTION_BYTES,
-    MAX_TIMEOUT_SECONDS, SCHEME_EXACT, X402_VERSION,
+    CHALLENGE_HASH_DOMAIN, HEADER_PAYMENT_REQUIRED, HEADER_PAYMENT_RESPONSE,
+    HEADER_PAYMENT_SIGNATURE, MAX_ACCEPTS_ENTRIES, MAX_HEADER_BYTES, MAX_MEMO_BYTES,
+    MAX_SVM_TRANSACTION_BYTES, MAX_TIMEOUT_SECONDS, SCHEME_EXACT, X402_VERSION,
 };

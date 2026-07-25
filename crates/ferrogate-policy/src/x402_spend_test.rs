@@ -33,8 +33,11 @@ fn selected(
         recipient: recipient.to_string(),
         fee_payer: FEE_PAYER.to_string(),
         memo: None,
+        recent_blockhash: None,
+        last_valid_block_height: None,
         resource_url: resource_url.to_string(),
         max_timeout_seconds: 300,
+        extensions: None,
         challenge_hash: [0xab; 32],
         raw_requirement: serde_json::Value::Null,
     }

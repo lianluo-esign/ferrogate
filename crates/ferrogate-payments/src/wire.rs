@@ -49,6 +49,12 @@ pub const MAX_ACCEPTS_ENTRIES: usize = 16;
 pub const MAX_TIMEOUT_SECONDS: u64 = 86_400;
 /// Maximum length of `extra.memo` in bytes, per the SVM `exact` scheme spec.
 pub const MAX_MEMO_BYTES: usize = 256;
+/// Domain-separation tag mixed into [`SelectedPayment::challenge_hash`].
+///
+/// The hash is a FerroGate-local idempotency/audit key, not part of the x402
+/// wire format. Any change to the hashed tuple MUST bump this tag so that
+/// persisted hashes from an older revision are distinguishable.
+pub const CHALLENGE_HASH_DOMAIN: &str = "ferrogate-x402-challenge-v1";
 /// Solana wire packet limit; a serialized proof transaction can never exceed
 /// this, so larger signer output is rejected as a failed proof build.
 pub const MAX_SVM_TRANSACTION_BYTES: usize = 1232;
@@ -104,6 +110,14 @@ pub struct PaymentRequired {
     /// Raw, order-preserved `accepts` entries (validated lazily during
     /// selection so unsupported entries can be skipped without error).
     pub accepts: Vec<Value>,
+    /// Server-advertised protocol `extensions` object, verbatim.
+    ///
+    /// Per x402 V2 §5.1.2/§5.2.2 the client MUST echo at least the info it
+    /// received back in the outgoing `PaymentPayload`, so this is carried
+    /// through selection into [`build_payment_signature`] unmodified.
+    ///
+    /// [`build_payment_signature`]: crate::build_payment_signature
+    pub extensions: Option<Value>,
 }
 
 /// One fully validated, selected SVM `exact` requirement — the structured
@@ -122,12 +136,32 @@ pub struct SelectedPayment {
     pub fee_payer: String,
     /// Optional seller memo from `extra.memo` (<= 256 bytes).
     pub memo: Option<String>,
+    /// Optional server-supplied blockhash from `extra.recentBlockhash`
+    /// (base58, validated 32 bytes). When present the signer SHOULD use it
+    /// as the transaction lifetime instead of fetching its own; when absent
+    /// the signer MUST fetch a recent blockhash itself.
+    pub recent_blockhash: Option<String>,
+    /// Optional `extra.lastValidBlockHeight` bound for
+    /// [`Self::recent_blockhash`]. Per the SVM `exact` scheme this field is
+    /// ignored when no blockhash was supplied, so it is only ever `Some`
+    /// alongside `recent_blockhash`.
+    pub last_valid_block_height: Option<u64>,
     /// URL of the protected resource this payment unlocks.
     pub resource_url: String,
     /// Relative payment validity window in seconds (1..=86400).
     pub max_timeout_seconds: u64,
-    /// Deterministic SHA-256 over the canonical requirement tuple. Stable
-    /// across processes; suitable as an idempotency / audit key.
+    /// Server-advertised protocol `extensions`, echoed verbatim into the
+    /// outgoing `PaymentPayload`.
+    pub extensions: Option<Value>,
+    /// Deterministic SHA-256 over the canonical *payment terms* tuple:
+    /// domain tag, scheme, network, mint, recipient, fee payer, memo,
+    /// atomic amount, timeout, resource URL. Stable across processes;
+    /// suitable as an idempotency / audit key.
+    ///
+    /// Transient transport hints (`recentBlockhash`,
+    /// `lastValidBlockHeight`) and `extensions` are deliberately EXCLUDED:
+    /// a server may refresh them between retries of the same logical
+    /// challenge, and including them would make the idempotency key unstable.
     pub challenge_hash: [u8; 32],
     /// The requirement entry exactly as received, echoed verbatim into the
     /// `accepted` field of the outgoing `PaymentPayload`.
@@ -271,6 +305,12 @@ pub fn parse_payment_required(header_value: &str) -> Result<PaymentRequired, Pay
         return Err(malformed(H, "accepts contains a non-object entry"));
     }
 
+    let extensions = match root.get("extensions") {
+        None | Some(Value::Null) => None,
+        Some(v) if v.is_object() => Some(v.clone()),
+        Some(_) => return Err(malformed(H, "extensions is not a JSON object")),
+    };
+
     Ok(PaymentRequired {
         error: root
             .get("error")
@@ -286,6 +326,7 @@ pub fn parse_payment_required(header_value: &str) -> Result<PaymentRequired, Pay
             .and_then(Value::as_str)
             .map(str::to_string),
         accepts: accepts.clone(),
+        extensions,
     })
 }
 
@@ -391,32 +432,77 @@ fn require_timeout(entry: &Value) -> Result<u64, PaymentError> {
     Ok(secs)
 }
 
-/// Deterministic SHA-256 over the canonical challenge tuple. FerroGate-local
-/// (not part of the wire contract); NUL-separated with a domain tag so field
-/// concatenation cannot collide.
-fn challenge_hash(
-    network: SolanaNetwork,
-    mint: &str,
-    amount: u64,
-    recipient: &str,
-    timeout: u64,
-    resource_url: &str,
-) -> [u8; 32] {
+/// Strict decimal parser for `extra.lastValidBlockHeight`, which the SVM
+/// `exact` scheme defines as a decimal string. Unlike an atomic amount this
+/// tolerates leading zeros (it is an advisory bound, not money), but it is
+/// still never coerced: a non-numeric, zero, or overflowing value is an error.
+fn parse_block_height(raw: &str) -> Result<u64, PaymentError> {
+    let bad = || {
+        malformed(
+            HEADER_PAYMENT_REQUIRED,
+            format!(
+                "extra.lastValidBlockHeight {:?} is not a positive decimal u64",
+                truncate_for_error(raw)
+            ),
+        )
+    };
+    if raw.is_empty() || raw.len() > 20 || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match raw.parse::<u64>() {
+        Ok(v) if v > 0 => Ok(v),
+        _ => Err(bad()),
+    }
+}
+
+/// Deterministic SHA-256 over the canonical payment-terms tuple.
+/// FerroGate-local (not part of the wire contract); NUL-separated with a
+/// versioned domain tag so field concatenation cannot collide.
+///
+/// Memo presence is encoded separately from memo content so that an absent
+/// memo and an empty-string memo cannot hash to the same value.
+fn challenge_hash(terms: &ChallengeTerms<'_>) -> [u8; 32] {
     let mut h = Sha256::new();
+    let amount = terms.atomic_amount.to_string();
+    let timeout = terms.max_timeout_seconds.to_string();
     for part in [
-        "ferrogate-x402-v2",
+        CHALLENGE_HASH_DOMAIN,
         SCHEME_EXACT,
-        network.caip2(),
-        mint,
-        recipient,
-        &amount.to_string(),
-        &timeout.to_string(),
-        resource_url,
+        terms.network.caip2(),
+        terms.mint,
+        terms.recipient,
+        terms.fee_payer,
+        amount.as_str(),
+        timeout.as_str(),
+        terms.resource_url,
     ] {
         h.update(part.as_bytes());
         h.update([0u8]);
     }
+    match terms.memo {
+        Some(m) => {
+            h.update([1u8]);
+            h.update(m.as_bytes());
+        }
+        None => h.update([0u8]),
+    }
+    h.update([0u8]);
     h.finalize().into()
+}
+
+/// The payment-terms tuple fed to [`challenge_hash`]. Deliberately excludes
+/// the transient `recentBlockhash` / `lastValidBlockHeight` hints and
+/// `extensions`, which a server may refresh between retries of the same
+/// logical challenge.
+struct ChallengeTerms<'a> {
+    network: SolanaNetwork,
+    mint: &'a str,
+    recipient: &'a str,
+    fee_payer: &'a str,
+    memo: Option<&'a str>,
+    atomic_amount: u64,
+    max_timeout_seconds: u64,
+    resource_url: &'a str,
 }
 
 /// Select exactly one supported requirement from a parsed
@@ -514,23 +600,59 @@ pub fn select_requirement(
             Some(_) => return Err(malformed(H, "extra.memo is not a string")),
         };
 
+        // `extra.recentBlockhash` / `extra.lastValidBlockHeight` are the
+        // transaction-lifetime hints the SVM `exact` scheme lets the resource
+        // server supply so the client can skip a `getLatestBlockhash` RPC.
+        // They are signer input, so they must survive into the intent rather
+        // than force the signer to re-parse the raw requirement.
+        let recent_blockhash = match extra.get("recentBlockhash") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(bh)) => match base58_decode(bh) {
+                Some(bytes) if bytes.len() == 32 => Some(bh.clone()),
+                _ => {
+                    return Err(malformed(
+                        H,
+                        "extra.recentBlockhash is not a base58 32-byte blockhash",
+                    ))
+                }
+            },
+            Some(_) => return Err(malformed(H, "extra.recentBlockhash is not a string")),
+        };
+        // Spec: `lastValidBlockHeight` is "ignored when recentBlockhash is
+        // absent", so it is only validated when a blockhash was supplied.
+        let last_valid_block_height = match (&recent_blockhash, extra.get("lastValidBlockHeight")) {
+            (None, _) | (Some(_), None) | (Some(_), Some(Value::Null)) => None,
+            (Some(_), Some(Value::String(height))) => Some(parse_block_height(height)?),
+            (Some(_), Some(_)) => {
+                return Err(malformed(
+                    H,
+                    "extra.lastValidBlockHeight is not a decimal string",
+                ))
+            }
+        };
+
         return Ok(SelectedPayment {
             network,
             mint: mint.to_string(),
             atomic_amount,
             recipient: recipient.to_string(),
             fee_payer: fee_payer.to_string(),
-            memo,
+            memo: memo.clone(),
+            recent_blockhash,
+            last_valid_block_height,
             resource_url: required.resource_url.clone(),
             max_timeout_seconds,
-            challenge_hash: challenge_hash(
+            extensions: required.extensions.clone(),
+            challenge_hash: challenge_hash(&ChallengeTerms {
                 network,
                 mint,
-                atomic_amount,
                 recipient,
+                fee_payer,
+                memo: memo.as_deref(),
+                atomic_amount,
                 max_timeout_seconds,
-                &required.resource_url,
-            ),
+                resource_url: &required.resource_url,
+            }),
             raw_requirement: entry.clone(),
         });
     }

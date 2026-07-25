@@ -185,6 +185,41 @@ rejects!(
     PaymentError::MalformedHeader { .. }
 );
 rejects!(
+    blockhash_invalid,
+    "blockhash_invalid.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    blockhash_wrong_length,
+    "blockhash_wrong_length.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    blockhash_non_string,
+    "blockhash_non_string.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    last_valid_block_height_invalid,
+    "last_valid_block_height_invalid.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    last_valid_block_height_json_number,
+    "last_valid_block_height_json_number.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    last_valid_block_height_zero,
+    "last_valid_block_height_zero.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
+    extensions_non_object,
+    "extensions_non_object.header",
+    PaymentError::MalformedHeader { .. }
+);
+rejects!(
     oversized,
     "oversized.header",
     PaymentError::OversizedHeader { .. }

@@ -91,6 +91,12 @@ pub struct SvmTransferIntent {
     pub fee_payer: String,
     /// Memo instruction data mandated by the requirement, if any.
     pub memo: Option<String>,
+    /// Server-supplied transaction lifetime (base58 blockhash), if any.
+    /// When `Some`, the signer SHOULD build against this blockhash instead
+    /// of fetching its own; when `None` the signer MUST fetch one.
+    pub recent_blockhash: Option<String>,
+    /// Bound on [`Self::recent_blockhash`], if the server supplied one.
+    pub last_valid_block_height: Option<u64>,
     /// Deterministic challenge hash of the underlying requirement.
     pub challenge_hash: [u8; 32],
 }
@@ -105,6 +111,8 @@ impl SvmTransferIntent {
             recipient: selected.recipient.clone(),
             fee_payer: selected.fee_payer.clone(),
             memo: selected.memo.clone(),
+            recent_blockhash: selected.recent_blockhash.clone(),
+            last_valid_block_height: selected.last_valid_block_height,
             challenge_hash: selected.challenge_hash,
         }
     }
@@ -156,12 +164,18 @@ pub fn build_payment_signature(
         });
     }
 
-    let payload: Value = json!({
+    let mut payload: Value = json!({
         "x402Version": X402_VERSION,
         "resource": { "url": selected.resource_url },
         "accepted": selected.raw_requirement,
         "payload": { "transaction": encode_header_bytes(&tx_bytes) },
     });
+    // x402 V2 §5.1.2: "clients echo them in `PaymentPayload`. The client must
+    // include at least the info received". Echo the server's extensions
+    // verbatim — never delete or overwrite what the server advertised.
+    if let (Some(obj), Some(extensions)) = (payload.as_object_mut(), selected.extensions.as_ref()) {
+        obj.insert("extensions".to_string(), extensions.clone());
+    }
     let bytes = serde_json::to_vec(&payload).map_err(|e| PaymentError::ProofBuildFailed {
         reason: format!("payload serialization failed: {e}"),
     })?;
