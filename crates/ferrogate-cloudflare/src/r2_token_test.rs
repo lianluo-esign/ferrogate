@@ -15,6 +15,7 @@ use crate::client::{
 };
 use crate::config::CloudflareConfig;
 use crate::error::CloudflareError;
+use crate::r2::r2_bucket_name_for_tenant;
 use crate::r2_token::{
     R2ScopedTokenRequest, R2TokenAccess, R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID,
     R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID,
@@ -356,11 +357,13 @@ fn revoke_rejects_malformed_token_id_before_any_request() {
 
 #[test]
 fn ensure_tenant_credentials_ensures_bucket_then_mints_scoped_token() {
+    // The bucket name is the #490 injective derivation, not a slug of the id.
+    let bucket = r2_bucket_name_for_tenant("tenant-acme");
     let transport = Arc::new(RecordingTransport::new(vec![
         // 1) ensure_tenant_r2_bucket -> create bucket.
         ok(
             200,
-            r#"{ "success": true, "errors": [], "result": { "name": "ferrogate-tenant-acme" } }"#,
+            &format!(r#"{{ "success": true, "errors": [], "result": {{ "name": "{bucket}" }} }}"#),
         ),
         // 2) create_scoped_r2_token -> mint token.
         ok(
@@ -374,7 +377,7 @@ fn ensure_tenant_credentials_ensures_bucket_then_mints_scoped_token() {
         .block_on(client.ensure_tenant_r2_credentials("tenant-acme"))
         .expect("ensure should succeed");
 
-    assert_eq!(provision.bucket.name, "ferrogate-tenant-acme");
+    assert_eq!(provision.bucket.name, bucket);
     assert!(provision.bucket.created);
     assert_eq!(
         provision.bucket.s3_endpoint,
@@ -391,10 +394,11 @@ fn ensure_tenant_credentials_ensures_bucket_then_mints_scoped_token() {
     assert!(requests[1].url.ends_with("/accounts/acct-test/tokens"));
     let token_body: serde_json::Value =
         serde_json::from_slice(requests[1].body.as_ref().unwrap()).unwrap();
-    assert_eq!(token_body["name"], "ferrogate-r2-ferrogate-tenant-acme");
+    assert_eq!(token_body["name"], format!("ferrogate-r2-{bucket}"));
     let resources = token_body["policies"][0]["resources"].as_object().unwrap();
-    assert!(resources
-        .contains_key("com.cloudflare.edge.r2.bucket.acct-test_default_ferrogate-tenant-acme"));
+    assert!(resources.contains_key(&format!(
+        "com.cloudflare.edge.r2.bucket.acct-test_default_{bucket}"
+    )));
 }
 
 #[test]

@@ -30,6 +30,16 @@
 //! error, so onboarding can provision unconditionally. See
 //! [`R2_BUCKET_ALREADY_EXISTS_CODES`].
 //!
+//! ## Tenant bucket naming — isolation, not cosmetics (issue #490)
+//!
+//! [`r2_bucket_name_for_tenant`] must be **injective**: the bucket name is the
+//! per-tenant asset boundary, so two tenants sharing a name share their
+//! objects. R2 names cannot carry a raw tenant id (`[a-z0-9-]`, 3–63 chars), so
+//! the name is `ferrogate-{cosmetic-slug}-{sha256-of-length-prefixed-tenant}`
+//! and *all* of the collision resistance lives in the digest. The pre-#490
+//! slug-only derivation is retained as
+//! [`r2_legacy_bucket_name_for_tenant`] for migration lookups only.
+//!
 //! ## Credential / scope
 //!
 //! Bucket management uses the account API token (Bearer), which must carry the
@@ -46,12 +56,41 @@
 //!   onboarding path), out of scope for this crate.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::client::{CloudflareClient, HttpMethod};
 use crate::error::CloudflareError;
 
 /// The account-relative path to the R2 buckets collection.
 const R2_BUCKETS_PATH: &str = "accounts/{account_id}/r2/buckets";
+
+/// R2's hard bucket-name bounds: 3–63 characters, lowercase letters/digits/
+/// hyphens, never starting or ending with a hyphen. (Cloudflare R2 docs,
+/// "Create new buckets".) Every name minted by
+/// [`r2_bucket_name_for_tenant`] satisfies all three by construction.
+pub const R2_BUCKET_NAME_MAX_LEN: usize = 63;
+/// See [`R2_BUCKET_NAME_MAX_LEN`].
+pub const R2_BUCKET_NAME_MIN_LEN: usize = 3;
+
+/// Readable leading tag of every FerroGate-minted tenant bucket name. Also what
+/// guarantees the name starts with a letter (R2 forbids a leading hyphen).
+const R2_TENANT_BUCKET_PREFIX: &str = "ferrogate-";
+
+/// Domain-separation tag mixed into the hashed tenant identity, so the digest
+/// for a tenant can never coincide with a digest this repo mints for some other
+/// purpose over the same bytes. Bump the `v1` suffix only with a migration
+/// (see [`r2_legacy_bucket_name_for_tenant`]).
+const R2_TENANT_BUCKET_DIGEST_DOMAIN: &str = "ferrogate.r2.bucket.v1";
+
+/// Hex characters of SHA-256 kept in the bucket name: 32 hex chars = **128
+/// bits**, i.e. a ~2^64 birthday bound. This — not the readable slug — is what
+/// makes the derivation collision-safe.
+const R2_TENANT_BUCKET_DIGEST_HEX_LEN: usize = 32;
+
+/// Characters of the *readable* (lossy, purely cosmetic) tenant slug kept in
+/// the name. Sized so `prefix(10) + slug(20) + '-'(1) + digest(32) == 63`, R2's
+/// exact maximum.
+const R2_TENANT_BUCKET_SLUG_MAX_LEN: usize = 20;
 
 /// Cloudflare error codes that mean "the bucket you asked to create already
 /// exists and is owned by this account" — the idempotent-create success case.
@@ -199,9 +238,10 @@ impl CloudflareClient {
     /// plus the account R2 S3 endpoint.
     ///
     /// Idempotent — safe to call on every onboarding attempt. The bucket name
-    /// follows [`r2_bucket_name_for_tenant`]. The returned
-    /// [`R2BucketProvision::created`] distinguishes a fresh create from a bucket
-    /// that already existed.
+    /// follows [`r2_bucket_name_for_tenant`], which is injective per #490 (an
+    /// earlier, non-injective derivation could hand two tenants one bucket).
+    /// The returned [`R2BucketProvision::created`] distinguishes a fresh create
+    /// from a bucket that already existed.
     pub async fn ensure_tenant_r2_bucket(
         &self,
         tenant: &str,
@@ -232,15 +272,81 @@ fn is_bucket_already_exists(error: &CloudflareError) -> bool {
     )
 }
 
-/// Derive a deterministic, R2-valid bucket name for a tenant.
+/// Derive a deterministic, R2-valid, **collision-safe** bucket name for a
+/// tenant.
 ///
-/// Convention: `ferrogate-<tenant-slug>`, where the tenant id is lowercased and
-/// any character outside `[a-z0-9]` becomes `-`. R2 bucket names must be 3–63
-/// chars, lowercase alphanumeric + hyphens, starting/ending alphanumeric; the
-/// `ferrogate-` prefix guarantees a valid start and the >= 3 length, and the
-/// result is capped at 63 chars and trimmed of any trailing hyphen.
+/// Shape: `ferrogate-{slug}-{digest}` (the `{slug}-` part is dropped when the
+/// tenant id carries no alphanumerics at all, e.g. `""`).
+///
+/// ## Why this is not the obvious "slugify the tenant id" (issue #490)
+///
+/// A tenant's bucket **is** its asset-isolation boundary: two tenants that
+/// derive the same bucket name read and overwrite each other's objects, and
+/// #462's per-tenant scoped credential would then be correctly scoped to a
+/// *shared* bucket. So the derivation must be injective. R2 bucket names cannot
+/// carry a raw tenant id — they are limited to `[a-z0-9-]` and 63 characters —
+/// so any direct embedding must fold characters and truncate, and folding plus
+/// truncation are exactly the two ways to lose injectivity. The pre-#490
+/// derivation lost it both ways (see [`r2_legacy_bucket_name_for_tenant`]).
+///
+/// Collision-safety therefore comes **only** from `{digest}`:
+///
+/// - The tenant identity is canonicalised **length-prefixed** as
+///   `"{domain}:{len}:{tenant}"` — the same trick as
+///   `ferrogate_storage::agent_cost_burn_key` /
+///   `observed_agent_presence_key` — so the encoding stays unambiguous if a
+///   second component (jurisdiction, realm, …) is ever appended.
+/// - `{digest}` is the lowercase hex SHA-256 of that canonical string,
+///   truncated to [`R2_TENANT_BUCKET_DIGEST_HEX_LEN`] hex chars (128 bits,
+///   ~2^64 birthday bound). Distinct tenant ids therefore map to distinct
+///   names short of a 128-bit SHA-256 collision — in particular no amount of
+///   case-folding, separator folding, or length can be *crafted* into an
+///   alias, which is the property the old derivation lacked.
+///
+/// `{slug}` is a lossy, purely **cosmetic** lowercase-alphanumeric rendering of
+/// the tenant id (hyphen-joined, capped at [`R2_TENANT_BUCKET_SLUG_MAX_LEN`])
+/// so an operator can eyeball which bucket belongs to whom. Two tenants may
+/// well share a slug; they cannot share a digest.
+///
+/// The result always satisfies R2's constraints: `[a-z0-9-]` only, starts with
+/// `f` and ends with a hex digit, and length between
+/// `10 + 32 = 42` and `10 + 20 + 1 + 32 =` [`R2_BUCKET_NAME_MAX_LEN`].
+///
+/// **Migration:** this is NOT the pre-#490 name. See
+/// [`r2_legacy_bucket_name_for_tenant`].
 pub fn r2_bucket_name_for_tenant(tenant: &str) -> String {
-    let mut name = String::from("ferrogate-");
+    let slug = tenant_bucket_slug(tenant);
+    let digest = tenant_bucket_digest(tenant);
+    if slug.is_empty() {
+        format!("{R2_TENANT_BUCKET_PREFIX}{digest}")
+    } else {
+        format!("{R2_TENANT_BUCKET_PREFIX}{slug}-{digest}")
+    }
+}
+
+/// The **pre-#490** bucket-name derivation, kept ONLY as a migration/lookup
+/// helper — never call it to provision.
+///
+/// It lowercased the tenant id, folded every non-alphanumeric character to `-`,
+/// truncated at 63 characters, and trimmed trailing hyphens, which is not
+/// injective:
+///
+/// ```text
+/// legacy("Acme_Corp") == legacy("acme-corp") == legacy("acme corp")
+///                     == legacy("ACME.CORP") == "ferrogate-acme-corp"
+/// ```
+///
+/// plus any two ids agreeing on their first 53 post-fold characters. Two such
+/// tenants shared one bucket — a cross-tenant asset read/write.
+///
+/// Nothing in the tree provisioned through it (onboarding wiring is still
+/// deferred; only tests and the live probe touched the R2 surface), so there is
+/// no known live bucket under a legacy name. If a deployment *did* provision
+/// one out-of-band, its objects live under this name and must be copied to
+/// [`r2_bucket_name_for_tenant`]'s name before the old bucket is deleted — this
+/// function is how a migration tool computes the source name.
+pub fn r2_legacy_bucket_name_for_tenant(tenant: &str) -> String {
+    let mut name = String::from(R2_TENANT_BUCKET_PREFIX);
     for c in tenant.chars() {
         name.push(if c.is_ascii_alphanumeric() {
             c.to_ascii_lowercase()
@@ -249,8 +355,41 @@ pub fn r2_bucket_name_for_tenant(tenant: &str) -> String {
         });
     }
     // All pushed bytes are ASCII, so truncating at a byte index is char-safe.
-    name.truncate(63);
+    name.truncate(R2_BUCKET_NAME_MAX_LEN);
     name.trim_end_matches('-').to_string()
+}
+
+/// Lowercase-hex SHA-256 of the length-prefixed, domain-separated tenant
+/// identity, truncated to [`R2_TENANT_BUCKET_DIGEST_HEX_LEN`] chars. This is
+/// the whole of the name's collision resistance.
+fn tenant_bucket_digest(tenant: &str) -> String {
+    let canonical = format!("{R2_TENANT_BUCKET_DIGEST_DOMAIN}:{}:{tenant}", tenant.len());
+    let hex: String = Sha256::digest(canonical.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // 64 ASCII hex chars, so a byte-index slice is char-safe.
+    hex[..R2_TENANT_BUCKET_DIGEST_HEX_LEN].to_string()
+}
+
+/// Cosmetic, deliberately lossy tenant rendering for the readable middle of the
+/// bucket name: runs of `[a-z0-9]` (lowercased) joined by a single `-`, capped
+/// at [`R2_TENANT_BUCKET_SLUG_MAX_LEN`] and never leading/trailing with `-` or
+/// containing `--`. Carries NO isolation guarantee — collisions here are fine
+/// and expected.
+fn tenant_bucket_slug(tenant: &str) -> String {
+    let mut slug = String::with_capacity(R2_TENANT_BUCKET_SLUG_MAX_LEN);
+    for c in tenant.chars() {
+        if slug.len() == R2_TENANT_BUCKET_SLUG_MAX_LEN {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_string()
 }
 
 /// Build the `r2/buckets/{name}` path, rejecting names that could escape the
