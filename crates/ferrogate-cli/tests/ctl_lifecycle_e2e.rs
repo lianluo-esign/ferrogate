@@ -62,7 +62,10 @@ struct CliRun {
 
 impl CliRun {
     fn code(&self) -> i32 {
-        self.output.status.code().expect("process exited via signal")
+        self.output
+            .status
+            .code()
+            .expect("process exited via signal")
     }
 
     fn stdout(&self) -> String {
@@ -203,8 +206,14 @@ fn guardrail_revision(policy_id: &str, keyword: &str) -> PolicyRevision {
         mode: PolicyMode::Enforce,
         streaming: PolicyStreamingMode::BufferAndEnforce,
         on_pass: vec![PolicyAction::allow()],
-        on_fail: vec![PolicyAction::block("blocked", "blocked by guardrail policy")],
-        on_error: vec![PolicyAction::block("unavailable", "guardrail policy unavailable")],
+        on_fail: vec![PolicyAction::block(
+            "blocked",
+            "blocked by guardrail policy",
+        )],
+        on_error: vec![PolicyAction::block(
+            "unavailable",
+            "guardrail policy unavailable",
+        )],
         deadline_ms: 2_000,
         created_at_unix: 1,
         created_by: "test-admin".to_string(),
@@ -273,7 +282,12 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
             &rev2,
         ],
     );
-    assert_eq!(append.code(), 0, "create-revision stderr: {}", append.stderr());
+    assert_eq!(
+        append.code(),
+        0,
+        "create-revision stderr: {}",
+        append.stderr()
+    );
     assert_eq!(
         append.json()["policy"]["revision"],
         2,
@@ -352,7 +366,10 @@ fn guardrail_revision_activation_and_rollback_via_cli() {
         "",
     ));
     assert!(
-        binding["data"].as_array().map(|r| !r.is_empty()).unwrap_or(false),
+        binding["data"]
+            .as_array()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false),
         "policy revisions must be readable after rollback: {binding}"
     );
 
@@ -424,7 +441,12 @@ fn agent_schedule_run_now_via_cli_records_run_evidence() {
         None,
         &["agent-schedules", "create", "--data", &schedule],
     );
-    assert_eq!(create.code(), 0, "schedule create stderr: {}", create.stderr());
+    assert_eq!(
+        create.code(),
+        0,
+        "schedule create stderr: {}",
+        create.stderr()
+    );
     assert_eq!(create.json()["agent_schedule"]["id"], schedule_id);
 
     // AC2: `ctl agent-schedules run-now` manually fires the schedule and returns
@@ -749,7 +771,9 @@ fn tool_approval_decision_via_cli_records_audit_and_fails_closed() {
         mismatch.stderr()
     );
     assert!(
-        mismatch.stderr().contains("tool_approval_fingerprint_mismatch"),
+        mismatch
+            .stderr()
+            .contains("tool_approval_fingerprint_mismatch"),
         "server fingerprint-mismatch code surfaced: {}",
         mismatch.stderr()
     );
@@ -888,7 +912,12 @@ fn insufficient_scope_and_wrong_tenant_fail_closed_via_cli() {
         None,
         &["agent-schedules", "create", "--data", &schedule],
     );
-    assert_eq!(create.code(), 0, "seed schedule stderr: {}", create.stderr());
+    assert_eq!(
+        create.code(),
+        0,
+        "seed schedule stderr: {}",
+        create.stderr()
+    );
 
     // AC3 insufficient scope: a read-only key attempting a write action
     // (run-now needs admin.write) fails closed with the Auth exit class

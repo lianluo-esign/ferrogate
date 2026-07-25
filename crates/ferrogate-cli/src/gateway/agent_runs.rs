@@ -26,7 +26,7 @@ use crate::{
     },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
-    state::{AdminAuditEventDraft, AppState},
+    state::{AdminAuditEventDraft, AgentRunAdmission, AppState, UNATTRIBUTED_AGENT_KEY},
 };
 use ferrogate_policy::{resolve_workflow_budget_envelope, WorkflowBudgetCaps};
 use ferrogate_storage::{
@@ -203,6 +203,63 @@ impl FerroGateway {
                 &ctx.request_id,
             )
             .await;
+        }
+
+        // #428 run admission: consult the per-tenant agent cost governor BEFORE
+        // anything is admitted -- before the #279 workflow gate debits the run
+        // budget, before the durable `running` agent-run row is written, and
+        // before any provider process is spawned. This is the point at which the
+        // run is started, so it is the point at which a breached budget must
+        // halt it.
+        //
+        // A tenant with no configured agent budget resolves to `Unbudgeted`: no
+        // governor is constructed, no ledger read happens, no audit event is
+        // written, and the handler continues on exactly the pre-#428 path.
+        let admission = state
+            .admit_agent_run(
+                &auth.tenant_context(),
+                auth.api_key_id.as_deref().unwrap_or(UNATTRIBUTED_AGENT_KEY),
+                &run_id,
+            )
+            .await;
+        match &admission {
+            AgentRunAdmission::Unbudgeted => {}
+            AgentRunAdmission::Admitted { policy_version } => {
+                // Audit trail for a governed run: record WHICH control-plane
+                // budget row admitted it, so a governed run is inspectable
+                // end-to-end (admitted here -> burn accumulated in the durable
+                // ledger -> visible on GET /admin/v1/agent-cost-burn).
+                state.record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
+                    ctx,
+                    auth: &auth,
+                    agent_run_id: Some(run_id.clone()),
+                    workflow_use: None,
+                    action: "agent.run_budget_admitted",
+                    target: "agent_run",
+                    outcome: "allowed",
+                    message: format!(
+                        "agent cost budget {policy_version} permits this run's dispatch"
+                    ),
+                }));
+            }
+            AgentRunAdmission::Refused {
+                status,
+                code,
+                message,
+            } => {
+                state.record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
+                    ctx,
+                    auth: &auth,
+                    agent_run_id: Some(run_id.clone()),
+                    workflow_use: None,
+                    action: "agent.run_budget_refused",
+                    target: "agent_run",
+                    outcome: "rejected",
+                    message: message.clone(),
+                }));
+                return write_json_error(session, *status, *code, message.clone(), &ctx.request_id)
+                    .await;
+            }
         }
 
         let workflow_use =

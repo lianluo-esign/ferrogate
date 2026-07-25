@@ -38,8 +38,7 @@ const PRESIGN_TTL_SECS: u64 = 120;
 /// fast-rejects any content embedding it (`asset_scan::contains_eicar`),
 /// independent of the pluggable scanner backend, so it is the deterministic
 /// "malware is detected and rejected" payload for a docker-free E2E.
-const EICAR_PAYLOAD: &str =
-    r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+const EICAR_PAYLOAD: &str = r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SignatureKind {
@@ -1333,9 +1332,9 @@ fn inline_and_presigned_publication_apply_identical_eicar_screening() {
         .as_array()
         .expect("audit-events must return a data array");
     assert!(
-        events
-            .iter()
-            .any(|event| { event["action"] == "asset.push" && event["outcome"] == "rejected_commit" }),
+        events.iter().any(|event| {
+            event["action"] == "asset.push" && event["outcome"] == "rejected_commit"
+        }),
         "a rejected presigned commit must record a rejected_commit audit event: {audit}"
     );
 }
@@ -1510,9 +1509,9 @@ fn inline_and_presigned_publication_apply_identical_cross_tenant_gate() {
         .as_array()
         .expect("audit-events must return a data array");
     assert!(
-        events
-            .iter()
-            .any(|event| { event["action"] == "asset.push" && event["outcome"] == "rejected_commit" }),
+        events.iter().any(|event| {
+            event["action"] == "asset.push" && event["outcome"] == "rejected_commit"
+        }),
         "a gated presigned commit must record a rejected_commit audit event: {audit}"
     );
 }

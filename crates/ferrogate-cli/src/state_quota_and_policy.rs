@@ -308,10 +308,14 @@ impl AppState {
     /// rejects the request before any agent dispatch happens) and is not
     /// re-litigated by this budget resolver.
     ///
-    /// Not yet called from product code: constructing the live
-    /// `AgentCostGovernor` (and choosing its burn ledger / window) is the
-    /// deployment's job, so this slice only makes the ceiling *resolvable*.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called from product code by
+    /// [`AppState::agent_cost_governor`](crate::state::AppState::agent_cost_governor),
+    /// which turns a `Some(policy)` into a live `AgentCostGovernor` over the
+    /// durable burn ledger and consults it at agent-run admission
+    /// (`state_agent_cost_governor.rs`). Deliberately carries **no**
+    /// `allow(dead_code)` escape hatch: the real call site makes one
+    /// unnecessary, and keeping it would hide the next regression that
+    /// disconnects the ceiling from enforcement.
     pub(crate) async fn resolve_agent_budget_policy(
         &self,
         tenant: &ferrogate_core::TenantContext,

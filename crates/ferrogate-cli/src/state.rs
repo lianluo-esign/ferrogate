@@ -6831,6 +6831,14 @@ mod state_x402_reconciler;
 #[path = "state_quota_and_policy.rs"]
 mod state_quota_and_policy;
 
+// #428: product wiring for the agent cost governor -- builds the
+// `AgentCostGovernor` over the resolved per-tenant ceiling + the durable burn
+// ledger and consults it at agent-run admission, so a budget breach halts
+// dispatch instead of being inert.
+#[path = "state_agent_cost_governor.rs"]
+mod state_agent_cost_governor;
+pub(crate) use state_agent_cost_governor::{AgentRunAdmission, UNATTRIBUTED_AGENT_KEY};
+
 #[path = "state_billing_metering.rs"]
 mod state_billing_metering;
 
