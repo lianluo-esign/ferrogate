@@ -82,6 +82,37 @@ subcommand, shared assertion, fixture) and wire it into `ferrogate-test ci`
 rather than skipping the layer — see "The harness must keep up with the layers"
 in the `ferrogate-test-strategy` skill.
 
+## After a Passing Run: Clean Up, Merge, Push
+
+A gate iteration is not finished when the tests go green. On **PASS**, always run
+this sequence — in this order:
+
+1. **Verify the test bed is current before trusting any result.** The gate
+   checkout has silently drifted 60+ commits behind `origin/main` before, which
+   invalidates every verdict rendered on it. Always:
+   ```bash
+   git fetch origin
+   git rev-list --left-right --count HEAD...origin/main   # want 0 behind
+   ```
+   If behind, re-run the verification on `origin/main` (a detached worktree is
+   the safe way when the checkout is dirty) before judging anything.
+2. **Clean the scene — delete the large build artifacts.** Rust `target/` output
+   and per-item worktrees accumulate fast on a disk-constrained box:
+   ```bash
+   cargo clean                          # or: cargo clean -p <crate> to keep the shared cache
+   git worktree remove <gate-worktree>  # remove every temporary gate worktree
+   git worktree prune
+   ```
+   Remove probe binaries and scratch artifacts the run produced. Do this on
+   **FAIL** too — only the merge/push below is PASS-only.
+3. **Fast-forward `main` first, then merge the verified work onto it.** Never
+   merge onto a stale base.
+4. **Push to GitHub.** Gate-verified work that stays on a local branch is
+   invisible to the rest of the loop and can be lost.
+
+Never merge-and-push on a FAIL: failing items go back to **Ready** with the
+`gate-rejected` label and an evidence comment.
+
 ## Failure Handling
 
 - If `ferrogate-test ci` fails on a status code, inspect the raw HTTP response
