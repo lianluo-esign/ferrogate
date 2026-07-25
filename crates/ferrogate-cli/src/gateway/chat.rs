@@ -49,6 +49,7 @@ use super::{
     dispatch::{
         dispatch_provider_request, dispatch_provider_streaming_request, provider_endpoint_origin,
     },
+    governed_decision::{GovernedDecision, GovernedWorkflowContext},
     responses_stream::{ResponsesStreamNormalizer, ResponsesStreamProviderKind},
     FerroGateway, ProxyContext,
 };
@@ -141,99 +142,42 @@ impl FerroGateway {
         endpoint: AiEndpoint,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let ingress_plan = match build_ai_ingress_plan(&state, &headers, endpoint, ctx).await {
+        // #470: every admission-stage governed outcome below is now a
+        // `GovernedDecision` *value* produced by a `decide_*` function, not a
+        // write straight into the Session. The same three functions are what
+        // the governed-decision conformance corpus drives (through
+        // `decide_ai_request`), so the corpus exercises the authority itself
+        // rather than a test-only replica of it.
+        //
+        // The step order is load-bearing and unchanged: authenticate before
+        // reading the body, so an unauthenticated oversized request is still
+        // `missing_api_key` and not `payload_too_large`. That is why the body
+        // read stays here in the handler (it is Session I/O) and its outcome
+        // is handed to the decision as a *fact* (`AiRequestBody`) rather than
+        // the decision reaching for the socket.
+        let ingress_plan = match decide_ai_ingress(&state, &headers, endpoint, ctx).await {
             Ok(plan) => plan,
-            Err(rejection) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: rejection.tenant,
-                        logical_model: rejection.logical_model.as_deref(),
-                        provider: None,
-                        status: rejection.status,
-                        error_code: rejection.code,
-                    },
-                );
-                write_json_error(
-                    session,
-                    rejection.status,
-                    rejection.code,
-                    rejection.message,
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
+            Err(decision) => {
+                return self
+                    .deliver_governed_decision(session, endpoint, ctx, decision)
+                    .await
             }
         };
         let body =
             match read_request_body(session, state.limits().inference_body_max_bytes()).await? {
-                Ok(body) => body,
-                Err(limit) => {
-                    self.record_ai_error_log(
-                        endpoint,
-                        ctx,
-                        AiErrorLog {
-                            tenant: ingress_plan.auth.tenant_context(),
-                            logical_model: None,
-                            provider: None,
-                            status: StatusCode::PAYLOAD_TOO_LARGE,
-                            error_code: "payload_too_large",
-                        },
-                    );
-                    write_json_error_and_close(
-                        session,
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "payload_too_large",
-                        format!(
-                            "request body exceeds maximum size of {} bytes",
-                            limit.max_bytes
-                        ),
-                        &ctx.request_id,
-                    )
-                    .await?;
-                    return Ok(());
-                }
+                Ok(body) => AiRequestBody::Read(body),
+                Err(limit) => AiRequestBody::TooLarge {
+                    max_bytes: limit.max_bytes,
+                },
             };
-        let request_plan = match build_ai_request_plan(&state, ingress_plan, &body, endpoint) {
+        let mut request_plan = match decide_ai_plan(&state, ingress_plan, body, endpoint) {
             Ok(plan) => plan,
-            Err(rejection) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: rejection.tenant,
-                        logical_model: rejection.logical_model.as_deref(),
-                        provider: None,
-                        status: rejection.status,
-                        error_code: rejection.code,
-                    },
-                );
-                write_json_error(
-                    session,
-                    rejection.status,
-                    rejection.code,
-                    rejection.message,
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
+            Err(decision) => {
+                return self
+                    .deliver_governed_decision(session, endpoint, ctx, decision)
+                    .await
             }
         };
-        let AiRequestPlan {
-            auth,
-            agent_run_id,
-            workflow_id,
-            workflow_version,
-            workflow_node_id,
-            workflow_iteration,
-            gateway_config,
-            request,
-            body_json,
-            estimated_usage,
-            mut routes,
-            guardrail_envelope,
-        } = request_plan;
         // Shadow/mirror rollout (issue #276): fire-and-forget a sampled,
         // budget-capped duplicate of this request to a secondary provider.
         // Spawned here (before the primary dispatch) so it adds no client
@@ -246,76 +190,35 @@ impl FerroGateway {
                 endpoint,
                 request_id: ctx.request_id.clone(),
                 route: endpoint.route(),
-                logical_model: request.model.clone(),
-                tenant: auth.tenant_context(),
-                api_key_id: auth.api_key_id.clone(),
-                sticky_key: rollout_sticky_key(&auth, &request.model),
-                body: body_json.clone(),
+                logical_model: request_plan.request.model.clone(),
+                tenant: request_plan.auth.tenant_context(),
+                api_key_id: request_plan.auth.api_key_id.clone(),
+                sticky_key: rollout_sticky_key(&request_plan.auth, &request_plan.request.model),
+                body: request_plan.body_json.clone(),
             },
         );
         let request_started_at_unix = now_unix_seconds();
-        let workflow_provider_constraint = match enforce_ai_workflow_policy(
-            &state,
-            AiWorkflowRequestContext {
-                auth: &auth,
-                agent_run_id: &agent_run_id,
-                workflow_id: workflow_id.as_deref(),
-                workflow_version,
-                workflow_node_id: workflow_node_id.as_deref(),
-                workflow_iteration,
-                logical_model: &request.model,
-                estimated_usage: &estimated_usage,
-                now_unix: request_started_at_unix,
-            },
-        )
-        .await
+        if let Err(decision) =
+            decide_ai_workflow_admission(&state, &mut request_plan, request_started_at_unix).await
         {
-            Ok(constraint) => constraint,
-            Err(rejection) => {
-                self.record_ai_workflow_rejection(
-                    session,
-                    AiWorkflowRejectionContext {
-                        endpoint,
-                        ctx,
-                        agent_run_id: &agent_run_id,
-                        workflow_id: workflow_id.as_deref(),
-                        workflow_version,
-                        workflow_node_id: workflow_node_id.as_deref(),
-                        auth: &auth,
-                        gateway_config: gateway_config.as_ref(),
-                        logical_model: &request.model,
-                        now_unix: request_started_at_unix,
-                        rejection,
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        if let Err(rejection) = apply_workflow_provider_constraint(
-            workflow_provider_constraint.as_ref(),
-            &request.model,
-            &mut routes,
-        ) {
-            self.record_ai_workflow_rejection(
-                session,
-                AiWorkflowRejectionContext {
-                    endpoint,
-                    ctx,
-                    agent_run_id: &agent_run_id,
-                    workflow_id: workflow_id.as_deref(),
-                    workflow_version,
-                    workflow_node_id: workflow_node_id.as_deref(),
-                    auth: &auth,
-                    gateway_config: gateway_config.as_ref(),
-                    logical_model: &request.model,
-                    now_unix: request_started_at_unix,
-                    rejection,
-                },
-            )
-            .await?;
-            return Ok(());
+            return self
+                .deliver_governed_decision(session, endpoint, ctx, decision)
+                .await;
         }
+        let AiRequestPlan {
+            auth,
+            agent_run_id,
+            workflow_id,
+            workflow_version,
+            workflow_node_id,
+            workflow_iteration: _,
+            gateway_config,
+            request,
+            body_json,
+            estimated_usage,
+            routes,
+            guardrail_envelope,
+        } = request_plan;
         let route_count = routes.len();
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
@@ -2193,61 +2096,72 @@ impl FerroGateway {
         });
     }
 
-    async fn record_ai_workflow_rejection(
+    /// Delivers an admission-stage [`GovernedDecision`] (#470): records the
+    /// request-log row the decision implies and writes the client response.
+    ///
+    /// This is the single place the admission half of the governed path turns a
+    /// decision into bytes. Before #470 the same work was open-coded at four
+    /// call sites in `handle_ai_request`, which is why the decision could not
+    /// be observed as a value.
+    async fn deliver_governed_decision(
         &self,
         session: &mut Session,
-        context: AiWorkflowRejectionContext<'_>,
+        endpoint: AiEndpoint,
+        ctx: &ProxyContext,
+        decision: GovernedDecision,
     ) -> PingoraResult<()> {
-        self.state.record_request_log(StoredRequestLog {
-            request_id: context.ctx.request_id.clone(),
-            trace_id: context.ctx.trace_id.clone(),
-            agent_run_id: Some(context.agent_run_id.to_string()),
-            workflow_id: context.workflow_id.map(ToOwned::to_owned),
-            workflow_version: context.workflow_version,
-            workflow_node_id: context.workflow_node_id.map(ToOwned::to_owned),
-            cluster_id: None,
-            node_id: None,
-            tenant: context.auth.tenant_context(),
-            route: Some(context.endpoint.route().into()),
-            provider: None,
-            logical_model: Some(context.logical_model.to_string()),
-            provider_model: None,
-            gateway_config_id: context.gateway_config.map(|profile| profile.id.clone()),
-            gateway_config_revision: context.gateway_config.map(|profile| profile.revision),
-            status_code: context.rejection.status.as_u16(),
-            error_code: Some(context.rejection.code.to_string()),
-            prompt_recorded: false,
-            response_recorded: false,
-            prompt_body: None,
-            response_body: None,
-            cache_status: None,
-            started_at_unix: Some(context.now_unix),
-            completed_at_unix: Some(context.now_unix),
-            parent_action_fingerprint: None,
-        });
-        write_json_error(
-            session,
-            context.rejection.status,
-            context.rejection.code,
-            context.rejection.message,
-            &context.ctx.request_id,
-        )
-        .await
+        let status = decision.status();
+        match &decision.workflow {
+            // Workflow denials carry the run/workflow attribution the workflow
+            // audit trail depends on, so they keep the richer log row they had
+            // before the extraction.
+            Some(workflow) => self.state.record_request_log(StoredRequestLog {
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                agent_run_id: Some(workflow.agent_run_id.clone()),
+                workflow_id: workflow.workflow_id.clone(),
+                workflow_version: workflow.workflow_version,
+                workflow_node_id: workflow.workflow_node_id.clone(),
+                cluster_id: None,
+                node_id: None,
+                tenant: decision.tenant.clone(),
+                route: Some(endpoint.route().into()),
+                provider: None,
+                logical_model: decision.logical_model.clone(),
+                provider_model: None,
+                gateway_config_id: workflow.gateway_config_id.clone(),
+                gateway_config_revision: workflow.gateway_config_revision,
+                status_code: status.as_u16(),
+                error_code: Some(decision.code().to_string()),
+                prompt_recorded: false,
+                response_recorded: false,
+                prompt_body: None,
+                response_body: None,
+                cache_status: None,
+                started_at_unix: Some(workflow.now_unix),
+                completed_at_unix: Some(workflow.now_unix),
+                parent_action_fingerprint: None,
+            }),
+            None => self.record_ai_error_log(
+                endpoint,
+                ctx,
+                AiErrorLog {
+                    tenant: decision.tenant.clone(),
+                    logical_model: decision.logical_model.as_deref(),
+                    provider: None,
+                    status,
+                    error_code: decision.code(),
+                },
+            ),
+        }
+        let code = decision.code().to_string();
+        if decision.close_connection {
+            write_json_error_and_close(session, status, code, decision.message, &ctx.request_id)
+                .await
+        } else {
+            write_json_error(session, status, code, decision.message, &ctx.request_id).await
+        }
     }
-}
-
-struct AiWorkflowRejectionContext<'a> {
-    endpoint: AiEndpoint,
-    ctx: &'a ProxyContext,
-    agent_run_id: &'a str,
-    workflow_id: Option<&'a str>,
-    workflow_version: Option<u32>,
-    workflow_node_id: Option<&'a str>,
-    auth: &'a AuthContext,
-    gateway_config: Option<&'a GatewayConfigUse>,
-    logical_model: &'a str,
-    now_unix: u64,
-    rejection: AiWorkflowRejection,
 }
 
 fn responses_stream_provider_kind(provider_kind: &str) -> ResponsesStreamProviderKind {
@@ -2270,7 +2184,7 @@ struct AiErrorLog<'a> {
 }
 
 #[derive(Debug)]
-struct AiRequestPlan {
+pub(super) struct AiRequestPlan {
     auth: AuthContext,
     agent_run_id: String,
     workflow_id: Option<String>,
@@ -2607,6 +2521,153 @@ pub(super) struct AiProviderRequestInput<'a> {
     pub(super) logical_model: String,
     pub(super) stream: bool,
     pub(super) body: serde_json::Value,
+}
+
+/// The outcome of the Session-side body read, handed to the decision as a
+/// *fact* (#470).
+///
+/// Reading the body is I/O and belongs to the handler; deciding what an
+/// over-cap body means is governance and belongs to the decision. Splitting
+/// them this way is what lets the conformance corpus drive the real decision
+/// function without a Pingora `Session`.
+pub(super) enum AiRequestBody {
+    Read(bytes::Bytes),
+    TooLarge { max_bytes: usize },
+}
+
+impl From<Box<AiRequestRejection>> for GovernedDecision {
+    fn from(rejection: Box<AiRequestRejection>) -> Self {
+        let AiRequestRejection {
+            tenant,
+            logical_model,
+            status,
+            code,
+            message,
+        } = *rejection;
+        GovernedDecision::deny(status, code, message, tenant, logical_model)
+    }
+}
+
+/// The admission half of the governed path as one value-returning function
+/// (#470) -- the `decide_ai_request` seam `docs/cloudflare-data-plane-decision.md`
+/// §8b names as the prerequisite for the conformance suite.
+///
+/// Covers steps 13-32 of §1 in production order and performs **no Session
+/// I/O**: the body arrives as an [`AiRequestBody`] fact. `handle_ai_request`
+/// calls the three stages separately because it must read the body from the
+/// Session between stages one and two, and spawn the shadow mirror between
+/// stages two and three -- both side effects that cannot influence the
+/// decision. So this is the *same* code path as production, not a second
+/// implementation of it, which is the whole point: a corpus that drives a
+/// replica proves nothing.
+///
+/// Steps 33-52 (guardrails, policy engine, cache, TPM consume, wallet hold,
+/// dispatch, billing, response-stage guardrails) are **not** covered; they are
+/// still written into the Session inside the per-candidate loop. See
+/// [`super::governed_decision::FixtureCoverage::PendingDispatchSeam`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) async fn decide_ai_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: AiRequestBody,
+    endpoint: AiEndpoint,
+    ctx: &ProxyContext,
+    now_unix: u64,
+) -> Result<AiRequestPlan, GovernedDecision> {
+    let ingress = decide_ai_ingress(state, headers, endpoint, ctx).await?;
+    let mut plan = decide_ai_plan(state, ingress, body, endpoint)?;
+    decide_ai_workflow_admission(state, &mut plan, now_unix).await?;
+    Ok(plan)
+}
+
+/// Steps 13-18: authenticate (four key sources) and `finalize_auth` (quota
+/// scope chain, monthly budget, prepaid wallet, RPM window), agent-run and
+/// workflow headers, gateway-config profile, drain check.
+async fn decide_ai_ingress(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint: AiEndpoint,
+    ctx: &ProxyContext,
+) -> Result<AiIngressPlan, GovernedDecision> {
+    build_ai_ingress_plan(state, headers, endpoint, ctx)
+        .await
+        .map_err(GovernedDecision::from)
+}
+
+/// Steps 19-30: body cap, JSON and typed parse, metadata bounds, per-key model
+/// allow/deny, model registry, external RBAC, tenant visibility, usage
+/// estimate, candidate routes, canary promotion, region fail-closed.
+fn decide_ai_plan(
+    state: &AppState,
+    ingress: AiIngressPlan,
+    body: AiRequestBody,
+    endpoint: AiEndpoint,
+) -> Result<AiRequestPlan, GovernedDecision> {
+    let body = match body {
+        AiRequestBody::Read(body) => body,
+        AiRequestBody::TooLarge { max_bytes } => {
+            return Err(GovernedDecision::deny(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!("request body exceeds maximum size of {max_bytes} bytes"),
+                ingress.auth.tenant_context(),
+                None,
+            )
+            .closing());
+        }
+    };
+    build_ai_request_plan(state, ingress, &body, endpoint).map_err(GovernedDecision::from)
+}
+
+/// Steps 31-32: workflow policy (13 denial codes) and the workflow provider
+/// constraint narrowing the candidate list.
+async fn decide_ai_workflow_admission(
+    state: &AppState,
+    plan: &mut AiRequestPlan,
+    now_unix: u64,
+) -> Result<(), GovernedDecision> {
+    let workflow_context = GovernedWorkflowContext {
+        agent_run_id: plan.agent_run_id.clone(),
+        workflow_id: plan.workflow_id.clone(),
+        workflow_version: plan.workflow_version,
+        workflow_node_id: plan.workflow_node_id.clone(),
+        gateway_config_id: plan
+            .gateway_config
+            .as_ref()
+            .map(|profile| profile.id.clone()),
+        gateway_config_revision: plan.gateway_config.as_ref().map(|profile| profile.revision),
+        now_unix,
+    };
+    let tenant = plan.auth.tenant_context();
+    let logical_model = plan.request.model.clone();
+    let deny = |rejection: AiWorkflowRejection| {
+        GovernedDecision::deny(
+            rejection.status,
+            rejection.code,
+            rejection.message,
+            tenant.clone(),
+            Some(logical_model.clone()),
+        )
+        .with_workflow(workflow_context.clone())
+    };
+    let constraint = enforce_ai_workflow_policy(
+        state,
+        AiWorkflowRequestContext {
+            auth: &plan.auth,
+            agent_run_id: &plan.agent_run_id,
+            workflow_id: plan.workflow_id.as_deref(),
+            workflow_version: plan.workflow_version,
+            workflow_node_id: plan.workflow_node_id.as_deref(),
+            workflow_iteration: plan.workflow_iteration,
+            logical_model: &plan.request.model,
+            estimated_usage: &plan.estimated_usage,
+            now_unix,
+        },
+    )
+    .await
+    .map_err(|rejection| deny(rejection))?;
+    apply_workflow_provider_constraint(constraint.as_ref(), &plan.request.model, &mut plan.routes)
+        .map_err(|rejection| deny(rejection))
 }
 
 async fn build_ai_ingress_plan(

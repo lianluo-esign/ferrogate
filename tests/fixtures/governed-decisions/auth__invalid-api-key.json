@@ -1,0 +1,71 @@
+{
+  "id": "auth/invalid-api-key",
+  "schema": 1,
+  "description": "A bearer token that matches no durable and no configured key is 401 invalid_api_key, never a silent fallthrough to the auth-disabled wildcard.",
+  "world": {
+    "config": {
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-1",
+          "name": "conformance key",
+          "key": "secret-1",
+          "scopes": [
+            "chat.completions",
+            "responses.create"
+          ],
+          "organization_id": "tenant-1",
+          "project_id": "project-1"
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer wrong-secret"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "deny",
+    "status": 401,
+    "code": "invalid_api_key",
+    "durable_writes": [
+      "request_log"
+    ],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [],
+    "expect": {
+      "schema": 1,
+      "outcome": "defer",
+      "status": 0
+    }
+  }
+}

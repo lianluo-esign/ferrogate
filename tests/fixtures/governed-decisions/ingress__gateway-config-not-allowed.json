@@ -1,0 +1,81 @@
+{
+  "id": "ingress/gateway-config-not-allowed",
+  "schema": 1,
+  "description": "A gateway-config profile restricted to other api keys is refused for this key; profile membership is a per-key authorisation, not a hint.",
+  "world": {
+    "config": {
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-1",
+          "name": "conformance key",
+          "key": "secret-1",
+          "scopes": [
+            "chat.completions",
+            "responses.create"
+          ],
+          "organization_id": "tenant-1",
+          "project_id": "project-1"
+        }
+      ],
+      "gateway_configs": [
+        {
+          "id": "profile-1",
+          "name": "p",
+          "api_key_ids": [
+            "key-2"
+          ]
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer secret-1",
+      "x-ferrogate-config": "profile-1"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "deny",
+    "status": 403,
+    "code": "gateway_config_not_allowed",
+    "durable_writes": [
+      "request_log"
+    ],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [],
+    "expect": {
+      "schema": 1,
+      "outcome": "defer",
+      "status": 0
+    }
+  }
+}

@@ -46,6 +46,12 @@ jobs:
     name: rust-ai-proxy-tests
     uses: ./.github/workflows/rust-ai-proxy-tests.yml
 
+  # #470: the authority and the veto-only Worker shell, over one committed
+  # corpus. Fails CI on divergence.
+  governed-decision-conformance:
+    name: governed-decision-conformance
+    uses: ./.github/workflows/governed-decision-conformance.yml
+
   cli-tooling-tests:
     name: rust-cli-tooling-tests
     uses: ./.github/workflows/rust-cli-tooling-tests.yml
@@ -76,6 +82,7 @@ jobs:
       - control-plane-tests
       - agentic-gateway-tests
       - ai-proxy-tests
+      - governed-decision-conformance
       - cli-tooling-tests
       - gateway-runtime
       - e2e-harness

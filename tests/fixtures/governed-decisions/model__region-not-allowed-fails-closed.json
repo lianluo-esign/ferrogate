@@ -1,0 +1,74 @@
+{
+  "id": "model/region-not-allowed-fails-closed",
+  "schema": 1,
+  "description": "A region-constrained tenant with no surviving candidate route is denied with a named reason (#173) rather than falling through to an empty route list.",
+  "world": {
+    "config": {
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-1",
+          "name": "conformance key",
+          "key": "secret-1",
+          "scopes": [
+            "chat.completions",
+            "responses.create"
+          ],
+          "organization_id": "tenant-1",
+          "project_id": "project-1",
+          "region_allowlist": [
+            "eu-west-1"
+          ]
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer secret-1"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "deny",
+    "status": 403,
+    "code": "region_not_allowed",
+    "durable_writes": [
+      "request_log"
+    ],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [],
+    "expect": {
+      "schema": 1,
+      "outcome": "defer",
+      "status": 0
+    }
+  }
+}

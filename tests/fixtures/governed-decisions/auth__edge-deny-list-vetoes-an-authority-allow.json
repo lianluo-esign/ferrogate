@@ -1,0 +1,71 @@
+{
+  "id": "auth/edge-deny-list-vetoes-an-authority-allow",
+  "schema": 1,
+  "description": "The authority admits this request; the operator has revoked the presented credential at the edge by SHA-256 hash. The veto-only shell may turn an allow into a deny, and this pins that direction -- and only that direction.",
+  "world": {
+    "config": {
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-1",
+          "name": "conformance key",
+          "key": "secret-1",
+          "scopes": [
+            "chat.completions",
+            "responses.create"
+          ],
+          "organization_id": "tenant-1",
+          "project_id": "project-1"
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer secret-1"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "allow",
+    "status": 200,
+    "durable_writes": [],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [
+      "f7e7c36e458e80e6b6a2c67d0a9ec09bd718dadd7bfa8d6bf6e7ad526e46c2f7"
+    ],
+    "expect": {
+      "schema": 1,
+      "outcome": "deny",
+      "status": 401,
+      "code": "invalid_api_key"
+    }
+  }
+}

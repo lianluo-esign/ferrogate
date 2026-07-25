@@ -1,0 +1,85 @@
+{
+  "id": "workflow/node-is-not-a-model-node",
+  "schema": 1,
+  "description": "Only model nodes may dispatch model traffic; a tool node attempting a completion is a policy violation, not a routing accident.",
+  "world": {
+    "config": {
+      "providers": [
+        {
+          "name": "primary",
+          "kind": "openai-compatible",
+          "base_url": "https://provider.invalid/v1",
+          "region": "us-east-1"
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-chat",
+          "provider": "primary",
+          "provider_model": "gpt-4o-mini"
+        }
+      ],
+      "api_keys": [
+        {
+          "id": "key-1",
+          "name": "conformance key",
+          "key": "secret-1",
+          "scopes": [
+            "chat.completions",
+            "responses.create"
+          ],
+          "organization_id": "tenant-1",
+          "project_id": "project-1"
+        }
+      ],
+      "agent_workflows": [
+        {
+          "id": "wf-1",
+          "name": "workflow one",
+          "nodes": [
+            {
+              "id": "node-1",
+              "kind": "tool"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "request": {
+    "endpoint": "chat.completions",
+    "headers": {
+      "authorization": "Bearer secret-1",
+      "x-ferrogate-workflow-id": "wf-1",
+      "x-ferrogate-workflow-node-id": "node-1"
+    },
+    "now_unix": 1784937600,
+    "body": {
+      "model": "fast-chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "schema": 1,
+    "outcome": "deny",
+    "status": 403,
+    "code": "workflow_node_not_model",
+    "durable_writes": [
+      "request_log"
+    ],
+    "audit_events": []
+  },
+  "worker_shell": {
+    "deny_list": [],
+    "expect": {
+      "schema": 1,
+      "outcome": "defer",
+      "status": 0
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "ferrogate-gateway-front",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FerroGate gateway-front Worker: the veto-only shell in front of the container-hosted Pingora data plane (issue #470), plus Runner B of the governed-decision conformance suite.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.8",
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "typescript": "5.5.4",
+    "vitest": "4.1.10",
+    "wrangler": "4.114.0"
+  }
+}

@@ -30,6 +30,21 @@ mod embeddings;
 mod external_actions;
 mod function_egress;
 mod function_egress_cloudflare;
+/// #470: the governed decision as a value, its error vocabulary, and the
+/// directional-conformance predicate for a veto-only second host.
+///
+/// The vocabulary table and the conformance predicates are the *contract* the
+/// corpus is graded against; they are consumed by the conformance suite rather
+/// than by the proxy hot path, so a release build sees them as dead. They are
+/// deliberately kept in production source (not behind `#[cfg(test)]`) so the
+/// stage/coverage decision for every governed code is reviewable next to the
+/// code that produces it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod governed_decision;
+/// #470 Runner A: the committed governed-decision corpus driven through the
+/// real admission seam, with the error-vocabulary coverage gate.
+#[cfg(test)]
+mod governed_decision_conformance_test;
 mod guardrail_policies;
 mod handlers;
 mod images;

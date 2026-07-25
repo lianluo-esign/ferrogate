@@ -701,6 +701,27 @@ still up), shim round-trip latency (P7b repeated),
 and the DO duration line on the next billing/usage report after streaming
 ~1k requests (validates or refutes the §7 estimate).
 
+**P9 — warm-start amortisation (#470).** The one measurement
+[`cloudflare-data-plane-decision.md`](cloudflare-data-plane-decision.md) §4b's
+central claim stands or falls on: that the verified 1–3 s container cold start
+is **off the request path** for the tethered agent loop, because the gateway
+container is started at agent-run admission in parallel with the agent's own
+container (#415's `POST /container/prepare` + `/container/start`).
+
+Procedure: start a gateway container through the admission path, and record the
+interval between `/container/start` returning and the first
+`/v1/chat/completions` through that instance completing. Repeat cold (no warm
+instance) and warm (instance already running, within `sleepAfter`). Report how
+much of the cold-start window the parallel start actually hides — i.e. the
+residual a caller still waits on after admission. A residual materially above
+zero refutes §4b's amortisation argument and, per that record's §7, means
+Option B needs re-costing for the tethered loop.
+
+This step is the reason #470's AC3 ("a *measured* cold-start + p50/p99 figure")
+is an operator task rather than a developer one: like P1–P8 it needs Docker, a
+live Cloudflare account on Workers Paid, and a deployed Containers application
+simultaneously.
+
 ## 10. Verified sources
 
 All fetched 2026-07-24; the outbound/Wrangler entries re-verified 2026-07-25
