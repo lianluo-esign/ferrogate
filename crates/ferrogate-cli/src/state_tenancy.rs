@@ -74,6 +74,22 @@ impl AppState {
             .await?)
     }
 
+    /// Durable per-agent cost-burn rows for `period`, biggest accumulated total
+    /// first (#428 slice B-surface). `tenant_scope = Some(tenant_id)` restricts
+    /// to that tenant so a tenant-scoped admin surface can never read another
+    /// tenant's burn; `None` is the platform-operator cross-tenant view. Backs
+    /// the `GET /admin/v1/agent-cost-burn` observability read.
+    pub(crate) async fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> anyhow::Result<Vec<ferrogate_storage::StoredAgentCostBurn>> {
+        Ok(self
+            .repositories
+            .list_agent_cost_burn(tenant_scope, period)
+            .await?)
+    }
+
     pub(crate) async fn get_project(&self, id: &str) -> anyhow::Result<Option<StoredProject>> {
         Ok(self.repositories.get_project(id).await?)
     }

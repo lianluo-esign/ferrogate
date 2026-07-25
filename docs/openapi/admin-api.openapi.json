@@ -12464,6 +12464,63 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/agent-cost-burn": {
+      "get": {
+        "operationId": "listAdminAgentCostBurn",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List tenant-scoped durable per-agent runtime cost-burn for a billing period.",
+        "description": "Surfaces the durable, accumulating per-agent runtime cost-burn (#428) in the observability/billing admin surface. One row per (tenant_id, agent_key, period): accumulated_usd folds every run of the stable agent key inside the YYYY-MM billing window, so CF-hosted-agent runtime cost is visible per tenant/agent. Optional period=YYYY-MM query selects the billing window (default: the current UTC month). Tenant-isolated: a tenant-scoped admin sees only its own tenant's burn; the platform operator sees all. Read-only surfacing -- enforcement of the per-agent ceiling is a separate concern -- so a durable-store failure is reported as service_unavailable, never a fabricated empty (zero-burn) list.",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "description": "Billing window as YYYY-MM (UTC). Defaults to the current month when omitted or malformed.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated durable per-agent cost-burn rows for the period, biggest accumulated total first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentCostBurnList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -25704,6 +25761,78 @@
             }
           }
         ]
+      },
+      "AdminAgentCostBurnList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentCostBurn"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentCostBurn": {
+        "type": "object",
+        "description": "One durable per-agent cost-burn row: the runtime cost accumulated by a stable agent key within a billing period.",
+        "required": [
+          "tenant_id",
+          "agent_key",
+          "period",
+          "accumulated_usd",
+          "updated_at_unix"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "description": "Owning tenant. A tenant-scoped admin only ever sees its own tenant's rows."
+          },
+          "agent_key": {
+            "type": "string",
+            "description": "Stable per-agent identity (the agent/deployment key), NOT a per-run id: every run of this agent inside the period folds into this row's total."
+          },
+          "period": {
+            "type": "string",
+            "description": "Billing window this accumulated total covers, as YYYY-MM (UTC).",
+            "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+          },
+          "accumulated_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Total USD runtime cost accumulated for this (tenant, agent, period)."
+          },
+          "updated_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the most recent burn increment folded into this row."
+          }
+        },
+        "additionalProperties": false
       },
       "AdminObservedAgentActivityList": {
         "type": "object",

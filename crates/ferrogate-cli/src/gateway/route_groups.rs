@@ -45,6 +45,7 @@ pub(super) enum RouteGroup {
     AdminConfigOps,
     AdminProvider,
     AdminManagedWorker,
+    AdminAgentCostBurn,
     AdminAgentUpstream,
     AdminPlugin,
     AdminTool,
@@ -84,6 +85,7 @@ impl RouteGroup {
             "admin_config_ops" => Self::AdminConfigOps,
             "admin_provider" => Self::AdminProvider,
             "admin_managed_worker" => Self::AdminManagedWorker,
+            "admin_agent_cost_burn" => Self::AdminAgentCostBurn,
             "admin_agent_upstream" => Self::AdminAgentUpstream,
             "admin_plugin" => Self::AdminPlugin,
             "admin_tool" => Self::AdminTool,
@@ -145,6 +147,10 @@ impl FerroGateway {
             RouteGroup::AdminProvider => self.try_admin_provider_routes(session, ctx, req).await,
             RouteGroup::AdminManagedWorker => {
                 self.try_admin_managed_worker_routes(session, ctx, req)
+                    .await
+            }
+            RouteGroup::AdminAgentCostBurn => {
+                self.try_admin_agent_cost_burn_routes(session, ctx, req)
                     .await
             }
             RouteGroup::AdminAgentUpstream => {
@@ -566,6 +572,26 @@ impl FerroGateway {
         }
         if req.path == "/admin/v1/observed-agent-activity" {
             self.handle_admin_observed_agent_activity(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_admin_agent_cost_burn_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/agent-cost-burn" {
+            self.handle_admin_agent_cost_burn(
                 session,
                 ctx,
                 &req.headers,

@@ -634,6 +634,16 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         agent_key: &str,
         period: &str,
     ) -> Result<Option<f64>, StorageError>;
+    /// List the durable per-agent burn rows for `period`, newest-total first,
+    /// optionally scoped to one tenant (#428, slice B-surface). `tenant_scope =
+    /// Some(tenant_id)` restricts to that tenant so a tenant-scoped admin never
+    /// sees another tenant's burn; `None` is the platform-operator cross-tenant
+    /// view. Read-only surfacing for the observability/billing admin API.
+    async fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> Result<Vec<StoredAgentCostBurn>, StorageError>;
 
     // Budget-alert idempotency ledger (#170).
     async fn record_budget_alert_notification(

@@ -1779,6 +1779,17 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .get_agent_burn(tenant_id, agent_key, period))
     }
 
+    async fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> Result<Vec<StoredAgentCostBurn>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent cost burn repository lock poisoned".into()))?
+            .list_agent_cost_burn(tenant_scope, period))
+    }
+
     async fn record_budget_alert_notification(
         &self,
         notification: StoredBudgetAlertNotification,

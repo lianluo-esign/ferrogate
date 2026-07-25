@@ -582,6 +582,14 @@ impl ControlPlaneStore for D1ControlPlaneStore {
         Err(unimplemented_surface("get_agent_burn"))
     }
 
+    async fn list_agent_cost_burn(
+        &self,
+        _tenant_scope: Option<&str>,
+        _period: &str,
+    ) -> Result<Vec<StoredAgentCostBurn>, StorageError> {
+        Err(unimplemented_surface("list_agent_cost_burn"))
+    }
+
     // --- API keys (IMPLEMENTED) ---
 
     async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {

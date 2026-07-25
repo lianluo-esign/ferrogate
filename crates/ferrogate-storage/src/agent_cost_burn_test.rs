@@ -165,6 +165,51 @@ fn concurrent_adds_never_lose_an_increment() {
 }
 
 #[test]
+fn list_agent_cost_burn_is_tenant_scoped_period_filtered_and_total_ordered() {
+    let repositories = memory_repositories();
+    // Two tenants, two periods, several agents.
+    block_on(repositories.add_agent_burn("tenant-a", "agent-1", "2026-07", 3.0)).expect("a1/jul");
+    block_on(repositories.add_agent_burn("tenant-a", "agent-2", "2026-07", 9.0)).expect("a2/jul");
+    block_on(repositories.add_agent_burn("tenant-a", "agent-1", "2026-08", 5.0)).expect("a1/aug");
+    block_on(repositories.add_agent_burn("tenant-b", "agent-9", "2026-07", 100.0)).expect("b9/jul");
+
+    // Tenant-scoped read: only tenant-a's July rows, biggest total first.
+    let scoped = block_on(repositories.list_agent_cost_burn(Some("tenant-a"), "2026-07"))
+        .expect("scoped list");
+    assert_eq!(scoped.len(), 2, "only tenant-a's July rows");
+    assert!(
+        scoped.iter().all(|row| row.tenant_id == "tenant-a"),
+        "RBAC no-leak: a tenant-scoped list never returns another tenant's burn",
+    );
+    assert_eq!(scoped[0].agent_key, "agent-2", "biggest accumulated first");
+    assert_close(scoped[0].accumulated_usd, 9.0, "agent-2 total");
+    assert_eq!(scoped[1].agent_key, "agent-1");
+    assert_close(scoped[1].accumulated_usd, 3.0, "agent-1 total");
+
+    // Period isolation: August is a separate accumulator window.
+    let august = block_on(repositories.list_agent_cost_burn(Some("tenant-a"), "2026-08"))
+        .expect("august list");
+    assert_eq!(august.len(), 1);
+    assert_eq!(august[0].period, "2026-08");
+    assert_close(august[0].accumulated_usd, 5.0, "agent-1 August total");
+
+    // Operator (None scope): the cross-tenant July view, tenant-b's 100 first.
+    let operator =
+        block_on(repositories.list_agent_cost_burn(None, "2026-07")).expect("operator list");
+    assert_eq!(operator.len(), 3, "both tenants' July rows");
+    assert_eq!(
+        operator[0].tenant_id, "tenant-b",
+        "biggest total across tenants"
+    );
+    assert_close(operator[0].accumulated_usd, 100.0, "tenant-b total");
+
+    // A period with no rows lists empty (never a fabricated row).
+    let empty = block_on(repositories.list_agent_cost_burn(Some("tenant-a"), "2026-01"))
+        .expect("empty list");
+    assert!(empty.is_empty(), "an un-burned period lists no rows");
+}
+
+#[test]
 fn burn_key_is_length_prefixed_and_collision_safe() {
     // The length prefix on each variable segment keeps a crafted triple from
     // aliasing another -- e.g. ("a", "b", "c:d") must not collide with

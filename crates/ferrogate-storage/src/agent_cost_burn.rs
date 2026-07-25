@@ -47,14 +47,12 @@ pub fn agent_cost_burn_key(tenant_id: &str, agent_key: &str, period: &str) -> St
     )
 }
 
-// Full column list + row mapper are the scaffolding for a future full-row
-// fetch/list surface; the atomic add/get paths only touch `accumulated_usd`, so
-// both are dead until that lands (mirrors the `agent_cost_burn_from_row` allow).
-#[allow(dead_code)]
+// Full column list + row mapper back the #428 slice-B-surface list read
+// (`list_agent_cost_burn`); the atomic add/get paths only touch
+// `accumulated_usd`.
 const AGENT_COST_BURN_COLUMNS: &str =
     "tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix";
 
-#[allow(dead_code)]
 fn agent_cost_burn_from_row(row: &PostgresRow) -> StoredAgentCostBurn {
     StoredAgentCostBurn {
         tenant_id: row.get::<_, String>(0),
@@ -149,6 +147,44 @@ impl PostgresControlPlaneStore {
         transaction.commit().await.map_err(postgres_error)?;
         Ok(row.map(|row| row.get::<_, f64>(0)))
     }
+
+    /// List the durable per-agent burn rows for `period`, biggest accumulated
+    /// total first, optionally scoped to one tenant (#428 slice B-surface). The
+    /// `$1::TEXT IS NULL OR tenant_id = $1` filter serves both the tenant-scoped
+    /// admin read (a bound tenant) and the platform-operator cross-tenant view
+    /// (a NULL scope) from one prepared statement, mirroring the guardrail
+    /// evidence list. Read-only: it never writes or fabricates a row.
+    pub(super) async fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> Result<Vec<StoredAgentCostBurn>, StorageError> {
+        let operation = self.agent_cost_burn_operation("list agent cost burn");
+        let mut client = self
+            .async_pool
+            .acquire(operation.name(), operation.remaining("pool acquisition")?)
+            .await?;
+        let transaction = client.transaction().await.map_err(postgres_error)?;
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        let rows = transaction
+            .query(
+                &format!(
+                    "SELECT {AGENT_COST_BURN_COLUMNS} FROM agent_cost_burn \
+                     WHERE ($1::TEXT IS NULL OR tenant_id = $1) AND period = $2 \
+                     ORDER BY accumulated_usd DESC, tenant_id ASC, agent_key ASC"
+                ),
+                &[&tenant_scope, &period],
+            )
+            .await
+            .map_err(postgres_error)?;
+        transaction.commit().await.map_err(postgres_error)?;
+        Ok(rows.iter().map(agent_cost_burn_from_row).collect())
+    }
 }
 
 impl RuntimeControlPlaneState {
@@ -200,6 +236,33 @@ impl RuntimeControlPlaneState {
             .get(&agent_cost_burn_key(tenant_id, agent_key, period))
             .map(|row| row.accumulated_usd)
     }
+
+    /// In-memory analogue of [`PostgresControlPlaneStore::list_agent_cost_burn`]:
+    /// filter the burn map to `period` (and `tenant_scope` when set), biggest
+    /// accumulated total first. The tenant-scope filter is the isolation
+    /// boundary -- a tenant-scoped caller can never observe another tenant's row.
+    pub(super) fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> Vec<StoredAgentCostBurn> {
+        let mut rows: Vec<_> = self
+            .agent_cost_burn
+            .list()
+            .into_iter()
+            .filter(|row| row.period == period)
+            .filter(|row| tenant_scope.is_none_or(|scope| row.tenant_id == scope))
+            .collect();
+        rows.sort_by(|left, right| {
+            right
+                .accumulated_usd
+                .partial_cmp(&left.accumulated_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.tenant_id.cmp(&right.tenant_id))
+                .then_with(|| left.agent_key.cmp(&right.agent_key))
+        });
+        rows
+    }
 }
 
 impl RuntimeStorageRepositories {
@@ -231,6 +294,23 @@ impl RuntimeStorageRepositories {
         self.control_plane
             .store()
             .get_agent_burn(tenant_id, agent_key, period)
+            .await
+    }
+
+    /// List the durable per-agent burn rows for `period`, biggest accumulated
+    /// total first, optionally scoped to one tenant (#428 slice B-surface).
+    /// `tenant_scope = Some(tenant_id)` restricts to that tenant so a
+    /// tenant-scoped admin surface never sees another tenant's burn; `None` is
+    /// the platform-operator cross-tenant view. Read-only surfacing for the
+    /// observability/billing admin API.
+    pub async fn list_agent_cost_burn(
+        &self,
+        tenant_scope: Option<&str>,
+        period: &str,
+    ) -> Result<Vec<StoredAgentCostBurn>, StorageError> {
+        self.control_plane
+            .store()
+            .list_agent_cost_burn(tenant_scope, period)
             .await
     }
 }
