@@ -61,6 +61,51 @@ produces:
 
 Plus `AGENTS.md` commit hygiene: issue-referenced subject, Lore trailers.
 
+### What this actually catches — evidence from the first full cycle
+
+42 items reviewed on 2026-07-25 (15 passed, 27 bounced). The bounce rate is high
+**by design**: the dev agent runs in speed mode and keeps only `cargo build`, so
+`cargo test`, `clippy -D warnings`, `check-openapi.py` and `check-module-layout.py`
+findings all land here. Running those four is cheap and worth doing every time.
+
+Four failure modes produced most of the bounces. Hunt them by name:
+
+1. **The code asserts a primitive it never calls.** #414's `cancel()` claimed a
+   fiber cancel that was a commented-out example; #427 documented a `SQLITE_FULL`
+   prune whose target table nothing writes; #409's secrets seam was landed and
+   unused. In each case the README, the docs *and* a Rust mapping table all
+   asserted the opposite of the code. **Trace every claimed capability to a real
+   call site.** The cost of missing one is not cosmetic: #414's no-op `cancel` was
+   the route #428's cost governor used to kill a runaway agent.
+2. **The test proves the mock, not the contract.** #343's single hand-written
+   fixture backed both the vitest and Playwright suites and encoded a payload shape
+   the gateway does not emit — both suites green, product broken. **Weight a test
+   by what it would fail on.** Ask: if the implementation were wrong, would this
+   assertion notice? If the fixture is hand-written, is it derived from the real
+   type?
+3. **An acceptance box with no artifact at all**, disclosed only in a handoff
+   comment. #472 (nothing materializes a repo), #474 (`/result` can never return
+   because nothing advances the run status). Disclosure is the right instinct but
+   **does not tick the box** — the fix is to edit the issue or file the split, not
+   to note it in a comment.
+4. **Missing data rendered as a confident value.** #343 showed `0 / 12` for twelve
+   healthy workers and a literal `NaN`; #345 printed a cache policy of `default`
+   when the manifest was merely unavailable. Grep the diff for `?? 0`, `|| 0` and
+   similar coalescing on anything that is a measurement.
+
+Two second-order lessons worth carrying:
+
+- **A defect can be invisible to every repo-wide sweep.** #344 embedded two NUL
+  bytes in a `.tsx` file, so git classified it binary and `grep`/`ripgrep` skipped
+  it silently — quietly shrinking every coverage claim ever made about that file.
+  When a sweep returns suspiciously few hits, check whether the file is text
+  (`git grep -Il ''`).
+- **A bounce can be undone by a commit trailer.** #417 was bounced to Ready with
+  findings, then auto-closed by a `Closes #417` trailer on the same issue's commit,
+  so the rework was never visible. **After bouncing, it is worth confirming the
+  issue is still open.** Tell the dev agent to prefer `Refs #<n>` until an item
+  actually passes.
+
 ### Depth and stop condition — read, don't rebuild
 
 Default to **static verification**: read the code and read the tests. This
