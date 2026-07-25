@@ -40,6 +40,12 @@
 //     spend stablecoin for free). A merchant-reported failure header is NOT
 //     on-chain proof, so it too parks unknown; the definite FAIL/RELEASE edges
 //     are reserved for the on-chain reconciler (remaining #381 work).
+//   * The AMOUNT is verified before the hold is captured. A merchant claiming
+//     success is never taken at its word about how much it settled: the reported
+//     amount is compared against the owed `atomic_amount` on parsed integers,
+//     through the SAME shared comparison the on-chain reconciler applies
+//     (#469/#476). A report SHORT of what is owed -- or one that omits the amount
+//     entirely -- parks `outcome_unknown` instead of capturing.
 //   * Attribution + evidence preserved. Request/trace ids flow into the durable
 //     attempt, and every terminal path returns the policy decision, the attempt
 //     id, and the settlement edge outcome as inspectable evidence.
@@ -62,7 +68,8 @@ use ferrogate_policy::{
 use ferrogate_storage::StorageError;
 
 use super::state_x402_settlement::{
-    EdgeOutcome, OpenOutcome, PaidEgressOpen, SettlementEvidence, X402SettlementLoop,
+    classify_settled_amount, AmountCoverage, EdgeOutcome, OpenOutcome, PaidEgressOpen,
+    SettlementEvidence, X402SettlementLoop,
 };
 
 /// HTTP status a paid-egress upstream returns to demand payment.
@@ -581,18 +588,93 @@ fn build_open(
     }
 }
 
+/// How the merchant's REPORTED settled amount compares to what is owed. Only
+/// [`Self::Covers`] may drive a capture; the other two are money-safety parks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReportedAmount {
+    /// The reported amount COVERS what is owed (`settled >= owed`, exact or a
+    /// spec-valid overpayment). Carries the amount actually OBSERVED (never the
+    /// owed amount) so the durable evidence stays honest, plus the excess when
+    /// the report exceeded what was owed.
+    Covers {
+        settled_atomic_amount: String,
+        overpayment_atomic_amount: Option<String>,
+    },
+    /// The merchant reported LESS than what is owed (or an amount that does not
+    /// parse as a canonical atomic value). Fail-closed: never captures.
+    Short { observed_atomic_amount: String },
+    /// The merchant reported success but NO amount at all. Fail-closed: never
+    /// captures. (Before #476 this silently assumed the owed amount had been
+    /// paid, which let an amount-less success claim capture the full hold.)
+    Absent,
+}
+
+/// Classify the merchant-reported settled amount against what is owed, deferring
+/// the comparison itself to [`classify_settled_amount`] -- the SAME `u128` parse
+/// and `settled >= owed` test the on-chain reconciler applies (#469), so the two
+/// paths that can capture a hold cannot drift apart again (#476).
+///
+/// Both inputs here are already integers (the frozen #350 wire parse yields `u64`
+/// on each side, and rejects a non-canonical amount before it ever reaches this
+/// function), so the shared string comparison can never see garbage on this path.
+/// It is used regardless: the point is that ONE function decides "does this cover
+/// what is owed", not that this path needs the parse.
+fn classify_reported_amount(
+    owed_atomic_amount: &str,
+    reported_atomic_amount: Option<u64>,
+) -> ReportedAmount {
+    let Some(reported) = reported_atomic_amount else {
+        return ReportedAmount::Absent;
+    };
+    let observed = reported.to_string();
+    match classify_settled_amount(owed_atomic_amount, &observed) {
+        AmountCoverage::Covers {
+            overpayment_atomic_amount,
+        } => ReportedAmount::Covers {
+            settled_atomic_amount: observed,
+            overpayment_atomic_amount,
+        },
+        AmountCoverage::Short => ReportedAmount::Short {
+            observed_atomic_amount: observed,
+        },
+    }
+}
+
 /// Reduce a paid replay's `PAYMENT-RESPONSE` header (if any) to a settlement
 /// edge and drive the loop's finalize.
 ///
-/// Trust discipline for THIS slice (no on-chain reconciler yet): the ONLY
-/// evidence that drives the definite SETTLE edge (capture the hold) is a
-/// successful settlement header carrying a valid on-chain transaction signature.
-/// Everything else -- a missing header, a parse failure, a success flag without
-/// a signature, or a merchant-reported failure -- is ambiguous and parks the
-/// attempt `outcome_unknown` with the hold RETAINED. A merchant header claiming
-/// failure is not on-chain proof, so it must never trigger a release that could
-/// spend stablecoin for free; the definite FAIL/RELEASE edges belong to the
-/// on-chain reconciler (remaining #381 work).
+/// Trust discipline: the ONLY evidence that drives the definite SETTLE edge
+/// (capture the tenant's wallet hold) is a successful settlement header that
+/// carries BOTH a valid on-chain transaction signature AND a reported settled
+/// amount that COVERS the owed `atomic_amount` -- verified on parsed integers via
+/// the shared [`classify_settled_amount`], exactly as the on-chain reconciler
+/// verifies a confirmed transfer (#469/#476). Everything else -- a missing
+/// header, a parse failure, a success flag without a signature, a merchant-
+/// reported failure, a reported amount SHORT of what is owed, or a success claim
+/// that omits the amount entirely -- is ambiguous and parks the attempt
+/// `outcome_unknown` with the hold RETAINED.
+///
+/// Why underpayment and an ABSENT amount park rather than fail: the FAIL edge
+/// RELEASES the hold, and a merchant claim is not on-chain proof in either
+/// direction. A short/absent report may still correspond to a full transfer that
+/// did land on-chain, so releasing here could spend stablecoin for free -- the
+/// same reason a merchant-reported failure has never driven a release. Parking is
+/// the outcome that composes with the rest of the machine: the #354 reconciler
+/// picks up exactly `submitted`/`outcome_unknown` attempts and resolves them
+/// against the chain (authoritative), the TTL sweeper deliberately never touches
+/// them, and the signature (when the header carried one) is persisted at this
+/// park CAS (#399) so the reconciler can query the chain from storage alone.
+/// A definite FAIL/RELEASE therefore stays the on-chain reconciler's to drive.
+///
+/// NOT changed here (deliberately, and the residual risk of this path): a report
+/// that COVERS the owed amount still settles inline on the merchant's word. The
+/// chain is authoritative, but no on-chain RPC client is bound yet
+/// (`UnboundOnChainRpc`), so deferring every capture to the reconciler today
+/// would strand every paid attempt in `outcome_unknown` indefinitely -- the
+/// sweeper never releases a post-submission hold. Verifying the amount removes
+/// the "claim success, pay less, capture in full" hole; moving capture behind
+/// on-chain confirmation is the separate design change that needs the live RPC
+/// transport first (#354).
 async fn finalize_settlement(
     loop_: &X402SettlementLoop,
     attempt_id: &str,
@@ -602,19 +684,50 @@ async fn finalize_settlement(
 ) -> Result<EdgeOutcome, StorageError> {
     let parsed =
         payment_response.and_then(|header| parse_payment_response(header, selected.network).ok());
-    let fallback_atomic = selected.atomic_amount.to_string();
-    let settled_amount = parsed
-        .as_ref()
-        .and_then(|evidence| evidence.settled_amount.map(|amount| amount.to_string()));
+    let owed_atomic_amount = selected.atomic_amount.to_string();
 
-    let evidence = match parsed.as_ref() {
-        Some(evidence) if evidence.success && evidence.transaction_signature.is_some() => {
+    // A merchant report is only a SETTLE candidate when it claims success AND
+    // carries an on-chain signature; only then is its amount worth comparing.
+    let claimed = parsed
+        .as_ref()
+        .filter(|evidence| evidence.success && evidence.transaction_signature.is_some());
+    let reported = claimed
+        .map(|evidence| classify_reported_amount(&owed_atomic_amount, evidence.settled_amount));
+
+    let evidence = match (claimed, reported.as_ref()) {
+        (
+            Some(claimed),
+            Some(ReportedAmount::Covers {
+                settled_atomic_amount,
+                overpayment_atomic_amount,
+            }),
+        ) => {
+            if let Some(excess) = overpayment_atomic_amount.as_deref() {
+                // Spec-valid overpayment: the hold captures only the amount it
+                // reserved (the owed amount -- `settle_wallet_reservation` takes
+                // no amount argument), so the excess is never captured. Logged so
+                // an overpaid settle stays distinguishable from an exact one,
+                // mirroring the reconciler (#469).
+                tracing::info!(
+                    attempt_id,
+                    owed = %owed_atomic_amount,
+                    settled = %settled_atomic_amount,
+                    excess = %excess,
+                    "x402 finalize: merchant reported an OVERPAYMENT (spec-valid, settled > \
+                     owed); settling with the hold capturing the owed amount only"
+                );
+            }
             SettlementEvidence::Settled {
-                transaction_signature: evidence
+                transaction_signature: claimed
                     .transaction_signature
                     .as_deref()
                     .expect("checked is_some above"),
-                settled_atomic_amount: settled_amount.as_deref().unwrap_or(&fallback_atomic),
+                // The amount OBSERVED in the merchant report, never the owed
+                // amount: an overpaid settlement therefore persists a
+                // `settled_atomic_amount` that differs from the attempt's
+                // `atomic_amount`, keeping the two cases distinguishable in the
+                // durable row (#469/#476).
+                settled_atomic_amount,
                 response: payment_response,
             }
         }
@@ -624,12 +737,34 @@ async fn finalize_settlement(
         // resolve the attempt from storage instead of re-parsing the untrusted
         // header every tick -- the earliest edge a signature is known that is not
         // a settle.
-        _ => SettlementEvidence::Unknown {
-            response: payment_response,
-            transaction_signature: parsed
-                .as_ref()
-                .and_then(|evidence| evidence.transaction_signature.as_deref()),
-        },
+        _ => {
+            match reported.as_ref() {
+                Some(ReportedAmount::Short {
+                    observed_atomic_amount,
+                }) => tracing::warn!(
+                    attempt_id,
+                    owed = %owed_atomic_amount,
+                    observed = %observed_atomic_amount,
+                    "x402 finalize: merchant claimed success for LESS than the owed amount; \
+                     NOT capturing the hold, parking outcome_unknown for on-chain \
+                     reconciliation (fail-closed)"
+                ),
+                Some(ReportedAmount::Absent) => tracing::warn!(
+                    attempt_id,
+                    owed = %owed_atomic_amount,
+                    "x402 finalize: merchant claimed success but reported NO settled amount; \
+                     NOT assuming the owed amount was paid, parking outcome_unknown for \
+                     on-chain reconciliation (fail-closed)"
+                ),
+                _ => {}
+            }
+            SettlementEvidence::Unknown {
+                response: payment_response,
+                transaction_signature: parsed
+                    .as_ref()
+                    .and_then(|evidence| evidence.transaction_signature.as_deref()),
+            }
+        }
     };
     loop_.finalize(attempt_id, &evidence, now_unix).await
 }

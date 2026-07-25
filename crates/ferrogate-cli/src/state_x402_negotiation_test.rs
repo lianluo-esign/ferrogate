@@ -9,7 +9,12 @@
 // typed failure; a second 402 after paying is a typed failure that never loops
 // and parks outcome_unknown (hold retained); a 2xx paid replay with ambiguous
 // settlement evidence parks outcome_unknown; insufficient funds never reaches
-// the signer; signer refusal releases the pre-submission hold.
+// the signer; signer refusal releases the pre-submission hold. Also pins the
+// #476 money-safety rule that the hold is only ever captured once the
+// merchant-REPORTED settled amount is proven to COVER the owed amount on parsed
+// integers -- underpayment, an omitted amount, and an unparseable amount all
+// park instead of capturing, while a spec-valid overpayment settles and still
+// captures only the owed hold.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,7 +111,8 @@ fn fee_payer() -> String {
 // x402 wire artifacts
 // --------------------------------------------------------------------------
 
-fn payment_required_header() -> String {
+/// A 402 challenge demanding exactly `owed_atomic_amount` (canonical decimal).
+fn payment_required_header_for(owed_atomic_amount: &str) -> String {
     let object = json!({
         "x402Version": 2,
         "resource": { "url": RESOURCE_URL },
@@ -114,7 +120,7 @@ fn payment_required_header() -> String {
             "scheme": "exact",
             "network": CAIP2_SOLANA_DEVNET,
             "asset": mint(),
-            "amount": "1000",
+            "amount": owed_atomic_amount,
             "payTo": recipient(),
             "maxTimeoutSeconds": 600,
             "extra": { "feePayer": fee_payer() }
@@ -123,20 +129,46 @@ fn payment_required_header() -> String {
     BASE64_STD.encode(serde_json::to_vec(&object).expect("serialize challenge"))
 }
 
-fn settled_payment_response() -> String {
-    let object = json!({
+fn payment_required_header() -> String {
+    payment_required_header_for("1000")
+}
+
+/// A merchant `PAYMENT-RESPONSE` claiming success with a valid on-chain
+/// signature, reporting `amount` verbatim (a JSON value so a test can supply a
+/// non-canonical / non-string / omitted amount).
+fn settled_payment_response_with_amount(amount: Option<serde_json::Value>) -> String {
+    let mut object = json!({
         "success": true,
         "network": CAIP2_SOLANA_DEVNET,
         "transaction": signature(),
-        "amount": "1000",
     });
+    if let Some(amount) = amount {
+        object["amount"] = amount;
+    }
     BASE64_STD.encode(serde_json::to_vec(&object).expect("serialize settlement"))
+}
+
+/// A merchant success report for exactly `settled_atomic_amount`.
+fn settled_payment_response_for(settled_atomic_amount: &str) -> String {
+    settled_payment_response_with_amount(Some(json!(settled_atomic_amount)))
+}
+
+fn settled_payment_response() -> String {
+    settled_payment_response_for("1000")
 }
 
 fn payment_required_response() -> EgressResponse {
     EgressResponse {
         status: 402,
         payment_required: Some(payment_required_header()),
+        payment_response: None,
+    }
+}
+
+fn payment_required_response_for(owed_atomic_amount: &str) -> EgressResponse {
+    EgressResponse {
+        status: 402,
+        payment_required: Some(payment_required_header_for(owed_atomic_amount)),
         payment_response: None,
     }
 }
@@ -412,6 +444,10 @@ fn allow_settle_single_replay_records_attempt_and_settlement() {
         attempt.transaction_signature.as_deref(),
         Some(signature().as_str())
     );
+    // Exact payment: the OBSERVED amount is persisted and equals what was owed
+    // (#476 changed nothing for this case).
+    assert_eq!(attempt.settled_atomic_amount.as_deref(), Some("1000"));
+    assert_eq!(attempt.atomic_amount, "1000");
 
     // The wallet was captured exactly once and the reservation settled.
     assert_eq!(
@@ -845,4 +881,253 @@ fn no_payment_required_passes_response_through() {
     // No payment machinery ran: one dispatch, no signing.
     assert_eq!(transport.calls(), vec![false]);
     assert_eq!(signer.call_count(), 0);
+}
+
+// --------------------------------------------------------------------------
+// 8. #476: the merchant-reported settled amount is VERIFIED before the hold is
+//    captured. This path and the offline reconciler (#469) make the SAME money
+//    decision, so they apply the SAME discipline: `settled >= owed` on parsed
+//    integers, fail-closed on anything else. Underpayment -- and a success claim
+//    that omits the amount -- must never capture.
+// --------------------------------------------------------------------------
+
+/// Negotiate one paid egress where the challenge demands `owed` and the paid
+/// replay returns 200 with `payment_response`. Returns the seeded state (wallet
+/// 10_000), the attempt id, and the settlement edge finalize drove.
+fn negotiate_with(owed: &str, payment_response: Option<String>) -> (AppState, String, EdgeOutcome) {
+    let state = seed_state(10_000);
+    let policy = allowing_policy();
+    let transport = FakeTransport::new(vec![
+        payment_required_response_for(owed),
+        success_response(payment_response),
+    ]);
+    let signer = FakeSigner::allowing();
+    let loop_ = state.x402_settlement_loop();
+
+    let outcome = block_on(negotiate_paid_egress(
+        &loop_,
+        &policy,
+        &SpendSnapshot::default(),
+        &context(),
+        &transport,
+        &signer,
+        300,
+    ))
+    .expect("negotiation completes");
+
+    match outcome {
+        X402Negotiation::Paid {
+            attempt_id,
+            settlement,
+            ..
+        } => (state, attempt_id, settlement),
+        other => panic!("expected Paid, got {other:?}"),
+    }
+}
+
+/// The money-safety assertion: NOTHING was captured. The hold is still ACTIVE,
+/// the wallet balance is untouched, the attempt is parked `outcome_unknown`
+/// (never `settled`), and no settled amount was recorded.
+fn assert_hold_not_captured(state: &AppState, attempt_id: &str, settlement: &EdgeOutcome) {
+    assert!(
+        matches!(settlement, EdgeOutcome::OutcomeUnknown { parked: true, .. }),
+        "expected a park, got {settlement:?}"
+    );
+    let attempt = block_on(attempt(state, attempt_id));
+    assert_eq!(attempt.state, PAYMENT_ATTEMPT_OUTCOME_UNKNOWN);
+    assert_ne!(attempt.state, PAYMENT_ATTEMPT_SETTLED);
+    assert_eq!(attempt.settled_atomic_amount, None);
+    assert_eq!(
+        block_on(reservation_status(state, attempt_id)).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "the hold must still be reserved, never captured"
+    );
+    assert_eq!(block_on(wallet_balance(state)), 10_000);
+}
+
+#[test]
+fn merchant_reported_underpayment_never_captures_the_hold() {
+    // Owed 1000; the merchant claims success with a valid on-chain signature but
+    // reports settling 999 -- one atomic unit short. Before #476 the amount was
+    // never compared, so this captured the FULL 1000-credit hold: the tenant was
+    // debited 1000 while 999 moved.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_for("999")));
+    assert_hold_not_captured(&state, &attempt_id, &settlement);
+
+    let attempt = block_on(attempt(&state, &attempt_id));
+    // The signature is still persisted at the park CAS (#399) so the on-chain
+    // reconciler -- which is authoritative -- can resolve the attempt from
+    // storage alone.
+    assert_eq!(
+        attempt.transaction_signature.as_deref(),
+        Some(signature().as_str())
+    );
+    // Evidence honesty: the merchant's report is durable VERBATIM, so what was
+    // actually claimed (999) is inspectable rather than an assumed full payment.
+    assert_eq!(
+        attempt.settlement_response,
+        Some(settled_payment_response_for("999"))
+    );
+}
+
+#[test]
+fn merchant_omitting_the_settled_amount_parks_instead_of_assuming_full_payment() {
+    // THE DOCUMENTED #476 CHOICE. A success claim that reports no amount at all
+    // used to fall back to "the owed amount was paid" and capture the hold. It
+    // now parks `outcome_unknown` with the hold RETAINED, which composes with the
+    // rest of the machine: the #354 reconciler picks up exactly these attempts
+    // and verifies them against the chain. It is deliberately NOT a FAIL -- that
+    // edge RELEASES the hold, and an amount-less claim is no more proof that the
+    // money did not move than it is proof that it did.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_with_amount(None)));
+    assert_hold_not_captured(&state, &attempt_id, &settlement);
+    assert_eq!(
+        block_on(attempt(&state, &attempt_id))
+            .transaction_signature
+            .as_deref(),
+        Some(signature().as_str()),
+        "the signature must still be persisted for the reconciler"
+    );
+}
+
+#[test]
+fn merchant_reported_overpayment_settles_and_captures_only_the_owed_hold() {
+    // Overpayment stays spec-valid and settles, consistent with #469.
+    let (state, attempt_id, settlement) =
+        negotiate_with("1000", Some(settled_payment_response_for("1500")));
+    assert!(
+        matches!(settlement, EdgeOutcome::Settled { .. }),
+        "{settlement:?}"
+    );
+
+    let attempt = block_on(attempt(&state, &attempt_id));
+    assert_eq!(attempt.state, PAYMENT_ATTEMPT_SETTLED);
+    // The OBSERVED amount is persisted, not the owed one, so overpaid and exact
+    // settlements stay distinguishable in the durable row.
+    assert_eq!(attempt.settled_atomic_amount.as_deref(), Some("1500"));
+    assert_eq!(attempt.atomic_amount, "1000");
+    // The capture takes exactly what the hold reserved (the owed 1000 credits):
+    // `settle_wallet_reservation` takes no amount, so an overpayment can never
+    // over-capture. The excess stayed with the payee on-chain.
+    assert_eq!(
+        block_on(reservation_status(&state, &attempt_id)).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED)
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 9_000);
+}
+
+#[test]
+fn online_amount_comparison_is_integer_not_lexical_in_both_directions() {
+    // THE LEXICAL TRAP. Owed 9, settled 10: a string comparison reads "10" < "9"
+    // (it compares '1' against '9') and would refuse a spec-valid overpayment.
+    let (state, attempt_id, settlement) =
+        negotiate_with("9", Some(settled_payment_response_for("10")));
+    assert!(
+        matches!(settlement, EdgeOutcome::Settled { .. }),
+        "owed 9, settled 10 must SETTLE -- a string compare would say \"10\" < \"9\": \
+         {settlement:?}"
+    );
+    let attempt = block_on(attempt(&state, &attempt_id));
+    assert_eq!(attempt.settled_atomic_amount.as_deref(), Some("10"));
+    // Only the owed 9 credits were captured, never the reported 10.
+    assert_eq!(block_on(wallet_balance(&state)), 9_991);
+
+    // ...and the mirror, which is the money-losing direction on THIS path:
+    // lexically "9" > "10", so a string comparison would CAPTURE a real
+    // underpayment. Integer comparison refuses it.
+    let (state, attempt_id, settlement) =
+        negotiate_with("10", Some(settled_payment_response_for("9")));
+    assert_hold_not_captured(&state, &attempt_id, &settlement);
+}
+
+#[test]
+fn unparseable_reported_amount_fails_closed_and_never_captures() {
+    // The frozen #350 wire parse rejects any non-canonical atomic amount, so a
+    // garbage `amount` makes the whole PAYMENT-RESPONSE unparseable -- which is
+    // ambiguous evidence and parks. Either way the hold is NEVER captured on an
+    // amount that could not be proven to cover what is owed.
+    for amount in [
+        json!("1.5"),   // no decimal point on the atomic path
+        json!("-1"),    // negative is not an atomic amount
+        json!("1e3"),   // no float/exponent notation on the money path
+        json!(" 1000"), // whitespace is not canonical
+        json!("01000"), // non-canonical leading zero
+        json!(""),      // empty
+        json!(1000),    // a JSON number, not the wire's string amount
+        json!(null),    // explicit null reads as "no amount reported"
+        json!("99999999999999999999999999999999999999999"), // wider than u64
+    ] {
+        let (state, attempt_id, settlement) = negotiate_with(
+            "1000",
+            Some(settled_payment_response_with_amount(Some(amount.clone()))),
+        );
+        assert_hold_not_captured(&state, &attempt_id, &settlement);
+        assert!(
+            block_on(attempt(&state, &attempt_id))
+                .settled_atomic_amount
+                .is_none(),
+            "amount {amount} must never be recorded as a settlement"
+        );
+    }
+}
+
+#[test]
+fn reported_amount_decision_table() {
+    fn covers(settled: &str, excess: Option<&str>) -> ReportedAmount {
+        ReportedAmount::Covers {
+            settled_atomic_amount: settled.to_string(),
+            overpayment_atomic_amount: excess.map(str::to_string),
+        }
+    }
+    fn short(observed: &str) -> ReportedAmount {
+        ReportedAmount::Short {
+            observed_atomic_amount: observed.to_string(),
+        }
+    }
+
+    // Exact and overpaid both cover the owed amount; only the overpaid one
+    // carries the excess, so the two never flatten together.
+    assert_eq!(
+        classify_reported_amount("1000", Some(1000)),
+        covers("1000", None)
+    );
+    assert_eq!(
+        classify_reported_amount("1000", Some(1500)),
+        covers("1500", Some("500"))
+    );
+    // One atomic unit short still fails closed.
+    assert_eq!(classify_reported_amount("1000", Some(999)), short("999"));
+    // No amount reported at all: never assumed to be the owed amount.
+    assert_eq!(
+        classify_reported_amount("1000", None),
+        ReportedAmount::Absent
+    );
+    // The lexical trap, both directions.
+    assert_eq!(
+        classify_reported_amount("9", Some(10)),
+        covers("10", Some("1"))
+    );
+    assert_eq!(classify_reported_amount("10", Some(9)), short("9"));
+    // The u64 boundary: the comparison and the excess are done in u128, so the
+    // maximal overpayment neither overflows nor wraps.
+    let max = u64::MAX.to_string();
+    assert_eq!(
+        classify_reported_amount(&max, Some(u64::MAX)),
+        covers(&max, None)
+    );
+    assert_eq!(
+        classify_reported_amount("1", Some(u64::MAX)),
+        covers(&max, Some(&(u128::from(u64::MAX) - 1).to_string()))
+    );
+    // An owed amount that is not a canonical atomic value can never be PROVEN
+    // covered, so it fails closed even against the largest possible report. The
+    // #350 challenge parse makes this unreachable today; pinned so the shared
+    // comparison's fail-closed default is a recorded property of this path too.
+    assert_eq!(
+        classify_reported_amount("not-a-number", Some(u64::MAX)),
+        short(&max)
+    );
+    assert_eq!(classify_reported_amount("", Some(u64::MAX)), short(&max));
 }

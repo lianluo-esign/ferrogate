@@ -56,7 +56,9 @@ use std::fmt;
 use ferrogate_payments::{parse_payment_response, SolanaNetwork};
 use ferrogate_storage::StoredPaymentAttempt;
 
-use super::state_x402_settlement::{EdgeOutcome, SettlementEvidence};
+use super::state_x402_settlement::{
+    classify_settled_amount, AmountCoverage, EdgeOutcome, SettlementEvidence,
+};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -196,41 +198,32 @@ enum ReconcileDecision {
 }
 
 /// Classify a CONFIRMED on-chain transfer against what is owed, on PARSED INTEGER
-/// atomic amounts. Never a string comparison: lexically `"10" < "9"`, which would
-/// read a spec-valid overpayment as an underpayment and fail it closed.
+/// atomic amounts.
 ///
-/// The x402 SVM `exact` scheme (`scheme_exact_svm.md` 1.4) defines a MATCHING
-/// transfer as one that MAY EXCEED `PaymentRequirements.amount` and MUST NOT be
-/// less than it, so:
+/// The comparison itself lives in [`classify_settled_amount`] (`u128` parse,
+/// `settled >= owed`, fail-closed on anything unparseable) because the ONLINE
+/// finalize path makes the identical money decision and must not drift from this
+/// one (#476); this function is only the reconciler's adapter from that shared
+/// verdict to its own decision enum:
 ///
-///   * `settled >= owed` -> SETTLE. Exact and overpaid are both spec-valid; the
-///     overpaid case additionally carries `settled - owed` so the evidence stays
-///     honest about which one happened (#469).
-///   * `settled  < owed` -> MISMATCH, fail-closed. An underpayment is never
-///     settled; that is the money-protective direction and is unchanged.
-///
-/// Both sides parse to `u128` (the on-chain domain is `u64`, so neither the
-/// comparison nor the excess subtraction can overflow), which also makes `"01000"`
-/// and `"1000"` equal. No float ever touches this path. A value that is not a
-/// canonical unsigned decimal amount stays fail-closed as a MISMATCH: an
-/// unparseable amount is NEVER treated as satisfying the owed threshold.
+///   * `Covers` -> SETTLE. Exact and overpaid are both spec-valid; the overpaid
+///     case additionally carries `settled - owed` so the evidence stays honest
+///     about which one happened (#469).
+///   * `Short`  -> MISMATCH, fail-closed. An underpayment (or an unparseable
+///     amount) is never settled; that is the money-protective direction and is
+///     unchanged.
 fn decide_confirmed_amount(
     expected_atomic_amount: &str,
     settled_atomic_amount: String,
 ) -> ReconcileDecision {
-    match (
-        expected_atomic_amount.parse::<u128>(),
-        settled_atomic_amount.parse::<u128>(),
-    ) {
-        (Ok(owed), Ok(settled)) if settled >= owed => ReconcileDecision::Settle {
-            overpayment_atomic_amount: (settled > owed).then(|| (settled - owed).to_string()),
+    match classify_settled_amount(expected_atomic_amount, &settled_atomic_amount) {
+        AmountCoverage::Covers {
+            overpayment_atomic_amount,
+        } => ReconcileDecision::Settle {
+            overpayment_atomic_amount,
             settled_atomic_amount,
         },
-        // Everything else is fail-closed, exactly as before: a transfer SHORT of
-        // what is owed, or an amount either side of which does not parse as a
-        // canonical unsigned decimal (never silently taken as "covers the owed
-        // amount").
-        _ => ReconcileDecision::Mismatch {
+        AmountCoverage::Short => ReconcileDecision::Mismatch {
             observed_atomic_amount: settled_atomic_amount,
         },
     }

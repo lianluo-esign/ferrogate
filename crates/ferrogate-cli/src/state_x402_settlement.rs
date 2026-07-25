@@ -110,6 +110,65 @@ pub(crate) enum SettlementEvidence<'a> {
     },
 }
 
+/// How an OBSERVED/REPORTED settled amount compares to the amount that is OWED.
+///
+/// This is the single definition of the settle-or-not money comparison, shared
+/// by BOTH paths that can capture a wallet hold: the offline on-chain reconciler
+/// (#354/#469) and the online 402-negotiation finalize (#476). The two paths make
+/// the SAME money decision, and letting each own its own comparison is exactly
+/// how they diverged (the online path had none at all, and captured the full hold
+/// on an unverified merchant-reported amount). One function, two callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AmountCoverage {
+    /// `settled >= owed`: the transfer COVERS what is owed, so a SETTLE (capture
+    /// the hold) is permitted. Both an exact transfer and a spec-valid
+    /// overpayment land here.
+    Covers {
+        /// `Some(settled - owed)` when the transfer EXCEEDED the owed amount
+        /// (decimal); `None` on an exact transfer. Keeps an overpaid settlement
+        /// distinguishable from an exact one instead of flattening the two
+        /// (#469). The excess is the payer's -- the hold only ever captures the
+        /// amount it reserved, so it is never captured.
+        overpayment_atomic_amount: Option<String>,
+    },
+    /// `settled < owed`, or either side is not a parseable atomic amount.
+    /// Fail-closed: this NEVER permits a capture.
+    Short,
+}
+
+/// Compare an observed/reported settled amount against what is owed on PARSED
+/// INTEGERS. Never a string comparison: lexically `"10" < "9"` (it compares `'1'`
+/// against `'9'`), which would read a spec-valid overpayment as an underpayment
+/// AND -- in the mirror direction -- read a real underpayment as covering the
+/// owed amount. Both mistakes are money bugs, in opposite directions.
+///
+/// The x402 SVM `exact` scheme (`scheme_exact_svm.md` 1.4) defines a MATCHING
+/// transfer as one that MAY EXCEED `PaymentRequirements.amount` and MUST NOT be
+/// less than it, hence `settled >= owed`.
+///
+/// Both sides parse to `u128` (the on-chain domain is `u64`, so neither the
+/// comparison nor the excess subtraction can overflow), which also makes
+/// `"01000"` and `"1000"` equal. No float ever touches this path. A value that is
+/// not a canonical unsigned decimal amount is fail-closed as [`AmountCoverage::Short`]:
+/// an unparseable amount is NEVER treated as satisfying the owed threshold.
+pub(crate) fn classify_settled_amount(
+    owed_atomic_amount: &str,
+    settled_atomic_amount: &str,
+) -> AmountCoverage {
+    match (
+        owed_atomic_amount.parse::<u128>(),
+        settled_atomic_amount.parse::<u128>(),
+    ) {
+        (Ok(owed), Ok(settled)) if settled >= owed => AmountCoverage::Covers {
+            overpayment_atomic_amount: (settled > owed).then(|| (settled - owed).to_string()),
+        },
+        // Everything else is fail-closed: a transfer SHORT of what is owed, or an
+        // amount either side of which does not parse as a canonical unsigned
+        // decimal (never silently taken as "covers the owed amount").
+        _ => AmountCoverage::Short,
+    }
+}
+
 /// Immutable inputs for opening a paid-egress attempt: the frozen #350 wire
 /// contract tuple plus the #351 policy decision output that already resolved to
 /// `Allow`. The loop turns these into a wallet hold (#281) and a durable payment
