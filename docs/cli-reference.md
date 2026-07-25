@@ -445,6 +445,7 @@ Subcommands:
 - `agent-schedules` — Manage agent run schedules and their fire history
 - `agent-upstreams` — Manage agent upstream bindings
 - `agent-runs` — Start and inspect agent runs
+- `agent-jobs` — Submit, observe, collect, and cancel long-running agent jobs
 - `self-hosted-workers` — Manage self-hosted workers and their lifecycle
 - `managed-workers` — List managed worker pools
 - `managed-worker-sessions` — List managed worker sessions
@@ -2780,6 +2781,143 @@ Options:
 ##### `ferrogate ctl agent-runs start`
 
 Start an agent run
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+#### `ferrogate ctl agent-jobs`
+
+Submit, observe, collect, and cancel long-running agent jobs
+
+Subcommands:
+
+- `submit` — Submit a long-running agent job (idempotent on the submitted idempotency_key)
+- `get` — Show an agent job's status
+- `events` — Read an agent job's incremental timeline events
+- `result` — Collect a terminal agent job's result
+- `cancel` — Cancel an in-flight agent job
+
+##### `ferrogate ctl agent-jobs submit`
+
+Submit a long-running agent job (idempotent on the submitted idempotency_key)
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl agent-jobs get`
+
+Show an agent job's status
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl agent-jobs events`
+
+Read an agent job's incremental timeline events
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl agent-jobs result`
+
+Collect a terminal agent job's result
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl agent-jobs cancel`
+
+Cancel an in-flight agent job
 
 Arguments:
 
