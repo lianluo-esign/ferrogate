@@ -130,6 +130,15 @@ fn deploy_puts_script_to_correct_url_with_bearer_and_body() {
         "https://api.cloudflare.com/client/v4/accounts/acct-777/workers/scripts/ferrogate-agent-gateway"
     );
     assert_eq!(req.bearer_token, "plaintext-token");
+    // The upload must carry the multipart content type (with the boundary the
+    // body is framed by), not the transport's `application/json` default — the
+    // live Script API rejects a JSON-typed multipart body. #411's honoring
+    // transport forwards whatever this `Some(..)` carries.
+    assert_eq!(req.content_type, Some(spec.content_type()));
+    assert_eq!(
+        req.content_type.as_deref(),
+        Some(format!("multipart/form-data; boundary={GATEWAY_MULTIPART_BOUNDARY}").as_str())
+    );
     let sent = String::from_utf8(req.body.unwrap()).unwrap();
     assert!(sent.contains("new_sqlite_classes"));
     assert!(sent.contains("durable_object_namespace"));
@@ -217,6 +226,9 @@ fn build_deploy_request_is_inspectable_without_sending() {
 
     let req = deployer.build_deploy_request(&spec).unwrap();
     assert_eq!(req.method, HttpMethod::Put);
+    // The constructed request pins the multipart content type so the honoring
+    // transport won't fall back to `application/json`.
+    assert_eq!(req.content_type, Some(spec.content_type()));
     // Nothing was sent by merely constructing the request.
     assert!(transport.captured.lock().unwrap().is_empty());
 }

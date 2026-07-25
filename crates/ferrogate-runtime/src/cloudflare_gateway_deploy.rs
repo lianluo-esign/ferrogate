@@ -39,14 +39,16 @@
 //! assert the constructed request byte-for-byte, with zero network — mirroring
 //! the shared client's own backoff tests.
 //!
-//! ## Live caveat: multipart content type
+//! ## Multipart content type
 //!
-//! `ferrogate_cloudflare::ReqwestTransport` hard-codes `application/json` for any
-//! request body, so the **production** multipart `PUT` should go through either a
-//! transport that honors [`GatewayWorkerSpec::content_type`] or the documented
-//! `wrangler deploy` shell-out ([`wrangler_deploy_command`]). The request
-//! *construction* here is faithful and fully modeled/tested; the live upload is
-//! the test agent's to prove (see the issue's deploy-fallback clause).
+//! The deploy `PUT` sets [`HttpRequest::content_type`] to
+//! [`GatewayWorkerSpec::content_type`] (`multipart/form-data; boundary=…`), which
+//! `ferrogate_cloudflare::ReqwestTransport` honors as of #411 (it defaults to
+//! `application/json` only when `content_type` is `None`). The documented
+//! `wrangler deploy` shell-out ([`wrangler_deploy_command`]) remains available as
+//! a CLI fallback. The request *construction* here is faithful and fully
+//! modeled/tested; the live upload is the test agent's to prove (see the issue's
+//! deploy-fallback clause).
 
 use std::sync::Arc;
 
@@ -241,7 +243,11 @@ impl GatewayWorkerDeployer {
             url: self.script_url(&spec.script_name),
             bearer_token: self.resolve_token()?,
             body: Some(spec.multipart_body()),
-            content_type: None,
+            // A module-Worker upload is `multipart/form-data`; carry the spec's
+            // boundary-bearing content type so #411's honoring transport
+            // (`ReqwestTransport`) sends it instead of defaulting to
+            // `application/json` (which the live Script API would reject).
+            content_type: Some(spec.content_type()),
         })
     }
 
