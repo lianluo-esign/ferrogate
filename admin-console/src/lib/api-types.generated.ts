@@ -146,6 +146,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit a long-running agent job and get a durable run_id back immediately, without holding the connection open.
+         * @description Idempotent submission. The job id is DERIVED from (tenant, idempotency key) -- supply the key via the `Idempotency-Key` header or the `idempotency_key` body field -- so a retried submit addresses the ORIGINAL run and answers 200 with `deduplicated: true` instead of spawning a second run. Without an explicit key the request id is used, which makes each submit its own job. The run row and its runtime dispatch are both durable, so the job survives the request that created it and a restart of the serving component.
+         */
+        post: operations["submitAgentJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent-jobs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        /** Observe an async agent job's status. Tenant-isolated: another tenant's run_id is reported as not found. */
+        get: operations["getAgentJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent-jobs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        /** Read an agent job's incremental events from the existing agent-run timeline, resumable by event id. */
+        get: operations["listAgentJobEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent-jobs/{run_id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        /** Collect a terminal agent job's result by run_id. */
+        get: operations["getAgentJobResult"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent-jobs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel an in-flight agent job: dispatches cancel_run to the runtime and terminalizes the run. */
+        post: operations["cancelAgentJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/mcp/tool/execute": {
         parameters: {
             query?: never;
@@ -172,7 +272,7 @@ export interface paths {
         };
         /**
          * Scoped control-plane overview: inventory counts, durable token totals, and bounded critical alerts.
-         * @description Returns the dashboard's global control-plane overview in one bounded request. Counts and token totals are produced by bounded repository aggregation (COUNT/SUM pushdown on Postgres, in-process fold elsewhere), never by loading whole collections. A platform-operator key sees every tenant; a tenant-scoped key is confined to its own tenant. Each section carries an explicit available/unavailable state so a storage failure is reported honestly instead of as a fabricated zero.
+         * @description Returns the dashboard's global control-plane overview in one bounded request. Counts and token totals are produced by bounded repository aggregation (COUNT/SUM pushdown on Postgres, in-process fold elsewhere), never by loading whole collections. A platform-operator key sees every tenant; a tenant-scoped key is confined to its own tenant. Each section carries an explicit available/unavailable state so a storage failure is reported honestly instead of as a fabricated zero. The `control_plane` section's `data` object (present only when the section is `ok`) additionally carries the issue #458 breakdowns: `virtual_keys` as a `{total,enabled}` split (disabled is `total-enabled`); `assets.referenced`/`assets.unreferenced` (channel-pinned vs not) and `assets.storage_quota_bytes` (the applicable per-scope asset-storage quota override, `null` for the global view or a tenant with no override, never a fabricated global aggregate); `pending_tool_approvals` (a scoped count, with a bounded `tool_approvals_pending` alert); a bounded, nearest-to-cap-first `quota_pressure` list of tenant scopes at/over 80% of a budget or asset-storage cap (with a bounded `quota_pressure` alert); and `policy_governance` (guardrail-revision/binding, quota-policy, and policy-rule counts) which is intentionally global-only -- serialized as `null` for a tenant-scoped key because guardrail revisions carry no tenant column and the quota/policy tables are not per-tenant attributable without a join. Every #458 field uses a nullable/not-applicable representation rather than a fake zero, and a durable failure nulls the whole `control_plane` section instead of zeroing any breakdown.
          */
         get: operations["getAdminOverview"];
         put?: never;
@@ -2912,6 +3012,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/agent-cost-burn": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List tenant-scoped durable per-agent runtime cost-burn for a billing period.
+         * @description Surfaces the durable, accumulating per-agent runtime cost-burn (#428) in the observability/billing admin surface. One row per (tenant_id, agent_key, period): accumulated_usd folds every run of the stable agent key inside the YYYY-MM billing window, so CF-hosted-agent runtime cost is visible per tenant/agent. Optional period=YYYY-MM query selects the billing window (default: the current UTC month). Tenant-isolated: a tenant-scoped admin sees only its own tenant's burn; the platform operator sees all. Read-only surfacing -- enforcement of the per-agent ceiling is a separate concern -- so a durable-store failure is reported as service_unavailable, never a fabricated empty (zero-burn) list.
+         */
+        get: operations["listAdminAgentCostBurn"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3891,6 +4011,105 @@ export interface components {
             turns_executed: number;
             output: string | null;
             tool_results: components["schemas"]["ToolResult"][];
+            request_id: string;
+        };
+        AgentJobSubmitRequest: {
+            /** @description The long-running task handed to the agent runtime. */
+            input: string;
+            /** @description Explicit idempotency key. The Idempotency-Key header takes precedence when both are present. A retried submit with the same key returns the original run_id. */
+            idempotency_key?: string | null;
+            /** @description Runtime framework adapter to lease this job to. Defaults to native-harness. */
+            framework_adapter?: string | null;
+            /**
+             * @description Capabilities a worker must advertise to lease this job. Defaults to ["shell"].
+             * @default []
+             */
+            required_capabilities: string[];
+            /** @description Opaque workload reference handed to the runtime. Defaults to agent-job://{run_id}. */
+            workload_ref?: string | null;
+        };
+        AgentJobSubmitResponse: {
+            /** @constant */
+            object: "agent_job";
+            /** @description The durable job id. Retries of the same idempotency key return this same value. */
+            run_id: string;
+            status: string;
+            /** @description The effective key this job is keyed on. */
+            idempotency_key: string;
+            /** @enum {string} */
+            idempotency_key_source: "header" | "body" | "request_id";
+            /** @description true when this submit matched an existing job and started nothing new. */
+            deduplicated: boolean;
+            terminal: boolean;
+            submitted_at_unix: number | null;
+            status_url: string;
+            events_url: string;
+            result_url: string;
+            request_id: string;
+        };
+        AgentJobStatus: {
+            /** @constant */
+            object: "agent_job";
+            run_id: string;
+            status: string;
+            terminal: boolean;
+            provider: string | null;
+            turns_executed: number;
+            output_recorded: boolean;
+            event_count: number;
+            started_at_unix: number | null;
+            completed_at_unix: number | null;
+            first_seen_unix: number | null;
+            last_seen_unix: number | null;
+            /** @description Latest lifecycle state the runtime itself reported for this run, from the self-hosted run timeline. */
+            runtime_reported_state: string | null;
+            runtime_reported_event_count: number;
+            request_id: string;
+        };
+        AgentJobEventPage: {
+            /** @constant */
+            object: "agent_job_event_page";
+            run_id: string;
+            data: components["schemas"]["StoredAgentRunEvent"][];
+            limit: number;
+            after_event_id: string | null;
+            next_after_event_id: string | null;
+            has_more: boolean;
+            request_id: string;
+        };
+        AgentJobArtifact: {
+            id: string;
+            worker_id: string;
+            occurred_at_unix: number | null;
+            event_json: string;
+        };
+        AgentJobResult: {
+            /** @constant */
+            object: "agent_job_result";
+            run_id: string;
+            status: string;
+            terminal: boolean;
+            turns_executed: number;
+            output_recorded: boolean;
+            output: string | null;
+            /** @description Artifact evidence the runtime reported for this run. */
+            artifacts: components["schemas"]["AgentJobArtifact"][];
+            request_count: number;
+            billing_event_count: number;
+            completed_at_unix: number | null;
+            request_id: string;
+        };
+        AgentJobCancelResponse: {
+            /** @constant */
+            object: "agent_job_cancel";
+            run_id: string;
+            status: string;
+            terminal: boolean;
+            /** @description true when this call terminalized the run; false when it was already terminal. */
+            cancelled: boolean;
+            /** @description true when a cancel_run dispatch was handed to the runtime transport. */
+            runtime_cancel_dispatched: boolean;
+            cancelled_at_unix: number | null;
             request_id: string;
         };
         ToolResult: {
@@ -5383,6 +5602,16 @@ export interface components {
             asset_hosting_enabled: boolean;
             /** Format: int64 */
             default_asset_storage_quota_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description The plan's per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.
+             */
+            default_asset_max_object_bytes?: number | null;
+            /**
+             * Format: double
+             * @description The plan's default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).
+             */
+            default_agent_cost_budget_usd?: number | null;
         };
         AdminProject: {
             id: string;
@@ -5497,6 +5726,16 @@ export interface components {
              * @description Tenant-only override of the plan asset storage quota; must be null for project, workspace, and key scopes.
              */
             asset_storage_quota_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description Tenant-only override of the plan per-object asset byte ceiling (issue #259); a per-object (not cumulative) cap, independent of asset_storage_quota_bytes; must be null for project, workspace, and key scopes.
+             */
+            asset_max_object_bytes?: number | null;
+            /**
+             * Format: double
+             * @description Per-scope monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money merged min-across-the-chain like monthly_budget_usd (settable at any scope, not tenant-only).
+             */
+            agent_cost_budget_usd?: number | null;
             alert_threshold_pcts: number[];
             enabled: boolean;
             /** Format: int64 */
@@ -5519,6 +5758,16 @@ export interface components {
              * @description Tenant-only override of the plan asset storage quota; rejected for project, workspace, and key scopes.
              */
             asset_storage_quota_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description Tenant-only override of the plan per-object asset byte ceiling (issue #259); a per-object (not cumulative) cap, independent of asset_storage_quota_bytes; rejected for project, workspace, and key scopes.
+             */
+            asset_max_object_bytes?: number | null;
+            /**
+             * Format: double
+             * @description Per-scope monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money merged min-across-the-chain like monthly_budget_usd (settable at any scope, not tenant-only).
+             */
+            agent_cost_budget_usd?: number | null;
             alert_threshold_pcts?: number[] | null;
             enabled?: boolean | null;
         };
@@ -5545,6 +5794,16 @@ export interface components {
             asset_hosting_enabled: boolean;
             /** Format: int64 */
             default_asset_storage_quota_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description Per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.
+             */
+            default_asset_max_object_bytes?: number | null;
+            /**
+             * Format: double
+             * @description Default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).
+             */
+            default_agent_cost_budget_usd?: number | null;
             extension_tools_enabled: boolean;
             /** Format: int64 */
             created_at_unix: number;
@@ -5569,6 +5828,16 @@ export interface components {
             asset_hosting_enabled?: boolean | null;
             /** Format: int64 */
             default_asset_storage_quota_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description Per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.
+             */
+            default_asset_max_object_bytes?: number | null;
+            /**
+             * Format: double
+             * @description Default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).
+             */
+            default_agent_cost_budget_usd?: number | null;
             extension_tools_enabled?: boolean | null;
         };
         AdminPlanMutationResponse: {
@@ -6029,6 +6298,33 @@ export interface components {
         DeleteWorkspaceResponse: components["schemas"]["DeleteResponse"] & {
             /** @constant */
             object?: "workspace";
+        };
+        AdminAgentCostBurnList: {
+            /** @constant */
+            object: "list";
+            data: components["schemas"]["AdminAgentCostBurn"][];
+            total: number;
+            offset: number;
+            limit: number;
+        };
+        /** @description One durable per-agent cost-burn row: the runtime cost accumulated by a stable agent key within a billing period. */
+        AdminAgentCostBurn: {
+            /** @description Owning tenant. A tenant-scoped admin only ever sees its own tenant's rows. */
+            tenant_id: string;
+            /** @description Stable per-agent identity (the agent/deployment key), NOT a per-run id: every run of this agent inside the period folds into this row's total. */
+            agent_key: string;
+            /** @description Billing window this accumulated total covers, as YYYY-MM (UTC). */
+            period: string;
+            /**
+             * Format: double
+             * @description Total USD runtime cost accumulated for this (tenant, agent, period).
+             */
+            accumulated_usd: number;
+            /**
+             * Format: int64
+             * @description Unix seconds of the most recent burn increment folded into this row.
+             */
+            updated_at_unix: number;
         };
         AdminObservedAgentActivityList: {
             /** @constant */
@@ -6834,6 +7130,165 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    submitAgentJob: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Explicit idempotency key. Takes precedence over the body's idempotency_key. */
+                "Idempotency-Key"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentJobSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Duplicate submission: the ORIGINAL run_id is returned and no second run is started. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobSubmitResponse"];
+                };
+            };
+            /** @description Job accepted; the durable run_id can be observed and collected. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobSubmitResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getAgentJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Agent job status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+        };
+    };
+    listAgentJobEvents: {
+        parameters: {
+            query?: {
+                /** @description Resume after this event id (from a previous page's next_after_event_id). */
+                after_event_id?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of agent-run timeline events for the job. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+        };
+    };
+    getAgentJobResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Terminal job result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    cancelAgentJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Durable agent job id returned by submitAgentJob (the agent run id). */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Job is terminal. `cancelled` is false when it was already terminal (cancel is idempotent). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentJobCancelResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     executeMcpTool: {
@@ -12863,6 +13318,35 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listAdminAgentCostBurn: {
+        parameters: {
+            query?: {
+                /** @description Billing window as YYYY-MM (UTC). Defaults to the current month when omitted or malformed. */
+                period?: string;
+                offset?: components["parameters"]["Offset"];
+                /** @description Clamped by storage.admin_list_max_limit. */
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated durable per-agent cost-burn rows for the period, biggest accumulated total first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAgentCostBurnList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
 }

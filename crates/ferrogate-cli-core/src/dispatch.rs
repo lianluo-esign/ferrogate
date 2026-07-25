@@ -75,6 +75,8 @@ pub fn resource_builder(group: &str) -> Option<VerbBuilder> {
         "agent-schedules" => agent::build_agent_schedules,
         "agent-upstreams" => agent::build_agent_upstreams,
         "agent-runs" => agent::build_agent_runs,
+        // Async long-running agent jobs (#474).
+        "agent-jobs" => agent::build_agent_jobs,
         // Worker lifecycle (#362).
         "self-hosted-workers" => worker::build_self_hosted_workers,
         "managed-workers" => worker::build_managed_workers,

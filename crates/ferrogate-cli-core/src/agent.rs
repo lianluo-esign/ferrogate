@@ -48,6 +48,9 @@ pub const AGENT_UPSTREAMS: ResourceApi = ResourceApi::new("/admin/v1/agent-upstr
 pub const AGENT_RUNS: ResourceApi = ResourceApi::new("/admin/v1/agent-runs");
 /// `/v1/agent-runs` — the runtime run-start operation (`createAgentRun`).
 pub const AGENT_RUNS_RUNTIME: ResourceApi = ResourceApi::new("/v1/agent-runs");
+/// `/v1/agent-jobs` — the async long-running job protocol (#474): submit a job,
+/// observe it, collect its result, cancel it.
+pub const AGENT_JOBS: ResourceApi = ResourceApi::new("/v1/agent-jobs");
 
 /// Agent workflows (full CRUD).
 pub struct AgentWorkflowsGroup;
@@ -222,12 +225,68 @@ pub fn build_agent_runs(verb: &str, input: &ResourceInput) -> CliResult<RequestS
     }
 }
 
+/// Async long-running agent jobs (#474): the caller-facing
+/// submit → observe → collect → cancel protocol on `/v1/agent-jobs`.
+///
+/// Distinct from `agent-runs start`, which drives the *bounded* harness inside
+/// the request: `submit` returns a durable `run_id` immediately and the
+/// remaining verbs address that id.
+pub struct AgentJobsGroup;
+
+impl CommandGroup for AgentJobsGroup {
+    fn descriptor(&self) -> GroupDescriptor {
+        GroupDescriptor::new(
+            "agent-jobs",
+            "Submit, observe, collect, and cancel long-running agent jobs",
+            vec![
+                VerbDescriptor::api(
+                    "submit",
+                    "Submit a long-running agent job (idempotent on the submitted idempotency_key)",
+                    "submitAgentJob",
+                ),
+                VerbDescriptor::api("get", "Show an agent job's status", "getAgentJob"),
+                VerbDescriptor::api(
+                    "events",
+                    "Read an agent job's incremental timeline events",
+                    "listAgentJobEvents",
+                ),
+                VerbDescriptor::api(
+                    "result",
+                    "Collect a terminal agent job's result",
+                    "getAgentJobResult",
+                ),
+                VerbDescriptor::api("cancel", "Cancel an in-flight agent job", "cancelAgentJob"),
+            ],
+        )
+    }
+}
+
+/// Build the request for an agent-jobs verb.
+///
+/// `submit` posts the job document to the collection; `get` addresses the job
+/// by id; `events`/`result` are nested reads under it; `cancel` is a `POST`
+/// lifecycle action, so the operator's intent (and the resulting audit record)
+/// is precise rather than a generic mutation.
+pub fn build_agent_jobs(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
+    match verb {
+        "submit" => AGENT_JOBS.create(input.require_body(verb)?),
+        "get" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?]),
+        "events" => AGENT_JOBS.read(&[first_segment(input, "agent-job")?, "events"], &input.list),
+        "result" => AGENT_JOBS.get(&[first_segment(input, "agent-job")?, "result"]),
+        "cancel" => build_item_action(&AGENT_JOBS, "agent-job", "cancel", input),
+        other => Err(crate::error::CliError::usage(format!(
+            "verb '{other}' is not an agent-jobs verb"
+        ))),
+    }
+}
+
 /// Register every agent command group with the registry.
 pub fn register(registry: &mut Registry) -> CliResult<()> {
     registry.register(&AgentWorkflowsGroup)?;
     registry.register(&AgentSchedulesGroup)?;
     registry.register(&AgentUpstreamsGroup)?;
     registry.register(&AgentRunsGroup)?;
+    registry.register(&AgentJobsGroup)?;
     Ok(())
 }
 

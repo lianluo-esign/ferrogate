@@ -497,6 +497,337 @@
         }
       }
     },
+    "/v1/agent-jobs": {
+      "post": {
+        "operationId": "submitAgentJob",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Submit a long-running agent job and get a durable run_id back immediately, without holding the connection open.",
+        "description": "Idempotent submission. The job id is DERIVED from (tenant, idempotency key) -- supply the key via the `Idempotency-Key` header or the `idempotency_key` body field -- so a retried submit addresses the ORIGINAL run and answers 200 with `deduplicated: true` instead of spawning a second run. Without an explicit key the request id is used, which makes each submit its own job. The run row and its runtime dispatch are both durable, so the job survives the request that created it and a restart of the serving component.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "Explicit idempotency key. Takes precedence over the body's idempotency_key."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentJobSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Duplicate submission: the ORIGINAL run_id is returned and no second run is started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobSubmitResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Job accepted; the durable run_id can be observed and collected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobSubmitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "agent.runs.create"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/agent-jobs/{run_id}": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Durable agent job id returned by submitAgentJob (the agent run id)."
+        }
+      ],
+      "get": {
+        "operationId": "getAgentJob",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Observe an async agent job's status. Tenant-isolated: another tenant's run_id is reported as not found.",
+        "responses": {
+          "200": {
+            "description": "Agent job status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "agent.runs.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/agent-jobs/{run_id}/events": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Durable agent job id returned by submitAgentJob (the agent run id)."
+        }
+      ],
+      "get": {
+        "operationId": "listAgentJobEvents",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Read an agent job's incremental events from the existing agent-run timeline, resumable by event id.",
+        "parameters": [
+          {
+            "name": "after_event_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Resume after this event id (from a previous page's next_after_event_id)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of agent-run timeline events for the job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "agent.runs.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/agent-jobs/{run_id}/result": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Durable agent job id returned by submitAgentJob (the agent run id)."
+        }
+      ],
+      "get": {
+        "operationId": "getAgentJobResult",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Collect a terminal agent job's result by run_id.",
+        "responses": {
+          "200": {
+            "description": "Terminal job result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "agent.runs.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/agent-jobs/{run_id}/cancel": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Durable agent job id returned by submitAgentJob (the agent run id)."
+        }
+      ],
+      "post": {
+        "operationId": "cancelAgentJob",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Cancel an in-flight agent job: dispatches cancel_run to the runtime and terminalizes the run.",
+        "responses": {
+          "200": {
+            "description": "Job is terminal. `cancelled` is false when it was already terminal (cancel is idempotent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentJobCancelResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "agent.runs.create"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/v1/mcp/tool/execute": {
       "post": {
         "operationId": "executeMcpTool",
@@ -17322,6 +17653,411 @@
             "items": {
               "$ref": "#/components/schemas/ToolResult"
             }
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobSubmitRequest": {
+        "type": "object",
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The long-running task handed to the agent runtime."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200,
+            "description": "Explicit idempotency key. The Idempotency-Key header takes precedence when both are present. A retried submit with the same key returns the original run_id."
+          },
+          "framework_adapter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Runtime framework adapter to lease this job to. Defaults to native-harness."
+          },
+          "required_capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Capabilities a worker must advertise to lease this job. Defaults to [\"shell\"]."
+          },
+          "workload_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque workload reference handed to the runtime. Defaults to agent-job://{run_id}."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobSubmitResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "status",
+          "idempotency_key",
+          "idempotency_key_source",
+          "deduplicated",
+          "terminal",
+          "submitted_at_unix",
+          "status_url",
+          "events_url",
+          "result_url",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_job"
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The durable job id. Retries of the same idempotency key return this same value."
+          },
+          "status": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "The effective key this job is keyed on."
+          },
+          "idempotency_key_source": {
+            "type": "string",
+            "enum": [
+              "header",
+              "body",
+              "request_id"
+            ]
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "true when this submit matched an existing job and started nothing new."
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "submitted_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "status_url": {
+            "type": "string"
+          },
+          "events_url": {
+            "type": "string"
+          },
+          "result_url": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobStatus": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "status",
+          "terminal",
+          "provider",
+          "turns_executed",
+          "output_recorded",
+          "event_count",
+          "started_at_unix",
+          "completed_at_unix",
+          "first_seen_unix",
+          "last_seen_unix",
+          "runtime_reported_state",
+          "runtime_reported_event_count",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_job"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turns_executed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_recorded": {
+            "type": "boolean"
+          },
+          "event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "first_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "runtime_reported_state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Latest lifecycle state the runtime itself reported for this run, from the self-hosted run timeline."
+          },
+          "runtime_reported_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobEventPage": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "data",
+          "limit",
+          "after_event_id",
+          "next_after_event_id",
+          "has_more",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_job_event_page"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredAgentRunEvent"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "after_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_after_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobArtifact": {
+        "type": "object",
+        "required": [
+          "id",
+          "worker_id",
+          "occurred_at_unix",
+          "event_json"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "event_json": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobResult": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "status",
+          "terminal",
+          "turns_executed",
+          "output_recorded",
+          "output",
+          "artifacts",
+          "request_count",
+          "billing_event_count",
+          "completed_at_unix",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_job_result"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "turns_executed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_recorded": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentJobArtifact"
+            },
+            "description": "Artifact evidence the runtime reported for this run."
+          },
+          "request_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "billing_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentJobCancelResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "status",
+          "terminal",
+          "cancelled",
+          "runtime_cancel_dispatched",
+          "cancelled_at_unix",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_job_cancel"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "type": "boolean",
+            "description": "true when this call terminalized the run; false when it was already terminal."
+          },
+          "runtime_cancel_dispatched": {
+            "type": "boolean",
+            "description": "true when a cancel_run dispatch was handed to the runtime transport."
+          },
+          "cancelled_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           },
           "request_id": {
             "type": "string"

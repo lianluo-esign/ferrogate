@@ -1,0 +1,1174 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-25
+// description: Caller-facing async agent-job surface (#474): submit -> run_id,
+// observe (status + incremental run-timeline events), retrieve the result,
+// and cancel -- all tenant-scoped and durable across restarts.
+
+//! The async long-running agent-job protocol (issue #474).
+//!
+//! Every other ingress FerroGate exposes is request/response and therefore
+//! bounded by an HTTP request lifetime: `POST /v1/agent-runs` drives the
+//! bounded harness to completion *inside* the request. A coding-agent task runs
+//! for minutes to hours, so this module adds the missing caller-facing verbs on
+//! top of the SAME durable evidence the platform already keeps -- it does not
+//! build a parallel job stack:
+//!
+//! | verb | route | reuses |
+//! |------|-------|--------|
+//! | submit | `POST /v1/agent-jobs` | `agent_runs` row + the self-hosted lease queue (#414 dispatch transport) |
+//! | status | `GET /v1/agent-jobs/{run_id}` | `AppState::agent_run_timeline` + `AppState::self_hosted_run_timeline` |
+//! | events | `GET /v1/agent-jobs/{run_id}/events` | the existing agent-run timeline (`agent_run_events`) |
+//! | result | `GET /v1/agent-jobs/{run_id}/result` | the same timeline + worker-reported artifact events |
+//! | cancel | `POST /v1/agent-jobs/{run_id}/cancel` | a `cancel_run` dispatch (#414) + run terminalization |
+//!
+//! **Durability.** Submission writes the `agent_runs` row through the same
+//! durable seam the synchronous create path uses and enqueues a
+//! `SelfHostedRunAction::StartRun` dispatch, which is written through to
+//! `self_hosted_run_dispatches` and rebuilt into the lease queue on startup.
+//! Both survive the request that created them (and a restart of the serving
+//! component) -- the entire point of the protocol.
+//!
+//! **Idempotency (the requirement most likely to be got wrong).** The
+//! idempotency key is explicit and first-class: `Idempotency-Key:` (header) or
+//! `idempotency_key` (body). The run id is *derived* from
+//! `(resolved tenant, idempotency key)` by [`agent_job_run_id`], so a retried
+//! submit addresses the SAME `run_id` by construction; the existing
+//! `agent_runs` row is then the dedup gate and the original id is returned with
+//! `deduplicated: true`. Two concurrent submits that both miss the gate still
+//! converge on one job: the run row is an upsert on that derived id and the
+//! dispatch id is derived from it too (the lease queue dedups on dispatch id).
+//! The key is namespaced by tenant, so one tenant's key can never address (or
+//! collide with) another tenant's run.
+//!
+//! **Tenant isolation.** Every read resolves the run through
+//! `AppState::agent_run_timeline` with `AgentRunFilter::organization_id` pinned
+//! by `crate::auth::enforce_tenant_filter` -- i.e. isolation is applied at the
+//! storage/query layer, before anything is shaped for the response, exactly as
+//! `handle_admin_agent_runs` does. A cross-tenant `run_id` resolves to `None`
+//! and is reported as 404 (not 403), so the surface is not an existence oracle.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use ferrogate_runtime::{SelfHostedRunAction, SelfHostedRunDispatch};
+use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
+use http::{HeaderMap, Method, StatusCode};
+use pingora::{proxy::Session, Result as PingoraResult};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    auth::{authenticate, enforce_tenant_filter, AuthContext},
+    responses::{write_json_error, write_json_error_and_close, write_json_response},
+    state::{AdminAuditEventDraft, AgentRunFilter, AgentRunTimeline, AppState},
+};
+
+use super::{body::read_request_body, FerroGateway, ProxyContext};
+
+/// Explicit idempotency-key header. Mirrors the industry-standard spelling so a
+/// generic HTTP client's retry middleware sets it without FerroGate-specific
+/// wiring; the body field `idempotency_key` is the equivalent for clients that
+/// cannot set headers.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// Max length of an idempotency key. Long enough for a UUID, a ULID, or a
+/// caller's `{repo}:{issue}:{attempt}` composite; short enough that the key is
+/// never a payload channel.
+const IDEMPOTENCY_KEY_MAX_LEN: usize = 200;
+
+/// Max characters of submitted input retained on the `job_submitted` timeline
+/// event. The timeline is evidence, not a job store: enough to identify the
+/// job, bounded so a large prompt cannot bloat every timeline read.
+const SUBMITTED_INPUT_EVIDENCE_MAX_CHARS: usize = 2_000;
+
+/// Default / maximum page size for the incremental event feed.
+const EVENT_PAGE_DEFAULT_LIMIT: usize = 100;
+const EVENT_PAGE_MAX_LIMIT: usize = 500;
+
+/// Scope required to submit or cancel a job -- the same scope the synchronous
+/// `POST /v1/agent-runs` create path enforces, because it is the same
+/// privilege (start agent work billed to this tenant).
+const AGENT_JOB_WRITE_SCOPE: &str = "agent.runs.create";
+
+/// Scope required to observe a job (status / events / result).
+const AGENT_JOB_READ_SCOPE: &str = "agent.runs.read";
+
+/// Run statuses that mean "this job will not change again". A caller polling
+/// status stops here; `.../result` only answers 200 in these states.
+fn agent_job_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "timed_out" | "max_turns_exceeded" | "exhausted"
+    )
+}
+
+/// Derive the durable job id from the tenant and the explicit idempotency key.
+///
+/// This is the whole idempotency mechanism: submission does not mint a random
+/// id and then look for a duplicate afterwards (which races), it *addresses* a
+/// deterministic id. A retry with the same key computes the same id, finds the
+/// existing `agent_runs` row, and returns it. Tenant is mixed into the digest,
+/// so identical keys in different tenants are different jobs and no key can be
+/// used to probe for (or clobber) another tenant's run.
+fn agent_job_run_id(tenant_id: &str, idempotency_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.as_bytes());
+    // Unit-separator domain break so ("ab", "c") and ("a", "bc") cannot hash
+    // to the same job id.
+    hasher.update([0x1f]);
+    hasher.update(idempotency_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut id = String::from("job-");
+    for byte in digest.iter().take(16) {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    id
+}
+
+/// Deterministic dispatch ids derived from the job id, so a racing double
+/// submit/cancel enqueues the SAME dispatch (the lease queue dedups on id).
+fn agent_job_start_dispatch_id(run_id: &str) -> String {
+    format!("agent-job-start-{run_id}")
+}
+
+fn agent_job_cancel_dispatch_id(run_id: &str) -> String {
+    format!("agent-job-cancel-{run_id}")
+}
+
+/// The caller's submission document. `input` is the task; everything else
+/// describes how the runtime should be selected, with defaults that make a
+/// minimal `{"input": "..."}` a valid submission.
+#[derive(Debug, Deserialize)]
+struct AgentJobSubmitRequest {
+    input: String,
+    /// The explicit idempotency key (equivalent to the `Idempotency-Key`
+    /// header, which wins when both are present).
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    framework_adapter: Option<String>,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
+    #[serde(default)]
+    workload_ref: Option<String>,
+}
+
+/// The submit response. `deduplicated` is the observable proof of idempotency:
+/// `false` + 202 on the first submit, `true` + 200 on every retry of the same
+/// key, always carrying the ORIGINAL `run_id`.
+#[derive(Debug, Serialize)]
+struct AgentJobSubmitResponse {
+    object: &'static str,
+    run_id: String,
+    status: String,
+    idempotency_key: String,
+    idempotency_key_source: &'static str,
+    deduplicated: bool,
+    terminal: bool,
+    submitted_at_unix: Option<u64>,
+    status_url: String,
+    events_url: String,
+    result_url: String,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentJobStatusResponse {
+    object: &'static str,
+    run_id: String,
+    status: String,
+    terminal: bool,
+    provider: Option<String>,
+    turns_executed: u32,
+    output_recorded: bool,
+    event_count: usize,
+    started_at_unix: Option<u64>,
+    completed_at_unix: Option<u64>,
+    first_seen_unix: Option<u64>,
+    last_seen_unix: Option<u64>,
+    /// Latest lifecycle state the runtime itself reported for this run, read
+    /// from the existing self-hosted run timeline (same `run_id`). `None` when
+    /// the runtime has not reported yet.
+    runtime_reported_state: Option<String>,
+    runtime_reported_event_count: usize,
+    request_id: String,
+}
+
+/// One page of the incremental event feed, cursored by event id.
+#[derive(Debug, Serialize)]
+struct AgentJobEventPage {
+    object: &'static str,
+    run_id: String,
+    data: Vec<StoredAgentRunEvent>,
+    limit: usize,
+    after_event_id: Option<String>,
+    next_after_event_id: Option<String>,
+    has_more: bool,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentJobResultResponse {
+    object: &'static str,
+    run_id: String,
+    status: String,
+    terminal: bool,
+    turns_executed: u32,
+    output_recorded: bool,
+    /// Terminal output carried on the run timeline, when the runtime recorded
+    /// one. `None` is honest absence -- nothing is fabricated.
+    output: Option<String>,
+    /// Artifact evidence the runtime reported for this run (for a coding agent
+    /// this is where the diff/PR reference lands, #472).
+    artifacts: Vec<AgentJobArtifact>,
+    request_count: usize,
+    billing_event_count: usize,
+    completed_at_unix: Option<u64>,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentJobArtifact {
+    id: String,
+    worker_id: String,
+    occurred_at_unix: Option<u64>,
+    event_json: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentJobCancelResponse {
+    object: &'static str,
+    run_id: String,
+    status: String,
+    terminal: bool,
+    /// `true` when this call terminalized the run; `false` when it was already
+    /// terminal (cancel is idempotent).
+    cancelled: bool,
+    /// `true` when a `cancel_run` dispatch was handed to the runtime transport.
+    runtime_cancel_dispatched: bool,
+    cancelled_at_unix: Option<u64>,
+    request_id: String,
+}
+
+impl FerroGateway {
+    /// Fan out the whole `/v1/agent-jobs[...]` surface by path suffix + method.
+    pub(super) async fn handle_agent_jobs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: HeaderMap,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        if path == "/v1/agent-jobs" {
+            return match *method {
+                Method::POST => self.handle_agent_job_submit(session, ctx, headers).await,
+                _ => method_not_allowed(session, ctx, "agent job submission requires POST").await,
+            };
+        }
+
+        let Some(rest) = path
+            .strip_prefix("/v1/agent-jobs/")
+            .filter(|rest| !rest.is_empty())
+        else {
+            return not_found(session, ctx).await;
+        };
+
+        if let Some(run_id) = rest.strip_suffix("/events") {
+            if !is_addressable_run_id(run_id) {
+                return not_found(session, ctx).await;
+            }
+            return match *method {
+                Method::GET => {
+                    self.handle_agent_job_events(session, ctx, &headers, run_id, query)
+                        .await
+                }
+                _ => method_not_allowed(session, ctx, "agent job events require GET").await,
+            };
+        }
+
+        if let Some(run_id) = rest.strip_suffix("/result") {
+            if !is_addressable_run_id(run_id) {
+                return not_found(session, ctx).await;
+            }
+            return match *method {
+                Method::GET => {
+                    self.handle_agent_job_result(session, ctx, &headers, run_id)
+                        .await
+                }
+                _ => method_not_allowed(session, ctx, "agent job result requires GET").await,
+            };
+        }
+
+        if let Some(run_id) = rest.strip_suffix("/cancel") {
+            if !is_addressable_run_id(run_id) {
+                return not_found(session, ctx).await;
+            }
+            return match *method {
+                Method::POST => {
+                    self.handle_agent_job_cancel(session, ctx, &headers, run_id)
+                        .await
+                }
+                _ => method_not_allowed(session, ctx, "agent job cancel requires POST").await,
+            };
+        }
+
+        if !is_addressable_run_id(rest) {
+            return not_found(session, ctx).await;
+        }
+        match *method {
+            Method::GET => {
+                self.handle_agent_job_status(session, ctx, &headers, rest)
+                    .await
+            }
+            _ => method_not_allowed(session, ctx, "agent job status requires GET").await,
+        }
+    }
+
+    async fn handle_agent_job_submit(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        if !state.config.agent_runtime.enabled {
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "agent_runtime_disabled",
+                "agent runtime is disabled by operator config",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let auth =
+            match authenticate(&state, &headers, AGENT_JOB_WRITE_SCOPE, &ctx.request_id).await {
+                Ok(auth) => auth,
+                Err(error) => return write_auth_error(session, ctx, error).await,
+            };
+
+        let body = match read_request_body(session, state.limits().tool_body_max_bytes()).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let request: AgentJobSubmitRequest = match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_json",
+                    format!("invalid agent job JSON: {error}"),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if request.input.trim().is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_agent_job_input",
+                "agent job input must not be empty",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        if request
+            .required_capabilities
+            .iter()
+            .any(|capability| capability.trim().is_empty())
+        {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_agent_job_capabilities",
+                "agent job required_capabilities must not contain empty values",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let idempotency = match resolve_idempotency_key(
+            &headers,
+            request.idempotency_key.as_deref(),
+            &ctx.request_id,
+        ) {
+            Ok(idempotency) => idempotency,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_idempotency_key",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let tenant = auth.tenant_context();
+        let tenant_id = crate::state::self_hosted_tenant_id(&tenant);
+        let run_id = agent_job_run_id(&tenant_id, &idempotency.key);
+
+        // The dedup gate. A retried submit lands here and returns the ORIGINAL
+        // run_id without enqueuing a second dispatch. The cross-tenant arm is
+        // defence in depth: the id already namespaces the key by tenant, so a
+        // foreign owner here means an id collision, never a reachable key.
+        if let Some(existing) = state.agent_run_record(&run_id) {
+            if existing.tenant.organization_id != tenant.organization_id {
+                return write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "agent_job_id_conflict",
+                    "an agent job with this id already exists for another tenant",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            let response = AgentJobSubmitResponse {
+                object: "agent_job",
+                terminal: agent_job_status_is_terminal(&existing.status),
+                status: existing.status.clone(),
+                idempotency_key: idempotency.key.clone(),
+                idempotency_key_source: idempotency.source,
+                deduplicated: true,
+                submitted_at_unix: existing.started_at_unix,
+                status_url: format!("/v1/agent-jobs/{run_id}"),
+                events_url: format!("/v1/agent-jobs/{run_id}/events"),
+                result_url: format!("/v1/agent-jobs/{run_id}/result"),
+                run_id,
+                request_id: ctx.request_id.clone(),
+            };
+            return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+        }
+
+        let now = now_unix_seconds();
+        let workspace_id = auth
+            .workspace_id
+            .clone()
+            .or_else(|| auth.project_id.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let dispatch = SelfHostedRunDispatch {
+            dispatch_id: agent_job_start_dispatch_id(&run_id),
+            action: SelfHostedRunAction::StartRun,
+            tenant_id: tenant_id.clone(),
+            workspace_id: workspace_id.clone(),
+            session_id: format!("agent-job-session-{run_id}"),
+            run_id: run_id.clone(),
+            framework_adapter: request
+                .framework_adapter
+                .as_deref()
+                .map(str::trim)
+                .filter(|adapter| !adapter.is_empty())
+                .unwrap_or("native-harness")
+                .to_string(),
+            required_capabilities: if request.required_capabilities.is_empty() {
+                vec!["shell".to_string()]
+            } else {
+                request.required_capabilities.clone()
+            },
+            workload_ref: request
+                .workload_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|workload| !workload.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("agent-job://{run_id}")),
+            // The queue rejects queued_at_unix == 0.
+            queued_at_unix: now.max(1),
+            request_id: Some(ctx.request_id.clone()),
+            trace_id: ctx.trace_id.clone(),
+            agent_run_id: Some(run_id.clone()),
+            // #307: a caller-submitted job has no upstream governed action, so
+            // the parent stays an explicit None (never fabricated).
+            parent_action_fingerprint: None,
+        };
+        // Enqueue FIRST, then claim the run row -- the same ordering the
+        // scheduler uses. If the row were written first and the enqueue then
+        // failed, every retry would be deduped against a job the runtime was
+        // never told about. Enqueue is idempotent on the deterministic id, so
+        // re-running this path is safe.
+        if let Err(error) = state.enqueue_scheduled_self_hosted_dispatch(dispatch) {
+            return write_json_error(
+                session,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "agent_job_dispatch_unavailable",
+                format!("agent job could not be handed to the runtime transport: {error}"),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        state.record_agent_run(StoredAgentRun {
+            id: run_id.clone(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant: tenant.clone(),
+            status: "queued".to_string(),
+            provider: "ferrogate.agent-job".to_string(),
+            turns_executed: 0,
+            output_recorded: false,
+            started_at_unix: Some(now),
+            completed_at_unix: None,
+        });
+        // The submission itself is the first entry on the run's EXISTING
+        // timeline -- no parallel event stream is introduced.
+        state.record_agent_run_event(StoredAgentRunEvent {
+            id: format!("agent-job-submitted:{run_id}"),
+            run_id: run_id.clone(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant: tenant.clone(),
+            turn: 0,
+            kind: "job_submitted".to_string(),
+            target: format!("agent_run:{run_id}"),
+            outcome: "accepted".to_string(),
+            tool_call_id: None,
+            message: Some(truncate_evidence(&request.input)),
+            occurred_at_unix: Some(now),
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
+        });
+        state.record_admin_audit_event(agent_job_audit_event(
+            ctx,
+            &auth,
+            &run_id,
+            "agent_job.submitted",
+            "accepted",
+            format!(
+                "agent job {run_id} submitted with idempotency key {}",
+                idempotency.key
+            ),
+        ));
+
+        let response = AgentJobSubmitResponse {
+            object: "agent_job",
+            status: "queued".to_string(),
+            terminal: false,
+            idempotency_key: idempotency.key,
+            idempotency_key_source: idempotency.source,
+            deduplicated: false,
+            submitted_at_unix: Some(now),
+            status_url: format!("/v1/agent-jobs/{run_id}"),
+            events_url: format!("/v1/agent-jobs/{run_id}/events"),
+            result_url: format!("/v1/agent-jobs/{run_id}/result"),
+            run_id,
+            request_id: ctx.request_id.clone(),
+        };
+        write_json_response(session, StatusCode::ACCEPTED, &response, &ctx.request_id).await
+    }
+
+    async fn handle_agent_job_status(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &HeaderMap,
+        run_id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
+        {
+            Ok(auth) => auth,
+            Err(error) => return write_auth_error(session, ctx, error).await,
+        };
+        let Some(timeline) = scoped_agent_job_timeline(&state, &auth, run_id) else {
+            return job_not_found(session, ctx, run_id).await;
+        };
+        let runtime_timeline =
+            state.self_hosted_run_timeline(run_id, enforce_tenant_filter(&auth, None).as_deref());
+        let status = agent_job_status(&timeline);
+        let response = AgentJobStatusResponse {
+            object: "agent_job",
+            run_id: run_id.to_string(),
+            terminal: agent_job_status_is_terminal(&status),
+            status,
+            provider: timeline.run.as_ref().map(|run| run.provider.clone()),
+            turns_executed: timeline.run.as_ref().map_or(0, |run| run.turns_executed),
+            output_recorded: timeline.run.as_ref().is_some_and(|run| run.output_recorded),
+            event_count: timeline.agent_events.len(),
+            started_at_unix: timeline.run.as_ref().and_then(|run| run.started_at_unix),
+            completed_at_unix: timeline.run.as_ref().and_then(|run| run.completed_at_unix),
+            first_seen_unix: timeline.summary.first_seen_unix,
+            last_seen_unix: timeline.summary.last_seen_unix,
+            runtime_reported_state: runtime_timeline
+                .as_ref()
+                .and_then(|runtime| runtime.latest_lifecycle_state.clone()),
+            runtime_reported_event_count: runtime_timeline
+                .as_ref()
+                .map_or(0, |runtime| runtime.reported_event_count),
+            request_id: ctx.request_id.clone(),
+        };
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+
+    async fn handle_agent_job_events(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &HeaderMap,
+        run_id: &str,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
+        {
+            Ok(auth) => auth,
+            Err(error) => return write_auth_error(session, ctx, error).await,
+        };
+        let cursor = match AgentJobEventCursor::from_query(query) {
+            Ok(cursor) => cursor,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_event_cursor",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let Some(timeline) = scoped_agent_job_timeline(&state, &auth, run_id) else {
+            return job_not_found(session, ctx, run_id).await;
+        };
+        let page = match page_agent_job_events(timeline.agent_events, &cursor) {
+            Ok(page) => page,
+            Err(message) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_event_cursor",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let response = AgentJobEventPage {
+            object: "agent_job_event_page",
+            run_id: run_id.to_string(),
+            limit: cursor.limit,
+            after_event_id: cursor.after_event_id.clone(),
+            next_after_event_id: page.next_after_event_id,
+            has_more: page.has_more,
+            data: page.data,
+            request_id: ctx.request_id.clone(),
+        };
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+
+    async fn handle_agent_job_result(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &HeaderMap,
+        run_id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
+        {
+            Ok(auth) => auth,
+            Err(error) => return write_auth_error(session, ctx, error).await,
+        };
+        let Some(timeline) = scoped_agent_job_timeline(&state, &auth, run_id) else {
+            return job_not_found(session, ctx, run_id).await;
+        };
+        let status = agent_job_status(&timeline);
+        if !agent_job_status_is_terminal(&status) {
+            return write_json_error(
+                session,
+                StatusCode::CONFLICT,
+                "agent_job_not_terminal",
+                format!("agent job {run_id} is {status}; poll /v1/agent-jobs/{run_id} until it is terminal"),
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let runtime_timeline =
+            state.self_hosted_run_timeline(run_id, enforce_tenant_filter(&auth, None).as_deref());
+        let response = AgentJobResultResponse {
+            object: "agent_job_result",
+            run_id: run_id.to_string(),
+            terminal: true,
+            turns_executed: timeline.run.as_ref().map_or(0, |run| run.turns_executed),
+            output_recorded: timeline.run.as_ref().is_some_and(|run| run.output_recorded),
+            output: agent_job_output(&timeline),
+            artifacts: runtime_timeline
+                .as_ref()
+                .map(|runtime| {
+                    runtime
+                        .events
+                        .iter()
+                        .filter(|event| event.kind == "artifact")
+                        .map(|event| AgentJobArtifact {
+                            id: event.id.clone(),
+                            worker_id: event.worker_id.clone(),
+                            occurred_at_unix: event.occurred_at_unix,
+                            event_json: event.event_json.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            request_count: timeline.requests.len(),
+            billing_event_count: timeline.billing_events.len(),
+            completed_at_unix: timeline.run.as_ref().and_then(|run| run.completed_at_unix),
+            status,
+            request_id: ctx.request_id.clone(),
+        };
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+
+    async fn handle_agent_job_cancel(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &HeaderMap,
+        run_id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, AGENT_JOB_WRITE_SCOPE, &ctx.request_id).await
+        {
+            Ok(auth) => auth,
+            Err(error) => return write_auth_error(session, ctx, error).await,
+        };
+        let Some(timeline) = scoped_agent_job_timeline(&state, &auth, run_id) else {
+            return job_not_found(session, ctx, run_id).await;
+        };
+        let Some(run) = timeline.run.clone() else {
+            // Evidence exists for the id but no canonical run row, so there is
+            // nothing to terminalize (and no dispatch to address).
+            return write_json_error(
+                session,
+                StatusCode::CONFLICT,
+                "agent_job_not_cancellable",
+                format!("agent job {run_id} has no cancellable run record"),
+                &ctx.request_id,
+            )
+            .await;
+        };
+        if agent_job_status_is_terminal(&run.status) {
+            let response = AgentJobCancelResponse {
+                object: "agent_job_cancel",
+                run_id: run_id.to_string(),
+                terminal: true,
+                status: run.status.clone(),
+                cancelled: false,
+                runtime_cancel_dispatched: false,
+                cancelled_at_unix: run.completed_at_unix,
+                request_id: ctx.request_id.clone(),
+            };
+            return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+        }
+
+        let now = now_unix_seconds();
+        let runtime_cancel_dispatched =
+            match cancel_agent_job_in_runtime(&state, &run, ctx.request_id.as_str(), now) {
+                Ok(dispatched) => dispatched,
+                Err(message) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "agent_job_cancel_unavailable",
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+        // Terminalize the run itself: the cancel is not "requested", it is the
+        // run's end state, so a caller polling status/result sees a terminal
+        // job even if the worker never comes back for its lease.
+        let mut cancelled = run.clone();
+        cancelled.status = "cancelled".to_string();
+        cancelled.completed_at_unix = Some(now);
+        state.record_agent_run(cancelled);
+        state.record_agent_run_event(StoredAgentRunEvent {
+            id: format!("agent-job-cancelled:{run_id}"),
+            run_id: run_id.to_string(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant: auth.tenant_context(),
+            turn: 0,
+            kind: "run_cancelled".to_string(),
+            target: format!("agent_run:{run_id}"),
+            outcome: "cancelled".to_string(),
+            tool_call_id: None,
+            message: Some(if runtime_cancel_dispatched {
+                format!("agent job {run_id} cancelled; cancel_run dispatched to the runtime")
+            } else {
+                format!("agent job {run_id} cancelled before any runtime dispatch existed")
+            }),
+            occurred_at_unix: Some(now),
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
+        });
+        state.record_admin_audit_event(agent_job_audit_event(
+            ctx,
+            &auth,
+            run_id,
+            "agent_job.cancelled",
+            "cancelled",
+            format!("agent job {run_id} cancelled by caller"),
+        ));
+
+        let response = AgentJobCancelResponse {
+            object: "agent_job_cancel",
+            run_id: run_id.to_string(),
+            status: "cancelled".to_string(),
+            terminal: true,
+            cancelled: true,
+            runtime_cancel_dispatched,
+            cancelled_at_unix: Some(now),
+            request_id: ctx.request_id.clone(),
+        };
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+}
+
+/// Hand a `cancel_run` (#414) to the runtime for `run`, addressing the SAME
+/// worker/session/adapter the start dispatch targeted so the cancel is leasable
+/// by the worker that owns the run. Returns whether a dispatch was enqueued: a
+/// job whose start dispatch is already gone (acked and pruned, or never
+/// created) has nothing to cancel in the transport, which is not an error --
+/// the run is still terminalized by the caller.
+fn cancel_agent_job_in_runtime(
+    state: &AppState,
+    run: &StoredAgentRun,
+    request_id: &str,
+    now_unix: u64,
+) -> Result<bool, String> {
+    let Some(start) = state.self_hosted_dispatch_for_run(&run.id, SelfHostedRunAction::StartRun)
+    else {
+        return Ok(false);
+    };
+    let cancel = SelfHostedRunDispatch {
+        dispatch_id: agent_job_cancel_dispatch_id(&run.id),
+        action: SelfHostedRunAction::CancelRun,
+        queued_at_unix: now_unix.max(1),
+        request_id: Some(request_id.to_string()),
+        trace_id: run.trace_id.clone(),
+        agent_run_id: Some(run.id.clone()),
+        ..start
+    };
+    state
+        .enqueue_scheduled_self_hosted_dispatch(cancel)
+        .map(|()| true)
+        .map_err(|error| format!("agent job cancel could not reach the runtime: {error}"))
+}
+
+/// Resolve a job's timeline with tenant isolation applied at the query layer.
+///
+/// The `AgentRunFilter.organization_id` is pinned by `enforce_tenant_filter`
+/// BEFORE the storage read, so a tenant-scoped caller's cross-tenant `run_id`
+/// resolves to `None` (reported as 404) rather than being filtered out of a
+/// response that already leaked its existence. A platform-operator key
+/// (`organization_id: None`) is unpinned and sees every tenant, matching every
+/// other admin read.
+fn scoped_agent_job_timeline(
+    state: &AppState,
+    auth: &AuthContext,
+    run_id: &str,
+) -> Option<AgentRunTimeline> {
+    let filter = AgentRunFilter {
+        organization_id: enforce_tenant_filter(auth, None),
+        ..AgentRunFilter::default()
+    };
+    state.agent_run_timeline(run_id, filter)
+}
+
+/// The job's status: the canonical `agent_runs.status` when the run row exists,
+/// otherwise the timeline summary's derived status (evidence-only runs).
+fn agent_job_status(timeline: &AgentRunTimeline) -> String {
+    timeline
+        .run
+        .as_ref()
+        .map(|run| run.status.clone())
+        .unwrap_or_else(|| timeline.summary.status.to_string())
+}
+
+/// The terminal output the runtime recorded on the run timeline, if any. Read
+/// from the newest completion-shaped event rather than a separate result store.
+fn agent_job_output(timeline: &AgentRunTimeline) -> Option<String> {
+    timeline
+        .agent_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "run_completed" | "job_result" | "run_output"
+            )
+        })
+        .max_by_key(|event| (event.occurred_at_unix.unwrap_or_default(), event.id.clone()))
+        .and_then(|event| event.message.clone())
+}
+
+/// The resolved idempotency key plus where it came from, so the response can
+/// tell the caller exactly which key its job is keyed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedIdempotencyKey {
+    key: String,
+    source: &'static str,
+}
+
+/// Resolve the explicit idempotency key: `Idempotency-Key` header wins, then
+/// the body's `idempotency_key`. When neither is supplied the request id is
+/// used, which makes every un-keyed submit its own job (never a silent merge)
+/// while still yielding a deterministic id; the response echoes the effective
+/// key and `idempotency_key_source: "request_id"` so the caller can see that a
+/// retry of that request will NOT dedup.
+fn resolve_idempotency_key(
+    headers: &HeaderMap,
+    body_key: Option<&str>,
+    request_id: &str,
+) -> Result<ResolvedIdempotencyKey, String> {
+    let header_key = match headers.get(IDEMPOTENCY_KEY_HEADER) {
+        Some(value) => Some(value.to_str().map_err(|_| {
+            format!("{IDEMPOTENCY_KEY_HEADER} must be valid visible ASCII/UTF-8 header text")
+        })?),
+        None => None,
+    };
+    let (raw, source) = match header_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(|key| (key, "header"))
+        .or_else(|| {
+            body_key
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(|key| (key, "body"))
+        }) {
+        Some(resolved) => resolved,
+        None => {
+            return Ok(ResolvedIdempotencyKey {
+                key: format!("request:{request_id}"),
+                source: "request_id",
+            })
+        }
+    };
+    if raw.chars().count() > IDEMPOTENCY_KEY_MAX_LEN {
+        return Err(format!(
+            "idempotency key must be at most {IDEMPOTENCY_KEY_MAX_LEN} characters"
+        ));
+    }
+    if raw.chars().any(|ch| ch.is_control()) {
+        return Err("idempotency key must not contain control characters".to_string());
+    }
+    Ok(ResolvedIdempotencyKey {
+        key: raw.to_string(),
+        source,
+    })
+}
+
+/// Cursor for the incremental event feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentJobEventCursor {
+    after_event_id: Option<String>,
+    limit: usize,
+}
+
+impl AgentJobEventCursor {
+    fn from_query(query: Option<&str>) -> Result<Self, String> {
+        let mut cursor = Self {
+            after_event_id: None,
+            limit: EVENT_PAGE_DEFAULT_LIMIT,
+        };
+        let Some(query) = query else {
+            return Ok(cursor);
+        };
+        for part in query.split('&') {
+            let Some((name, value)) = part.split_once('=') else {
+                continue;
+            };
+            match name {
+                "after_event_id" | "after" => {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        cursor.after_event_id = Some(value.to_string());
+                    }
+                }
+                "limit" => {
+                    let limit = value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "limit must be an unsigned integer".to_string())?;
+                    if limit == 0 {
+                        return Err("limit must be greater than zero".to_string());
+                    }
+                    cursor.limit = limit.min(EVENT_PAGE_MAX_LIMIT);
+                }
+                _ => {}
+            }
+        }
+        Ok(cursor)
+    }
+}
+
+struct AgentJobEventSlice {
+    data: Vec<StoredAgentRunEvent>,
+    next_after_event_id: Option<String>,
+    has_more: bool,
+}
+
+/// Order the run's timeline events deterministically and take the page after
+/// the cursor. Ordering by `(occurred_at_unix, id)` (not storage order) is what
+/// makes `after_event_id` a stable resume point for a long-poll loop.
+fn page_agent_job_events(
+    mut events: Vec<StoredAgentRunEvent>,
+    cursor: &AgentJobEventCursor,
+) -> Result<AgentJobEventSlice, String> {
+    events.sort_by(|left, right| {
+        left.occurred_at_unix
+            .unwrap_or_default()
+            .cmp(&right.occurred_at_unix.unwrap_or_default())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let start = match cursor.after_event_id.as_deref() {
+        None => 0,
+        Some(after) => events
+            .iter()
+            .position(|event| event.id == after)
+            .map(|index| index + 1)
+            .ok_or_else(|| format!("after_event_id {after} is not an event of this agent job"))?,
+    };
+    let remaining = events.split_off(start);
+    let has_more = remaining.len() > cursor.limit;
+    let data: Vec<StoredAgentRunEvent> = remaining.into_iter().take(cursor.limit).collect();
+    let next_after_event_id = data.last().map(|event| event.id.clone());
+    Ok(AgentJobEventSlice {
+        data,
+        next_after_event_id,
+        has_more,
+    })
+}
+
+/// A run id is addressable when it is a single non-empty path segment.
+fn is_addressable_run_id(run_id: &str) -> bool {
+    !run_id.is_empty() && !run_id.contains('/')
+}
+
+fn truncate_evidence(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.chars().count() <= SUBMITTED_INPUT_EVIDENCE_MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let mut truncated: String = trimmed
+        .chars()
+        .take(SUBMITTED_INPUT_EVIDENCE_MAX_CHARS)
+        .collect();
+    truncated.push('…');
+    truncated
+}
+
+fn agent_job_audit_event(
+    ctx: &ProxyContext,
+    auth: &AuthContext,
+    run_id: &str,
+    action: &str,
+    outcome: &str,
+    message: String,
+) -> AdminAuditEventDraft {
+    AdminAuditEventDraft {
+        action_identity: Default::default(),
+        request_id: ctx.request_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        agent_run_id: Some(run_id.to_string()),
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        actor_api_key_id: auth.api_key_id.clone(),
+        tenant: auth.tenant_context(),
+        action: action.to_string(),
+        target: format!("agent_job:{run_id}"),
+        outcome: outcome.to_string(),
+        message,
+    }
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn job_not_found(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    run_id: &str,
+) -> PingoraResult<()> {
+    // Deliberately 404 (not 403) for a cross-tenant id: the tenant filter is
+    // applied at the query layer, so this path cannot distinguish "does not
+    // exist" from "belongs to someone else", and must not.
+    write_json_error(
+        session,
+        StatusCode::NOT_FOUND,
+        "agent_job_not_found",
+        format!("agent job {run_id} was not found"),
+        &ctx.request_id,
+    )
+    .await
+}
+
+async fn not_found(session: &mut Session, ctx: &ProxyContext) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::NOT_FOUND,
+        "agent_job_endpoint_not_found",
+        "agent job endpoint not found",
+        &ctx.request_id,
+    )
+    .await
+}
+
+async fn method_not_allowed(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    message: &'static str,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        message,
+        &ctx.request_id,
+    )
+    .await
+}
+
+async fn write_auth_error(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    error: crate::auth::AuthError,
+) -> PingoraResult<()> {
+    write_json_error(
+        session,
+        error.status,
+        error.code,
+        error.message,
+        &ctx.request_id,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[path = "agent_jobs_test.rs"]
+mod agent_jobs_test;

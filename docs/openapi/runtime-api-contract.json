@@ -103,6 +103,14 @@
       "group": "agent_run"
     },
     {
+      "pattern": "/v1/agent-jobs",
+      "group": "agent_run"
+    },
+    {
+      "pattern": "/v1/agent-jobs/{*rest}",
+      "group": "agent_run"
+    },
+    {
       "pattern": "/.well-known/agent.json",
       "group": "agent_run"
     },
@@ -560,6 +568,61 @@
       "auth": {
         "kind": "bearer",
         "scope": "agents.invoke"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/agent-jobs",
+      "method": "post",
+      "operation_id": "submitAgentJob",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "agent.runs.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/agent-jobs/{run_id}",
+      "method": "get",
+      "operation_id": "getAgentJob",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "agent.runs.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/agent-jobs/{run_id}/events",
+      "method": "get",
+      "operation_id": "listAgentJobEvents",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "agent.runs.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/agent-jobs/{run_id}/result",
+      "method": "get",
+      "operation_id": "getAgentJobResult",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "agent.runs.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/agent-jobs/{run_id}/cancel",
+      "method": "post",
+      "operation_id": "cancelAgentJob",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "agent.runs.create"
       },
       "rbac_action": null
     },

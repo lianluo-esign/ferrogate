@@ -292,6 +292,21 @@ impl FerroGateway {
                 .await?;
             return Ok(true);
         }
+        // #474: the caller-facing async agent-job protocol (submit/observe/
+        // collect/cancel) lives alongside the synchronous run-create route in
+        // the same group, because it addresses the same `agent_runs` evidence.
+        if req.path == "/v1/agent-jobs" || req.path.starts_with("/v1/agent-jobs/") {
+            self.handle_agent_jobs(
+                session,
+                ctx,
+                req.headers.clone(),
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
         if req.path == "/.well-known/agent.json" {
             self.handle_agent_discovery(session, ctx, &req.headers)
                 .await?;

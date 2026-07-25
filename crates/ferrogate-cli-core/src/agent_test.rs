@@ -103,6 +103,7 @@ fn all_groups_register_in_order() {
             "agent-schedules",
             "agent-upstreams",
             "agent-runs",
+            "agent-jobs",
         ]
     );
 }
@@ -114,6 +115,7 @@ fn every_declared_verb_builds_a_request() {
         (AgentSchedulesGroup.descriptor(), build_agent_schedules),
         (AgentUpstreamsGroup.descriptor(), build_agent_upstreams),
         (AgentRunsGroup.descriptor(), build_agent_runs),
+        (AgentJobsGroup.descriptor(), build_agent_jobs),
     ];
     let input = universal_input();
     for (descriptor, build) in cases {
@@ -150,11 +152,17 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "listAdminAgentRuns",
         "getAdminAgentRunTimeline",
         "createAgentRun",
+        "submitAgentJob",
+        "getAgentJob",
+        "listAgentJobEvents",
+        "getAgentJobResult",
+        "cancelAgentJob",
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 6 (workflows) + 8 (schedules) + 6 (upstreams) + 3 (runs) = 23 distinct ids.
-    assert_eq!(manifest.len(), 23);
+    // 6 (workflows) + 8 (schedules) + 6 (upstreams) + 3 (runs) + 5 (jobs) = 28
+    // distinct ids.
+    assert_eq!(manifest.len(), 28);
 }
 
 #[test]

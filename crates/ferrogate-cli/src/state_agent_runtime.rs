@@ -1477,6 +1477,29 @@ impl AppState {
         crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
     }
 
+    /// #474: the queued self-hosted dispatch that carries `run_id` for
+    /// `action`, if one is still in the lease queue. The queue is rebuilt from
+    /// the durable `self_hosted_run_dispatches` rows on startup
+    /// (`rebuild_self_hosted_worker_dispatch_runtime`), so this survives a
+    /// restart of the serving component -- which is what lets the async
+    /// agent-job cancel path address the SAME runtime dispatch the submit path
+    /// enqueued (matching its framework adapter / workspace / session) instead
+    /// of guessing those fields from the cancelling request.
+    pub(crate) fn self_hosted_dispatch_for_run(
+        &self,
+        run_id: &str,
+        action: SelfHostedRunAction,
+    ) -> Option<SelfHostedRunDispatch> {
+        let records = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.run_records(),
+            Err(poisoned) => poisoned.into_inner().queue.run_records(),
+        };
+        records
+            .into_iter()
+            .map(|record| record.dispatch)
+            .find(|dispatch| dispatch.run_id == run_id && dispatch.action == action)
+    }
+
     pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
         // Same #309 routing as record_agent_run: durable -> background
         // evidence writer, in-memory -> inline.

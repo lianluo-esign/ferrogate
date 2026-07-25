@@ -8,6 +8,7 @@ mod a2a;
 mod admin_list_query;
 mod admin_overview;
 mod agent_cost_burn;
+mod agent_jobs;
 mod agent_runs;
 mod agent_schedules;
 mod api_contract;
