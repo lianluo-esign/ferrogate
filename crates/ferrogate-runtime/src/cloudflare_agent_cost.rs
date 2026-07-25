@@ -294,13 +294,19 @@ impl CfRuntimeCostModel {
 
 /// A per-agent/tenant cost budget: a hard ceiling plus threshold fractions.
 ///
-/// The `ceiling_usd` is an **input** to the engine (e.g. resolved by slice B
-/// from an operator quota). It is deliberately NOT sourced from
-/// `ferrogate-policy` here.
+/// The `ceiling_usd` is an **input** to the engine. It is deliberately NOT
+/// sourced from `ferrogate-policy` here: this crate does not depend on
+/// `ferrogate-policy`, which keeps the pure burn/decision engine testable and
+/// free of the control-plane resolution stack.
 ///
-// TODO(#428 slice B): promote the ceiling/threshold fields onto a
-// ferrogate-policy EffectiveQuota so the control plane owns them, and resolve an
-// AgentBudgetPolicy per (tenant, agent) from it.
+/// The control plane owns the ceiling as of #428 slice B-policy
+/// (`ferrogate_policy::EffectiveQuota::agent_cost_budget_usd`, resolved
+/// `min`-across-the-tenant-chain with a plan default), and the connector that
+/// turns that quota into an `AgentBudgetPolicy` lives in the crate that depends
+/// on both sides: `AppState::resolve_agent_budget_policy` in
+/// `ferrogate-cli/src/state_quota_and_policy.rs`. It returns `None` when no
+/// budget is configured, so an unbudgeted tenant constructs no governor at all
+/// rather than a zero ceiling. Callers hand the resulting policy to this engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBudgetPolicy {

@@ -2579,3 +2579,151 @@ fn merge_precedence_orders_deny_above_approval_above_redact() {
         Some(GuardrailActionKind::RequireApproval),
     );
 }
+
+// ---------------------------------------------------------------------------
+// #428: agent cost budget ceiling resolved out of the control-plane quota
+// ---------------------------------------------------------------------------
+
+fn agent_budget_quota_policy(
+    scope_type: QuotaScopeKind,
+    scope_id: &str,
+    agent_cost_budget_usd: Option<f64>,
+) -> StoredQuotaPolicy {
+    StoredQuotaPolicy {
+        id: format!("{}:{scope_id}", scope_type.as_str()),
+        scope_type,
+        scope_id: scope_id.to_string(),
+        model_allowlist: vec![],
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd: None,
+        asset_storage_quota_bytes: None,
+        asset_max_object_bytes: None,
+        agent_cost_budget_usd,
+        alert_threshold_pcts: vec![],
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: None,
+        enabled: true,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+    }
+}
+
+fn agent_budget_tenant_context() -> ferrogate_core::TenantContext {
+    ferrogate_core::TenantContext {
+        organization_id: Some("tenant-1".to_string()),
+        project_id: Some("project-1".to_string()),
+        workspace_id: Some("ws-1".to_string()),
+        ..ferrogate_core::TenantContext::default()
+    }
+}
+
+#[test]
+fn agent_budget_at_the_tenant_scope_resolves_into_a_policy_tagged_with_the_winning_scope() {
+    let state = AppState::new(Config::default());
+    block_on(state.upsert_quota_policy(agent_budget_quota_policy(
+        QuotaScopeKind::Tenant,
+        "tenant-1",
+        Some(250.0),
+    )))
+    .expect("seed tenant quota policy");
+
+    let policy = block_on(state.resolve_agent_budget_policy(&agent_budget_tenant_context()))
+        .expect("resolve agent budget policy")
+        .expect("a configured budget must produce a policy");
+
+    assert_eq!(policy.ceiling_usd, 250.0);
+    // policy_version is stamped onto every AgentCostReceipt, so it must name
+    // the control-plane row that actually won the chain, not a constant.
+    assert_eq!(policy.policy_version, "quota:tenant:tenant-1");
+    assert_eq!(policy.degrade_fraction, None);
+    assert_eq!(
+        policy.warn_fraction,
+        ferrogate_runtime::DEFAULT_WARN_FRACTION
+    );
+    policy.validate().expect("resolved policy must be valid");
+}
+
+#[test]
+fn no_configured_agent_budget_resolves_to_none_and_never_a_zero_ceiling() {
+    // THE dangerous-default guard. An unconfigured agent budget must resolve to
+    // `None` (no governor is constructed, dispatch is untouched). If it ever
+    // became `Some(AgentBudgetPolicy { ceiling_usd: 0.0, .. })`, every agent run
+    // on every unbudgeted tenant would be an instant BudgetDecision::Kill.
+    let state = AppState::new(Config::default());
+
+    let resolved = block_on(state.resolve_agent_budget_policy(&agent_budget_tenant_context()))
+        .expect("resolution must succeed when nothing is configured");
+
+    assert!(
+        resolved.is_none(),
+        "an unconfigured agent budget must be None, got {resolved:?}",
+    );
+
+    // Same for a quota policy that exists but leaves the agent budget unset.
+    block_on(state.upsert_quota_policy(agent_budget_quota_policy(
+        QuotaScopeKind::Tenant,
+        "tenant-1",
+        None,
+    )))
+    .expect("seed tenant quota policy without an agent budget");
+    let resolved = block_on(state.resolve_agent_budget_policy(&agent_budget_tenant_context()))
+        .expect("resolution must succeed when the budget field is unset");
+    assert!(
+        resolved.is_none(),
+        "a quota policy without agent_cost_budget_usd must be None, got {resolved:?}",
+    );
+}
+
+#[test]
+fn a_tighter_child_scope_agent_budget_wins_the_resolved_ceiling_and_version() {
+    // Mirrors EffectiveQuota's min-across-the-chain rule: the nearer (tighter)
+    // scope wins, and the resolved policy_version must name it.
+    let state = AppState::new(Config::default());
+    block_on(state.upsert_quota_policy(agent_budget_quota_policy(
+        QuotaScopeKind::Tenant,
+        "tenant-1",
+        Some(500.0),
+    )))
+    .expect("seed tenant quota policy");
+    block_on(state.upsert_quota_policy(agent_budget_quota_policy(
+        QuotaScopeKind::Workspace,
+        "ws-1",
+        Some(120.0),
+    )))
+    .expect("seed workspace quota policy");
+
+    let tenant = agent_budget_tenant_context();
+    let quota = block_on(state.resolve_effective_quota(&tenant)).expect("resolve effective quota");
+    let policy = block_on(state.resolve_agent_budget_policy(&tenant))
+        .expect("resolve agent budget policy")
+        .expect("a configured budget must produce a policy");
+
+    assert_eq!(quota.agent_cost_budget_usd, Some(120.0));
+    assert_eq!(policy.ceiling_usd, 120.0);
+    assert_eq!(policy.policy_version, "quota:workspace:ws-1");
+}
+
+#[test]
+fn an_invalid_agent_budget_ceiling_is_a_loud_misconfiguration_not_a_silent_disable() {
+    // A garbage ceiling must not silently collapse to `None` (that would
+    // silently disable enforcement -- unbounded spend, the very inertness this
+    // connector closes) nor build a nonsensical policy. It errors.
+    for ceiling in [-5.0_f64, 0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let state = AppState::new(Config::default());
+        block_on(state.upsert_quota_policy(agent_budget_quota_policy(
+            QuotaScopeKind::Tenant,
+            "tenant-1",
+            Some(ceiling),
+        )))
+        .expect("seed tenant quota policy");
+
+        let error = block_on(state.resolve_agent_budget_policy(&agent_budget_tenant_context()))
+            .expect_err(&format!("ceiling {ceiling} must be rejected"));
+        let message = error.to_string();
+        assert!(
+            message.contains("quota:tenant:tenant-1"),
+            "the error must name the offending control-plane scope, got {message}",
+        );
+    }
+}

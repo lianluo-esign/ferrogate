@@ -258,6 +258,96 @@ impl AppState {
         ))
     }
 
+    /// Resolve the per-tenant CF-hosted-agent cost ceiling (issue #428) from the
+    /// control plane into the runtime's [`AgentBudgetPolicy`].
+    ///
+    /// This is the connector that closes the inert-ceiling gap: slice B-policy
+    /// promoted `agent_cost_budget_usd` onto [`EffectiveQuota`] (persisted,
+    /// CRUD'd, in the OpenAPI contract) and slice A built the
+    /// `AgentCostGovernor` that enforces an `AgentBudgetPolicy`, but nothing
+    /// read the former into the latter -- so an operator-configured per-tenant
+    /// agent budget had zero effect ("control plane writes / runtime ignores",
+    /// the #188/#397 defect class). This lives in `ferrogate-cli` on purpose:
+    /// `ferrogate-runtime` deliberately does NOT depend on `ferrogate-policy`
+    /// (see the note on [`AgentBudgetPolicy`]), and the cli is the crate that
+    /// already owns both the quota resolution and the runtime types.
+    ///
+    /// Returns:
+    /// - `Ok(None)` when the tenant chain (and its plan default) configures NO
+    ///   agent budget. This is the deliberate, load-bearing default-off: no
+    ///   configured budget means no governor is constructed and agent dispatch
+    ///   is completely unaffected. An absent budget must NEVER be turned into a
+    ///   ceiling of `0.0` -- a zero ceiling is an instant
+    ///   `BudgetDecision::Kill` for every run, i.e. it would halt every agent on
+    ///   every unbudgeted tenant.
+    /// - `Ok(Some(policy))` with `ceiling_usd` set to the resolved
+    ///   (min-across-the-chain) budget, the type's default warn fraction and no
+    ///   degrade tier, and a traceable `policy_version`.
+    /// - `Err(..)` when a budget IS configured but is not a usable ceiling
+    ///   (non-finite, negative, or zero). A garbage ceiling is an operator
+    ///   misconfiguration and is reported loudly rather than silently dropped:
+    ///   collapsing it to `Ok(None)` would silently disable enforcement (an
+    ///   unbounded-spend hole and exactly the inertness this slice closes),
+    ///   while accepting it would build a nonsensical budget. Note
+    ///   [`AgentBudgetPolicy::validate`] alone is not sufficient here: `NaN`
+    ///   passes its `ceiling_usd <= 0.0` test (every `NaN` comparison is
+    ///   false), so finiteness is checked explicitly first.
+    ///
+    /// `policy_version` format: `"quota:{scope_kind}:{scope_id}"` built from
+    /// `EffectiveQuota::agent_cost_budget_scope` -- the scope that actually won
+    /// the chain's `min` (e.g. `"quota:workspace:ws-1"`; a plan default is
+    /// recorded against the tenant scope). It is stamped onto every
+    /// `AgentCostReceipt`, so an audit can tell which control-plane row
+    /// produced a decision. When no winning scope was recorded it falls back to
+    /// `"quota:unscoped:{tenant_id}"` (`"unknown"` when the request carries no
+    /// organization), which is still stable per tenant.
+    ///
+    /// A chain denied by a disabled scope ([`EffectiveQuota::denied_by`]) leaves
+    /// every quota field at its default, so it resolves to `Ok(None)` here;
+    /// admission on a denied chain is the auth layer's fail-closed job (it
+    /// rejects the request before any agent dispatch happens) and is not
+    /// re-litigated by this budget resolver.
+    ///
+    /// Not yet called from product code: constructing the live
+    /// `AgentCostGovernor` (and choosing its burn ledger / window) is the
+    /// deployment's job, so this slice only makes the ceiling *resolvable*.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn resolve_agent_budget_policy(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+    ) -> anyhow::Result<Option<AgentBudgetPolicy>> {
+        let quota = self.resolve_effective_quota(tenant).await?;
+        let Some(ceiling_usd) = quota.agent_cost_budget_usd else {
+            return Ok(None);
+        };
+        let policy_version = match quota.agent_cost_budget_scope.as_ref() {
+            Some(scope) => format!("quota:{}:{}", scope.kind.as_str(), scope.id),
+            None => format!(
+                "quota:unscoped:{}",
+                tenant.organization_id.as_deref().unwrap_or("unknown")
+            ),
+        };
+        if !ceiling_usd.is_finite() {
+            warn!(
+                policy_version = %policy_version,
+                ceiling_usd,
+                "agent cost budget ceiling is not finite; refusing to build an agent budget policy"
+            );
+            anyhow::bail!("agent_cost_budget_usd for {policy_version} is not a finite USD amount");
+        }
+        let policy = AgentBudgetPolicy::new(ceiling_usd, policy_version.clone());
+        if let Err(error) = policy.validate() {
+            warn!(
+                policy_version = %policy_version,
+                ceiling_usd,
+                %error,
+                "agent cost budget ceiling is not a valid policy; refusing to build an agent budget policy"
+            );
+            anyhow::bail!("agent_cost_budget_usd for {policy_version} is invalid: {error}");
+        }
+        Ok(Some(policy))
+    }
+
     /// Committed monthly token spend for one api key (issue #330). The filter
     /// and sum are pushed into storage (`WHERE api_key_id = $1` in SQL on the
     /// durable path) instead of loading the entire `usage_aggregate_rollups`
