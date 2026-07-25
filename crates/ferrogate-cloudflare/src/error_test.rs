@@ -45,12 +45,24 @@ fn maps_missing_scope_code_to_missing_scope_with_required_groups() {
     );
     match mapped {
         CloudflareError::MissingScope { required, errors } => {
-            assert!(
-                !required.is_empty(),
-                "required permission groups must be named"
+            // The whole remediation list, not spot-checks: two `any(...)`
+            // probes let a row be deleted with the suite green, which is how
+            // the #489 defect came back (see scopes_test.rs for the
+            // preflight-level pin of the same invariant).
+            assert_eq!(
+                required,
+                vec![
+                    "AI Gateway",
+                    "Secrets Store",
+                    "D1",
+                    "Workers Scripts",
+                    "Workers R2 Storage",
+                    "API Tokens",
+                    "Cloudflare Pages",
+                    "Workflows (Workers Scripts)",
+                ],
+                "the required-permission-group list a caller is handed changed"
             );
-            assert!(required.iter().any(|g| g.contains("AI Gateway")));
-            assert!(required.iter().any(|g| g.contains("Workers R2 Storage")));
             assert_eq!(errors[0].code, 9109);
         }
         other => panic!("expected MissingScope, got {other:?}"),

@@ -458,7 +458,10 @@ foundation client's preflight set byte-for-byte**. Source of truth:
 (an under-scoped token surfaces as `CloudflareError::MissingScope`, whose message
 names these groups via `required_group_names()`,
 `crates/ferrogate-cloudflare/src/error.rs:119`). Rows and access levels below are
-copied verbatim from the code, in code order.
+copied verbatim from the code, in code order — and that parity is **enforced**,
+not asserted: `the_operator_doc_scope_table_matches_the_code_table_row_for_row`
+in `crates/ferrogate-cloudflare/src/scopes_test.rs` parses this very table out of
+this file and fails the build if either side drifts.
 
 | Permission group | Access | FerroGate use (`used_by` in code) |
 |------------------|--------|-----------------------------------|
@@ -484,10 +487,17 @@ Notes:
   **Workers Scripts Edit** row (assets attach to a Worker deploy).
 - R2's optional S3 Access Key path is a *credential form*, not an extra permission
   group; the account-token equivalent is the **Workers R2 Storage** row.
-- **API Tokens (Write)** is the account-level group that lets the account token
-  *mint and revoke other tokens*. It is required by the #462 per-tenant scoped-R2
-  credential path (`POST`/`DELETE /accounts/{account_id}/tokens`); **Workers R2
-  Storage** alone lets you use R2 but not issue bucket-scoped tokens for it.
+- **API Tokens (Write)** is the group that lets the token *mint and revoke other
+  tokens*. It is required by the #462 per-tenant scoped-R2 credential path
+  (`POST`/`DELETE /accounts/{account_id}/tokens`); **Workers R2 Storage** alone
+  lets you use R2 but not issue bucket-scoped tokens for it. Note where to find
+  it: Cloudflare publishes `API Tokens Read` / `API Tokens Write` (dashboard:
+  *API Tokens Edit*) in the **User** permissions table, scope
+  `com.cloudflare.api.user` — there is **no** `API Tokens` row under *Account*
+  permissions, and the dashboard exposes the pair only through the **Create
+  additional tokens** template, not the Custom Token builder. Provisioning it as
+  an account permission is the most common way to land in the under-scoped state
+  #489 exists to prevent.
 - **Workers AI** (for the optional Llama Guard detector, §7) is deliberately
   **not** in this set — it is opt-in, so the code does not require it at preflight.
 

@@ -27,3 +27,14 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+
+# The live scoped-R2-token probe carries the #489 cleanup-ordering invariant
+# (a failing revoke must still delete the probe bucket). Examples are normally
+# compile-only, which left that invariant unpinnable; `test = true` makes
+# `cargo test -p ferrogate-cloudflare` run the example's own `#[test]`s so the
+# ordering is executed, not merely read. The probe's live `main()` still needs
+# real Cloudflare credentials and is unaffected.
+[[example]]
+name = "r2_token_live_probe"
+path = "examples/r2_token_live_probe.rs"
+test = true

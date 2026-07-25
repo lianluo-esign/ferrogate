@@ -94,3 +94,6 @@ mod r2_token_test;
 #[cfg(test)]
 #[path = "resolver_test.rs"]
 mod resolver_test;
+#[cfg(test)]
+#[path = "scopes_test.rs"]
+mod scopes_test;
