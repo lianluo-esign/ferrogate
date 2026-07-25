@@ -57,6 +57,11 @@ echo "== 1/5 local gate =="
 if [ "$SKIP_TESTS" = "true" ]; then
   echo "   (skipped --skip-tests)"
 else
+  # Greppability gate (#487): reject tracked source files git classifies as
+  # binary. A single NUL byte makes git, grep and ripgrep skip the file
+  # silently, so the secret scan below and every other repo-wide sweep lose
+  # coverage without failing. Sub-second and dependency-free, so it runs first.
+  python3 "$ROOT/scripts/check-binary-source-files.py"
   # The same gate the release pipeline enforces before an image is trusted.
   cargo +1.88.0 fmt --check
   cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings

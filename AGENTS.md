@@ -343,7 +343,7 @@ table is the binding taxonomy.
 
 | Layer | Mechanism in this repo | Question it answers |
 |---|---|---|
-| Static gate | `cargo fmt --check`, `clippy -D warnings`, `cargo metadata --locked`, `scripts/check-openapi.py`, `git diff --check` | Does it build clean and match the declared API/schema contract? |
+| Static gate | `cargo fmt --check`, `clippy -D warnings`, `cargo metadata --locked`, `scripts/check-openapi.py`, `scripts/check-binary-source-files.py`, `git diff --check` | Does it build clean, match the declared API/schema contract, and stay greppable? |
 | Unit | dedicated sibling `*_test.rs` modules (or `crates/*/tests/*.rs`); `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
 | Property | `proptest` (currently `ferrogate-billing`, `ferrogate-policy`; extend to any state-machine/invariant surface) | Do invariants hold across generated inputs, not just hand-picked cases? |
 | Crate integration | `crates/*/tests/*.rs` (`ferrogate-cli/tests/*_e2e.rs`, `rbac_*`, `assets_*`, `*_provider_e2e`, …) | Do wired-together modules behave correctly at a real in-process boundary? |

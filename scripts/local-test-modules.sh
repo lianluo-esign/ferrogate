@@ -64,6 +64,10 @@ run_quality() {
   cargo test -p ferrogate-cli --all-features config::tests
   cargo test -p ferrogate-cli --all-features config::validation_tests
   python3 scripts/check-openapi.py
+  # Greppability gate (#487): a NUL byte makes git/grep/ripgrep treat a source
+  # file as binary and skip it silently, so every repo-wide sweep (secret scan,
+  # literal audits, dead-code greps) quietly loses coverage.
+  python3 scripts/check-binary-source-files.py
   scripts/check-kubernetes-examples.sh
 }
 
