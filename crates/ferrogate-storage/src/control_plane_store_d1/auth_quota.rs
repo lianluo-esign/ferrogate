@@ -361,9 +361,9 @@ impl D1ControlPlaneStore {
              (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
               monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
               alert_threshold_pcts_json, asset_storage_quota_bytes, monthly_egress_bytes_budget, \
-              download_rpm_limit, asset_max_object_bytes) \
+              download_rpm_limit, asset_max_object_bytes, agent_cost_budget_usd) \
              VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, \
-              NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, '')) \
+              NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, '')) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
              model_allowlist_json = excluded.model_allowlist_json, \
              rpm_limit = excluded.rpm_limit, tpm_limit = excluded.tpm_limit, \
@@ -373,7 +373,8 @@ impl D1ControlPlaneStore {
              asset_storage_quota_bytes = excluded.asset_storage_quota_bytes, \
              monthly_egress_bytes_budget = excluded.monthly_egress_bytes_budget, \
              download_rpm_limit = excluded.download_rpm_limit, \
-             asset_max_object_bytes = excluded.asset_max_object_bytes",
+             asset_max_object_bytes = excluded.asset_max_object_bytes, \
+             agent_cost_budget_usd = excluded.agent_cost_budget_usd",
             vec![
                 policy.id,
                 policy.scope_type.as_str().to_string(),
@@ -390,6 +391,7 @@ impl D1ControlPlaneStore {
                 optional_number_param(policy.monthly_egress_bytes_budget),
                 optional_number_param(policy.download_rpm_limit),
                 optional_number_param(policy.asset_max_object_bytes),
+                optional_number_param(policy.agent_cost_budget_usd),
             ],
         )
         .await
@@ -446,10 +448,10 @@ impl D1ControlPlaneStore {
               default_monthly_budget_usd, created_at_unix, updated_at_unix, asset_hosting_enabled, \
               default_asset_storage_quota_bytes, extension_tools_enabled, \
               default_monthly_egress_bytes_budget, default_download_rpm_limit, \
-              default_asset_max_object_bytes) \
+              default_asset_max_object_bytes, default_agent_cost_budget_usd) \
              VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), \
               NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), \
-              NULLIF(?, '')) \
+              NULLIF(?, ''), NULLIF(?, '')) \
              ON CONFLICT (id) DO UPDATE SET \
              name = excluded.name, slug = excluded.slug, mcp_enabled = excluded.mcp_enabled, \
              self_hosted_workers_enabled = excluded.self_hosted_workers_enabled, \
@@ -464,7 +466,8 @@ impl D1ControlPlaneStore {
              extension_tools_enabled = excluded.extension_tools_enabled, \
              default_monthly_egress_bytes_budget = excluded.default_monthly_egress_bytes_budget, \
              default_download_rpm_limit = excluded.default_download_rpm_limit, \
-             default_asset_max_object_bytes = excluded.default_asset_max_object_bytes",
+             default_asset_max_object_bytes = excluded.default_asset_max_object_bytes, \
+             default_agent_cost_budget_usd = excluded.default_agent_cost_budget_usd",
             vec![
                 plan.id,
                 plan.name,
@@ -484,6 +487,7 @@ impl D1ControlPlaneStore {
                 optional_number_param(plan.default_monthly_egress_bytes_budget),
                 optional_number_param(plan.default_download_rpm_limit),
                 optional_number_param(plan.default_asset_max_object_bytes),
+                optional_number_param(plan.default_agent_cost_budget_usd),
             ],
         )
         .await

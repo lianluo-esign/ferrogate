@@ -721,6 +721,9 @@ impl FerroGateway {
             default_asset_max_object_bytes: plan
                 .as_ref()
                 .and_then(|plan| plan.default_asset_max_object_bytes),
+            default_agent_cost_budget_usd: plan
+                .as_ref()
+                .and_then(|plan| plan.default_agent_cost_budget_usd),
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }

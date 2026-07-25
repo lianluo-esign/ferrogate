@@ -355,6 +355,8 @@ pub(super) struct QuotaPolicyRow {
     pub(super) monthly_egress_bytes_budget: Option<i64>,
     pub(super) download_rpm_limit: Option<i64>,
     pub(super) asset_max_object_bytes: Option<i64>,
+    // #428: money (REAL), decoded directly like `monthly_budget_usd`.
+    pub(super) agent_cost_budget_usd: Option<f64>,
 }
 
 impl QuotaPolicyRow {
@@ -373,6 +375,7 @@ impl QuotaPolicyRow {
             rpm_limit: self.rpm_limit.map(nonnegative_u64),
             tpm_limit: self.tpm_limit.map(nonnegative_u64),
             monthly_budget_usd: self.monthly_budget_usd,
+            agent_cost_budget_usd: self.agent_cost_budget_usd,
             asset_storage_quota_bytes: self.asset_storage_quota_bytes.map(nonnegative_u64),
             asset_max_object_bytes: self.asset_max_object_bytes.map(nonnegative_u64),
             alert_threshold_pcts: deserialize_storage_document(&self.alert_threshold_pcts_json)?,
@@ -405,6 +408,8 @@ pub(super) struct PlanRow {
     pub(super) default_monthly_egress_bytes_budget: Option<i64>,
     pub(super) default_download_rpm_limit: Option<i64>,
     pub(super) default_asset_max_object_bytes: Option<i64>,
+    // #428: money (REAL), decoded directly like `default_monthly_budget_usd`.
+    pub(super) default_agent_cost_budget_usd: Option<f64>,
 }
 
 impl PlanRow {
@@ -435,6 +440,7 @@ impl PlanRow {
             default_asset_max_object_bytes: self
                 .default_asset_max_object_bytes
                 .map(nonnegative_u64),
+            default_agent_cost_budget_usd: self.default_agent_cost_budget_usd,
             extension_tools_enabled: self.extension_tools_enabled != 0,
         })
     }
@@ -613,14 +619,14 @@ pub(super) const SELECT_QUOTA_POLICY_COLUMNS: &str =
     "SELECT id, scope_type, scope_id, model_allowlist_json, \
      rpm_limit, tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
      alert_threshold_pcts_json, asset_storage_quota_bytes, monthly_egress_bytes_budget, \
-     download_rpm_limit, asset_max_object_bytes FROM quota_policies";
+     download_rpm_limit, asset_max_object_bytes, agent_cost_budget_usd FROM quota_policies";
 
 pub(super) const SELECT_PLAN_COLUMNS: &str = "SELECT id, name, slug, mcp_enabled, \
      self_hosted_workers_enabled, admin_console_seats, default_model_allowlist_json, \
      default_rpm_limit, default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
      updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
      extension_tools_enabled, default_monthly_egress_bytes_budget, default_download_rpm_limit, \
-     default_asset_max_object_bytes FROM plans";
+     default_asset_max_object_bytes, default_agent_cost_budget_usd FROM plans";
 
 pub(super) const SELECT_TENANT_COLUMNS: &str =
     "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix FROM tenants";

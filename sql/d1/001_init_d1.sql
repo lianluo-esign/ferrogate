@@ -235,6 +235,10 @@ CREATE TABLE IF NOT EXISTS quota_policies (
     -- Per-object (not cumulative) asset byte ceiling, tenant-only (#259);
     -- distinct from the cumulative asset_storage_quota_bytes above.
     asset_max_object_bytes INTEGER,
+    -- Per-tenant monthly USD ceiling on CF-hosted-agent runtime cost (#428);
+    -- money (REAL) that mirrors monthly_budget_usd, settable at any scope and
+    -- merged min-across-the-chain (NOT tenant-only).
+    agent_cost_budget_usd REAL,
     UNIQUE (scope_type, scope_id)
 );
 
@@ -263,7 +267,10 @@ CREATE TABLE IF NOT EXISTS plans (
     default_download_rpm_limit INTEGER,
     -- Per-object (not cumulative) default asset byte ceiling (#259); distinct
     -- from the cumulative default_asset_storage_quota_bytes above.
-    default_asset_max_object_bytes INTEGER
+    default_asset_max_object_bytes INTEGER,
+    -- Per-tenant default monthly USD ceiling on CF-hosted-agent runtime cost
+    -- (#428); money (REAL) mirroring default_monthly_budget_usd.
+    default_agent_cost_budget_usd REAL
 );
 
 -- Seed the default 'free' plan every tenant lands on unless assigned another,

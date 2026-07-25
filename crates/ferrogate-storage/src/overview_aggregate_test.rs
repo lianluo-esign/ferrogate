@@ -173,6 +173,7 @@ fn tenant_quota_policy(
         rpm_limit: None,
         tpm_limit: None,
         monthly_budget_usd,
+        agent_cost_budget_usd: None,
         asset_storage_quota_bytes,
         asset_max_object_bytes: None,
         alert_threshold_pcts: Vec::new(),

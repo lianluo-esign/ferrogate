@@ -23303,6 +23303,14 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "default_agent_cost_budget_usd": {
+            "description": "The plan's default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         },
         "additionalProperties": false,
@@ -23791,6 +23799,14 @@
             "format": "int64",
             "minimum": 0
           },
+          "agent_cost_budget_usd": {
+            "description": "Per-scope monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money merged min-across-the-chain like monthly_budget_usd (settable at any scope, not tenant-only).",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
           "alert_threshold_pcts": {
             "type": "array",
             "items": {
@@ -23891,6 +23907,14 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "agent_cost_budget_usd": {
+            "description": "Per-scope monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money merged min-across-the-chain like monthly_budget_usd (settable at any scope, not tenant-only).",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "alert_threshold_pcts": {
             "anyOf": [
@@ -24006,6 +24030,14 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "default_agent_cost_budget_usd": {
+            "description": "Default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "extension_tools_enabled": {
             "type": "boolean"
@@ -24132,6 +24164,14 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "default_agent_cost_budget_usd": {
+            "description": "Default monthly USD ceiling on CF-hosted-agent runtime cost (issue #428); money that mirrors default_monthly_budget_usd (min-across-the-chain, not tenant-only).",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "extension_tools_enabled": {
             "type": [

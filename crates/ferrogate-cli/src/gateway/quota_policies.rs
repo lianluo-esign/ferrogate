@@ -548,6 +548,14 @@ impl FerroGateway {
                         .as_ref()
                         .and_then(|existing| existing.monthly_budget_usd)
                 }),
+                // #428: mirrors monthly_budget_usd -- settable at any scope,
+                // merged min-across-the-chain (NOT tenant-only like the asset
+                // ceilings), preserved from the existing policy on merge.
+                agent_cost_budget_usd: payload.agent_cost_budget_usd.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.agent_cost_budget_usd)
+                }),
                 asset_storage_quota_bytes: if scope_type == QuotaScopeKind::Tenant {
                     payload.asset_storage_quota_bytes.or_else(|| {
                         existing
@@ -597,6 +605,8 @@ impl FerroGateway {
                 rpm_limit: payload.rpm_limit,
                 tpm_limit: payload.tpm_limit,
                 monthly_budget_usd: payload.monthly_budget_usd,
+                // #428: mirrors monthly_budget_usd (settable at any scope).
+                agent_cost_budget_usd: payload.agent_cost_budget_usd,
                 asset_storage_quota_bytes: if scope_type == QuotaScopeKind::Tenant {
                     payload.asset_storage_quota_bytes
                 } else {
@@ -693,6 +703,7 @@ fn admin_quota_policy(policy: &StoredQuotaPolicy) -> AdminQuotaPolicy {
         rpm_limit: policy.rpm_limit,
         tpm_limit: policy.tpm_limit,
         monthly_budget_usd: policy.monthly_budget_usd,
+        agent_cost_budget_usd: policy.agent_cost_budget_usd,
         asset_storage_quota_bytes: policy.asset_storage_quota_bytes,
         asset_max_object_bytes: policy.asset_max_object_bytes,
         alert_threshold_pcts: policy.alert_threshold_pcts.clone(),

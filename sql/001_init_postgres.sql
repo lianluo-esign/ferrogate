@@ -2549,3 +2549,26 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 57 (#428): a per-tenant monthly USD ceiling on CF-hosted-agent
+-- runtime cost, the per-tenant source a later connector resolves into the
+-- slice-A AgentBudgetPolicy ceiling. quota_policies gets a per-scope column and
+-- plans gets the tenant-wide default the effective-quota merge falls back to.
+-- This is MONEY, so it mirrors monthly_budget_usd exactly: DOUBLE PRECISION,
+-- settable at ANY scope and merged min-across-the-chain -- NOT tenant-only like
+-- the asset byte ceilings, so it carries NO tenant-only CHECK. Added via the
+-- insert-first/IF FOUND gate so only the startup that records the migration
+-- runs the DDL, and a failed ALTER rolls the ledger row back for a clean retry.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (57, '057_agent_cost_budget_usd')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE quota_policies
+            ADD COLUMN IF NOT EXISTS agent_cost_budget_usd DOUBLE PRECISION;
+        ALTER TABLE plans
+            ADD COLUMN IF NOT EXISTS default_agent_cost_budget_usd DOUBLE PRECISION;
+    END IF;
+END
+$$;

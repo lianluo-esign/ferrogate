@@ -554,6 +554,7 @@ fn quota_policy_round_trips_through_real_supabase() {
         rpm_limit: Some(1_000),
         tpm_limit: Some(500_000),
         monthly_budget_usd: Some(250.5),
+        agent_cost_budget_usd: Some(75.25),
         asset_storage_quota_bytes: Some(10_485_760),
         asset_max_object_bytes: Some(4_194_304),
         alert_threshold_pcts: vec![50, 90],
@@ -575,6 +576,7 @@ fn quota_policy_round_trips_through_real_supabase() {
         rpm_limit: Some(500),
         tpm_limit: None,
         monthly_budget_usd: None,
+        agent_cost_budget_usd: Some(33.5),
         asset_storage_quota_bytes: Some(52_428_800),
         asset_max_object_bytes: Some(1_048_576),
         alert_threshold_pcts: vec![],
@@ -600,6 +602,9 @@ fn quota_policy_round_trips_through_real_supabase() {
     // #259: the dedicated per-object ceiling survives the Postgres roundtrip
     // independently of the cumulative quota above.
     assert_eq!(policy.asset_max_object_bytes, Some(1_048_576));
+    // #428: the per-tenant agent-cost ceiling (DOUBLE PRECISION money, like
+    // monthly_budget_usd) survives the Postgres roundtrip.
+    assert_eq!(policy.agent_cost_budget_usd, Some(33.5));
     // #262: the second upsert reset both egress columns to NULL, proving they
     // survive the Postgres roundtrip (were Some on the first write).
     assert_eq!(policy.monthly_egress_bytes_budget, None);

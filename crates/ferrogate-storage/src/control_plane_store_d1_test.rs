@@ -882,6 +882,7 @@ fn sample_quota_policy() -> StoredQuotaPolicy {
         rpm_limit: Some(600),
         tpm_limit: None,
         monthly_budget_usd: Some(12.5),
+        agent_cost_budget_usd: Some(7.5),
         asset_storage_quota_bytes: Some(1024),
         asset_max_object_bytes: Some(512),
         alert_threshold_pcts: vec![75, 90],
@@ -908,7 +909,7 @@ fn quota_policy_round_trips_with_dialect_mapping() {
                     "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64,
                     "alert_threshold_pcts_json": "[75,90]", "asset_storage_quota_bytes": 1024,
                     "monthly_egress_bytes_budget": null, "download_rpm_limit": 30,
-                    "asset_max_object_bytes": 512
+                    "asset_max_object_bytes": 512, "agent_cost_budget_usd": 7.5
                 }]),
                 0,
             ),
@@ -956,6 +957,7 @@ fn sample_plan() -> StoredPlan {
         asset_hosting_enabled: true,
         default_asset_storage_quota_bytes: Some(10_485_760),
         default_asset_max_object_bytes: Some(2_097_152),
+        default_agent_cost_budget_usd: Some(60.0),
         default_monthly_egress_bytes_budget: None,
         default_download_rpm_limit: None,
         extension_tools_enabled: false,
@@ -978,7 +980,8 @@ fn plan_round_trips_through_the_control_database() {
                     "created_at_unix": 1_753_000_000_i64, "updated_at_unix": 1_753_000_001_i64,
                     "asset_hosting_enabled": 1, "default_asset_storage_quota_bytes": 10_485_760_i64,
                     "extension_tools_enabled": 0, "default_monthly_egress_bytes_budget": null,
-                    "default_download_rpm_limit": null, "default_asset_max_object_bytes": 2_097_152_i64
+                    "default_download_rpm_limit": null, "default_asset_max_object_bytes": 2_097_152_i64,
+                    "default_agent_cost_budget_usd": 60.0
                 }]),
                 0,
             ),

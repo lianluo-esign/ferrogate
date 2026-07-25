@@ -15,6 +15,7 @@ fn policy(scope_type: QuotaScopeKind) -> StoredQuotaPolicy {
         rpm_limit: None,
         tpm_limit: None,
         monthly_budget_usd: None,
+        agent_cost_budget_usd: None,
         asset_storage_quota_bytes: Some(50),
         asset_max_object_bytes: None,
         alert_threshold_pcts: Vec::new(),

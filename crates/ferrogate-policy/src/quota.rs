@@ -92,6 +92,17 @@ pub struct EffectiveQuota {
     pub tpm_limit_scope: Option<QuotaScopeSelector>,
     pub monthly_budget_usd: Option<f64>,
     pub monthly_budget_scope: Option<QuotaScopeSelector>,
+    /// #428 (agent cost governance): tightest per-tenant monthly USD ceiling on
+    /// CF-hosted-agent runtime cost across the chain, resolved with the same
+    /// `min`-across-the-chain rule as `monthly_budget_usd` (a nearer scope
+    /// overrides but can never exceed an ancestor's cap, with a plan default as
+    /// the floor). This is the per-tenant source a later connector resolves into
+    /// the slice-A `AgentBudgetPolicy.ceiling_usd`. `None` means no ceiling.
+    pub agent_cost_budget_usd: Option<f64>,
+    /// The scope whose `agent_cost_budget_usd` won the chain's `min`, recorded
+    /// exactly like `monthly_budget_scope` so a caller can key any per-tenant
+    /// agent-cost window on the winning scope's [`QuotaScopeSelector::counter_key`].
+    pub agent_cost_budget_scope: Option<QuotaScopeSelector>,
     pub asset_storage_quota_bytes: Option<u64>,
     /// #259: dedicated per-object asset byte ceiling (each individual object
     /// must be <= this), resolved exactly like `asset_storage_quota_bytes` --
@@ -200,6 +211,16 @@ pub fn resolve_effective_quota(
             policy.scope_type,
             &policy.scope_id,
         );
+        // #428: the per-tenant agent runtime-cost ceiling merges exactly like
+        // `monthly_budget_usd` above (min-across-the-chain, ties to the most
+        // specific scope), sourcing the slice-A AgentBudgetPolicy ceiling.
+        update_min_f64_scope(
+            &mut effective.agent_cost_budget_usd,
+            &mut effective.agent_cost_budget_scope,
+            policy.agent_cost_budget_usd,
+            policy.scope_type,
+            &policy.scope_id,
+        );
         // #262: egress byte budget + download RPM merge exactly like rpm/tpm
         // (min-across-the-chain, ties to the most specific scope).
         update_min_u64_scope(
@@ -252,6 +273,15 @@ pub fn resolve_effective_quota(
             if let Some(budget) = plan.default_monthly_budget_usd {
                 effective.monthly_budget_usd = Some(budget);
                 effective.monthly_budget_scope = plan_scope.clone();
+            }
+        }
+        // #428: the plan's agent-cost ceiling default fills in only when no
+        // explicit scope policy set it, keyed on the tenant scope like the
+        // monthly budget above.
+        if effective.agent_cost_budget_usd.is_none() {
+            if let Some(budget) = plan.default_agent_cost_budget_usd {
+                effective.agent_cost_budget_usd = Some(budget);
+                effective.agent_cost_budget_scope = plan_scope.clone();
             }
         }
         // #262: egress budget + download RPM take the plan floor only when no
@@ -341,6 +371,7 @@ mod tests {
             rpm_limit,
             tpm_limit,
             monthly_budget_usd,
+            agent_cost_budget_usd: None,
             asset_storage_quota_bytes: None,
             asset_max_object_bytes: None,
             alert_threshold_pcts: Vec::new(),
@@ -369,6 +400,7 @@ mod tests {
             rpm_limit: None,
             tpm_limit: None,
             monthly_budget_usd: None,
+            agent_cost_budget_usd: None,
             asset_storage_quota_bytes: None,
             asset_max_object_bytes: None,
             alert_threshold_pcts: Vec::new(),
@@ -822,6 +854,7 @@ mod tests {
             default_rpm_limit: Some(600),
             default_tpm_limit: Some(100_000),
             default_monthly_budget_usd: Some(250.0),
+            default_agent_cost_budget_usd: Some(180.0),
             created_at_unix: 1,
             updated_at_unix: 1,
             asset_hosting_enabled: true,
@@ -885,6 +918,77 @@ mod tests {
         assert_eq!(quota.tpm_limit, Some(100_000));
         assert!(quota.allows_model("fast-chat"));
         assert!(!quota.allows_model("vision"));
+    }
+
+    #[test]
+    fn agent_cost_budget_resolves_min_across_the_chain_with_plan_default() {
+        // #428: the per-tenant agent runtime-cost ceiling behaves exactly like
+        // `monthly_budget_usd` -- the tightest value across the chain wins (a
+        // nearer scope can tighten but never loosen an ancestor cap), the
+        // winning scope is tracked, and the plan default is only the floor
+        // applied when no explicit policy set it.
+        let tenant = StoredQuotaPolicy {
+            agent_cost_budget_usd: Some(500.0),
+            ..policy(QuotaScopeKind::Tenant, "t1", vec![], None, None, None, true)
+        };
+        let key = StoredQuotaPolicy {
+            agent_cost_budget_usd: Some(120.0),
+            ..policy(QuotaScopeKind::Key, "k1", vec![], None, None, None, true)
+        };
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: Some("k1"),
+            },
+            lookup_from(vec![tenant, key]),
+            None,
+        );
+        assert_eq!(quota.agent_cost_budget_usd, Some(120.0));
+        assert_eq!(
+            quota.agent_cost_budget_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Key, "k1"))
+        );
+
+        // With no explicit policy, the plan default fills in, keyed on the
+        // tenant scope (a plan is a tenant-wide default bundle).
+        let plan = sample_plan();
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(vec![]),
+            Some(&plan),
+        );
+        assert_eq!(
+            quota.agent_cost_budget_usd,
+            plan.default_agent_cost_budget_usd
+        );
+        assert_eq!(
+            quota.agent_cost_budget_scope,
+            Some(QuotaScopeSelector::new(QuotaScopeKind::Tenant, "t1"))
+        );
+
+        // An explicit tenant policy overrides the plan default.
+        let tenant = StoredQuotaPolicy {
+            agent_cost_budget_usd: Some(42.0),
+            ..policy(QuotaScopeKind::Tenant, "t1", vec![], None, None, None, true)
+        };
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(vec![tenant]),
+            Some(&plan),
+        );
+        assert_eq!(quota.agent_cost_budget_usd, Some(42.0));
     }
 
     #[test]

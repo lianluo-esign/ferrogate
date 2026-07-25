@@ -1044,6 +1044,9 @@ pub(crate) struct AdminPlan {
     /// #259: per-object (not cumulative) default asset byte ceiling, independent
     /// of `default_asset_storage_quota_bytes`.
     pub(crate) default_asset_max_object_bytes: Option<u64>,
+    /// #428: tenant-wide default monthly USD ceiling on CF-hosted-agent runtime
+    /// cost; a monetary value that mirrors `default_monthly_budget_usd`.
+    pub(crate) default_agent_cost_budget_usd: Option<f64>,
     pub(crate) extension_tools_enabled: bool,
     /// #262: tenant-wide default monthly egress byte budget / download RPM.
     pub(crate) default_monthly_egress_bytes_budget: Option<u64>,
@@ -1084,6 +1087,8 @@ pub(crate) struct AdminPlanMutation {
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) default_asset_max_object_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) default_agent_cost_budget_usd: Option<f64>,
     #[serde(default)]
     pub(crate) extension_tools_enabled: Option<bool>,
     #[serde(default)]
@@ -1263,6 +1268,9 @@ pub(crate) struct AdminTenantResolvedDefaults {
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
     /// #259: the plan's per-object (not cumulative) default asset byte ceiling.
     pub(crate) default_asset_max_object_bytes: Option<u64>,
+    /// #428: the plan's default monthly USD ceiling on CF-hosted-agent runtime
+    /// cost (mirrors `default_monthly_budget_usd`).
+    pub(crate) default_agent_cost_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1394,6 +1402,10 @@ pub(crate) struct AdminQuotaPolicy {
     /// (issue #259): a per-object (not cumulative) ceiling, independent of
     /// `asset_storage_quota_bytes`. `None` means the plan default applies.
     pub(crate) asset_max_object_bytes: Option<u64>,
+    /// #428: per-scope monthly USD ceiling on CF-hosted-agent runtime cost, a
+    /// monetary value merged `min`-across-the-chain like `monthly_budget_usd`
+    /// (settable at any scope, not tenant-only). `None` means no cap here.
+    pub(crate) agent_cost_budget_usd: Option<f64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[50, 90]`) that fire a
     /// one-time proactive alert webhook when spend first crosses them
     /// (issue #170) -- distinct from the unconditional 100% hard-deny in
@@ -1426,6 +1438,8 @@ pub(crate) struct AdminQuotaPolicyMutation {
     pub(crate) asset_storage_quota_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) asset_max_object_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) agent_cost_budget_usd: Option<f64>,
     #[serde(default)]
     pub(crate) alert_threshold_pcts: Option<Vec<u8>>,
     #[serde(default)]

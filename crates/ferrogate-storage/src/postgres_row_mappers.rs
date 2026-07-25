@@ -189,6 +189,8 @@ pub(crate) fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPoli
         monthly_egress_bytes_budget: row.get::<_, Option<i64>>(12).map(nonnegative_u64),
         download_rpm_limit: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
         asset_max_object_bytes: row.get::<_, Option<i64>>(14).map(nonnegative_u64),
+        // #428: money (DOUBLE PRECISION), read directly like `monthly_budget_usd`.
+        agent_cost_budget_usd: row.get::<_, Option<f64>>(15),
     })
 }
 
@@ -213,6 +215,8 @@ pub(crate) fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageErro
         default_monthly_egress_bytes_budget: row.get::<_, Option<i64>>(15).map(nonnegative_u64),
         default_download_rpm_limit: row.get::<_, Option<i64>>(16).map(nonnegative_u64),
         default_asset_max_object_bytes: row.get::<_, Option<i64>>(17).map(nonnegative_u64),
+        // #428: money (DOUBLE PRECISION), read directly like the monthly budget.
+        default_agent_cost_budget_usd: row.get::<_, Option<f64>>(18),
     })
 }
 

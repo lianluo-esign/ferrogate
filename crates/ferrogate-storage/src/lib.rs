@@ -3701,9 +3701,10 @@ impl PostgresControlPlaneStore {
                  (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
                   monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                   alert_threshold_pcts_json, asset_storage_quota_bytes, \
-                  monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes) \
+                  monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes, \
+                  agent_cost_budget_usd) \
                  VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11::text::jsonb, \
-                  $12, $13, $14, $15) \
+                  $12, $13, $14, $15, $16) \
                  ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
                  model_allowlist_json = EXCLUDED.model_allowlist_json, \
                  rpm_limit = EXCLUDED.rpm_limit, tpm_limit = EXCLUDED.tpm_limit, \
@@ -3713,7 +3714,8 @@ impl PostgresControlPlaneStore {
                  asset_storage_quota_bytes = EXCLUDED.asset_storage_quota_bytes, \
                  monthly_egress_bytes_budget = EXCLUDED.monthly_egress_bytes_budget, \
                  download_rpm_limit = EXCLUDED.download_rpm_limit, \
-                 asset_max_object_bytes = EXCLUDED.asset_max_object_bytes",
+                 asset_max_object_bytes = EXCLUDED.asset_max_object_bytes, \
+                 agent_cost_budget_usd = EXCLUDED.agent_cost_budget_usd",
                 &[
                     &policy.id,
                     &policy.scope_type.as_str(),
@@ -3730,6 +3732,7 @@ impl PostgresControlPlaneStore {
                     &monthly_egress_bytes_budget,
                     &download_rpm_limit,
                     &asset_max_object_bytes,
+                    &policy.agent_cost_budget_usd,
                 ],
             )
             .await
@@ -3763,7 +3766,8 @@ impl PostgresControlPlaneStore {
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes, \
-                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes \
+                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes, \
+                 agent_cost_budget_usd \
                  FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
@@ -3794,7 +3798,8 @@ impl PostgresControlPlaneStore {
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes, \
-                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes \
+                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes, \
+                 agent_cost_budget_usd \
                  FROM quota_policies ORDER BY id ASC",
                 &[],
             )
@@ -3871,10 +3876,11 @@ impl PostgresControlPlaneStore {
                   default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                   updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                   extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                  default_download_rpm_limit, default_asset_max_object_bytes) \
+                  default_download_rpm_limit, default_asset_max_object_bytes, \
+                  default_agent_cost_budget_usd) \
                  VALUES \
                  ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, \
-                  $16, $17, $18) \
+                  $16, $17, $18, $19) \
                  ON CONFLICT (id) DO UPDATE SET \
                  name = EXCLUDED.name, slug = EXCLUDED.slug, \
                  mcp_enabled = EXCLUDED.mcp_enabled, \
@@ -3890,7 +3896,8 @@ impl PostgresControlPlaneStore {
                  extension_tools_enabled = EXCLUDED.extension_tools_enabled, \
                  default_monthly_egress_bytes_budget = EXCLUDED.default_monthly_egress_bytes_budget, \
                  default_download_rpm_limit = EXCLUDED.default_download_rpm_limit, \
-                 default_asset_max_object_bytes = EXCLUDED.default_asset_max_object_bytes",
+                 default_asset_max_object_bytes = EXCLUDED.default_asset_max_object_bytes, \
+                 default_agent_cost_budget_usd = EXCLUDED.default_agent_cost_budget_usd",
                 &[
                     &plan.id,
                     &plan.name,
@@ -3910,6 +3917,7 @@ impl PostgresControlPlaneStore {
                     &default_monthly_egress_bytes_budget,
                     &default_download_rpm_limit,
                     &default_asset_max_object_bytes,
+                    &plan.default_agent_cost_budget_usd,
                 ],
             )
             .await
@@ -3941,7 +3949,8 @@ impl PostgresControlPlaneStore {
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                  extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                 default_download_rpm_limit, default_asset_max_object_bytes \
+                 default_download_rpm_limit, default_asset_max_object_bytes, \
+                 default_agent_cost_budget_usd \
                  FROM plans WHERE id = $1",
                 &[&id],
             )
@@ -3974,7 +3983,8 @@ impl PostgresControlPlaneStore {
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                  extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                 default_download_rpm_limit, default_asset_max_object_bytes \
+                 default_download_rpm_limit, default_asset_max_object_bytes, \
+                 default_agent_cost_budget_usd \
                  FROM plans ORDER BY id ASC",
                 &[],
             )
@@ -11402,6 +11412,10 @@ fn default_free_plan() -> StoredPlan {
         // objects stay bounded by the operator's global presign ceiling and
         // the cumulative quota above, exactly as before this field existed.
         default_asset_max_object_bytes: None,
+        // #428: no default agent runtime-cost ceiling on the free plan -- an
+        // operator opts a tenant into agent-cost governance explicitly, exactly
+        // as with the monthly budget above.
+        default_agent_cost_budget_usd: None,
         // Compute-adjacent like mcp_enabled/self_hosted_workers_enabled --
         // gated off by default (issue #183).
         extension_tools_enabled: false,
@@ -11455,6 +11469,15 @@ pub struct StoredPlan {
     /// back to the operator ceiling / cumulative quota alone).
     #[serde(default)]
     pub default_asset_max_object_bytes: Option<u64>,
+    /// Per-tenant monthly USD ceiling on CF-hosted-agent runtime cost (issue
+    /// #428): the tenant-wide default `resolve_effective_quota` applies as the
+    /// floor when no explicit `quota_policies.agent_cost_budget_usd` is set in
+    /// the chain. A monetary value that mirrors `default_monthly_budget_usd`
+    /// (min-across-the-chain, plan default), NOT the tenant-only byte ceilings.
+    /// `None` means no default agent-cost ceiling. The per-tenant source a
+    /// later connector resolves into the slice-A `AgentBudgetPolicy.ceiling_usd`.
+    #[serde(default)]
+    pub default_agent_cost_budget_usd: Option<f64>,
     /// #262 (egress governance): tenant-wide default monthly egress/download
     /// byte budget, the floor `resolve_effective_quota` applies when no
     /// explicit `quota_policies.monthly_egress_bytes_budget` is set anywhere
@@ -12101,6 +12124,15 @@ pub struct StoredQuotaPolicy {
     /// default".
     #[serde(default)]
     pub asset_max_object_bytes: Option<u64>,
+    /// Per-tenant monthly USD ceiling on CF-hosted-agent runtime cost (issue
+    /// #428): a monetary value that mirrors `monthly_budget_usd` -- settable at
+    /// any scope and merged `min`-across-the-chain by `resolve_effective_quota`
+    /// (NOT tenant-only like the asset byte ceilings), with the plan's
+    /// `default_agent_cost_budget_usd` as the floor. `None` means no agent-cost
+    /// ceiling defined at this scope. The per-tenant source a later connector
+    /// resolves into the slice-A `AgentBudgetPolicy.ceiling_usd`.
+    #[serde(default)]
+    pub agent_cost_budget_usd: Option<f64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[75, 90, 95]`) that fire
     /// a one-time webhook notification each, strictly before the 100% hard
     /// deny in `AppState::monthly_budget_exceeded` (issue #170). Empty
@@ -16940,6 +16972,7 @@ mod tests {
             monthly_budget_usd: Some(250.0),
             asset_storage_quota_bytes: Some(104_857_600),
             asset_max_object_bytes: Some(1_048_576),
+            agent_cost_budget_usd: Some(90.0),
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -16958,6 +16991,7 @@ mod tests {
             monthly_budget_usd: None,
             asset_storage_quota_bytes: None,
             asset_max_object_bytes: None,
+            agent_cost_budget_usd: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -16975,6 +17009,7 @@ mod tests {
         assert_eq!(tenant_policy.monthly_budget_usd, Some(250.0));
         assert_eq!(tenant_policy.asset_storage_quota_bytes, Some(104_857_600));
         assert_eq!(tenant_policy.asset_max_object_bytes, Some(1_048_576));
+        assert_eq!(tenant_policy.agent_cost_budget_usd, Some(90.0));
         assert_eq!(
             tenant_policy.model_allowlist,
             vec!["fast-chat", "smart-chat"]
@@ -17011,6 +17046,7 @@ mod tests {
             monthly_budget_usd: None,
             asset_storage_quota_bytes: None,
             asset_max_object_bytes: None,
+            agent_cost_budget_usd: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -17030,6 +17066,7 @@ mod tests {
             monthly_budget_usd: Some(10.0),
             asset_storage_quota_bytes: None,
             asset_max_object_bytes: None,
+            agent_cost_budget_usd: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
