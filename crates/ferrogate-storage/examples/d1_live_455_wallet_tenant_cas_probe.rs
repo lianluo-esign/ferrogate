@@ -244,8 +244,9 @@ async fn exercise(
         .await?;
     match r4 {
         WalletReservationResult::Insufficient {
-            available_credits, ..
-        } if available_credits == 0 => {}
+            available_credits: 0,
+            ..
+        } => {}
         other => return Err(format!("expected Insufficient(available=0), got {other:?}").into()),
     }
     println!("6 reserve r4=1 -> Insufficient(available=0)");
