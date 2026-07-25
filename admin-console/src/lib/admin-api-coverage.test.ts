@@ -78,17 +78,10 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "read-only per-agent cost-burn rollup for a billing period; its operator UI belongs as a spend panel inside the existing wallets/metering cockpit rather than a standalone page — deferred, needs UI",
   },
-  // Unattributed ("Unknown" virtual-key) agent activity: a read-only triage
-  // correlation list consumed today through `ferrogate ctl
-  // observed-agent-activity list` during incident/attribution work. Its natural
-  // console home is an "unattributed activity" view alongside `/app/agent-runs`,
-  // not a page of its own; until that lands it stays operator/CLI-only.
-  // Deferred, needs UI — #313 chain, agent-observability item.
-  "observed-agent-activity": {
-    owner: "agent observability (#313 chain)",
-    reason:
-      "read-only unattributed-agent-activity correlation list used for CLI/operator triage; belongs as an 'unattributed' view on the agent-runs page — deferred, needs UI",
-  },
+  // (`observed-agent-activity` used to be excluded here as "deferred, needs UI".
+  // #464 shipped that UI as the Unattributed tab on `src/pages/agent-runs.tsx`,
+  // so the exclusion was DELETED: the group is now covered by a real call site
+  // and the obsolete-exclusion check below would fail if the entry stayed.)
   // Legacy compatibility read: `/admin/v1/tenants` lists tenant references
   // DERIVED from API-key configuration, not durable records — there is nothing
   // to create, edit or delete. The console already renders the durable tenant

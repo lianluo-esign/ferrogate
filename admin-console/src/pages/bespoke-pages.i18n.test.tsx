@@ -217,6 +217,44 @@ describe("agent-runs page copy is localized", () => {
   });
 });
 
+// #464: the unattributed-activity tab on the same page carries its own copy —
+// including the truthfulness wording (no fabricated stop, unavailable != zero) —
+// so it must be localized in BOTH catalogs like the rest of the bespoke pages.
+describe("agent-runs unattributed tab copy is localized", () => {
+  beforeEach(() => {
+    mockAdminList("/admin/v1/agent-runs", []);
+    mockAdminList("/admin/v1/observed-agent-activity", []);
+  });
+
+  it("renders English tab label, description, and empty state", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AgentRunsPage />, { locale: "en" });
+    await user.click(
+      await screen.findByRole("tab", { name: en["page.agentRuns.tab.unattributed"] }),
+    );
+    expect(
+      await screen.findByText(en["page.agentRuns.unattributed.description"]),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(en["page.agentRuns.unattributed.empty"]),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Simplified Chinese tab label, description, and empty state", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AgentRunsPage />, { locale: "zh-CN" });
+    await user.click(
+      await screen.findByRole("tab", { name: zhCN["page.agentRuns.tab.unattributed"] }),
+    );
+    expect(
+      await screen.findByText(zhCN["page.agentRuns.unattributed.description"]),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(zhCN["page.agentRuns.unattributed.empty"]),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("agent-schedules page copy is localized", () => {
   beforeEach(() => {
     mockAdminList("/admin/v1/agent-schedules", []);

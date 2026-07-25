@@ -1096,6 +1096,42 @@ export const zhCN = {
   "page.agentRuns.empty": "没有匹配的代理运行。",
   "page.agentRuns.pagination.range": "{start}–{end}，共 {total}",
 
+  // 代理运行页上的“无归属活动”视图（#464）。文案必须如实反映接口所知与所不知：
+  // “运行中”由最近活动时间窗推导得出（从不代表停止事件），缺失的用量证据表示未知，
+  // 绝不等于 0。
+  "page.agentRuns.tab.runs": "运行",
+  "page.agentRuns.tab.unattributed": "无归属",
+  "page.agentRuns.unattributed.description":
+    "在虚拟 API 密钥上观测到、但不携带任何已验证代理身份的流量，因此没有可关联的代理运行。每一行代表一个观测到的租户/密钥活动类别——既不是具名代理，也不代表共用该密钥的代理数量。",
+  "page.agentRuns.unattributed.loadError": "加载无归属活动失败：{message}",
+  "page.agentRuns.unattributed.empty": "未观测到无归属活动。",
+  "page.agentRuns.unattributed.category": "身份未知",
+  "page.agentRuns.unattributed.categoryHint":
+    "这是一类无归属的密钥活动，而非代理实体：该密钥背后真实代理的数量未知。",
+  "page.agentRuns.unattributed.col.activity": "观测到的活动",
+  "page.agentRuns.unattributed.col.apiKey": "API 密钥",
+  "page.agentRuns.unattributed.col.tokens": "令牌",
+  "page.agentRuns.unattributed.col.cost": "费用",
+  "page.agentRuns.unattributed.col.evidence": "证据",
+  "page.agentRuns.unattributed.status.running": "运行中",
+  "page.agentRuns.unattributed.status.inactive": "非活跃",
+  "page.agentRuns.unattributed.status.runningBasis": "依据最近 {ttl} 秒内的活动推导得出",
+  "page.agentRuns.unattributed.status.noStopEvent":
+    "最近活动时间窗已过期——未记录到停止事件，因此没有结束时间",
+  "page.agentRuns.unattributed.usageUnavailable": "该活动没有可用的用量证据——未知，而非 0",
+  "page.agentRuns.unattributed.evidence.show": "为什么？",
+  "page.agentRuns.unattributed.evidence.hide": "收起",
+  "page.agentRuns.unattributed.evidence.toggleLabel": "查看 {id} 的证据",
+  "page.agentRuns.unattributed.evidence.source": "证据来源",
+  "page.agentRuns.unattributed.evidence.statusBasis": "状态依据",
+  "page.agentRuns.unattributed.evidence.requestCount": "观测到的请求数",
+  "page.agentRuns.unattributed.evidence.secondsSinceLastSeen": "距最近一次出现的秒数",
+  "page.agentRuns.unattributed.evidence.runningTtl": "运行时间窗（秒）",
+  "page.agentRuns.unattributed.evidence.withinWindow": "处于运行时间窗内",
+  "page.agentRuns.unattributed.evidence.durablePresence": "由持久化在场记录支撑",
+  "page.agentRuns.unattributed.evidence.usageAvailable": "用量证据可用",
+  "page.agentRuns.unattributed.evidence.reason": "原因",
+
   // 代理运行证据链时间线（src/pages/agent-run-detail.tsx）。
   "page.agentRunDetail.loading": "正在加载运行时间线…",
   "page.agentRunDetail.loadError": "加载代理运行失败：{message}",

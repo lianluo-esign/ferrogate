@@ -1076,6 +1076,47 @@ export const enRest = {
   "page.agentRuns.empty": "No agent runs match.",
   "page.agentRuns.pagination.range": "{start}–{end} of {total}",
 
+  // Unattributed activity view on the agent-runs page (#464): traffic on a
+  // virtual API key with no verified agent identity. The copy must stay
+  // truthful about what the API does and does NOT know — "running" is a derived
+  // recency window (never a stop event), and missing usage evidence is unknown,
+  // never zero. Contract tokens (evidence_source, status_basis, reason) and ids
+  // stay data-driven.
+  "page.agentRuns.tab.runs": "Runs",
+  "page.agentRuns.tab.unattributed": "Unattributed",
+  "page.agentRuns.unattributed.description":
+    "Traffic observed on a virtual API key that carries no verified agent identity, so it has no agent run to link to. Each row is one observed tenant/key activity category — not a named agent, and not a count of how many agents share the key.",
+  "page.agentRuns.unattributed.loadError": "Failed to load unattributed activity: {message}",
+  "page.agentRuns.unattributed.empty": "No unattributed activity observed.",
+  "page.agentRuns.unattributed.category": "Unknown identity",
+  "page.agentRuns.unattributed.categoryHint":
+    "A category of unattributed key activity, not an agent entity: the number of real agents behind this key is unknown.",
+  "page.agentRuns.unattributed.col.activity": "Observed activity",
+  "page.agentRuns.unattributed.col.apiKey": "API key",
+  "page.agentRuns.unattributed.col.tokens": "Tokens",
+  "page.agentRuns.unattributed.col.cost": "Cost",
+  "page.agentRuns.unattributed.col.evidence": "Evidence",
+  "page.agentRuns.unattributed.status.running": "Running",
+  "page.agentRuns.unattributed.status.inactive": "Inactive",
+  "page.agentRuns.unattributed.status.runningBasis":
+    "Derived from activity within the last {ttl}s",
+  "page.agentRuns.unattributed.status.noStopEvent":
+    "Recency window expired — no stop event was recorded, so there is no end time",
+  "page.agentRuns.unattributed.usageUnavailable":
+    "Usage evidence unavailable for this activity — unknown, not zero",
+  "page.agentRuns.unattributed.evidence.show": "Why?",
+  "page.agentRuns.unattributed.evidence.hide": "Hide",
+  "page.agentRuns.unattributed.evidence.toggleLabel": "Show the evidence for {id}",
+  "page.agentRuns.unattributed.evidence.source": "Evidence source",
+  "page.agentRuns.unattributed.evidence.statusBasis": "Status basis",
+  "page.agentRuns.unattributed.evidence.requestCount": "Requests observed",
+  "page.agentRuns.unattributed.evidence.secondsSinceLastSeen": "Seconds since last seen",
+  "page.agentRuns.unattributed.evidence.runningTtl": "Running window (seconds)",
+  "page.agentRuns.unattributed.evidence.withinWindow": "Within running window",
+  "page.agentRuns.unattributed.evidence.durablePresence": "Durable presence backed",
+  "page.agentRuns.unattributed.evidence.usageAvailable": "Usage evidence available",
+  "page.agentRuns.unattributed.evidence.reason": "Reason",
+
   // Agent run evidence-chain timeline (src/pages/agent-run-detail.tsx).
   // Correlation ids, fingerprints, decision/outcome/disposition enum tokens,
   // provider names, and turn counts stay data-driven.
