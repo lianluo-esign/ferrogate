@@ -572,6 +572,22 @@ pub(crate) struct AssetBucketConfig {
     pub(crate) cf_script_name: Option<String>,
 }
 
+impl AssetBucketConfig {
+    /// Whether the runtime will actually construct the S3/R2 SigV4 client for
+    /// this section (issue #485).
+    ///
+    /// `AppState::asset_bucket_client` returns `None` for a disabled section
+    /// and for the Cloudflare-native backend, so the S3-only load-time guards
+    /// (`validate_asset_bucket`'s credential-presence rules and the R2 host /
+    /// region rules) must key off exactly the same condition -- otherwise a
+    /// section carrying leftover S3 fields hard-fails config load for a client
+    /// that is never built. Both the runtime accessor and the validators call
+    /// this so the condition cannot drift.
+    pub(crate) fn builds_s3_client(&self) -> bool {
+        self.enabled && matches!(self.backend, AssetBucketBackend::S3)
+    }
+}
+
 /// Pre-authentication network controls (issue #166), applied to every
 /// request before virtual-key/storage lookups. All fields are additive and
 /// default to the pre-#166 behavior (no allowlist, no pre-auth throttling).

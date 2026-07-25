@@ -290,11 +290,16 @@ impl AppState {
         &self,
     ) -> Option<Box<dyn crate::gateway::asset_bucket::AssetObjectStore>> {
         let bucket = &self.config.asset_bucket;
-        if !bucket.enabled {
-            return None;
-        }
         match bucket.backend {
             crate::config::AssetBucketBackend::S3 => {
+                // The S3-only load-time guards (`validate_asset_bucket`'s
+                // credential rules, `validate_asset_bucket_r2`'s host/region
+                // rules) gate on this same predicate (issue #485) rather than
+                // on a second copy of `enabled && backend == S3`, so they can
+                // never fire for a client this never builds.
+                if !bucket.builds_s3_client() {
+                    return None;
+                }
                 let endpoint = bucket.endpoint.clone()?;
                 let bucket_name = bucket.bucket.clone()?;
                 let region = bucket.region.clone()?;
@@ -315,6 +320,9 @@ impl AppState {
                 ))
             }
             crate::config::AssetBucketBackend::WorkersStaticAssets => {
+                if !bucket.enabled {
+                    return None;
+                }
                 let account_id = bucket.cf_account_id.clone()?;
                 let api_token = bucket.cf_api_token.clone()?;
                 let script_name = bucket.cf_script_name.clone()?;

@@ -170,12 +170,27 @@ Three CF options for serving FerroGate-hosted static assets/sites.
 - Best fit for FerroGate because the asset path is already an S3-compatible
   bucket client (§10.2) — R2 is close to a drop-in endpoint/credential swap.
 - **Config:** point `[asset_bucket].endpoint` at the R2 host, set `region =
-  "auto"` (R2's fixed SigV4 region — a geographic region yields
-  `SignatureDoesNotMatch`), and supply the R2 Access Key ID / Secret through the
-  existing `access_key_id` + `secret_access_key_env` fields. The load-time
+  "auto"`, and supply the R2 Access Key ID / Secret through the existing
+  `access_key_id` + `secret_access_key_env` fields. The load-time
   `validate_asset_bucket_r2` check (issue #410) enforces the host shape and the
   `auto` region for any R2 endpoint. No backend switch is needed — R2 runs on
   the default S3 backend.
+  - The endpoint must be the **bare account host**: no `:port` and no path
+    suffix. The runtime signer folds anything past the host into the signed
+    `host` header, so `https://<acct>.r2.cloudflarestorage.com/anything` would
+    sign a host R2 cannot serve; the guard rejects it at load time and names
+    the host it would have signed (issue #485). Host casing is normalized, so
+    `HTTPS://ACCT.R2.CloudflareStorage.com` is accepted and signed lowercase.
+  - `region = "auto"` is a **FerroGate** requirement, not strictly an R2 one:
+    Cloudflare's S3-compatibility docs also accept a blank region and
+    `us-east-1` as aliases for `auto`. FerroGate pins the canonical value
+    because the signer folds the string straight into the credential scope; a
+    *geographic* region other than those aliases yields
+    `SignatureDoesNotMatch`.
+  - The R2 rules run only when the runtime would actually build the S3 client
+    (`enabled = true` **and** `backend = "s3"`), so a disabled or
+    `workers-static-assets` section carrying a leftover R2 endpoint never
+    hard-fails config load (issue #485).
 - **Public serving requires a custom domain.** R2 buckets are private by
   default; the `r2.dev` subdomain is rate-limited/dev-only, so production public
   hosting must attach a **custom domain** to the bucket. FerroGate's

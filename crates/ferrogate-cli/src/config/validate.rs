@@ -188,27 +188,44 @@ impl Config {
     /// R2 is S3-compatible, so an R2 bucket is configured by pointing
     /// `[asset_bucket].endpoint` at the account's R2 S3 host and using an R2
     /// Access Key ID + Secret through the existing credential fields -- there
-    /// is no separate backend switch. This runs only when the endpoint is
-    /// detected as an R2 host (`endpoint_targets_r2`); non-R2 endpoints
-    /// (Supabase, MinIO, AWS S3, the local mock) are entirely unaffected.
+    /// is no separate backend switch. This runs only when the runtime would
+    /// actually build the S3/R2 SigV4 client (`builds_s3_client()`, the same
+    /// predicate `AppState::asset_bucket_client` gates on) *and* the endpoint
+    /// is detected as an R2 host (`endpoint_targets_r2`); a disabled section, a
+    /// `workers-static-assets` section, and non-R2 endpoints (Supabase, MinIO,
+    /// AWS S3, the local mock) are entirely unaffected.
     ///
     /// When the endpoint *is* R2 we enforce the two things a config load can
     /// prove and that R2 gets wrong most often:
-    ///   1. the host is the well-formed `https://<account_id>.r2.cloudflarestorage.com`
+    ///   1. the endpoint's *signed host* -- the literal value
+    ///      `AssetBucketClient::scheme_and_host` hands to the SigV4 signer --
+    ///      is the well-formed `<account_id>.r2.cloudflarestorage.com`
     ///      (optionally an `.eu.`/`.fedramp.` jurisdiction) with a single-label
-    ///      account id, and
-    ///   2. `region` is R2's required literal `auto` (R2 ignores geographic
-    ///      regions; a stray `us-east-1` yields a `SignatureDoesNotMatch` at
-    ///      the bucket, which is painful to diagnose live).
+    ///      account id and no `:port` or path suffix, and
+    ///   2. `region` is `auto`.
+    ///
+    /// Both rules are expressed against `crate::gateway::asset_bucket`'s shared
+    /// [`parse_endpoint`](crate::gateway::asset_bucket::parse_endpoint)
+    /// decomposition, which is the same one the runtime signer uses -- issue
+    /// #485 was this guard using a *different*, more forgiving decomposition
+    /// (port and path suffix silently dropped, host compared case-sensitively),
+    /// so misconfigurations it was written to catch sailed through and
+    /// resurfaced as opaque R2 errors at request time.
     ///
     /// Credential presence is already enforced by `validate_asset_bucket` when
     /// `enabled = true`, so it is not re-checked here. Live token/bucket
     /// existence and the public-serving custom-domain requirement are runtime
     /// concerns, not config-load invariants.
     fn validate_asset_bucket_r2(&self) -> AnyResult<()> {
-        use crate::gateway::asset_bucket::{endpoint_targets_r2, parse_r2_endpoint, R2_REGION};
+        use crate::gateway::asset_bucket::{
+            endpoint_targets_r2, parse_endpoint, parse_r2_endpoint, R2_REGION,
+        };
 
         let bucket = &self.asset_bucket;
+        // Never fail a load over an S3/R2 client the runtime will not build.
+        if !bucket.builds_s3_client() {
+            return Ok(());
+        }
         let Some(endpoint) = bucket.endpoint.as_deref() else {
             return Ok(());
         };
@@ -216,18 +233,25 @@ impl Config {
             return Ok(());
         }
         if parse_r2_endpoint(endpoint).is_none() {
+            let signed_host = parse_endpoint(endpoint)
+                .map(|parts| parts.signing_host())
+                .unwrap_or_else(|_| endpoint.to_string());
             bail!(
                 "field asset_bucket.endpoint: {endpoint} looks like a Cloudflare R2 endpoint but \
                  is not of the form https://<account_id>.r2.cloudflarestorage.com (optionally with \
-                 an .eu./.fedramp. jurisdiction label); the account id must be a single DNS label"
+                 an .eu./.fedramp. jurisdiction label); the account id must be a single DNS label \
+                 and the endpoint must carry no port and no path suffix. The signer would sign \
+                 `host: {signed_host}`, which R2 rejects"
             );
         }
         match bucket.region.as_deref() {
             Some(region) if region == R2_REGION => {}
             other => bail!(
-                "field asset_bucket.region: Cloudflare R2 requires region \"{R2_REGION}\" (got \
-                 {other:?}); R2 ignores geographic regions and signs the credential scope with \
-                 `auto`"
+                "field asset_bucket.region: FerroGate requires region \"{R2_REGION}\" for \
+                 Cloudflare R2 endpoints (got {other:?}); R2 ignores geographic regions and \
+                 documents a blank region and \"us-east-1\" as aliases for \"{R2_REGION}\", but \
+                 the signer folds this string straight into the credential scope, so FerroGate \
+                 pins the canonical value"
             ),
         }
         Ok(())
@@ -403,13 +427,13 @@ impl Config {
         {
             bail!("field asset_bucket.secret_access_key_env: cannot be empty");
         }
-        if !bucket.enabled {
-            return Ok(());
-        }
-        // The S3 credential pieces below are required only for the S3-compatible
-        // backend (issue #411). A CF-native backend uses the `cf_*` fields and
-        // is validated by `validate_asset_bucket_backend`.
-        if bucket.backend != crate::config::AssetBucketBackend::S3 {
+        // The S3 credential pieces below are required only when the runtime
+        // will actually build the S3-compatible client (issue #411/#485) --
+        // `builds_s3_client()` is the same predicate
+        // `AppState::asset_bucket_client` gates its S3 arm on. A CF-native
+        // backend uses the `cf_*` fields and is validated by
+        // `validate_asset_bucket_backend`.
+        if !bucket.builds_s3_client() {
             return Ok(());
         }
         if bucket.endpoint.is_none() {

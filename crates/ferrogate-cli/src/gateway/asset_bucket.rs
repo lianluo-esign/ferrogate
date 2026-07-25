@@ -54,7 +54,11 @@ pub(crate) struct AssetBucketConfig {
     /// object paths, and R2 accepts the real `x-amz-content-sha256` payload
     /// hash this client sends. `[asset_bucket]` targeting an R2 host is
     /// auto-detected and validated (see `validate_asset_bucket_r2`); no extra
-    /// config marker is needed. NOTE: R2 buckets are private by default -- for
+    /// config marker is needed. An R2 endpoint must be the bare account host:
+    /// a `:port` or a path suffix is NOT ignored, because
+    /// `AssetBucketClient::scheme_and_host` folds it into the signed `host`
+    /// header, so the load-time guard rejects it (issue #485). NOTE: R2 buckets
+    /// are private by default -- for
     /// *public* static serving you must attach a custom domain to the bucket
     /// (the `r2.dev` subdomain is rate-limited/dev-only); the gateway's
     /// presigned-GET path serves private objects without a public bucket.
@@ -70,10 +74,15 @@ pub(crate) struct AssetBucketConfig {
 /// jurisdiction hosts insert a `.eu.` / `.fedramp.` label before it.
 pub(crate) const R2_ENDPOINT_SUFFIX: &str = "r2.cloudflarestorage.com";
 
-/// R2's required SigV4 region. R2 ignores geographic regions and mandates the
-/// literal `auto` in the credential scope (`.../auto/s3/aws4_request`); the
-/// existing signer folds whatever region string it is given into the scope, so
-/// setting this value is the only R2-specific config the SigV4 path needs.
+/// The region FerroGate requires for an R2 endpoint. R2 ignores geographic
+/// regions; its canonical credential scope is `.../auto/s3/aws4_request`, and
+/// Cloudflare's S3-compatibility docs additionally accept a *blank* region and
+/// `us-east-1` as aliases for `auto`. FerroGate pins the canonical `auto`
+/// rather than accepting the aliases: the signer folds whatever region string
+/// it is given straight into the credential scope, so pinning one value keeps
+/// the signed scope unambiguous and keeps this the only R2-specific config the
+/// SigV4 path needs. The load-time guard's error message says exactly what to
+/// set.
 pub(crate) const R2_REGION: &str = "auto";
 
 /// A parsed Cloudflare R2 S3 endpoint (issue #410): the account id and the
@@ -86,36 +95,124 @@ pub(crate) struct R2Endpoint {
     pub(crate) jurisdiction: Option<&'static str>,
 }
 
-/// Reduces `endpoint` to its bare host (drops scheme, any `:port`, and any
-/// path suffix). Shared by the R2 detection/parsing helpers so they agree on
-/// what "the host" is.
-fn endpoint_host(endpoint: &str) -> &str {
-    let trimmed = endpoint.trim().trim_end_matches('/');
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
-    let host = without_scheme.split('/').next().unwrap_or(without_scheme);
-    host.split(':').next().unwrap_or(host)
+/// `asset_bucket.endpoint` decomposed into the exact pieces the runtime SigV4
+/// path uses (issue #485).
+///
+/// This type exists so the load-time guards and the runtime signer cannot
+/// disagree about what an endpoint *means*. Before #485 there were two
+/// independent decompositions -- a validation-only `endpoint_host()` that
+/// dropped the port and any path suffix, and
+/// `AssetBucketClient::scheme_and_host` which dropped neither -- so an
+/// endpoint the guard judged to be a clean R2 host could still sign a
+/// completely different `host` header. Both now go through
+/// [`parse_endpoint`], and the R2 guards are written against
+/// [`EndpointParts::signing_host`] (the literal value the signer signs), so a
+/// value the guard accepts is by construction the value the signer sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndpointParts {
+    /// `http` only for an explicit `http://` endpoint (local mocks); `https`
+    /// otherwise, matching `bedrock.rs::extract_host`'s convention.
+    pub(crate) scheme: &'static str,
+    /// `host[:port]`, ASCII-lowercased. DNS hostnames are case-insensitive, so
+    /// normalizing here (rather than in each caller) is what makes the R2
+    /// detector case-insensitive *and* guarantees the signer signs the same
+    /// spelling the guard inspected.
+    pub(crate) authority: String,
+    /// Any path prefix the endpoint carries (`/storage/v1/s3` for Supabase
+    /// Storage), or `""`. Case is preserved -- URL paths are case-sensitive.
+    /// A trailing `/` is trimmed, exactly as the signer trims it.
+    pub(crate) path_prefix: String,
+}
+
+impl EndpointParts {
+    /// The literal string the runtime puts in the signed `host` header and in
+    /// the authority position of every request URL it builds. For a
+    /// path-prefixed endpoint this deliberately includes the prefix, because
+    /// that is what the signer does today; the R2 guard rejects such an
+    /// endpoint precisely because this is not a bare R2 host.
+    pub(crate) fn signing_host(&self) -> String {
+        format!("{}{}", self.authority, self.path_prefix)
+    }
+
+    /// The bare DNS host: [`Self::authority`] with any `:port` removed.
+    pub(crate) fn host_name(&self) -> &str {
+        if self.authority.starts_with('[') {
+            // IPv6 literal: `[::1]:8080` -> `[::1]`.
+            return match self.authority.find(']') {
+                Some(end) => &self.authority[..=end],
+                None => &self.authority,
+            };
+        }
+        self.authority
+            .split(':')
+            .next()
+            .unwrap_or(self.authority.as_str())
+    }
+}
+
+/// Decomposes `asset_bucket.endpoint` the way the runtime signer does. THE
+/// single source of truth for "what host will we sign?" -- see
+/// [`EndpointParts`].
+pub(crate) fn parse_endpoint(endpoint: &str) -> anyhow::Result<EndpointParts> {
+    let raw = endpoint.trim();
+    let (scheme, rest) = match raw.strip_prefix("http://") {
+        Some(rest) => ("http", rest),
+        None => ("https", raw.strip_prefix("https://").unwrap_or(raw)),
+    };
+    let rest = rest.trim_end_matches('/');
+    let (authority, path_prefix) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        anyhow::bail!("asset_bucket.endpoint {endpoint} has no host");
+    }
+    Ok(EndpointParts {
+        scheme,
+        authority: authority.to_ascii_lowercase(),
+        path_prefix: path_prefix.to_string(),
+    })
 }
 
 /// True when `endpoint`'s host is under the R2 S3 domain (any account /
 /// jurisdiction), used to decide whether the R2-specific validation applies.
-/// This is a permissive detector: it matches even a malformed R2 host (e.g. a
-/// missing account label) so `validate_asset_bucket_r2` can reject that with a
-/// clear error rather than silently treating it as a generic S3 endpoint.
+/// This is a permissive detector: it matches even an endpoint the signer could
+/// never use against R2 (a missing account label, a stray port, a path suffix,
+/// an upper-case spelling) so `validate_asset_bucket_r2` can reject those with
+/// a clear error rather than silently treating them as a generic S3 endpoint.
 pub(crate) fn endpoint_targets_r2(endpoint: &str) -> bool {
-    let host = endpoint_host(endpoint);
+    let Ok(parts) = parse_endpoint(endpoint) else {
+        return false;
+    };
+    let host = parts.host_name();
     host == R2_ENDPOINT_SUFFIX || host.ends_with(&format!(".{R2_ENDPOINT_SUFFIX}"))
 }
 
 /// Strictly parses an R2 S3 endpoint of the form
 /// `https://<account_id>.r2.cloudflarestorage.com` (optionally with a
 /// `.eu.` / `.fedramp.` jurisdiction label). Returns `None` when the host is
-/// not R2 *or* is malformed (empty / multi-label account id). The account id
-/// must be a single DNS label (no dots), matching R2's 32-hex-char account id.
+/// not R2 *or* when the signer would not sign a bare R2 host for it: a
+/// malformed (empty / multi-label) account id, a `:port`, or a path suffix.
+/// The account id must be a single DNS label (no dots), matching R2's
+/// 32-hex-char account id.
+///
+/// The port/path rejections are the #485 fix: R2 addresses buckets path-style
+/// off the account host, so anything beyond that host is not "ignored" by the
+/// runtime -- `AssetBucketClient::scheme_and_host` folds it into the signed
+/// `host` header and the request URL, which R2 rejects with an opaque error.
+/// `Some(_)` therefore carries a promise: reassembling the returned account id
+/// and jurisdiction reproduces [`EndpointParts::signing_host`] exactly (pinned
+/// by `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`).
 pub(crate) fn parse_r2_endpoint(endpoint: &str) -> Option<R2Endpoint> {
-    let host = endpoint_host(endpoint);
+    let parts = parse_endpoint(endpoint).ok()?;
+    // Anything the signer would append to the host is disqualifying.
+    if !parts.path_prefix.is_empty() {
+        return None;
+    }
+    let host = parts.host_name();
+    if host.len() != parts.authority.len() {
+        return None; // an explicit `:port`
+    }
     // `<...>.r2.cloudflarestorage.com` -> `<...>` (with its trailing dot).
     let prefix = host.strip_suffix(R2_ENDPOINT_SUFFIX)?.strip_suffix('.')?; // reject the bare suffix domain (empty account)
     let (account_id, jurisdiction) = if let Some(account) = prefix.strip_suffix(".eu") {
@@ -639,26 +736,15 @@ impl AssetBucketClient {
         )
     }
 
-    /// Extracts `(scheme, host[:port])` from `config.endpoint` -- mirrors
+    /// Extracts `(scheme, signed host)` from `config.endpoint` -- mirrors
     /// `bedrock.rs::extract_host`'s http-preserved-for-tests /
-    /// https-otherwise convention, duplicated here rather than shared
-    /// since it's a trivial ~10-line helper and the two crates don't
-    /// otherwise need a shared utilities module for it.
+    /// https-otherwise convention. The decomposition itself lives in
+    /// [`parse_endpoint`] because the config-load guards
+    /// (`validate_asset_bucket_r2`) must reason about the *same* value this
+    /// signs; issue #485 was two decompositions drifting apart.
     fn scheme_and_host(&self) -> anyhow::Result<(&'static str, String)> {
-        let trimmed = self.config.endpoint.trim_end_matches('/');
-        let scheme = if trimmed.starts_with("http://") {
-            "http"
-        } else {
-            "https"
-        };
-        let host = trimmed
-            .strip_prefix("https://")
-            .or_else(|| trimmed.strip_prefix("http://"))
-            .unwrap_or(trimmed);
-        if host.is_empty() {
-            anyhow::bail!("asset_bucket.endpoint {} has no host", self.config.endpoint);
-        }
-        Ok((scheme, host.to_string()))
+        let parts = parse_endpoint(&self.config.endpoint)?;
+        Ok((parts.scheme, parts.signing_host()))
     }
 }
 
@@ -1607,10 +1693,22 @@ mod tests {
                 jurisdiction: None,
             })
         );
-        // Trailing slash and virtual-host-irrelevant path suffixes are ignored;
-        // R2 addresses buckets path-style.
+        // A bare trailing slash is ignored -- and only because the runtime
+        // signer trims it too (`parse_endpoint`). A real path suffix is NOT
+        // ignored: the signer folds it into the signed `host`, so the strict
+        // parse rejects it. See
+        // `r2_validation_and_the_runtime_signer_agree_on_every_endpoint`.
         assert_eq!(
             parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com/"),
+            Some(R2Endpoint {
+                account_id: "abc123def456".into(),
+                jurisdiction: None,
+            })
+        );
+        // Upper case is a legal spelling of the same DNS host and parses to
+        // the same (normalized) account id.
+        assert_eq!(
+            parse_r2_endpoint("https://ABC123DEF456.R2.CloudflareStorage.com"),
             Some(R2Endpoint {
                 account_id: "abc123def456".into(),
                 jurisdiction: None,
@@ -1643,6 +1741,200 @@ mod tests {
         // The bare suffix domain with no account label.
         assert_eq!(parse_r2_endpoint("https://r2.cloudflarestorage.com"), None);
         assert_eq!(parse_r2_endpoint("https://.r2.cloudflarestorage.com"), None);
+        // A path suffix or an explicit port would be signed into the `host`
+        // header verbatim, so neither is a well-formed R2 endpoint (#485).
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com/x"),
+            None
+        );
+        assert_eq!(
+            parse_r2_endpoint("https://abc123def456.r2.cloudflarestorage.com:8443"),
+            None
+        );
+    }
+
+    /// The #485 contract, as a table: for every endpoint shape, the load-time
+    /// R2 guard's verdict is checked against the host the runtime signer
+    /// actually builds.
+    ///
+    /// Two directions are asserted, and together they are what makes the two
+    /// paths unable to drift apart:
+    ///   * ACCEPTED => the signed host is *exactly* the R2 host reassembled
+    ///     from the parse result (account id + optional jurisdiction +
+    ///     suffix). No port, no path, lower case -- nothing the guard didn't
+    ///     see.
+    ///   * REJECTED-but-detected => the signed host is demonstrably something
+    ///     R2 cannot serve, and the guard says so at load time instead of
+    ///     letting it become a `SignatureDoesNotMatch` at request time.
+    ///
+    /// Before #485 the rows marked `signed_host` containing `/`, `:8443`, or
+    /// mixed case were the bugs: the first two were accepted by the guard and
+    /// silently signed a broken host; the mixed-case one was not detected as
+    /// R2 at all, so neither the host-shape nor the `region = auto` rule ran.
+    #[test]
+    fn r2_validation_and_the_runtime_signer_agree_on_every_endpoint() {
+        // (endpoint, detected as R2, accepted by the strict guard, signed host)
+        let cases: &[(&str, bool, bool, &str)] = &[
+            (
+                "https://abc123def456.r2.cloudflarestorage.com",
+                true,
+                true,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
+                "https://abc123def456.r2.cloudflarestorage.com/",
+                true,
+                true,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
+                "  https://abc123def456.r2.cloudflarestorage.com  ",
+                true,
+                true,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
+                "https://ABC123DEF456.R2.CloudflareStorage.com",
+                true,
+                true,
+                "abc123def456.r2.cloudflarestorage.com",
+            ),
+            (
+                "https://abc123def456.eu.r2.cloudflarestorage.com",
+                true,
+                true,
+                "abc123def456.eu.r2.cloudflarestorage.com",
+            ),
+            (
+                "https://abc123def456.fedramp.r2.cloudflarestorage.com",
+                true,
+                true,
+                "abc123def456.fedramp.r2.cloudflarestorage.com",
+            ),
+            // Detected as R2 but the signer would sign a host R2 cannot serve.
+            (
+                "https://abc123def456.r2.cloudflarestorage.com/x",
+                true,
+                false,
+                "abc123def456.r2.cloudflarestorage.com/x",
+            ),
+            (
+                "https://abc123def456.r2.cloudflarestorage.com:8443",
+                true,
+                false,
+                "abc123def456.r2.cloudflarestorage.com:8443",
+            ),
+            (
+                "https://.r2.cloudflarestorage.com",
+                true,
+                false,
+                ".r2.cloudflarestorage.com",
+            ),
+            (
+                "https://r2.cloudflarestorage.com",
+                true,
+                false,
+                "r2.cloudflarestorage.com",
+            ),
+            (
+                // Multi-label account id: not an R2 account host.
+                "https://abc.def.r2.cloudflarestorage.com",
+                true,
+                false,
+                "abc.def.r2.cloudflarestorage.com",
+            ),
+            // Not R2 at all: the R2 rules must not apply, and the signer's
+            // host is unchanged from pre-#485 behavior.
+            (
+                "https://project.supabase.co/storage/v1/s3",
+                false,
+                false,
+                "project.supabase.co/storage/v1/s3",
+            ),
+            ("http://127.0.0.1:9999", false, false, "127.0.0.1:9999"),
+        ];
+
+        for (endpoint, targets_r2, well_formed, signed_host) in cases {
+            let bucket = r2_client(endpoint);
+            let (_scheme, host) = bucket
+                .scheme_and_host()
+                .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
+            assert_eq!(
+                &host, signed_host,
+                "{endpoint}: the signer's host header drifted"
+            );
+            assert_eq!(
+                endpoint_targets_r2(endpoint),
+                *targets_r2,
+                "{endpoint}: R2 detection disagrees with the table"
+            );
+            let parsed = parse_r2_endpoint(endpoint);
+            assert_eq!(
+                parsed.is_some(),
+                *well_formed,
+                "{endpoint}: the strict R2 guard disagrees with the table"
+            );
+            match parsed {
+                // Accepted => the signed host IS the reassembled R2 host.
+                Some(r2) => {
+                    let reassembled = match r2.jurisdiction {
+                        Some(jurisdiction) => {
+                            format!("{}.{jurisdiction}.{R2_ENDPOINT_SUFFIX}", r2.account_id)
+                        }
+                        None => format!("{}.{R2_ENDPOINT_SUFFIX}", r2.account_id),
+                    };
+                    assert_eq!(
+                        host, reassembled,
+                        "{endpoint}: guard accepted an endpoint whose signed host is not the \
+                         bare R2 host it parsed"
+                    );
+                }
+                // Rejected while detected as R2 => the signed host is not a
+                // bare R2 account host, which is exactly why it was rejected.
+                None if *targets_r2 => {
+                    let bare_r2_host = host
+                        .strip_suffix(R2_ENDPOINT_SUFFIX)
+                        .and_then(|prefix| prefix.strip_suffix('.'))
+                        .is_some_and(|account| {
+                            let account = account
+                                .strip_suffix(".eu")
+                                .or_else(|| account.strip_suffix(".fedramp"))
+                                .unwrap_or(account);
+                            !account.is_empty() && !account.contains('.')
+                        });
+                    assert!(
+                        !bare_r2_host,
+                        "{endpoint}: guard rejected an endpoint the signer would have signed \
+                         correctly ({host})"
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// The signed `host` header is byte-for-byte
+    /// [`EndpointParts::signing_host`], so the value the guard inspects is the
+    /// value that lands in the SigV4 canonical request (#485).
+    #[test]
+    fn the_signed_host_header_is_the_shared_parse_result() {
+        for endpoint in [
+            "https://abc123def456.r2.cloudflarestorage.com",
+            "https://ABC123DEF456.R2.CloudflareStorage.com",
+            "https://project.supabase.co/storage/v1/s3",
+            "http://127.0.0.1:9999",
+        ] {
+            let parts = parse_endpoint(endpoint).unwrap();
+            let bucket = r2_client(endpoint);
+            assert_eq!(
+                bucket.scheme_and_host().unwrap(),
+                (parts.scheme, parts.signing_host()),
+                "{endpoint}"
+            );
+        }
+        // An endpoint with no host is rejected identically by both.
+        assert!(parse_endpoint("https://").is_err());
+        assert!(r2_client("https://").scheme_and_host().is_err());
     }
 
     #[test]

@@ -503,6 +503,40 @@ fn accepts_a_cloudflare_r2_jurisdiction_asset_bucket() {
     config.validate().unwrap();
 }
 
+/// An upper-case spelling of the same DNS host is legal (hostnames are
+/// case-insensitive) and must be *detected* as R2, so the host-shape and
+/// region rules still apply — issue #485 item 2, where a case-sensitive
+/// `ends_with` let it slip past both rules into a live
+/// `SignatureDoesNotMatch`.
+#[test]
+fn accepts_an_uppercase_cloudflare_r2_asset_bucket_host() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://ABC123DEF456.R2.CloudflareStorage.com".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+/// ...and the R2 rules genuinely apply to that upper-case spelling.
+#[test]
+fn rejects_uppercase_r2_asset_bucket_host_with_non_auto_region() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://ABC123DEF456.R2.CloudflareStorage.com".into());
+    asset_bucket.region = Some("us-east-1".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("requires region \"auto\""), "{error}");
+}
+
+/// FerroGate is deliberately stricter than R2 here: Cloudflare documents a
+/// blank region and `us-east-1` as accepted aliases for `auto`, but the signer
+/// folds this string straight into the credential scope, so the config pins the
+/// canonical value and the error says exactly what to set (issue #485 item 3).
 #[test]
 fn rejects_r2_asset_bucket_with_non_auto_region() {
     let mut asset_bucket = enabled_r2_asset_bucket();
@@ -514,6 +548,123 @@ fn rejects_r2_asset_bucket_with_non_auto_region() {
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("field asset_bucket.region"));
     assert!(error.contains("requires region \"auto\""));
+}
+
+/// Issue #485 item 1: a path suffix on an R2 endpoint used to pass validation
+/// and then get folded into the signed `host` header. The guard now reasons
+/// about the signer's host, so it fails at load time and names the bad host.
+#[test]
+fn rejects_r2_asset_bucket_endpoint_with_a_path_suffix() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://abc123def456.r2.cloudflarestorage.com/x".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.endpoint"), "{error}");
+    assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
+    // The message names the host the signer would actually have sent.
+    assert!(
+        error.contains("host: abc123def456.r2.cloudflarestorage.com/x"),
+        "{error}"
+    );
+}
+
+/// An explicit port is likewise signed verbatim, so it is not a well-formed R2
+/// endpoint (issue #485 item 1).
+#[test]
+fn rejects_r2_asset_bucket_endpoint_with_a_port() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.endpoint = Some("https://abc123def456.r2.cloudflarestorage.com:8443".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.endpoint"), "{error}");
+    assert!(error.contains("Cloudflare R2 endpoint"), "{error}");
+}
+
+/// Issue #485 item 4: the R2 rules must key off the same predicate the runtime
+/// builds the S3 client on. A disabled section never constructs a client, so a
+/// leftover R2 endpoint with a geographic region must not hard-fail the load.
+#[test]
+fn disabled_asset_bucket_with_an_r2_endpoint_skips_the_r2_rules() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.enabled = false;
+    asset_bucket.region = Some("us-east-1".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+/// Same, for the Cloudflare-native backend: it never constructs the SigV4
+/// client either (issue #485 item 4).
+#[test]
+fn workers_static_assets_backend_with_an_r2_endpoint_skips_the_r2_rules() {
+    let mut asset_bucket = enabled_r2_asset_bucket();
+    asset_bucket.backend = crate::config::AssetBucketBackend::WorkersStaticAssets;
+    asset_bucket.region = Some("us-east-1".into());
+    asset_bucket.cf_account_id = Some("cf-account".into());
+    asset_bucket.cf_api_token = Some("env://FERROGATE_CF_TOKEN".into());
+    asset_bucket.cf_script_name = Some("ferrogate-assets".into());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+/// The load-time guard and the runtime signer agree, end to end: every endpoint
+/// `Config::validate()` accepts signs the bare R2 host, and every endpoint it
+/// rejects would have signed something else (issue #485).
+#[test]
+fn r2_config_validation_matches_the_runtime_signed_host() {
+    use crate::gateway::asset_bucket::{parse_endpoint, R2_ENDPOINT_SUFFIX};
+
+    for (endpoint, accepted) in [
+        ("https://abc123def456.r2.cloudflarestorage.com", true),
+        ("https://abc123def456.r2.cloudflarestorage.com/", true),
+        ("https://ABC123DEF456.R2.CloudflareStorage.com", true),
+        ("https://abc123def456.eu.r2.cloudflarestorage.com", true),
+        ("https://abc123def456.r2.cloudflarestorage.com/x", false),
+        ("https://abc123def456.r2.cloudflarestorage.com:8443", false),
+        ("https://abc.def.r2.cloudflarestorage.com", false),
+        ("https://.r2.cloudflarestorage.com", false),
+    ] {
+        let mut asset_bucket = enabled_r2_asset_bucket();
+        asset_bucket.endpoint = Some(endpoint.into());
+        let config = Config {
+            asset_bucket,
+            ..Config::default()
+        };
+        assert_eq!(
+            config.validate().is_ok(),
+            accepted,
+            "{endpoint}: config validation disagrees with the table"
+        );
+        // Whatever the verdict, it must match what the signer would sign: the
+        // accepted set is exactly the endpoints whose signed host is a bare
+        // `<label>[.eu|.fedramp].r2.cloudflarestorage.com`.
+        let signed_host = parse_endpoint(endpoint).unwrap().signing_host();
+        let signs_bare_r2_host = signed_host
+            .strip_suffix(R2_ENDPOINT_SUFFIX)
+            .and_then(|prefix| prefix.strip_suffix('.'))
+            .is_some_and(|account| {
+                let account = account
+                    .strip_suffix(".eu")
+                    .or_else(|| account.strip_suffix(".fedramp"))
+                    .unwrap_or(account);
+                !account.is_empty() && !account.contains('.')
+            });
+        assert_eq!(
+            accepted, signs_bare_r2_host,
+            "{endpoint}: validation verdict disagrees with the signed host {signed_host}"
+        );
+    }
 }
 
 #[test]
