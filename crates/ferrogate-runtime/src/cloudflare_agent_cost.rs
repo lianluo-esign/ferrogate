@@ -1064,6 +1064,45 @@ pub async fn should_dispatch<L: AgentBurnLedger>(
     Ok(evaluate(policy, burn, 0.0).permits_dispatch())
 }
 
+/// Object-safe dispatch guard the [`crate::ManagedWorkerScheduler`] consults
+/// before provisioning a new run.
+///
+/// Decouples the scheduler from the [`AgentCostGovernor`]'s `<C, L>` generics: a
+/// live governor is handed to the scheduler as an `Arc<dyn AgentDispatchGuard>`,
+/// so the scheduler enforces cost governance without naming the control surface
+/// or ledger types.
+///
+/// The contract is **fail closed** by convention — the scheduler treats both
+/// `Ok(false)` (over budget) and `Err(_)` (ledger/store failure) as "do not
+/// dispatch"; only `Ok(true)` permits a new run.
+#[async_trait]
+pub trait AgentDispatchGuard: Send + Sync {
+    /// `Ok(true)` = allow dispatch; `Ok(false)` = over budget, refuse; `Err` =
+    /// fail closed (refuse).
+    async fn allow_dispatch(
+        &self,
+        identity: &AgentInstanceIdentity,
+    ) -> Result<bool, CostGovernorError>;
+}
+
+/// The live governor is a dispatch guard: `allow_dispatch` delegates to
+/// [`AgentCostGovernor::should_dispatch`], which reads the burn ledger and
+/// evaluates the budget with a zero incremental cost (any throttle/degrade/kill
+/// pressure — or a ledger error — refuses the dispatch).
+#[async_trait]
+impl<C, L> AgentDispatchGuard for AgentCostGovernor<C, L>
+where
+    C: CloudflareControlSurface + Send + Sync,
+    L: AgentBurnLedger + Send + Sync,
+{
+    async fn allow_dispatch(
+        &self,
+        identity: &AgentInstanceIdentity,
+    ) -> Result<bool, CostGovernorError> {
+        self.should_dispatch(identity).await
+    }
+}
+
 #[cfg(test)]
 #[path = "cloudflare_agent_cost_test.rs"]
 mod tests;

@@ -16,6 +16,7 @@ use std::{
     fmt,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
+    sync::Arc,
 };
 #[cfg(unix)]
 use std::{
@@ -35,6 +36,7 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    cloudflare_agent_cost::AgentDispatchGuard, cloudflare_agent_memory::AgentInstanceIdentity,
     select_isolation_backend, FrameworkAdapterCapabilities, IsolationBackendDescriptor,
     IsolationCleanupOutcome, IsolationError, IsolationExecOutcome, IsolationExecRequest,
     IsolationPolicy, IsolationPrepareRequest, IsolationStarted, IsolationStopOutcome,
@@ -1389,10 +1391,25 @@ pub trait AgentWorkerControlClient {
     ) -> Result<IsolationCleanupOutcome, ManagedWorkerError>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ManagedWorkerScheduler {
     config: ManagedWorkerSchedulerConfig,
     templates: Vec<WorkerTemplate>,
+    /// Optional cost-governance guard consulted before provisioning a session.
+    /// `None` (the default) leaves dispatch unchanged; `Some(_)` enforces the
+    /// per-agent budget, failing closed on refusal or ledger error.
+    dispatch_guard: Option<Arc<dyn AgentDispatchGuard>>,
+}
+
+impl fmt::Debug for ManagedWorkerScheduler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedWorkerScheduler")
+            .field("config", &self.config)
+            .field("templates", &self.templates)
+            // The guard is a trait object (not `Debug`); render only its presence.
+            .field("dispatch_guard", &self.dispatch_guard.is_some())
+            .finish()
+    }
 }
 
 impl ManagedWorkerScheduler {
@@ -1415,10 +1432,24 @@ impl ManagedWorkerScheduler {
                 "at least one worker template is required".to_string(),
             ));
         }
-        Ok(Self { config, templates })
+        Ok(Self {
+            config,
+            templates,
+            dispatch_guard: None,
+        })
     }
 
-    pub fn start_session<C>(
+    /// Attach a cost-governance [`AgentDispatchGuard`] consulted before each
+    /// session is provisioned. Additive: schedulers built without a guard keep
+    /// their prior behavior. When present, `start_session` **fails closed** —
+    /// an over-budget verdict (`Ok(false)`) or a guard/ledger error (`Err`) both
+    /// refuse dispatch before any host-level provisioning.
+    pub fn with_dispatch_guard(mut self, guard: Arc<dyn AgentDispatchGuard>) -> Self {
+        self.dispatch_guard = Some(guard);
+        self
+    }
+
+    pub async fn start_session<C>(
         &self,
         request: ManagedWorkerSessionRequest,
         agent_worker: &mut C,
@@ -1426,9 +1457,33 @@ impl ManagedWorkerScheduler {
     where
         C: AgentWorkerControlClient,
     {
-        // TODO(#428 slice B): call cloudflare_agent_cost::should_dispatch(ledger,
-        // policy, identity) here to refuse dispatch to an over-budget CF-hosted
-        // agent once a durable burn ledger is threaded through the scheduler.
+        // Cost-governance dispatch guard (#428): refuse dispatch to an
+        // over-budget CF-hosted agent before any provisioning. Fail closed —
+        // both an over-budget verdict and a ledger/store error refuse.
+        if let Some(guard) = &self.dispatch_guard {
+            let identity = AgentInstanceIdentity::new(
+                request.tenant_id.clone(),
+                request.session_id.clone(),
+                request.run_id.clone(),
+            );
+            match guard.allow_dispatch(&identity).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(ManagedWorkerError::BudgetExceeded(format!(
+                        "cost governor refused dispatch for tenant {} session {} run {}: \
+                         agent is over budget",
+                        request.tenant_id, request.session_id, request.run_id
+                    )));
+                }
+                Err(error) => {
+                    return Err(ManagedWorkerError::BudgetExceeded(format!(
+                        "cost governor failed for tenant {} session {} run {} \
+                         (failing closed): {error}",
+                        request.tenant_id, request.session_id, request.run_id
+                    )));
+                }
+            }
+        }
         self.validate_request(&request)?;
         self.check_concurrency(&request)?;
         let template = self.select_template(&request)?;
@@ -1461,7 +1516,7 @@ impl ManagedWorkerScheduler {
         })
     }
 
-    pub fn run_to_completion<C>(
+    pub async fn run_to_completion<C>(
         &self,
         request: ManagedWorkerSessionRequest,
         run: ManagedWorkerRunRequest,
@@ -1470,7 +1525,7 @@ impl ManagedWorkerScheduler {
     where
         C: AgentWorkerControlClient,
     {
-        let mut session = self.start_session(request, agent_worker)?;
+        let mut session = self.start_session(request, agent_worker).await?;
         let exec = agent_worker.exec_or_attach(IsolationExecRequest {
             instance_id: session.instance_id.clone(),
             workload_ref: run.workload_ref,
@@ -1487,7 +1542,7 @@ impl ManagedWorkerScheduler {
         })
     }
 
-    pub fn run_with_cleanup<C>(
+    pub async fn run_with_cleanup<C>(
         &self,
         request: ManagedWorkerSessionRequest,
         run: ManagedWorkerRunRequest,
@@ -1496,14 +1551,17 @@ impl ManagedWorkerScheduler {
     where
         C: AgentWorkerControlClient,
     {
-        let mut session = self.start_session(request, agent_worker).map_err(|error| {
-            Box::new(ManagedWorkerFailedExecution {
-                session: ManagedWorkerSession::failed_before_start(),
-                error,
-                stop: None,
-                cleanup: IsolationCleanupOutcome::not_started(),
-            })
-        })?;
+        let mut session = self
+            .start_session(request, agent_worker)
+            .await
+            .map_err(|error| {
+                Box::new(ManagedWorkerFailedExecution {
+                    session: ManagedWorkerSession::failed_before_start(),
+                    error,
+                    stop: None,
+                    cleanup: IsolationCleanupOutcome::not_started(),
+                })
+            })?;
         let exec = match agent_worker.exec_or_attach(IsolationExecRequest {
             instance_id: session.instance_id.clone(),
             workload_ref: run.workload_ref,
@@ -1945,6 +2003,10 @@ pub enum ManagedWorkerError {
     InvalidRequest(String),
     ManagementProtocol(AgentWorkerManagementError),
     QuotaExceeded(String),
+    /// The cost-governance dispatch guard refused to provision the session: the
+    /// agent is over its per-agent budget, or the guard/ledger errored and the
+    /// scheduler fails closed. No host-level provisioning was attempted.
+    BudgetExceeded(String),
     NoCompatibleTemplate(String),
     Isolation(IsolationError),
     AgentWorker(String),
@@ -1980,6 +2042,11 @@ impl ManagedWorkerError {
                 code: AgentWorkerManagementErrorCode::InvalidRequest,
                 message: message.clone(),
                 retryable: true,
+            },
+            Self::BudgetExceeded(message) => AgentWorkerManagementError {
+                code: AgentWorkerManagementErrorCode::QuotaExceeded,
+                message: message.clone(),
+                retryable: false,
             },
             Self::NoCompatibleTemplate(message) => AgentWorkerManagementError {
                 code: AgentWorkerManagementErrorCode::InvalidRequest,
@@ -2019,6 +2086,12 @@ impl fmt::Display for ManagedWorkerError {
             }
             Self::QuotaExceeded(message) => {
                 write!(formatter, "managed worker quota exceeded: {message}")
+            }
+            Self::BudgetExceeded(message) => {
+                write!(
+                    formatter,
+                    "managed worker dispatch refused by cost governor: {message}"
+                )
             }
             Self::NoCompatibleTemplate(message) => {
                 write!(
@@ -2060,9 +2133,12 @@ mod tests {
             IsolationBackendKind::FirecrackerMicroVm,
         )]);
 
-        let execution = scheduler
-            .run_to_completion(session_request(), run_request(), &mut agent_worker)
-            .unwrap();
+        let execution = block_on(scheduler.run_to_completion(
+            session_request(),
+            run_request(),
+            &mut agent_worker,
+        ))
+        .unwrap();
 
         assert_eq!(
             agent_worker.calls,
@@ -2136,9 +2212,7 @@ mod tests {
             ..session_request()
         };
 
-        let error = scheduler
-            .start_session(request, &mut agent_worker)
-            .unwrap_err();
+        let error = block_on(scheduler.start_session(request, &mut agent_worker)).unwrap_err();
 
         assert!(matches!(error, ManagedWorkerError::QuotaExceeded(_)));
         assert!(agent_worker.calls.is_empty());
@@ -2154,9 +2228,8 @@ mod tests {
         agent_worker.handlers[0].ready = false;
         agent_worker.handlers[0].readiness_reason = Some("codex binary missing".to_string());
 
-        let error = scheduler
-            .start_session(session_request(), &mut agent_worker)
-            .unwrap_err();
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
 
         assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
         assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
@@ -2172,9 +2245,8 @@ mod tests {
         )]);
         agent_worker.handlers[0].capabilities = vec!["tools".to_string(), "streaming".to_string()];
 
-        let error = scheduler
-            .start_session(session_request(), &mut agent_worker)
-            .unwrap_err();
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
 
         assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
         assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
@@ -2196,9 +2268,8 @@ mod tests {
             IsolationBackendKind::FirecrackerMicroVm,
         )]);
 
-        let error = scheduler
-            .start_session(session_request(), &mut agent_worker)
-            .unwrap_err();
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
 
         assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
         assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
@@ -2217,9 +2288,9 @@ mod tests {
             ..session_request()
         };
 
-        let failure = scheduler
-            .run_with_cleanup(request, run_request(), &mut agent_worker)
-            .unwrap_err();
+        let failure =
+            block_on(scheduler.run_with_cleanup(request, run_request(), &mut agent_worker))
+                .unwrap_err();
 
         assert!(agent_worker.calls.is_empty());
         let records = failure.lifecycle_records();
@@ -2244,9 +2315,7 @@ mod tests {
             ..session_request()
         };
 
-        let error = scheduler
-            .start_session(request, &mut agent_worker)
-            .unwrap_err();
+        let error = block_on(scheduler.start_session(request, &mut agent_worker)).unwrap_err();
 
         assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
         assert!(agent_worker.calls.is_empty());
@@ -2260,9 +2329,8 @@ mod tests {
             IsolationBackendKind::RootlessDocker,
         )]);
 
-        let error = scheduler
-            .start_session(session_request(), &mut agent_worker)
-            .unwrap_err();
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
 
         assert!(matches!(
             error,
@@ -2280,9 +2348,12 @@ mod tests {
         )]);
         agent_worker.fail_exec = true;
 
-        let failure = scheduler
-            .run_with_cleanup(session_request(), run_request(), &mut agent_worker)
-            .unwrap_err();
+        let failure = block_on(scheduler.run_with_cleanup(
+            session_request(),
+            run_request(),
+            &mut agent_worker,
+        ))
+        .unwrap_err();
 
         assert_eq!(
             agent_worker.calls,
@@ -2316,9 +2387,8 @@ mod tests {
             "firecracker",
             IsolationBackendKind::FirecrackerMicroVm,
         )]);
-        let session = scheduler
-            .start_session(session_request(), &mut agent_worker)
-            .unwrap();
+        let session =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap();
         agent_worker.calls.clear();
 
         let cancellation = scheduler
@@ -3113,9 +3183,119 @@ mod tests {
         );
     }
 
+    /// A scripted [`AgentDispatchGuard`] for scheduler tests: returns a fixed
+    /// verdict (or a fixed ledger error) with no ledger/network I/O, so the
+    /// scheduler's dispatch-guard seam is exercised in isolation.
+    struct StubDispatchGuard {
+        verdict: Result<bool, crate::CostGovernorError>,
+    }
+
+    impl StubDispatchGuard {
+        fn allow() -> Self {
+            Self { verdict: Ok(true) }
+        }
+
+        fn deny() -> Self {
+            Self { verdict: Ok(false) }
+        }
+
+        fn error() -> Self {
+            Self {
+                verdict: Err(crate::CostGovernorError::Ledger(
+                    crate::AgentBurnLedgerError::Storage("burn ledger unavailable".to_string()),
+                )),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDispatchGuard for StubDispatchGuard {
+        async fn allow_dispatch(
+            &self,
+            _identity: &AgentInstanceIdentity,
+        ) -> Result<bool, crate::CostGovernorError> {
+            self.verdict.clone()
+        }
+    }
+
+    #[test]
+    fn dispatch_guard_denies_over_budget_session_before_provisioning() {
+        let scheduler = scheduler().with_dispatch_guard(Arc::new(StubDispatchGuard::deny()));
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
+
+        assert!(matches!(error, ManagedWorkerError::BudgetExceeded(_)));
+        assert!(error.to_string().contains("over budget"));
+        // Fail closed BEFORE any host-level work: no agent-worker call happened,
+        // so an over-budget agent is never provisioned.
+        assert!(agent_worker.calls.is_empty());
+    }
+
+    #[test]
+    fn dispatch_guard_fails_closed_when_the_guard_errors() {
+        let scheduler = scheduler().with_dispatch_guard(Arc::new(StubDispatchGuard::error()));
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+
+        let error =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap_err();
+
+        // A guard/ledger error refuses dispatch just like an over-budget verdict.
+        assert!(matches!(error, ManagedWorkerError::BudgetExceeded(_)));
+        assert!(error.to_string().contains("failing closed"));
+        assert!(agent_worker.calls.is_empty());
+    }
+
+    #[test]
+    fn dispatch_guard_allowing_provisions_the_session() {
+        let scheduler = scheduler().with_dispatch_guard(Arc::new(StubDispatchGuard::allow()));
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+
+        let session =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap();
+
+        assert_eq!(session.status, ManagedWorkerSessionStatus::Running);
+        assert!(agent_worker.calls.contains(&"provision_managed_worker"));
+    }
+
+    #[test]
+    fn default_scheduler_without_guard_dispatches_unchanged() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+
+        let session =
+            block_on(scheduler.start_session(session_request(), &mut agent_worker)).unwrap();
+
+        assert_eq!(session.status, ManagedWorkerSessionStatus::Running);
+        assert!(agent_worker.calls.contains(&"provision_managed_worker"));
+    }
+
     fn scheduler() -> ManagedWorkerScheduler {
         ManagedWorkerScheduler::new(ManagedWorkerSchedulerConfig::default(), vec![template()])
             .unwrap()
+    }
+
+    /// tokio's `macros`/test features are not enabled for this crate, so drive
+    /// the now-async scheduler entry points on a bare current-thread runtime (no
+    /// IO/timer needed) — the same pattern the cost-governance tests use.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread test runtime")
+            .block_on(fut)
     }
 
     fn template() -> WorkerTemplate {

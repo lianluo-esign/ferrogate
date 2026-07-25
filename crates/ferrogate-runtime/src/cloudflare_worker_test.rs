@@ -23,6 +23,16 @@ fn scheduler() -> ManagedWorkerScheduler {
     ManagedWorkerScheduler::new(ManagedWorkerSchedulerConfig::default(), vec![template()]).unwrap()
 }
 
+/// The scheduler entry points are async (the #428 dispatch-guard seam); tokio's
+/// test macro isn't enabled for this crate, so drive them on a bare
+/// current-thread runtime.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build current-thread test runtime")
+        .block_on(fut)
+}
+
 fn template() -> WorkerTemplate {
     WorkerTemplate {
         id: "template-codex-cloudflare".to_string(),
@@ -107,9 +117,9 @@ fn runs_hosted_session_end_to_end_against_mock_cloudflare_surface() {
     let scheduler = scheduler();
     let mut client = client(MockCloudflareControlSurface::new());
 
-    let execution = scheduler
-        .run_to_completion(session_request(), run_request(), &mut client)
-        .unwrap();
+    let execution =
+        block_on(scheduler.run_to_completion(session_request(), run_request(), &mut client))
+            .unwrap();
 
     // The session ran through the same state machine and cleaned up.
     assert_eq!(
@@ -194,9 +204,9 @@ fn reconciles_session_and_run_status_through_storage_row_types() {
     let scheduler = scheduler();
     let mut client = client(MockCloudflareControlSurface::new());
 
-    let execution = scheduler
-        .run_to_completion(session_request(), run_request(), &mut client)
-        .unwrap();
+    let execution =
+        block_on(scheduler.run_to_completion(session_request(), run_request(), &mut client))
+            .unwrap();
     let run_ref = execution.session.instance_id.clone();
 
     // The client reconciles the last observed CF status onto the scheduler's
@@ -402,9 +412,7 @@ fn provision_failure_surfaces_as_agent_worker_error_and_skips_persistence() {
     let scheduler = scheduler();
     let mut client = client(MockCloudflareControlSurface::failing_start());
 
-    let error = scheduler
-        .start_session(session_request(), &mut client)
-        .unwrap_err();
+    let error = block_on(scheduler.start_session(session_request(), &mut client)).unwrap_err();
 
     assert!(matches!(error, ManagedWorkerError::AgentWorker(_)));
     assert!(error
@@ -419,9 +427,9 @@ fn exec_failure_still_stops_and_cleans_up_the_hosted_run() {
     let scheduler = scheduler();
     let mut client = client(MockCloudflareControlSurface::failing_exec());
 
-    let failure = scheduler
-        .run_with_cleanup(session_request(), run_request(), &mut client)
-        .unwrap_err();
+    let failure =
+        block_on(scheduler.run_with_cleanup(session_request(), run_request(), &mut client))
+            .unwrap_err();
 
     assert!(matches!(failure.error, ManagedWorkerError::AgentWorker(_)));
     assert_eq!(
