@@ -109,7 +109,9 @@ fn full_lifecycle_drives_the_worker_routes_and_records_evidence() {
     let mut backend = backend(vec![
         ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "preparedId": "prep-1" }"#),
         ok(
-            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#,
+            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
         ),
         ok(
             r#"{ "instance": "fg.tenant-a.sess-1.run-9", "exitCode": 0, "stdout": "ok\n", "stderr": "" }"#,
@@ -166,7 +168,9 @@ fn lifecycle_hits_each_container_route_in_order() {
     let mut backend = backend(vec![
         ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "preparedId": "prep-1" }"#),
         ok(
-            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#,
+            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
         ),
         ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "signal": "SIGTERM", "running": false }"#),
         ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "destroyed": true }"#),

@@ -44,6 +44,14 @@ import { handleContainer } from "./container";
 // sealed. A governed allowlist opens specific hosts at runtime via
 // `sandbox.setAllowedHosts(...)` (container.ts `/container/start`), which the
 // Container base grants egress to even while `enableInternet` stays false.
+//
+// THIS FIELD IS THE LOAD-BEARING CONTROL FOR ISSUE #471. Cloudflare enforces it
+// OUTSIDE the container (per the Containers "Handle outbound traffic" docs, with
+// `enableInternet = false` "only traffic you explicitly allow ... can leave the
+// container"; only ports 80/443 and Cloudflare-resolver DNS survive), so code
+// running inside — including model-authored code — cannot switch it back on.
+// Changing it, or binding CONTAINER_SANDBOX to a class that does not extend this
+// one, silently converts the whole tier from enforced to cooperative.
 export class AgentSandbox extends Sandbox {
   enableInternet = false;
 }
@@ -91,6 +99,17 @@ export interface Env {
   CONTAINER_SANDBOX?: DurableObjectNamespace<Sandbox>;
   /** Cap on captured container stdout/stderr bytes; defaults to 1_000_000. */
   CONTAINER_MAX_OUTPUT_BYTES?: string;
+  /**
+   * Comma-separated set of hosts an operator has authorized the container tier
+   * to open egress to (issue #471) — in practice the FerroGate gateway, and
+   * nothing else. `/container/start` rejects any `egressAllowlist` entry outside
+   * this set.
+   *
+   * UNSET OR EMPTY MEANS NO HOST MAY BE OPENED: every container is sealed. The
+   * failure mode of a forgotten configuration is "the agent reaches nothing",
+   * never "the agent reaches everything".
+   */
+  CONTAINER_GOVERNED_EGRESS_HOSTS?: string;
 }
 
 /** Lifecycle status vocabulary mirrored by the Rust `CloudflareRunStatus`. */

@@ -23,8 +23,12 @@
 //!
 //! Fail-closed by construction:
 //!
-//! * **Egress** starts OFF (`enableInternet=false`); the client rejects
-//!   internet access without a governed allowlist before any HTTP.
+//! * **Egress** is governed by construction (#471): the start spec's
+//!   [`ContainerEgressPosture`] has no inhabitant that grants direct public
+//!   egress, so the tier cannot be started open. It defaults to *sealed*; an
+//!   operator tethers it to one validated gateway host through
+//!   `AGENT_WORKER_CF_CONTAINER_EGRESS_GATEWAY_HOST`. The Worker must attest the
+//!   posture it applied or the start fails closed.
 //! * **Snapshot/checkpoint** has no Cloudflare primitive, so
 //!   [`cloudflare_container_capabilities`] advertises it `false` and
 //!   [`snapshot_or_checkpoint`](CloudflareContainerIsolationBackend::snapshot_or_checkpoint)
@@ -51,15 +55,18 @@ use std::env;
 
 use ferrogate_runtime::{
     cloudflare_container_descriptor, AgentInstanceIdentity, CollectedIsolationArtifacts,
-    CollectedIsolationLogs, ContainerControlClient, ContainerControlError, ContainerExecSpec,
-    ContainerInstanceTier, ContainerPrepareSpec, ContainerSignal, ContainerStartSpec,
-    GatewayControlTransport, IsolationArtifact, IsolationBackendDescriptor,
+    CollectedIsolationLogs, ContainerControlClient, ContainerControlError, ContainerEgressPosture,
+    ContainerExecSpec, ContainerInstanceTier, ContainerPrepareSpec, ContainerSignal,
+    ContainerStartSpec, GatewayControlTransport, IsolationArtifact, IsolationBackendDescriptor,
     IsolationCleanupOutcome, IsolationError, IsolationExecOutcome, IsolationExecRequest,
     IsolationLifecycleEvidence, IsolationPolicy, IsolationPrepareRequest, IsolationPrepared,
     IsolationResult, IsolationStarted, IsolationStopOutcome,
 };
 
 const DEFAULT_WORKER_IMAGE: &str = "ferrogate/agent-sandbox:latest";
+/// Operator-pinned governed gateway host the container is tethered to (issue
+/// #471). Unset ⇒ the container starts SEALED (no egress at all), never open.
+const CF_CONTAINER_EGRESS_GATEWAY_HOST_VAR: &str = "AGENT_WORKER_CF_CONTAINER_EGRESS_GATEWAY_HOST";
 const DEFAULT_TIER: ContainerInstanceTier = ContainerInstanceTier::Standard1;
 
 /// Whether an operator has explicitly enabled the Cloudflare container tier.
@@ -230,12 +237,34 @@ impl<T: GatewayControlTransport> CloudflareContainerIsolationBackend<T> {
         })
     }
 
-    /// Governed start spec: egress stays deny-by-default. The runtime
-    /// `IsolationNetworkPolicy` never grants direct public egress for a managed
-    /// worker (it fail-closes in `validate`), so this maps to
-    /// `enableInternet=false` with an empty governed allowlist.
-    fn start_spec(&self) -> ContainerStartSpec {
-        ContainerStartSpec::default()
+    /// Governed start spec, derived from the session's isolation network policy
+    /// (issue #471).
+    ///
+    /// The posture is a [`ContainerEgressPosture`], which has **no inhabitant
+    /// that grants direct public egress** — so this cannot produce an open
+    /// container even if the policy were tampered with; a policy carrying
+    /// `direct_public_egress = true` (or `governed_egress = false`) fails the
+    /// start outright rather than downgrading silently.
+    ///
+    /// Default posture is **sealed**. When the operator pins the governed
+    /// gateway host via `AGENT_WORKER_CF_CONTAINER_EGRESS_GATEWAY_HOST`, the
+    /// container is tethered to exactly that host — the agent's LLM base URL
+    /// points there and nothing else is reachable. That host is validated: a
+    /// wildcard or a provider endpoint is rejected.
+    fn start_spec(&self) -> IsolationResult<ContainerStartSpec> {
+        let policy = self.policy()?;
+        let gateway_host = env::var(CF_CONTAINER_EGRESS_GATEWAY_HOST_VAR).ok();
+        let egress = ContainerEgressPosture::from_network_policy(
+            &policy.network_policy,
+            gateway_host.as_deref(),
+        )
+        .map_err(|e| {
+            IsolationError::Backend(format!("cloudflare container egress posture rejected: {e}"))
+        })?;
+        Ok(ContainerStartSpec {
+            egress,
+            ..ContainerStartSpec::default()
+        })
     }
 }
 
@@ -270,7 +299,7 @@ impl<T: GatewayControlTransport> ferrogate_runtime::IsolationBackendLifecycle
 
     fn start(&mut self, prepared: IsolationPrepared) -> IsolationResult<IsolationStarted> {
         let identity = self.identity()?.clone();
-        let spec = self.start_spec();
+        let spec = self.start_spec()?;
         let started = self
             .client
             .start(&identity, &spec)

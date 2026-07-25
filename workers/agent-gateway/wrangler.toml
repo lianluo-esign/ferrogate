@@ -54,6 +54,15 @@ SCHEDULE_MAX_TASKS_PER_INSTANCE = "100"
 # @cloudflare/sandbox instance ("just another sandbox"; egress deny-by-default).
 # See docs/cloudflare-container-isolation.md. Cap on captured stdout/stderr bytes.
 CONTAINER_MAX_OUTPUT_BYTES = "1000000"
+# --- Governed egress allowlist (issue #471) ----------------------------------
+# The ONLY hosts /container/start may open egress to — in practice the FerroGate
+# gateway host, and nothing else. Comma-separated, bare hostnames.
+#
+# EMPTY MEANS SEALED: with no authorized host, every container starts with NO
+# egress at all and any egressAllowlist request is rejected 422. That is the
+# intended default — a forgotten configuration must fail closed. Set it to the
+# tenant's gateway hostname when the governed data plane (#470) is deployed.
+CONTAINER_GOVERNED_EGRESS_HOSTS = ""
 
 # Container/sandbox binding (Workers PAID only). Enabled 2026-07-24 by the
 # test gate for #415 live validation: `AgentSandbox` re-exports

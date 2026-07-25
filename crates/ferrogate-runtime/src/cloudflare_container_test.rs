@@ -19,6 +19,7 @@ use super::{
     ContainerSignal, ContainerStartSpec,
 };
 use crate::cloudflare_agent_memory::AgentInstanceIdentity;
+use crate::cloudflare_container_egress::ContainerEgressPosture;
 use crate::cloudflare_gateway_control::GatewayControlTransport;
 use crate::cloudflare_worker::CloudflareControlSurfaceError;
 use crate::isolation::{
@@ -133,13 +134,24 @@ fn prepare_rejects_empty_image_without_http() {
     assert_eq!(c.transport().captured_len(), 0);
 }
 
-// ---- start + egress governance ---------------------------------------------
+// ---- start + egress governance (issue #471) ---------------------------------
+
+/// Build the `egress` attestation the Worker returns for a posture.
+fn attested(posture: &ContainerEgressPosture) -> String {
+    let allowed = serde_json::to_string(posture.allowed_hosts()).unwrap();
+    let denied = serde_json::to_string(posture.denied_hosts()).unwrap();
+    format!(
+        r#"{{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": {{ "directPublicEgress": false, "posture": "{}",
+                          "allowedHosts": {allowed}, "deniedHosts": {denied} }} }}"#,
+        posture.wire_label()
+    )
+}
 
 #[test]
-fn start_defaults_to_no_internet_and_posts_env() {
-    let c = client(vec![ok(
-        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#,
-    )]);
+fn start_defaults_to_sealed_egress_and_posts_env() {
+    let sealed = ContainerEgressPosture::Sealed;
+    let c = client(vec![ok(&attested(&sealed))]);
     let mut spec = ContainerStartSpec::default();
     spec.env.insert("FOO".into(), "bar".into());
     let started = c.start(&identity(), &spec).unwrap();
@@ -147,17 +159,72 @@ fn start_defaults_to_no_internet_and_posts_env() {
     assert!(started.running);
 
     let body = body_json(&c.transport().last());
+    // `direct_public_egress = false` is asserted on the wire and is not a knob:
+    // ContainerStartSpec has no field that could set it true.
     assert_eq!(body["enableInternet"], false);
+    assert_eq!(body["directPublicEgress"], false);
+    assert_eq!(body["egressPosture"], "sealed");
     assert_eq!(body["env"]["FOO"], "bar");
     assert!(body["egressAllowlist"].as_array().unwrap().is_empty());
+    assert!(body["egressDenylist"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn start_with_internet_requires_governed_allowlist_no_http() {
-    let c = client(vec![]);
+fn tethered_start_posts_the_governed_allowlist_and_the_provider_denylist() {
+    let posture = ContainerEgressPosture::tethered_to("gw.ferrogate.internal").unwrap();
+    let c = client(vec![ok(&attested(&posture))]);
     let spec = ContainerStartSpec {
-        enable_internet: true,
-        egress_allowlist: Vec::new(),
+        egress: posture,
+        ..ContainerStartSpec::default()
+    };
+    c.start(&identity(), &spec).unwrap();
+    let body = body_json(&c.transport().last());
+    assert_eq!(body["enableInternet"], false);
+    assert_eq!(body["egressPosture"], "gateway-tethered");
+    assert_eq!(body["egressAllowlist"][0], "gw.ferrogate.internal");
+    let denylist = body["egressDenylist"].as_array().unwrap();
+    assert!(denylist.iter().any(|h| h == "api.anthropic.com"));
+    assert!(denylist.iter().any(|h| h == "api.openai.com"));
+}
+
+#[test]
+fn a_provider_endpoint_can_never_be_put_in_a_start_spec() {
+    // The bypass this tier exists to prevent is unrepresentable: the posture
+    // refuses to construct, so no HTTP is ever attempted.
+    let err = ContainerEgressPosture::tethered_to("api.anthropic.com").unwrap_err();
+    assert!(err.to_string().contains("LLM provider endpoint"), "{err}");
+    let err = ContainerEgressPosture::tethered_to("*").unwrap_err();
+    assert!(err.to_string().contains("wildcard"), "{err}");
+}
+
+#[test]
+fn an_unattested_start_is_refused() {
+    // A Worker deployment without the #471 posture attestation: the instance may
+    // be running with whatever egress it likes, so the start fails closed.
+    let c = client(vec![ok(
+        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#,
+    )]);
+    let err = c
+        .start(&identity(), &ContainerStartSpec::default())
+        .unwrap_err();
+    match err {
+        ContainerControlError::EgressNotGoverned(m) => {
+            assert!(m.contains("did not attest"), "got {m}")
+        }
+        other => panic!("expected EgressNotGoverned, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_start_whose_worker_dropped_the_allowlist_is_refused() {
+    let posture = ContainerEgressPosture::tethered_to("gw.ferrogate.internal").unwrap();
+    let c = client(vec![ok(
+        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "gateway-tethered",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
+    )]);
+    let spec = ContainerStartSpec {
+        egress: posture,
         ..ContainerStartSpec::default()
     };
     let err = c.start(&identity(), &spec).unwrap_err();
@@ -165,27 +232,24 @@ fn start_with_internet_requires_governed_allowlist_no_http() {
         matches!(err, ContainerControlError::EgressNotGoverned(_)),
         "got {err:?}"
     );
-    assert_eq!(
-        c.transport().captured_len(),
-        0,
-        "ungoverned egress must send no HTTP"
-    );
 }
 
 #[test]
-fn start_with_internet_and_allowlist_posts_governed_egress() {
+fn a_start_attesting_direct_public_egress_is_refused() {
     let c = client(vec![ok(
-        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#,
+        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": true, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
     )]);
-    let spec = ContainerStartSpec {
-        enable_internet: true,
-        egress_allowlist: vec!["api.example.com".into()],
-        ..ContainerStartSpec::default()
-    };
-    c.start(&identity(), &spec).unwrap();
-    let body = body_json(&c.transport().last());
-    assert_eq!(body["enableInternet"], true);
-    assert_eq!(body["egressAllowlist"][0], "api.example.com");
+    let err = c
+        .start(&identity(), &ContainerStartSpec::default())
+        .unwrap_err();
+    match err {
+        ContainerControlError::EgressNotGoverned(m) => {
+            assert!(m.contains("direct public egress"), "got {m}")
+        }
+        other => panic!("expected EgressNotGoverned, got {other:?}"),
+    }
 }
 
 // ---- exec -------------------------------------------------------------------

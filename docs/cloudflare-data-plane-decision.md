@@ -721,6 +721,20 @@ on a second implementation of it** — so #471's job is a network-enforcement
 problem, not simultaneously a policy-equivalence problem. Under Option A it
 would have been both.
 
+**Update (#471 landed).** Cloudflare's egress controls turn out to be a real
+network control, not a convention: with `enableInternet = false` "only traffic
+you explicitly allow … can leave the container", only ports 80/443 and
+Cloudflare-resolver DNS survive, and `deniedHosts` "overrides everything else in
+the chain" — all verified from the CF docs on 2026-07-25 and tabulated, with the
+unverified assumptions labelled, in
+[`cloudflare-container-isolation.md`](cloudflare-container-isolation.md)
+§"What Cloudflare actually enforces for egress". Step 4's allowlist is now
+constrained to an operator-authorized host set (empty ⇒ sealed), the posture type
+cannot express open internet, and the Worker attests the posture it applied or
+the start fails. Step 6's "by construction, not by reconciliation" stands **for
+traffic that traverses the tether**; the residual, configuration-shaped risk is
+covered by the reconciliation detector rather than assumed away.
+
 ---
 
 ## 10. What this record does not settle

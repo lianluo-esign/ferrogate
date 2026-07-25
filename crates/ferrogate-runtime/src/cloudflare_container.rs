@@ -24,12 +24,23 @@
 //! execute arbitrary / untrusted code: each named instance is a per-tenant
 //! isolated Durable Object (isolation IS tenant isolation, per the #427 naming
 //! scheme `fg.{tenant}.{session}.{run}`), scales to zero, and — critically —
-//! starts with **no internet** (`enableInternet=false`). Egress is opened only
-//! through a governed allowlist, mirroring the #117 function-egress broker:
-//! [`ContainerStartSpec::enable_internet`] with an EMPTY
-//! [`ContainerStartSpec::egress_allowlist`] is rejected **client-side, before
-//! any HTTP** ([`ContainerControlError::EgressNotGoverned`]); the Worker
-//! independently re-enforces the same rule.
+//! starts with **no internet** (`enableInternet=false`).
+//!
+//! **Egress posture (issue #471).** `direct_public_egress = false` is enforced
+//! *by construction*: [`ContainerStartSpec::egress`] is a
+//! [`ContainerEgressPosture`], and no inhabitant of that type grants open
+//! internet — the old `enable_internet: bool` / `egress_allowlist: Vec<String>`
+//! pair (which let a caller legally ask for internet plus an allowlist of
+//! `api.anthropic.com`, i.e. the exact bypass) no longer exists. A tethered
+//! posture can only be built from hosts that are neither wildcards nor provider
+//! endpoints. The wire body always carries `enableInternet: false` plus the
+//! provider denylist, the Worker independently re-enforces both, and
+//! [`ContainerControlClient::start`] refuses the start unless the Worker
+//! **attests** the posture it actually applied
+//! ([`ContainerControlError::EgressNotGoverned`]). See
+//! [`crate::cloudflare_container_egress`] for what Cloudflare does and does not
+//! enforce, and [`crate::cloudflare_container_tether_audit`] for the detection
+//! path that covers what prevention cannot.
 //!
 //! The lifecycle maps onto the runtime [`crate::IsolationBackendLifecycle`]
 //! contract (the `agent-worker` backend in `cloudflare_container_backend.rs`
@@ -50,6 +61,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cloudflare_agent_memory::AgentInstanceIdentity;
+use crate::cloudflare_container_egress::{ContainerEgressPosture, EgressPostureAttestation};
 use crate::cloudflare_gateway_control::GatewayControlTransport;
 use crate::isolation::{
     IsolationBackendCapabilities, IsolationBackendDescriptor, IsolationBackendKind,
@@ -177,20 +189,22 @@ impl ContainerPrepareSpec {
     }
 }
 
-/// `start` spec: launch the prepared instance. `enable_internet` defaults OFF
-/// (via `Default`); any egress must ride the governed `egress_allowlist`.
+/// `start` spec: launch the prepared instance.
+///
+/// **There is no `enable_internet` field (issue #471).** The network posture is
+/// a [`ContainerEgressPosture`], which cannot express direct public egress in
+/// any variant; the default is [`ContainerEgressPosture::Sealed`]. That is what
+/// makes `direct_public_egress = false` structural rather than documented: a
+/// caller cannot construct a start spec that opens the internet, and cannot
+/// allowlist a wildcard or a provider endpoint.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContainerStartSpec {
     /// Optional entrypoint override (argv).
     pub entrypoint: Vec<String>,
     /// Environment injected into the instance (deterministic order on the wire).
     pub env: BTreeMap<String, String>,
-    /// Open public egress? Defaults false. Requires a non-empty
-    /// `egress_allowlist` — rejected client-side otherwise.
-    pub enable_internet: bool,
-    /// Governed egress allowlist (host or URL patterns). Mirrors the #117
-    /// function-egress broker: egress is deny-by-default.
-    pub egress_allowlist: Vec<String>,
+    /// The governed egress posture: sealed, or tethered to a validated host set.
+    pub egress: ContainerEgressPosture,
 }
 
 /// What to execute in a running instance.
@@ -247,12 +261,20 @@ pub struct ContainerPrepared {
 }
 
 /// Outcome of `start`.
+///
+/// `egress` is the Worker's **attestation** of the posture it actually applied
+/// (issue #471). It is `Option` only so a response from a Worker deployment that
+/// predates the attestation contract decodes rather than erroring at the serde
+/// layer — [`ContainerControlClient::start`] then rejects the `None` case as an
+/// unattested (therefore ungoverned) start.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ContainerStarted {
     pub instance: String,
     #[serde(rename = "instanceId")]
     pub instance_id: String,
     pub running: bool,
+    #[serde(default)]
+    pub egress: Option<EgressPostureAttestation>,
 }
 
 /// Outcome of `exec` — stdout/stderr/exit captured from the instance.
@@ -318,8 +340,10 @@ pub enum ContainerControlError {
     InvalidIdentity(String),
     /// The spec is invalid (client-side, or the Worker's 422 `invalid_spec`).
     InvalidSpec(String),
-    /// `enable_internet` was requested with an empty governed allowlist —
-    /// rejected client-side, before any HTTP (fail-closed egress).
+    /// The instance is not provably running under a governed egress posture
+    /// (issue #471): the Worker did not attest the posture it applied, or
+    /// attested one that diverges from the requested
+    /// [`ContainerEgressPosture`]. Fail-closed — the run does not proceed.
     EgressNotGoverned(String),
     /// The Worker has no container/sandbox binding configured (HTTP 501).
     Unbound(String),
@@ -464,29 +488,49 @@ impl<T: GatewayControlTransport> ContainerControlClient<T> {
         )
     }
 
-    /// Start the prepared instance. `enable_internet` with an empty governed
-    /// allowlist is rejected here (no HTTP): egress is deny-by-default.
+    /// Start the prepared instance under a **governed egress posture**
+    /// (issue #471).
+    ///
+    /// The wire body always asserts `enableInternet: false` and
+    /// `directPublicEgress: false` — the posture type has no other inhabitant —
+    /// and carries the provider denylist so the Worker applies `setDeniedHosts`,
+    /// which Cloudflare evaluates ahead of (and overriding) any allowlist.
+    ///
+    /// The response is not trusted blindly: the Worker must **attest** the
+    /// posture it applied, and a missing or divergent attestation fails the
+    /// start with [`ContainerControlError::EgressNotGoverned`]. A run therefore
+    /// never proceeds on an instance whose egress configuration was silently
+    /// dropped.
     pub fn start(
         &self,
         identity: &AgentInstanceIdentity,
         spec: &ContainerStartSpec,
     ) -> Result<ContainerStarted, ContainerControlError> {
         let instance = self.instance_name(identity)?;
-        if spec.enable_internet && spec.egress_allowlist.is_empty() {
-            return Err(ContainerControlError::EgressNotGoverned(
-                "enable_internet requires a non-empty egress_allowlist; \
-                 open public egress is deny-by-default"
-                    .into(),
-            ));
-        }
         let body = json!({
             "instance": instance,
             "entrypoint": spec.entrypoint,
             "env": spec.env,
-            "enableInternet": spec.enable_internet,
-            "egressAllowlist": spec.egress_allowlist,
+            // Structural, not configurable: this tier has no open-internet mode.
+            "enableInternet": false,
+            "directPublicEgress": false,
+            "egressPosture": spec.egress.wire_label(),
+            "egressAllowlist": spec.egress.allowed_hosts(),
+            "egressDenylist": spec.egress.denied_hosts(),
         });
-        self.call("start", "container/start", body)
+        let started: ContainerStarted = self.call("start", "container/start", body)?;
+        match &started.egress {
+            None => Err(ContainerControlError::EgressNotGoverned(
+                "the agent-gateway Worker did not attest the applied egress posture; \
+                 refusing to run an unattested container (deploy a Worker with the #471 \
+                 container routes)"
+                    .into(),
+            )),
+            Some(attestation) => match attestation.verify(&spec.egress) {
+                Ok(()) => Ok(started),
+                Err(e) => Err(ContainerControlError::EgressNotGoverned(e.to_string())),
+            },
+        }
     }
 
     /// Execute a command or code step in the running instance and capture

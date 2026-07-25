@@ -106,7 +106,11 @@ fn prepared_response() -> HttpResponse {
 }
 
 fn started_response() -> HttpResponse {
-    ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true }"#)
+    ok(
+        r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
+    )
 }
 
 /// Provision mirrors `provision_docker`: prepare + start drive the fronting

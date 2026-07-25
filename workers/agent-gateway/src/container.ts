@@ -9,6 +9,12 @@
 //   the tier through, with egress deny-by-default (the `AgentSandbox` DO class pins
 //   `enableInternet=false`; egress is opened only for a governed allowlist).
 //
+//   #471 (P1 security): the tether is now ENFORCED, not cooperative. /container/start
+//   rejects enableInternet/directPublicEgress unconditionally, constrains any allowlist to
+//   the operator-authorized CONTAINER_GOVERNED_EGRESS_HOSTS (empty ⇒ sealed), applies a
+//   provider denylist that overrides everything in Cloudflare's egress chain, and ATTESTS
+//   the applied posture so the Rust client can refuse an unfenced instance.
+//
 //   REWORK (gate re-test of #415): the earlier draft drove a GUESSED structural RPC
 //   surface (`configureEgress`, `signal`, `runCode`/`listFiles`/`readLogs` on a hand-rolled
 //   interface) that diverged from the REAL `@cloudflare/sandbox@0.12.4` API and crashed
@@ -194,35 +200,201 @@ interface StartBody {
   entrypoint?: unknown;
   env?: unknown;
   enableInternet?: unknown;
+  directPublicEgress?: unknown;
+  egressPosture?: unknown;
   egressAllowlist?: unknown;
+  egressDenylist?: unknown;
+}
+
+/**
+ * The posture the Worker actually applied, returned to the Rust client, which
+ * REFUSES to run an instance whose attestation does not match what it asked for
+ * (issue #471). Without this the client would have to take "HTTP 200" as proof
+ * that egress was configured — which it is not.
+ */
+interface EgressAttestation {
+  directPublicEgress: false;
+  posture: "sealed" | "gateway-tethered";
+  allowedHosts: string[];
+  deniedHosts: string[];
+}
+
+/**
+ * LLM provider endpoints a governed agent container must NEVER reach directly
+ * (issue #471). Cloudflare evaluates `deniedHosts` FIRST and it "overrides
+ * everything else in the chain", so this survives an over-broad allowlist and a
+ * per-host outbound handler alike.
+ *
+ * The Worker keeps its OWN copy rather than trusting the caller's `egressDenylist`:
+ * a compromised or stale caller must not be able to shrink the denylist. The
+ * caller's list is unioned in, never subtracted from. Mirrors
+ * `PROVIDER_EGRESS_DENYLIST` in `crates/ferrogate-runtime/src/cloudflare_container_egress.rs`;
+ * the Rust side verifies its entries are all present (superset allowed), so the
+ * two lists may drift wider but never narrower.
+ */
+const PROVIDER_EGRESS_DENYLIST = [
+  "api.anthropic.com",
+  "api.openai.com",
+  "*.openai.azure.com",
+  "generativelanguage.googleapis.com",
+  "aiplatform.googleapis.com",
+  "*.aiplatform.googleapis.com",
+  "bedrock-runtime.*.amazonaws.com",
+  "bedrock.*.amazonaws.com",
+  "api.cohere.ai",
+  "api.cohere.com",
+  "api.mistral.ai",
+  "api.groq.com",
+  "api.deepseek.com",
+  "api.x.ai",
+  "api.together.xyz",
+  "api.fireworks.ai",
+  "api.perplexity.ai",
+  "openrouter.ai",
+  "*.openrouter.ai",
+  "api.moonshot.cn",
+  "dashscope.aliyuncs.com",
+  "api.voyageai.com",
+];
+
+/** Bare-host shape: no scheme, path, port, credentials, wildcard or whitespace. */
+const HOST_PATTERN = /^[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?)*$/;
+
+/** Glob match honoring Cloudflare's `*` ("any sequence of characters") semantics. */
+export function hostMatchesPattern(host: string, pattern: string): boolean {
+  const escaped = pattern
+    .toLowerCase()
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${escaped}$`).test(host.toLowerCase());
+}
+
+/**
+ * The ONLY hosts an operator has authorized this deployment to open (issue #471):
+ * the `CONTAINER_GOVERNED_EGRESS_HOSTS` var, comma-separated.
+ *
+ * Unset or empty means **no host may be opened** — every container is sealed.
+ * That is deliberate: the failure mode of a forgotten configuration must be "the
+ * agent cannot reach anything", not "the agent can reach everything".
+ */
+export function governedEgressHosts(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0);
+}
+
+/**
+ * Validate a requested allowlist against the governed posture rules. Returns the
+ * normalized hosts, or an error message naming the first violation.
+ *
+ * Independent re-enforcement of what the Rust `ContainerEgressPosture` already
+ * guarantees — this Worker is bearer-gated but must not assume its caller is the
+ * FerroGate client.
+ */
+export function validateEgressAllowlist(
+  requested: string[],
+  authorized: string[],
+): { ok: true; hosts: string[] } | { ok: false; message: string } {
+  const hosts: string[] = [];
+  for (const raw of requested) {
+    const host = raw.trim().toLowerCase();
+    if (host.includes("*")) {
+      return { ok: false, message: `egressAllowlist entry ${raw} contains a wildcard; a wildcard grant is open public egress` };
+    }
+    if (host.length === 0 || host.length > 253 || !HOST_PATTERN.test(host)) {
+      return { ok: false, message: `egressAllowlist entry ${raw} is not a bare hostname` };
+    }
+    if (PROVIDER_EGRESS_DENYLIST.some((pattern) => hostMatchesPattern(host, pattern))) {
+      return { ok: false, message: `egressAllowlist entry ${raw} names an LLM provider endpoint; the container tier reaches providers only through the governed gateway` };
+    }
+    if (!authorized.includes(host)) {
+      return {
+        ok: false,
+        message:
+          authorized.length === 0
+            ? `no governed egress hosts are configured (CONTAINER_GOVERNED_EGRESS_HOSTS); the container tier is sealed and cannot open ${raw}`
+            : `egressAllowlist entry ${raw} is not in CONTAINER_GOVERNED_EGRESS_HOSTS`,
+      };
+    }
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+  return { ok: true, hosts };
 }
 
 /**
  * Configure the instance for a governed run: inject env and apply the egress
- * posture. `enableInternet` with an EMPTY `egressAllowlist` is rejected
- * (defense-in-depth: the Rust client blocks it client-side too) — open public
- * egress is deny-by-default.
+ * posture (issue #471 — enforcement, not cooperation).
  *
- * Deny-by-default is enforced structurally by the `AgentSandbox` DO class
- * (`enableInternet = false`, index.ts), so every container start — including the
- * lazy auto-start on the first `exec` — is sealed. A governed allowlist opens a
- * specific set of hosts via `setAllowedHosts`, which the Container base grants
- * egress to even while `enableInternet` stays false.
+ * `direct_public_egress = false` is enforced at four independent points:
+ *
+ * 1. The `AgentSandbox` DO class pins `enableInternet = false` (index.ts), so
+ *    EVERY start — including the lazy auto-start on the first `exec` — is sealed
+ *    by the platform. Cloudflare enforces that outside the container (only ports
+ *    80/443 + Cloudflare DNS survive), so code running INSIDE cannot undo it.
+ * 2. This route rejects `enableInternet: true` / `directPublicEgress: true`
+ *    **unconditionally** (422). There is no legitimate open-internet mode for a
+ *    coding-agent container: previously an allowlist made `enableInternet: true`
+ *    acceptable, which is exactly the hole #471 closes.
+ * 3. Any requested allowlist must be a subset of the operator-authorized
+ *    `CONTAINER_GOVERNED_EGRESS_HOSTS`, contain no wildcard, and name no provider
+ *    endpoint. Unset config ⇒ nothing may be opened.
+ * 4. Every tethered start applies {@link PROVIDER_EGRESS_DENYLIST} via
+ *    `setDeniedHosts`, which Cloudflare evaluates first and which overrides the
+ *    allowlist and all handlers.
+ *
+ * The sealed path deliberately calls NEITHER `setAllowedHosts` nor
+ * `setDeniedHosts`: a sealed container already denies everything, and staying off
+ * Cloudflare's outbound-interception path (which needs the `ContainerProxy`
+ * export and, for HTTPS, in-image CA trust) is what keeps it failing closed on
+ * any image.
  */
 export async function containerStart(
   env: Env,
   body: StartBody,
-): Promise<ContainerResult<{ instance: string; instanceId: string; running: boolean }>> {
-  const enableInternet = body.enableInternet === true;
-  const allowlist = Array.isArray(body.egressAllowlist)
-    ? body.egressAllowlist.filter((x): x is string => typeof x === "string")
-    : [];
-  if (enableInternet && allowlist.length === 0) {
+): Promise<
+  ContainerResult<{
+    instance: string;
+    instanceId: string;
+    running: boolean;
+    egress: EgressAttestation;
+  }>
+> {
+  if (body.enableInternet === true || body.directPublicEgress === true) {
     return fail(
       "invalid_spec",
-      "enableInternet requires a non-empty egressAllowlist; open public egress is deny-by-default",
+      "direct public egress is not available on the container agent tier; " +
+        "enableInternet/directPublicEgress must be false (issue #471)",
     );
   }
+  const requested = Array.isArray(body.egressAllowlist)
+    ? body.egressAllowlist.filter((x): x is string => typeof x === "string")
+    : [];
+  const validated = validateEgressAllowlist(requested, governedEgressHosts(env.CONTAINER_GOVERNED_EGRESS_HOSTS));
+  if (!validated.ok) {
+    return fail("invalid_spec", validated.message);
+  }
+  const allowlist = validated.hosts;
+  if (body.egressPosture !== undefined && body.egressPosture !== "sealed" && body.egressPosture !== "gateway-tethered") {
+    return fail("invalid_spec", "egressPosture must be sealed or gateway-tethered");
+  }
+  const posture: "sealed" | "gateway-tethered" = allowlist.length === 0 ? "sealed" : "gateway-tethered";
+  if (body.egressPosture !== undefined && body.egressPosture !== posture) {
+    return fail(
+      "invalid_spec",
+      `egressPosture ${String(body.egressPosture)} does not match the requested allowlist`,
+    );
+  }
+  // The Worker's own denylist wins; a caller-supplied list can only WIDEN it.
+  const callerDenylist = Array.isArray(body.egressDenylist)
+    ? body.egressDenylist.filter((x): x is string => typeof x === "string")
+    : [];
+  const denylist =
+    posture === "sealed"
+      ? []
+      : [...PROVIDER_EGRESS_DENYLIST, ...callerDenylist.filter((h) => !PROVIDER_EGRESS_DENYLIST.includes(h))];
+
   const envVars: Record<string, string> = {};
   if (body.env && typeof body.env === "object" && !Array.isArray(body.env)) {
     for (const [k, v] of Object.entries(body.env as Record<string, unknown>)) {
@@ -235,15 +407,29 @@ export async function containerStart(
   }
   try {
     await sandbox.setEnvVars(envVars);
-    // Egress: the base posture is sealed (AgentSandbox pins enableInternet=false).
-    // Only when a governed allowlist is provided do we enable per-host egress via
-    // interception; the sealed path stays free of any interception dependency so
-    // it fails closed even if the container image lacks the interception CA.
-    if (allowlist.length > 0) {
+    if (posture === "gateway-tethered") {
+      // Denylist FIRST: if `setAllowedHosts` were applied and the deny call then
+      // threw, the instance would be left reachable-but-unfenced. Cloudflare
+      // evaluates deniedHosts ahead of allowedHosts, so this ordering also
+      // matches the enforcement order.
+      await sandbox.setDeniedHosts(denylist);
       await sandbox.setAllowedHosts(allowlist);
     }
-    return { ok: true, instance: body.instance, instanceId: body.instance, running: true };
+    return {
+      ok: true,
+      instance: body.instance,
+      instanceId: body.instance,
+      running: true,
+      egress: {
+        directPublicEgress: false,
+        posture,
+        allowedHosts: allowlist,
+        deniedHosts: denylist,
+      },
+    };
   } catch (err) {
+    // A failure applying the egress posture must NOT surface as a started
+    // instance: the caller would run an agent whose fence was never installed.
     return fail("container_error", errMessage(err));
   }
 }
@@ -551,8 +737,9 @@ function containerResponse(result: ContainerResultLike): Response {
  * query strings) carry the instance name, since names embed tenant identity:
  *
  *   POST /container/prepare   { instance, container }              pin image/tier
- *   POST /container/start     { instance, entrypoint?, env?,       configure (egress
- *                               enableInternet?, egressAllowlist? }  deny-by-default)
+ *   POST /container/start     { instance, entrypoint?, env?,       configure + ATTEST the
+ *                               egressPosture?, egressAllowlist?,   governed egress posture
+ *                               egressDenylist? }                   (#471; internet never on)
  *   POST /container/exec      { instance, step }                   run cmd/code
  *   POST /container/stop      { instance, signal }                 SIGTERM/SIGKILL
  *   POST /container/logs      { instance, tail? }                  recent logs

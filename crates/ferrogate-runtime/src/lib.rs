@@ -13,6 +13,8 @@ mod cloudflare_agent_cost;
 mod cloudflare_agent_memory;
 mod cloudflare_agent_schedule;
 mod cloudflare_container;
+mod cloudflare_container_egress;
+mod cloudflare_container_tether_audit;
 mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
@@ -83,6 +85,16 @@ pub use cloudflare_container::{
     ContainerLogs, ContainerPrepareSpec, ContainerPrepared, ContainerSignal, ContainerStartSpec,
     ContainerStarted, ContainerStopped, CLOUDFLARE_CONTAINER_BACKEND_NAME,
     CLOUDFLARE_CONTAINER_HOST_LIFECYCLE_OWNER,
+};
+// Issue #471: the enforced egress posture for the container agent tier, and the
+// tether-bypass detection that covers what prevention cannot.
+pub use cloudflare_container_egress::{
+    host_matches_pattern, ContainerEgressPosture, EgressPostureAttestation, EgressPostureError,
+    GovernedEgressAllowlist, PROVIDER_EGRESS_DENYLIST,
+};
+pub use cloudflare_container_tether_audit::{
+    verdict_for, RunTokenUsage, RunUsageSource, ScriptedRunUsageSource, TetherAuditError,
+    TetherAuditor, TetherReconciliation, TetherTolerance, TetherVerdict, TetherWindow, UsageSource,
 };
 pub use cloudflare_gateway_control::{
     BlockingHttpControlTransport, GatewayControlTransport, WorkerGatewayControlSurface,

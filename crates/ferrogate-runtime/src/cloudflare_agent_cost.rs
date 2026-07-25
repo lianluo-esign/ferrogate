@@ -34,6 +34,27 @@
 //!    over-budget run through the #414 [`CloudflareControlSurface`]; plus
 //!    [`should_dispatch`], the guard the managed scheduler consults.
 //!
+//! ## Enforcement assumes the egress tether holds (issue #471)
+//!
+//! Every ceiling, warn/degrade threshold and kill decision here is computed from
+//! usage that **reached FerroGate**. LLM spend an agent incurs by calling a
+//! provider directly — bypassing the gateway — is not merely mis-priced, it is
+//! *invisible*: the burn ledger never sees it, so the cap cannot be enforced
+//! against it at all. This engine's guarantees are therefore conditional on the
+//! egress tether of whatever isolation tier the agent runs in.
+//!
+//! For the Cloudflare Containers / Sandbox tier that tether is enforced at the
+//! network layer (`enableInternet = false` plus a governed allowlist, applied and
+//! attested through the agent-gateway Worker — see
+//! [`crate::cloudflare_container_egress`]), but with documented residual risk:
+//! a mis-bound `CONTAINER_SANDBOX` class or an over-wide
+//! `CONTAINER_GOVERNED_EGRESS_HOSTS` silently converts it back to cooperative.
+//! [`crate::cloudflare_container_tether_audit`] is the detector that tells an
+//! operator whether these numbers can be trusted for a given run; a run whose
+//! verdict is `Unattested` has an **unproven** budget, not a clean one. Read
+//! `docs/cloudflare-container-isolation.md` §"Residual risk" before relying on a
+//! spend cap for this tier.
+//!
 //! ## Scope of this slice
 //!
 //! This is the **engine only**. The live-metrics pull (enabling Worker
