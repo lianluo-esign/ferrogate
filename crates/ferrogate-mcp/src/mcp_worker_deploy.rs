@@ -318,6 +318,7 @@ impl McpWorkerDeployer {
             url: self.script_url(&spec.script_name),
             bearer_token: self.resolve_token()?,
             body: Some(spec.multipart_body()),
+            content_type: None,
         })
     }
 
@@ -364,6 +365,7 @@ impl McpWorkerDeployer {
             url: self.script_url(script_name),
             bearer_token: self.resolve_token()?,
             body: None,
+            content_type: None,
         };
         let response = self.transport.execute(request).await?;
         // A DELETE success envelope carries no meaningful `result`.

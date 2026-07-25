@@ -296,6 +296,7 @@ impl<T: GatewayControlTransport> AgentMemoryClient<T> {
                 url,
                 bearer_token: self.control_token.clone(),
                 body: Some(bytes),
+                content_type: None,
             })
             .map_err(|e| AgentMemoryError::Transport(e.to_string()))
     }

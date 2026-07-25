@@ -410,6 +410,7 @@ impl<T: GatewayControlTransport> ContainerControlClient<T> {
                 url,
                 bearer_token: self.control_token.clone(),
                 body: Some(bytes),
+                content_type: None,
             })
             .map_err(|e| ContainerControlError::Transport(e.to_string()))
     }

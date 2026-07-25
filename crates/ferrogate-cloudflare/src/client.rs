@@ -43,6 +43,12 @@ pub struct HttpRequest {
     pub url: String,
     pub bearer_token: String,
     pub body: Option<Vec<u8>>,
+    /// The `Content-Type` header to send with `body`. `None` means the default
+    /// `application/json` (the shape almost every `client/v4` endpoint takes);
+    /// `Some(..)` carries an explicit type such as a `multipart/form-data;
+    /// boundary=…` value for the Workers Static Assets direct upload / Worker
+    /// script deploy. Ignored when `body` is `None`.
+    pub content_type: Option<String>,
 }
 
 impl std::fmt::Debug for HttpRequest {
@@ -51,6 +57,7 @@ impl std::fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("bearer_token", &"<redacted>")
+            .field("content_type", &self.content_type)
             .field("body_len", &self.body.as_ref().map(Vec::len))
             .finish()
     }
@@ -238,6 +245,41 @@ impl CloudflareClient {
         envelope.into_result(status, retry_after)
     }
 
+    /// Like [`request_json`](Self::request_json) but sends `body` with an
+    /// explicit `content_type` and, when `bearer_override` is `Some`,
+    /// authenticates with that token instead of the configured account token.
+    ///
+    /// This is the shape multi-part upload flows need. The Workers Static Assets
+    /// direct upload uses both: step 2 posts a `multipart/form-data` batch of
+    /// file bytes authenticated by the short-lived upload-session JWT (a
+    /// `bearer_override`), and step 3 is a `multipart/form-data` Worker script
+    /// `PUT` under the account token (`bearer_override = None`). The same
+    /// retry/backoff loop and envelope decoding apply.
+    pub async fn request_json_with<T: DeserializeOwned>(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Vec<u8>,
+        content_type: &str,
+        bearer_override: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<T, CloudflareError> {
+        let (status, retry_after, bytes) = self
+            .send_raw_with(
+                method,
+                path,
+                Some(body),
+                Some(content_type),
+                bearer_override,
+                tenant,
+            )
+            .await?;
+        let envelope: CloudflareEnvelope<T> = serde_json::from_slice(&bytes).map_err(|e| {
+            CloudflareError::Decode(format!("failed to decode Cloudflare envelope: {e}"))
+        })?;
+        envelope.into_result(status, retry_after)
+    }
+
     /// Convenience GET returning a decoded `result`.
     pub async fn get_json<T: DeserializeOwned>(
         &self,
@@ -293,12 +335,33 @@ impl CloudflareClient {
         body: Option<Vec<u8>>,
         tenant: Option<&str>,
     ) -> Result<(u16, Option<Duration>, Vec<u8>), CloudflareError> {
-        let token = self.resolve_token(tenant)?;
+        self.send_raw_with(method, path, body, None, None, tenant)
+            .await
+    }
+
+    /// [`send_raw`](Self::send_raw) with an optional explicit `content_type` and
+    /// an optional `bearer_override`. When `bearer_override` is `None` the
+    /// configured account token is resolved as usual; when `Some` it is used
+    /// verbatim (the direct-upload session JWT authenticates step 2 this way).
+    async fn send_raw_with(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Option<Vec<u8>>,
+        content_type: Option<&str>,
+        bearer_override: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<(u16, Option<Duration>, Vec<u8>), CloudflareError> {
+        let bearer_token = match bearer_override {
+            Some(token) => token.to_string(),
+            None => self.resolve_token(tenant)?.expose().to_string(),
+        };
         let request = HttpRequest {
             method,
             url: self.build_url(path),
-            bearer_token: token.expose().to_string(),
+            bearer_token,
             body,
+            content_type: content_type.map(str::to_string),
         };
         let RetryOutcome { response, attempts } = self.execute_with_retry(request).await?;
         if response.status == 429 {
@@ -394,7 +457,15 @@ impl HttpTransport for ReqwestTransport {
             .header(AUTHORIZATION, format!("Bearer {}", request.bearer_token))
             .header(ACCEPT, "application/json");
         if let Some(body) = request.body {
-            builder = builder.header(CONTENT_TYPE, "application/json").body(body);
+            // Default to JSON (what almost every endpoint takes) but honor an
+            // explicit content type — the Workers Static Assets direct upload
+            // and Worker script deploy send `multipart/form-data` with a
+            // boundary the body itself is framed by.
+            let content_type = request
+                .content_type
+                .as_deref()
+                .unwrap_or("application/json");
+            builder = builder.header(CONTENT_TYPE, content_type).body(body);
         }
 
         let response = builder

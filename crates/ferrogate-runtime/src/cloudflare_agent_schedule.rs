@@ -308,6 +308,7 @@ impl<T: GatewayControlTransport> AgentScheduleClient<T> {
                 url,
                 bearer_token: self.control_token.clone(),
                 body: Some(bytes),
+                content_type: None,
             })
             .map_err(|e| AgentScheduleError::Transport(e.to_string()))
     }

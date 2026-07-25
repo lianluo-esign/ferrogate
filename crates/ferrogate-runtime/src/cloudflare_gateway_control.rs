@@ -118,6 +118,7 @@ impl<T: GatewayControlTransport> WorkerGatewayControlSurface<T> {
             url: self.route(path),
             bearer_token: self.control_token.clone(),
             body: Some(bytes),
+            content_type: None,
         })
     }
 
@@ -127,6 +128,7 @@ impl<T: GatewayControlTransport> WorkerGatewayControlSurface<T> {
             url: self.route(path),
             bearer_token: self.control_token.clone(),
             body: None,
+            content_type: None,
         })
     }
 }

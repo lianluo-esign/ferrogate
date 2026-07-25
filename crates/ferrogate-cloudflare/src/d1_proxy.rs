@@ -238,6 +238,7 @@ impl D1ProxyClient {
             url: self.build_url(path),
             bearer_token: token.expose().to_string(),
             body: Some(body),
+            content_type: None,
         };
         let response = self.transport.execute(request).await?;
         let envelope: CloudflareEnvelope<T> =

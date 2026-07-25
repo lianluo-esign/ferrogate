@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ferrogate_cloudflare::{CloudflareClient, HttpMethod};
 use ferrogate_providers::{
     presign_sigv4_query, presign_sigv4_query_bound, sign_sigv4_with_content_hash_header,
@@ -682,10 +683,11 @@ pub(crate) struct AssetUploadManifest {
 }
 
 /// Cloudflare's manifest hash width. CF keys the direct-upload session on a
-/// 32-hex-char content hash (a SHA-256 prefix); the exact CF hashing recipe is
-/// pinned by the live publish test-agent, but the request-construction seam
-/// here computes a deterministic SHA-256 prefix so the manifest shape and the
-/// bucket-negotiation round-trip are unit-testable offline.
+/// 32-hex-char content hash: `SHA-256(base64(file bytes) + extension)`
+/// truncated to 32 hex chars (see [`cf_asset_hash`]). This is the exact recipe
+/// the Cloudflare direct-upload flow expects, so the same hash the manifest
+/// declares is the field name the step-2 byte upload posts under and the key
+/// Cloudflare dedups + serves against.
 const CF_ASSET_HASH_HEX_LEN: usize = 32;
 
 impl AssetUploadManifest {
@@ -693,15 +695,17 @@ impl AssetUploadManifest {
     /// per-object publish negotiates. `path` is normalized to a leading `/`.
     pub(crate) fn single(path: &str, body: &[u8]) -> Self {
         let mut files = BTreeMap::new();
-        files.insert(
-            normalize_asset_path(path),
-            AssetManifestEntry::for_bytes(body),
-        );
+        let normalized = normalize_asset_path(path);
+        let entry = AssetManifestEntry::for_file(&normalized, body);
+        files.insert(normalized, entry);
         Self { files }
     }
 
     /// The number of files described. (Kept small on purpose — the manifest is
-    /// a plan, not the bytes.)
+    /// a plan, not the bytes.) Retained as part of the manifest's public shape
+    /// and asserted by the manifest tests, though the single-object publish path
+    /// gates on [`is_empty`](Self::is_empty).
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.files.len()
     }
@@ -718,13 +722,39 @@ impl AssetUploadManifest {
 }
 
 impl AssetManifestEntry {
-    fn for_bytes(body: &[u8]) -> Self {
-        let mut hash = ferrogate_storage::sha256_hex(body);
-        hash.truncate(CF_ASSET_HASH_HEX_LEN);
+    /// The manifest entry for `body` published at `path`. The hash uses
+    /// Cloudflare's recipe ([`cf_asset_hash`]) so it agrees with the byte-upload
+    /// field name and CF's server-side dedup/serve key.
+    fn for_file(path: &str, body: &[u8]) -> Self {
         Self {
-            hash,
+            hash: cf_asset_hash(path, body),
             size: body.len() as u64,
         }
+    }
+}
+
+/// Cloudflare's Workers Static Assets content hash: the SHA-256 of the
+/// base64-encoded file bytes concatenated with the file **extension** (without
+/// the dot), truncated to 32 hex chars. Matching this exactly matters — the
+/// upload-session negotiation, the step-2 byte-upload field name, and CF's
+/// edge dedup/serve all key on this same value, so a divergent hash would make
+/// the deploy serve stale or missing bytes.
+fn cf_asset_hash(path: &str, body: &[u8]) -> String {
+    let mut input = BASE64_STANDARD.encode(body).into_bytes();
+    input.extend_from_slice(asset_extension(path).as_bytes());
+    let mut hash = ferrogate_storage::sha256_hex(&input);
+    hash.truncate(CF_ASSET_HASH_HEX_LEN);
+    hash
+}
+
+/// The file extension of `path` without the leading dot (`"/a/index.html"` ->
+/// `"html"`), or `""` when the final path segment has none / is a dotfile —
+/// matching Node's `path.extname` semantics Cloudflare's tooling uses.
+fn asset_extension(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => ext,
+        _ => "",
     }
 }
 
@@ -738,7 +768,7 @@ fn normalize_asset_path(key: &str) -> String {
 /// The decoded `result` of a Workers Static Assets upload-session negotiation:
 /// a JWT authorizing the follow-up file upload and the buckets of content
 /// hashes whose bytes CF still needs. Empty `buckets` means every asset is
-/// already present server-side.
+/// already present server-side and `jwt` is directly the completion token.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub(crate) struct UploadSession {
     #[serde(default)]
@@ -747,19 +777,158 @@ pub(crate) struct UploadSession {
     pub(crate) buckets: Vec<Vec<String>>,
 }
 
+/// The decoded `result` of a Workers Static Assets byte-upload batch (step 2).
+/// The `jwt` is the **completion token** Cloudflare returns once the final
+/// pending batch lands; it is redeemed in the step-3 script deploy.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AssetUploadAck {
+    #[serde(default)]
+    jwt: Option<String>,
+}
+
+/// The decoded `result` of the Worker script deploy (step 3). Only the echoed
+/// id is consumed (mirrors the sibling Worker deployers); its presence in a
+/// `success: true` envelope is what marks the publish durable.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ScriptDeployResult {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: Option<String>,
+}
+
+/// Fixed multipart boundary for the step-2 byte upload. A constant (not random)
+/// boundary keeps the constructed request deterministic so tests assert the
+/// exact bytes — the same discipline the sibling Worker deployers use.
+const WSA_UPLOAD_BOUNDARY: &str = "----FerroGateWorkersAssetsUploadBoundary";
+
+/// Fixed multipart boundary for the step-3 Worker script deploy.
+const WSA_DEPLOY_BOUNDARY: &str = "----FerroGateWorkersAssetsDeployBoundary";
+
+/// The `main_module` filename referenced by the deploy metadata.
+const WSA_MAIN_MODULE_FILENAME: &str = "main.js";
+
+/// Worker compatibility date for the static-assets Worker deploy.
+const WSA_COMPATIBILITY_DATE: &str = "2025-06-01";
+
+/// The minimal main module for an assets-only static Worker. When a Worker has
+/// an `assets` binding and no `run_worker_first`, Cloudflare serves matching
+/// static assets from the edge *before* invoking the script, so this handler
+/// only runs for non-asset paths, where it 404s. It exists because the Workers
+/// Script API deploy requires a `main_module`.
+const WSA_STATIC_MAIN_MODULE: &str =
+    "export default { async fetch() { return new Response(\"Not Found\", { status: 404 }); } };\n";
+
+/// The `multipart/form-data; boundary=…` content-type header value.
+fn multipart_content_type(boundary: &str) -> String {
+    format!("multipart/form-data; boundary={boundary}")
+}
+
+/// Build the step-2 byte-upload `multipart/form-data` body. Each part is keyed
+/// (field name + filename) by the file's content hash, carries the serving
+/// `Content-Type` Cloudflare echoes when the asset is later fetched, and holds
+/// the **base64-encoded** file bytes (the request uses `?base64=true`).
+fn build_assets_upload_body(parts: &[UploadPart]) -> Vec<u8> {
+    let b = WSA_UPLOAD_BOUNDARY;
+    let mut body = String::new();
+    for part in parts {
+        body.push_str(&format!("--{b}\r\n"));
+        body.push_str(&format!(
+            "Content-Disposition: form-data; name=\"{0}\"; filename=\"{0}\"\r\n",
+            part.hash
+        ));
+        body.push_str(&format!("Content-Type: {}\r\n\r\n", part.content_type));
+        body.push_str(&part.base64_body);
+        body.push_str("\r\n");
+    }
+    body.push_str(&format!("--{b}--\r\n"));
+    body.into_bytes()
+}
+
+/// One `(hash, base64 bytes, serving content-type)` part of a byte-upload batch.
+struct UploadPart {
+    hash: String,
+    base64_body: String,
+    content_type: String,
+}
+
+/// The step-3 deploy metadata JSON: registers the minimal main module and
+/// attaches the uploaded bundle via the `assets` binding (the completion token
+/// plus routing config).
+fn deploy_metadata_json(completion_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "main_module": WSA_MAIN_MODULE_FILENAME,
+        "compatibility_date": WSA_COMPATIBILITY_DATE,
+        "assets": {
+            "jwt": completion_token,
+            "config": {
+                "html_handling": "auto-trailing-slash",
+                "not_found_handling": "none",
+            },
+        },
+    })
+}
+
+/// Build the step-3 script-deploy `multipart/form-data` body: a `metadata` JSON
+/// part attaching the assets binding + a minimal ES-module part.
+fn build_deploy_body(completion_token: &str) -> Vec<u8> {
+    let metadata = serde_json::to_string(&deploy_metadata_json(completion_token))
+        .expect("deploy metadata JSON is always serializable");
+    let b = WSA_DEPLOY_BOUNDARY;
+    let mut body = String::new();
+    // metadata part
+    body.push_str(&format!("--{b}\r\n"));
+    body.push_str(
+        "Content-Disposition: form-data; name=\"metadata\"; filename=\"metadata.json\"\r\n",
+    );
+    body.push_str("Content-Type: application/json\r\n\r\n");
+    body.push_str(&metadata);
+    body.push_str("\r\n");
+    // module part
+    body.push_str(&format!("--{b}\r\n"));
+    body.push_str(&format!(
+        "Content-Disposition: form-data; name=\"{0}\"; filename=\"{0}\"\r\n",
+        WSA_MAIN_MODULE_FILENAME
+    ));
+    body.push_str("Content-Type: application/javascript+module\r\n\r\n");
+    body.push_str(WSA_STATIC_MAIN_MODULE);
+    body.push_str("\r\n");
+    // closing boundary
+    body.push_str(&format!("--{b}--\r\n"));
+    body.into_bytes()
+}
+
 /// A Cloudflare-native static-asset publish backend built on Workers Static
 /// Assets (issue #411). NOT S3-shaped: it publishes a bundle through the CF
 /// direct-upload flow rather than exposing arbitrary object GET/HEAD/LIST or
-/// SigV4 presign. Wired through the shared [`CloudflareClient`] so the publish
-/// request construction is unit-testable against a mocked transport.
+/// SigV4 presign. Wired through the shared [`CloudflareClient`] so the whole
+/// publish is unit-testable against a mocked transport.
 ///
-/// Publish is a 3-step flow: (1) negotiate an upload session against a file
-/// manifest, (2) upload the pending file bytes referencing the session JWT,
-/// (3) PUT the Worker script referencing the completion token. Only step 1 is
-/// a plain JSON request the shared client models today; steps 2-3 use the
-/// multipart direct-upload transport and are the live-publish path owned by
-/// the #411 test-agent. This backend therefore constructs and issues step 1
-/// (mock-tested) and refuses to claim a durable publish it has not completed.
+/// Publish is a 3-step flow, all issued through [`CloudflareClient`]:
+/// 1. **Negotiate** an upload session against a file manifest
+///    (`POST …/workers/scripts/{script}/assets-upload-session`) — a JSON
+///    request that returns an upload JWT plus the `buckets` of content hashes
+///    whose bytes CF still needs (dedup happens server-side).
+/// 2. **Upload** the pending file bytes, base64-encoded, as `multipart/form-data`
+///    to `POST …/workers/assets/upload?base64=true`, authenticated with the
+///    session JWT, until Cloudflare returns the **completion token**. When
+///    `buckets` is empty every asset was already present and the session JWT is
+///    itself the completion token (step 2 is skipped).
+/// 3. **Deploy** the Worker script (`PUT …/workers/scripts/{script}`) as
+///    `multipart/form-data`: a metadata part attaching the assets binding
+///    (`assets: { jwt: <completion-token>, config }`) plus a minimal main
+///    module, which durably associates the uploaded bundle with the Worker.
+///
+/// The publish only reports success on a `success: true` step-3 envelope; a
+/// failed or partial upload/deploy surfaces the underlying error and never
+/// claims a durable publish it did not complete.
+///
+/// Live caveat: the production multipart upload requires a transport that
+/// honors the request `content_type` — [`ReqwestTransport`] now does (it
+/// defaults to JSON but sends the explicit `multipart/form-data` type this flow
+/// sets). The live publish-and-serve proof against a real account is env-gated
+/// and owned by the #411 gate (see `live_workers_static_assets_*`).
+///
+/// [`ReqwestTransport`]: ferrogate_cloudflare::ReqwestTransport
 pub(crate) struct WorkersStaticAssetsStore {
     client: Arc<CloudflareClient>,
     script_name: String,
@@ -796,31 +965,144 @@ impl WorkersStaticAssetsStore {
         Ok(session)
     }
 
-    /// The publish path for a single asset. Negotiates the upload session
-    /// (step 1) and then reports honestly that the direct byte upload + Worker
-    /// script deploy (steps 2-3) are not yet wired for a live publish — it does
-    /// NOT fake a durable publish from a negotiated session alone.
-    async fn publish_object(&self, key: &str, body: &[u8]) -> anyhow::Result<()> {
-        let manifest = AssetUploadManifest::single(key, body);
+    /// The full publish path for a single asset: negotiate (step 1), upload the
+    /// pending bytes (step 2), and deploy the Worker script that redeems the
+    /// completion token (step 3). Only a `success: true` deploy marks the
+    /// publish durable; any failure along the way surfaces as an error and does
+    /// NOT claim a publish that did not complete.
+    async fn publish_object(
+        &self,
+        key: &str,
+        body: &[u8],
+        content_type: &str,
+    ) -> anyhow::Result<()> {
+        let path = normalize_asset_path(key);
+        let manifest = AssetUploadManifest::single(&path, body);
         if manifest.is_empty() {
             anyhow::bail!("workers-static-assets: refusing to publish an empty manifest");
         }
         let session = self.create_upload_session(&manifest).await?;
-        // The negotiation succeeded; the completion JWT authorizes steps 2-3.
-        let jwt_state = if session.jwt.is_some() {
-            "a completion JWT was issued"
-        } else {
-            "no completion JWT was returned"
-        };
-        anyhow::bail!(
-            "workers-static-assets: negotiated an upload session for {} file(s) ({jwt_state}, {} \
-             bucket(s) pending upload), but the direct byte upload and Worker script deploy (steps \
-             2-3 of the Cloudflare direct-upload flow) are not yet wired for live publish (issue \
-             #411 test-agent follow-up); this backend does not claim a durable publish it has not \
-             completed",
-            manifest.len(),
-            session.buckets.len(),
-        )
+        let completion_token = self
+            .resolve_completion_token(&path, body, content_type, &session)
+            .await?;
+        self.deploy_static_worker(&completion_token).await
+    }
+
+    /// Resolve the assets **completion token** to redeem at deploy. When the
+    /// session negotiated no pending buckets (everything deduped server-side),
+    /// the session JWT is already the completion token; otherwise the pending
+    /// bytes are uploaded (step 2) and Cloudflare's returned completion token is
+    /// used.
+    async fn resolve_completion_token(
+        &self,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+        session: &UploadSession,
+    ) -> anyhow::Result<String> {
+        let pending_count = session
+            .buckets
+            .iter()
+            .filter(|bucket| !bucket.is_empty())
+            .count();
+        if pending_count == 0 {
+            // Nothing to upload: the session JWT is itself the completion token.
+            return session.jwt.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workers-static-assets: upload session reported nothing to upload but returned \
+                     no completion token"
+                )
+            });
+        }
+        let session_jwt = session.jwt.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "workers-static-assets: upload session returned {pending_count} bucket(s) to \
+                 upload but no jwt to authorize the byte upload"
+            )
+        })?;
+        self.upload_pending_buckets(path, body, content_type, session, session_jwt)
+            .await
+    }
+
+    /// Step 2: upload the pending file bytes referenced by `session.buckets`,
+    /// authenticated with the session JWT, returning the completion token
+    /// Cloudflare hands back once the final batch lands. A single-object publish
+    /// carries exactly one file, so its hash is the only one the buckets may
+    /// reference — a bucket naming any other hash is a protocol violation and is
+    /// rejected rather than silently uploaded.
+    async fn upload_pending_buckets(
+        &self,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+        session: &UploadSession,
+        session_jwt: &str,
+    ) -> anyhow::Result<String> {
+        let hash = cf_asset_hash(path, body);
+        let base64_body = BASE64_STANDARD.encode(body);
+        let mut completion_token: Option<String> = None;
+        for bucket in session.buckets.iter().filter(|bucket| !bucket.is_empty()) {
+            let mut parts = Vec::with_capacity(bucket.len());
+            for pending_hash in bucket {
+                anyhow::ensure!(
+                    pending_hash == &hash,
+                    "workers-static-assets: upload session referenced hash {pending_hash} which is \
+                     not in the published manifest"
+                );
+                parts.push(UploadPart {
+                    hash: pending_hash.clone(),
+                    base64_body: base64_body.clone(),
+                    content_type: content_type.to_string(),
+                });
+            }
+            let ack: AssetUploadAck = self
+                .client
+                .request_json_with(
+                    HttpMethod::Post,
+                    "accounts/{account_id}/workers/assets/upload?base64=true",
+                    build_assets_upload_body(&parts),
+                    &multipart_content_type(WSA_UPLOAD_BOUNDARY),
+                    Some(session_jwt),
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("workers-static-assets byte upload failed: {error}")
+                })?;
+            if ack.jwt.is_some() {
+                completion_token = ack.jwt;
+            }
+        }
+        completion_token.ok_or_else(|| {
+            anyhow::anyhow!(
+                "workers-static-assets: byte upload completed but Cloudflare returned no completion \
+                 token to deploy with"
+            )
+        })
+    }
+
+    /// Step 3: deploy the Worker script referencing the completion token. A
+    /// `success: true` envelope is the point at which the publish is durable.
+    async fn deploy_static_worker(&self, completion_token: &str) -> anyhow::Result<()> {
+        let path = format!(
+            "accounts/{{account_id}}/workers/scripts/{}",
+            self.script_name
+        );
+        let _deployed: ScriptDeployResult = self
+            .client
+            .request_json_with(
+                HttpMethod::Put,
+                &path,
+                build_deploy_body(completion_token),
+                &multipart_content_type(WSA_DEPLOY_BOUNDARY),
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("workers-static-assets script deploy failed: {error}")
+            })?;
+        Ok(())
     }
 }
 
@@ -838,16 +1120,16 @@ fn workers_static_assets_unsupported(operation: &str) -> anyhow::Error {
 
 #[async_trait]
 impl AssetObjectStore for WorkersStaticAssetsStore {
-    async fn put_object(&self, key: &str, body: &[u8], _content_type: &str) -> anyhow::Result<()> {
-        self.publish_object(key, body).await
+    async fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> anyhow::Result<()> {
+        self.publish_object(key, body, content_type).await
     }
     async fn put_object_owned(
         &self,
         key: &str,
         body: Vec<u8>,
-        _content_type: &str,
+        content_type: &str,
     ) -> anyhow::Result<()> {
-        self.publish_object(key, &body).await
+        self.publish_object(key, &body, content_type).await
     }
     async fn get_object(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
         Err(workers_static_assets_unsupported("object GET by key"))
@@ -1758,6 +2040,75 @@ mod tests {
 
     const UPLOAD_SESSION_OK: &str = r#"{"success":true,"errors":[],"messages":[],"result":{"jwt":"upload-jwt","buckets":[["deadbeef"]]}}"#;
 
+    /// A CloudflareClient transport that records EVERY request it is handed and
+    /// replays a scripted sequence of `(status, body)` responses in order — the
+    /// shape the multi-request publish flow (session -> upload -> deploy) needs
+    /// so each leg can be asserted independently.
+    struct ScriptedCfTransport {
+        requests: Arc<Mutex<Vec<ferrogate_cloudflare::HttpRequest>>>,
+        responses: Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>,
+    }
+
+    #[async_trait]
+    impl ferrogate_cloudflare::HttpTransport for ScriptedCfTransport {
+        async fn execute(
+            &self,
+            request: ferrogate_cloudflare::HttpRequest,
+        ) -> Result<ferrogate_cloudflare::HttpResponse, ferrogate_cloudflare::CloudflareError>
+        {
+            self.requests.lock().unwrap().push(request);
+            let (status, body) = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ScriptedCfTransport received more requests than scripted responses");
+            Ok(ferrogate_cloudflare::HttpResponse {
+                status,
+                retry_after: None,
+                body,
+            })
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn cf_store_scripted(
+        responses: Vec<(u16, String)>,
+    ) -> (
+        WorkersStaticAssetsStore,
+        Arc<Mutex<Vec<ferrogate_cloudflare::HttpRequest>>>,
+    ) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(ScriptedCfTransport {
+            requests: Arc::clone(&requests),
+            responses: Mutex::new(
+                responses
+                    .into_iter()
+                    .map(|(status, body)| (status, body.into_bytes()))
+                    .collect(),
+            ),
+        });
+        let cf = CloudflareClient::from_parts(
+            ferrogate_cloudflare::CloudflareConfig::new("acct-123", "plaintext-token"),
+            Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env()),
+            transport,
+            Arc::new(ferrogate_cloudflare::TokioClock),
+            ferrogate_cloudflare::RetryPolicy::default(),
+        );
+        let store = WorkersStaticAssetsStore::new(Arc::new(cf), "my-worker".to_string());
+        (store, requests)
+    }
+
+    /// A `success: true` envelope wrapping `result`.
+    fn cf_ok(result: &str) -> String {
+        format!(r#"{{"success":true,"errors":[],"messages":[],"result":{result}}}"#)
+    }
+
+    /// A session `result` declaring `hash` as the one pending bucket + `jwt`.
+    fn session_result(jwt: &str, hash: &str) -> String {
+        cf_ok(&format!(r#"{{"jwt":"{jwt}","buckets":[["{hash}"]]}}"#))
+    }
+
     #[test]
     fn asset_upload_manifest_is_a_leading_slash_path_map() {
         let empty = AssetUploadManifest::default();
@@ -1801,24 +2152,190 @@ mod tests {
         assert_eq!(entry["hash"].as_str().unwrap().len(), CF_ASSET_HASH_HEX_LEN);
     }
 
-    #[tokio::test]
-    async fn workers_static_assets_put_negotiates_but_does_not_fake_a_publish() {
-        // #411 honesty guard: put issues the real negotiation request but must
-        // NOT claim a durable publish it has not completed (steps 2-3 are the
-        // live-publish path).
-        let (store, last) = cf_store(200, UPLOAD_SESSION_OK);
-        let store_dyn: &dyn AssetObjectStore = &store;
+    #[test]
+    fn cf_asset_hash_matches_cloudflares_base64_plus_extension_recipe() {
+        // CF hashes SHA-256(base64(bytes) + extension)[0..32]. Pin the recipe so
+        // the manifest hash agrees with the upload field name and CF's dedup key.
+        let body = b"<html>hi</html>";
+        let mut expected = ferrogate_storage::sha256_hex(
+            &[BASE64_STANDARD.encode(body).as_bytes(), b"html"].concat(),
+        );
+        expected.truncate(CF_ASSET_HASH_HEX_LEN);
+        assert_eq!(cf_asset_hash("/index.html", body), expected);
+        assert_eq!(expected.len(), CF_ASSET_HASH_HEX_LEN);
+        // Extension changes the hash; a missing/dotfile extension folds in "".
+        assert_ne!(
+            cf_asset_hash("/index.html", body),
+            cf_asset_hash("/index.txt", body)
+        );
+        assert_eq!(asset_extension("/a/b/index.html"), "html");
+        assert_eq!(asset_extension("/foo.min.js"), "js");
+        assert_eq!(asset_extension("/noext"), "");
+        assert_eq!(asset_extension("/.gitignore"), "");
+    }
 
+    #[tokio::test]
+    async fn workers_static_assets_publishes_through_all_three_steps() {
+        // #411: put drives the full 3-step direct upload — session negotiation,
+        // JWT-authenticated byte upload of the pending bucket, and the Worker
+        // script deploy redeeming the completion token — all through the mocked
+        // CloudflareClient transport.
+        let body = b"<html>hi</html>";
+        let hash = cf_asset_hash("/index.html", body);
+        let (store, requests) = cf_store_scripted(vec![
+            (200, session_result("session-jwt", &hash)),
+            (201, cf_ok(r#"{"jwt":"completion-token"}"#)),
+            (200, cf_ok(r#"{"id":"my-worker"}"#)),
+        ]);
+        let store_dyn: &dyn AssetObjectStore = &store;
+        store_dyn
+            .put_object("/index.html", body, "text/html")
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "session + upload + deploy");
+
+        // Step 1: JSON session negotiation under the account token.
+        let session = &requests[0];
+        assert_eq!(session.method, HttpMethod::Post);
+        assert!(session
+            .url
+            .ends_with("/workers/scripts/my-worker/assets-upload-session"));
+
+        // Step 2: multipart byte upload to /workers/assets/upload?base64=true,
+        // authenticated with the SESSION JWT (not the account token).
+        let upload = &requests[1];
+        assert_eq!(upload.method, HttpMethod::Post);
+        assert!(upload.url.ends_with("/workers/assets/upload?base64=true"));
+        assert_eq!(upload.bearer_token, "session-jwt");
+        assert_ne!(
+            upload.bearer_token, session.bearer_token,
+            "step 2 must use the session JWT, not the account token"
+        );
+        assert_eq!(
+            upload.content_type.as_deref(),
+            Some(multipart_content_type(WSA_UPLOAD_BOUNDARY).as_str())
+        );
+        let upload_body = String::from_utf8(upload.body.clone().unwrap()).unwrap();
+        // The part is keyed by the file hash and carries the base64 bytes + type.
+        assert!(upload_body.contains(&format!("name=\"{hash}\"; filename=\"{hash}\"")));
+        assert!(upload_body.contains("Content-Type: text/html"));
+        assert!(upload_body.contains(&BASE64_STANDARD.encode(body)));
+
+        // Step 3: multipart Worker script PUT under the account token, carrying
+        // the completion token in the assets binding + a main module.
+        let deploy = &requests[2];
+        assert_eq!(deploy.method, HttpMethod::Put);
+        assert!(deploy.url.ends_with("/workers/scripts/my-worker"));
+        assert_eq!(deploy.bearer_token, session.bearer_token);
+        assert!(deploy
+            .content_type
+            .as_deref()
+            .unwrap()
+            .starts_with("multipart/form-data; boundary="));
+        let deploy_body = String::from_utf8(deploy.body.clone().unwrap()).unwrap();
+        assert!(deploy_body.contains(r#""jwt":"completion-token""#));
+        assert!(deploy_body.contains(r#""main_module":"main.js""#));
+        assert!(deploy_body.contains("name=\"metadata\""));
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_skips_upload_when_everything_is_deduped() {
+        // When CF returns no pending buckets, the session JWT is already the
+        // completion token: step 2 is skipped and the deploy redeems it directly.
+        let (store, requests) = cf_store_scripted(vec![
+            (200, cf_ok(r#"{"jwt":"already-complete","buckets":[]}"#)),
+            (200, cf_ok(r#"{"id":"my-worker"}"#)),
+        ]);
+        let store_dyn: &dyn AssetObjectStore = &store;
+        store_dyn
+            .put_object("/index.html", b"<html>hi</html>", "text/html")
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "no byte upload when nothing is pending");
+        assert!(requests[1].url.ends_with("/workers/scripts/my-worker"));
+        let deploy_body = String::from_utf8(requests[1].body.clone().unwrap()).unwrap();
+        assert!(deploy_body.contains(r#""jwt":"already-complete""#));
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_does_not_claim_publish_when_deploy_fails() {
+        // Honesty guard: a failed step-3 deploy surfaces the error and never
+        // reports a durable publish. The byte upload still happened (2 prior
+        // requests), but the outcome is an error, not a false success.
+        let body = b"<html>hi</html>";
+        let hash = cf_asset_hash("/index.html", body);
+        let (store, requests) = cf_store_scripted(vec![
+            (200, session_result("session-jwt", &hash)),
+            (201, cf_ok(r#"{"jwt":"completion-token"}"#)),
+            // 400 is a non-retryable client error, so the deploy fails on the
+            // first attempt (a 5xx would trip the client's retry loop).
+            (
+                400,
+                r#"{"success":false,"errors":[{"code":10021,"message":"boom"}],"messages":[],"result":null}"#
+                    .to_string(),
+            ),
+        ]);
+        let store_dyn: &dyn AssetObjectStore = &store;
         let error = store_dyn
-            .put_object("/index.html", b"bytes", "text/html")
+            .put_object("/index.html", body, "text/html")
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("not yet wired for live publish"),
+            error.to_string().contains("script deploy failed"),
             "unexpected error: {error}"
         );
-        // It did issue the step-1 negotiation request.
-        assert!(last.lock().unwrap().is_some());
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_errors_when_session_has_pending_but_no_jwt() {
+        // A session that returns pending buckets but no upload JWT cannot
+        // authorize the byte upload; the publish fails rather than proceeding.
+        let body = b"<html>hi</html>";
+        let hash = cf_asset_hash("/index.html", body);
+        let (store, requests) = cf_store_scripted(vec![(
+            200,
+            cf_ok(&format!(r#"{{"buckets":[["{hash}"]]}}"#)),
+        )]);
+        let store_dyn: &dyn AssetObjectStore = &store;
+        let error = store_dyn
+            .put_object("/index.html", body, "text/html")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no jwt to authorize the byte upload"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "only the session request was made"
+        );
+    }
+
+    #[tokio::test]
+    async fn workers_static_assets_rejects_a_bucket_hash_not_in_the_manifest() {
+        // If CF names a hash the publish never declared, that is a protocol
+        // violation — reject rather than upload the wrong bytes under it.
+        let (store, _requests) = cf_store_scripted(vec![(
+            200,
+            session_result("session-jwt", "ffffffffffffffffffffffffffffffff"),
+        )]);
+        let store_dyn: &dyn AssetObjectStore = &store;
+        let error = store_dyn
+            .put_object("/index.html", b"<html>hi</html>", "text/html")
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not in the published manifest"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -1877,5 +2394,97 @@ mod tests {
                 .contains("upload-session negotiation failed"),
             "unexpected error: {error}"
         );
+    }
+
+    // ---- #411 live Workers Static Assets publish proof (gate-owned) ---------
+
+    /// The env vars the gate sets to run the live publish-and-serve proof. There
+    /// is no live Cloudflare here, so every local run SKIPS cleanly; the gate,
+    /// which has a real account + a route/custom domain on the script, sets
+    /// these and runs the full 3-step publish against the real API:
+    ///
+    ///   * `FERROGATE_WSA_ACCOUNT_ID`  — the Cloudflare account id.
+    ///   * `FERROGATE_WSA_API_TOKEN`   — an API token with Workers Scripts Edit
+    ///     (an inline plaintext token, resolved exactly as the production
+    ///     `WorkersStaticAssets` backend resolves `cf_api_token`).
+    ///   * `FERROGATE_WSA_SCRIPT_NAME` — the Worker script to publish onto.
+    ///   * `FERROGATE_WSA_SERVE_URL`   — OPTIONAL. When set, the test GETs it
+    ///     after publishing and asserts the just-published bytes are served,
+    ///     closing the loop end-to-end (requires the script to have a route /
+    ///     custom domain, which the gate configures).
+    struct LiveWsaEnv {
+        account_id: String,
+        api_token: String,
+        script_name: String,
+        serve_url: Option<String>,
+    }
+
+    fn live_wsa_env() -> Option<LiveWsaEnv> {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        Some(LiveWsaEnv {
+            account_id: var("FERROGATE_WSA_ACCOUNT_ID")?,
+            api_token: var("FERROGATE_WSA_API_TOKEN")?,
+            script_name: var("FERROGATE_WSA_SCRIPT_NAME")?,
+            serve_url: var("FERROGATE_WSA_SERVE_URL"),
+        })
+    }
+
+    #[tokio::test]
+    async fn live_workers_static_assets_publishes_and_optionally_serves() {
+        let Some(env) = live_wsa_env() else {
+            eprintln!(
+                "skipping live_workers_static_assets_publishes_and_optionally_serves: set \
+                 FERROGATE_WSA_ACCOUNT_ID, FERROGATE_WSA_API_TOKEN and FERROGATE_WSA_SCRIPT_NAME \
+                 (and optionally FERROGATE_WSA_SERVE_URL) to run the live publish proof (gate-owned; \
+                 no live Cloudflare in the dev sandbox)"
+            );
+            return;
+        };
+
+        // A real CloudflareClient (reqwest transport) — the same wiring the
+        // production `WorkersStaticAssets` backend builds in `state_assets.rs`.
+        let cf_config = ferrogate_cloudflare::CloudflareConfig::new(env.account_id, env.api_token);
+        let resolver = Arc::new(ferrogate_cloudflare::EnvTokenResolver::from_process_env());
+        let client = CloudflareClient::new(cf_config, resolver)
+            .expect("failed to build the live Cloudflare client");
+        let store = WorkersStaticAssetsStore::new(Arc::new(client), env.script_name);
+
+        // Publish a small, uniquely-marked index.html through the full 3-step
+        // flow. A unique body guarantees at least one pending bucket (dodging
+        // the server-side dedup edge case) and lets the serve check assert the
+        // exact bytes this run published.
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let body =
+            format!("<!doctype html><html><body>ferrogate wsa live probe {stamp}</body></html>")
+                .into_bytes();
+        let store_dyn: &dyn AssetObjectStore = &store;
+        store_dyn
+            .put_object("/index.html", &body, "text/html")
+            .await
+            .expect("live Workers Static Assets publish failed");
+
+        // If the gate wired a serving route/domain, close the loop: the edge
+        // must serve exactly what we just published.
+        if let Some(serve_url) = env.serve_url {
+            let http = reqwest::Client::new();
+            let response = http
+                .get(&serve_url)
+                .send()
+                .await
+                .expect("serve GET failed to send");
+            assert!(
+                response.status().is_success(),
+                "serve GET returned HTTP {}",
+                response.status()
+            );
+            let served = response.bytes().await.expect("serve GET body").to_vec();
+            assert_eq!(
+                served, body,
+                "served bytes must match the just-published bundle"
+            );
+        }
     }
 }
