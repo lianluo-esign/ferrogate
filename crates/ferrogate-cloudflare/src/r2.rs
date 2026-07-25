@@ -12,7 +12,8 @@
 //! bucket lifecycle:
 //!
 //! - `POST   /accounts/{account_id}/r2/buckets` — create a bucket.
-//! - `GET    /accounts/{account_id}/r2/buckets` — list buckets.
+//! - `GET    /accounts/{account_id}/r2/buckets` — list buckets (cursor-paginated;
+//!   [`CloudflareClient::list_r2_buckets`] walks every page, issue #490).
 //! - `DELETE /accounts/{account_id}/r2/buckets/{name}` — delete a bucket.
 //!
 //! Auth, `{account_id}` templating, envelope decoding, typed error mapping, and
@@ -26,8 +27,10 @@
 //! exists and is owned by this account, Cloudflare answers `success: false` with
 //! error code `10004` ("The bucket you tried to create already exists, and you
 //! own it."; the S3-compatible sibling is `10073`/`BucketConflict`, HTTP 409).
-//! That case is mapped to [`R2BucketCreation::AlreadyExists`] rather than an
-//! error, so onboarding can provision unconditionally. See
+//! That — and **only** that — is mapped to [`R2BucketCreation::AlreadyExists`]
+//! rather than an error, so onboarding can provision unconditionally. Any other
+//! conflict, including a 409 carrying no recognised code, surfaces as a typed
+//! error instead of a phantom "provisioned" bucket (issue #490). See
 //! [`R2_BUCKET_ALREADY_EXISTS_CODES`].
 //!
 //! ## Tenant bucket naming — isolation, not cosmetics (issue #490)
@@ -59,10 +62,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::client::{CloudflareClient, HttpMethod};
+use crate::envelope::CloudflareResultInfo;
 use crate::error::CloudflareError;
 
 /// The account-relative path to the R2 buckets collection.
 const R2_BUCKETS_PATH: &str = "accounts/{account_id}/r2/buckets";
+
+/// Rows requested per page of the bucket list. Cloudflare defaults `per_page`
+/// to 20 and caps it at 1,000; asking for the cap keeps the page count (and so
+/// the request count against the ~1,200 req / 5 min global limit) minimal. If
+/// the server clamps the value, correctness is unaffected — the cursor is
+/// followed either way.
+const R2_BUCKETS_PER_PAGE: usize = 1000;
 
 /// R2's hard bucket-name bounds: 3–63 characters, lowercase letters/digits/
 /// hyphens, never starting or ending with a hyphen. (Cloudflare R2 docs,
@@ -98,8 +109,9 @@ const R2_TENANT_BUCKET_SLUG_MAX_LEN: usize = 20;
 /// `10004` is what the account REST API (`client/v4`) returns on a duplicate
 /// `POST .../r2/buckets` ("The bucket you tried to create already exists, and
 /// you own it."). `10073` is the S3-compatible `BucketConflict` sibling
-/// (HTTP 409). Either code — or a bare HTTP 409 on the create path — is treated
-/// as success by [`CloudflareClient::create_r2_bucket`].
+/// (HTTP 409). One of these codes is what
+/// [`CloudflareClient::create_r2_bucket`] treats as success — the HTTP status
+/// alone is not sufficient (issue #490); see `is_bucket_already_exists`.
 pub const R2_BUCKET_ALREADY_EXISTS_CODES: &[i64] = &[10004, 10073];
 
 /// Request body for `POST /accounts/{account_id}/r2/buckets`.
@@ -218,11 +230,49 @@ impl CloudflareClient {
         }
     }
 
-    /// List the account's R2 buckets. The list `result` wraps the rows in a
-    /// `buckets` array; this returns that array.
+    /// List **all** of the account's R2 buckets, following the cursor beyond
+    /// the first page (issue #490).
+    ///
+    /// The list `result` wraps the rows in a `buckets` array and the envelope's
+    /// `result_info.cursor` carries the continuation token. Without walking it
+    /// the caller silently receives page 1 (Cloudflare's default `per_page` is
+    /// 20) with no way to learn more exist — an "absent" answer that is really
+    /// "not on page 1", which is exactly how the `#461` live probe could pass
+    /// vacuously after a delete. This mirrors the sibling `D1Client::
+    /// list_databases` walk (issue #440); R2 is cursor-paginated rather than
+    /// page-numbered, so the cursor is echoed back instead of a page index.
+    ///
+    /// Termination: the loop stops on the first page whose `result_info` has no
+    /// (or an empty) cursor, on an empty page, and on a cursor the server
+    /// repeats verbatim — the last is a server-side no-progress bug that would
+    /// otherwise spin forever.
     pub async fn list_r2_buckets(&self) -> Result<Vec<R2Bucket>, CloudflareError> {
-        let list: R2BucketList = self.get_json(R2_BUCKETS_PATH, None).await?;
-        Ok(list.buckets)
+        let mut buckets = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let path = match &cursor {
+                Some(cursor) => format!(
+                    "{R2_BUCKETS_PATH}?per_page={R2_BUCKETS_PER_PAGE}&cursor={}",
+                    percent_encode_query_value(cursor)
+                ),
+                None => format!("{R2_BUCKETS_PATH}?per_page={R2_BUCKETS_PER_PAGE}"),
+            };
+            let (list, info): (R2BucketList, Option<CloudflareResultInfo>) =
+                self.get_json_paged(&path, None).await?;
+            let page_was_empty = list.buckets.is_empty();
+            buckets.extend(list.buckets);
+
+            let next = info
+                .as_ref()
+                .and_then(CloudflareResultInfo::next_cursor)
+                .map(str::to_string);
+            match next {
+                Some(next) if !page_was_empty && Some(&next) != cursor.as_ref() => {
+                    cursor = Some(next);
+                }
+                _ => return Ok(buckets),
+            }
+        }
     }
 
     /// Delete an R2 bucket by name. Ack-style (the endpoint returns a null
@@ -242,10 +292,17 @@ impl CloudflareClient {
     /// earlier, non-injective derivation could hand two tenants one bucket).
     /// The returned [`R2BucketProvision::created`] distinguishes a fresh create
     /// from a bucket that already existed.
+    ///
+    /// A tenant id that names no identity (empty / no ASCII alphanumerics) is
+    /// rejected as a [`CloudflareError::Config`] before any request is sent —
+    /// see `validate_tenant_id`. This is the entry point
+    /// [`Self::ensure_tenant_r2_credentials`] also provisions through, so the
+    /// #462 credential path inherits the same guard.
     pub async fn ensure_tenant_r2_bucket(
         &self,
         tenant: &str,
     ) -> Result<R2BucketProvision, CloudflareError> {
+        validate_tenant_id(tenant)?;
         let name = r2_bucket_name_for_tenant(tenant);
         let outcome = self
             .create_r2_bucket(&R2CreateBucketRequest::named(name.clone()))
@@ -259,17 +316,73 @@ impl CloudflareClient {
 }
 
 /// Whether a create-bucket failure is really the idempotent "already exists and
-/// you own it" case (see [`R2_BUCKET_ALREADY_EXISTS_CODES`]). A bare HTTP 409 on
-/// the create path is treated as the same case.
+/// you own it" case — the ONLY failure this module absorbs into a success
+/// (issue #490).
+///
+/// Narrowed from "any HTTP 409" to "carries a documented already-exists code"
+/// (see [`R2_BUCKET_ALREADY_EXISTS_CODES`]). A swallowed error must not be
+/// indistinguishable from success: `AlreadyExists` is reported to the caller as
+/// a provisioned bucket, and #462 then mints a read+write credential scoped to
+/// that name. Absorbing a *bare* 409 — or any other conflict Cloudflare may
+/// return on this path (a bucket mid-deletion, a jurisdiction conflict, a name
+/// held elsewhere) — would claim a bucket exists that does not, so every 409
+/// without one of these codes now surfaces as
+/// [`CloudflareError::Api`]`{ status: 409, .. }`.
+///
+/// The check is status-agnostic on purpose: Cloudflare also answers the
+/// duplicate-create with `success: false` and code `10004` under HTTP 200, and
+/// the code — not the status — is the idempotency signal.
 fn is_bucket_already_exists(error: &CloudflareError) -> bool {
     matches!(
         error,
-        CloudflareError::Api { status, errors }
-            if *status == 409
-                || errors
-                    .iter()
-                    .any(|e| R2_BUCKET_ALREADY_EXISTS_CODES.contains(&e.code))
+        CloudflareError::Api { errors, .. }
+            if errors
+                .iter()
+                .any(|e| R2_BUCKET_ALREADY_EXISTS_CODES.contains(&e.code))
     )
+}
+
+/// Percent-encode a query-parameter value, keeping only the RFC 3986 unreserved
+/// set literal. Cloudflare's pagination cursor is an opaque token that can carry
+/// `+`, `/` and `=`; splicing it raw into the query string would corrupt it.
+/// Dependency-free (the crate has no URL-encoding dep) and only ever applied to
+/// server-issued cursors.
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+/// Reject a tenant id that cannot name a tenant (issue #490).
+///
+/// [`r2_bucket_name_for_tenant`] is deliberately infallible — it maps *any*
+/// string to an R2-legal, injective name, including `""` (which derives
+/// `ferrogate-8785c455…`). That is right for a derivation but wrong for a
+/// provisioning entry point: an empty or punctuation-only tenant id is a caller
+/// bug, and silently minting real storage (plus, via #462, a real credential)
+/// for it hides that bug behind a success. The sibling D1 path takes the same
+/// position — `ferrogate_storage::control_plane_store_d1`'s `validate_tenant_id`
+/// rejects an empty id before it can name a database.
+///
+/// The rule is deliberately narrower than that D1 charset check: this crate is
+/// a transport client and does not own tenant-id policy, so it only requires an
+/// id that carries a real identity (at least one ASCII alphanumeric). Callers
+/// that need a stricter charset gate it upstream.
+fn validate_tenant_id(tenant: &str) -> Result<(), CloudflareError> {
+    if !tenant.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(CloudflareError::Config(format!(
+            "invalid tenant id {tenant:?} for R2 provisioning: expected at least one ASCII \
+             alphanumeric character"
+        )));
+    }
+    Ok(())
 }
 
 /// Derive a deterministic, R2-valid, **collision-safe** bucket name for a
@@ -297,14 +410,14 @@ fn is_bucket_already_exists(error: &CloudflareError) -> bool {
 ///   `observed_agent_presence_key` — so the encoding stays unambiguous if a
 ///   second component (jurisdiction, realm, …) is ever appended.
 /// - `{digest}` is the lowercase hex SHA-256 of that canonical string,
-///   truncated to [`R2_TENANT_BUCKET_DIGEST_HEX_LEN`] hex chars (128 bits,
+///   truncated to `R2_TENANT_BUCKET_DIGEST_HEX_LEN` hex chars (128 bits,
 ///   ~2^64 birthday bound). Distinct tenant ids therefore map to distinct
 ///   names short of a 128-bit SHA-256 collision — in particular no amount of
 ///   case-folding, separator folding, or length can be *crafted* into an
 ///   alias, which is the property the old derivation lacked.
 ///
 /// `{slug}` is a lossy, purely **cosmetic** lowercase-alphanumeric rendering of
-/// the tenant id (hyphen-joined, capped at [`R2_TENANT_BUCKET_SLUG_MAX_LEN`])
+/// the tenant id (hyphen-joined, capped at `R2_TENANT_BUCKET_SLUG_MAX_LEN`)
 /// so an operator can eyeball which bucket belongs to whom. Two tenants may
 /// well share a slug; they cannot share a digest.
 ///
@@ -345,6 +458,13 @@ pub fn r2_bucket_name_for_tenant(tenant: &str) -> String {
 /// one out-of-band, its objects live under this name and must be copied to
 /// [`r2_bucket_name_for_tenant`]'s name before the old bucket is deleted — this
 /// function is how a migration tool computes the source name.
+///
+/// **There is no such tool yet, and no non-test caller.** Issue #496 carries the
+/// decision: either build the copy-then-delete path (rejecting an ambiguous
+/// legacy name, since a colliding one cannot be attributed to a tenant) or drop
+/// this from the public API. There is deliberately no dual-read fallback — a
+/// fallback would resolve two colliding tenants back to one shared bucket,
+/// reintroducing exactly what #490 fixed.
 pub fn r2_legacy_bucket_name_for_tenant(tenant: &str) -> String {
     let mut name = String::from(R2_TENANT_BUCKET_PREFIX);
     for c in tenant.chars() {

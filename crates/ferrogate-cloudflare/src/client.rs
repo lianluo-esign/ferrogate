@@ -21,7 +21,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use serde::de::DeserializeOwned;
 
 use crate::config::CloudflareConfig;
-use crate::envelope::CloudflareEnvelope;
+use crate::envelope::{CloudflareEnvelope, CloudflareResultInfo};
 use crate::error::CloudflareError;
 use crate::resolver::{ResolvedToken, TokenResolver};
 
@@ -305,6 +305,26 @@ impl CloudflareClient {
         tenant: Option<&str>,
     ) -> Result<T, CloudflareError> {
         self.request_json(HttpMethod::Get, path, None, tenant).await
+    }
+
+    /// GET returning the decoded `result` **plus** the `result_info`
+    /// pagination metadata (issue #490).
+    ///
+    /// [`get_json`](Self::get_json) discards `result_info`, which leaves a
+    /// caller of a cursor-paginated list endpoint unable to tell a complete
+    /// answer from page 1 of many. Callers that must walk pages use this and
+    /// follow [`CloudflareResultInfo::next_cursor`].
+    pub async fn get_json_paged<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        tenant: Option<&str>,
+    ) -> Result<(T, Option<CloudflareResultInfo>), CloudflareError> {
+        let (status, retry_after, bytes) =
+            self.send_raw(HttpMethod::Get, path, None, tenant).await?;
+        let envelope: CloudflareEnvelope<T> = serde_json::from_slice(&bytes).map_err(|e| {
+            CloudflareError::Decode(format!("failed to decode Cloudflare envelope: {e}"))
+        })?;
+        envelope.into_result_with_info(status, retry_after)
     }
 
     /// Issue a request whose success carries no meaningful `result` (delete

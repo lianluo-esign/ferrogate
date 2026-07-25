@@ -98,3 +98,46 @@ fn into_ack_rejects_success_with_error_status() {
         "got {err:?}"
     );
 }
+
+/// Issue #490: `result_info` used to be discarded, so a caller of a
+/// cursor-paginated list could not tell a complete answer from page 1 of many.
+#[test]
+fn decodes_result_info_and_normalises_the_next_cursor() {
+    let body = r#"{
+        "success": true,
+        "errors": [],
+        "result": { "id": "acct-123", "name": "FerroGate" },
+        "result_info": { "cursor": "opaque+cursor/=", "per_page": 1000 }
+    }"#;
+    let env: CloudflareEnvelope<Account> = serde_json::from_str(body).unwrap();
+    let (_, info) = env.into_result_with_info(200, None).unwrap();
+    let info = info.expect("result_info should decode");
+    assert_eq!(info.per_page, Some(1000));
+    assert_eq!(info.next_cursor(), Some("opaque+cursor/="));
+
+    // Cloudflare ends a cursor walk either by omitting the field or by sending
+    // an empty string; both must read as "no next page".
+    let last_page = r#"{ "success": true, "errors": [], "result": { "id": "a", "name": "b" },
+                         "result_info": { "cursor": "" } }"#;
+    let env: CloudflareEnvelope<Account> = serde_json::from_str(last_page).unwrap();
+    let (_, info) = env.into_result_with_info(200, None).unwrap();
+    assert_eq!(info.unwrap().next_cursor(), None);
+
+    let no_info = r#"{ "success": true, "errors": [], "result": { "id": "a", "name": "b" } }"#;
+    let env: CloudflareEnvelope<Account> = serde_json::from_str(no_info).unwrap();
+    assert!(env.into_result_with_info(200, None).unwrap().1.is_none());
+}
+
+/// The page-numbered dialect (D1's list) reports `page`/`count`/`total_count`
+/// and no cursor; the same struct must carry it.
+#[test]
+fn decodes_the_page_numbered_result_info_dialect() {
+    let body = r#"{ "success": true, "errors": [], "result": { "id": "a", "name": "b" },
+                    "result_info": { "page": 2, "per_page": 20, "count": 7, "total_count": 27 } }"#;
+    let env: CloudflareEnvelope<Account> = serde_json::from_str(body).unwrap();
+    let info = env.result_info.clone().expect("result_info should decode");
+    assert_eq!(info.page, Some(2));
+    assert_eq!(info.count, Some(7));
+    assert_eq!(info.total_count, Some(27));
+    assert_eq!(info.next_cursor(), None);
+}

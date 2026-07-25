@@ -49,7 +49,7 @@ pub use client::{
 };
 pub use config::{default_ai_gateway_base_url, default_api_base_url, CloudflareConfig};
 pub use d1_proxy::{D1ProxyClient, D1ProxyStatement};
-pub use envelope::{CloudflareEnvelope, CloudflareMessage};
+pub use envelope::{CloudflareEnvelope, CloudflareMessage, CloudflareResultInfo};
 pub use error::{CloudflareApiError, CloudflareError, AUTHENTICATION_CODES, MISSING_SCOPE_CODES};
 pub use r2::{
     r2_bucket_name_for_tenant, r2_legacy_bucket_name_for_tenant, R2Bucket, R2BucketCreation,

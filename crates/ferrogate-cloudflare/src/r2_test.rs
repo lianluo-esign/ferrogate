@@ -176,19 +176,68 @@ fn create_bucket_already_exists_s3_sibling_code_10073_maps_to_ok() {
     assert_eq!(outcome, R2BucketCreation::AlreadyExists);
 }
 
+/// Issue #490: the create path used to absorb **any** HTTP 409 into
+/// `AlreadyExists`. A swallowed error must not be indistinguishable from
+/// success — `AlreadyExists` tells the caller a bucket exists, and #462 then
+/// mints a read+write credential scoped to that name. A 409 with no recognised
+/// code is not the documented already-exists case, so it must surface.
 #[test]
-fn create_bucket_bare_409_conflict_maps_to_ok() {
-    // A 409 with no structured code on the create path is still an already-exists
-    // conflict and is treated idempotently.
+fn create_bucket_bare_409_conflict_surfaces_as_a_typed_api_error() {
     let transport = Arc::new(RecordingTransport::new(vec![ok(
         409,
         r#"{ "success": false, "errors": [] }"#,
     )]));
     let client = cf_client(transport);
 
+    let error = runtime()
+        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
+        .expect_err("a codeless 409 is not the idempotent already-exists case");
+    match error {
+        CloudflareError::Api { status, errors } => {
+            assert_eq!(status, 409);
+            assert!(errors.is_empty());
+        }
+        other => panic!("expected Api error, got {other:?}"),
+    }
+}
+
+/// A 409 carrying some *other* conflict code (here: the bucket is mid-deletion)
+/// is a real failure — the bucket does not exist, so reporting it as provisioned
+/// would hand #462 a credential for a name with nothing behind it.
+#[test]
+fn create_bucket_unrelated_409_conflict_code_surfaces_as_a_typed_api_error() {
+    let transport = Arc::new(RecordingTransport::new(vec![ok(
+        409,
+        r#"{ "success": false, "errors": [ { "code": 10035,
+            "message": "The bucket you tried to create is being deleted." } ] }"#,
+    )]));
+    let client = cf_client(transport);
+
+    let error = runtime()
+        .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
+        .expect_err("an unrelated 409 conflict must not read as successful provisioning");
+    match error {
+        CloudflareError::Api { status, errors } => {
+            assert_eq!(status, 409);
+            assert_eq!(errors[0].code, 10035);
+        }
+        other => panic!("expected Api error, got {other:?}"),
+    }
+}
+
+/// The idempotency signal is the error *code*, not the status: Cloudflare also
+/// answers a duplicate create with `success: false` + `10004` under HTTP 200.
+#[test]
+fn create_bucket_already_exists_code_is_absorbed_regardless_of_status() {
+    let transport = Arc::new(RecordingTransport::new(vec![ok(
+        200,
+        r#"{ "success": false, "errors": [ { "code": 10004, "message": "already exists" } ] }"#,
+    )]));
+    let client = cf_client(transport);
+
     let outcome = runtime()
         .block_on(client.create_r2_bucket(&R2CreateBucketRequest::named("ferrogate-existing")))
-        .expect("bare 409 should map to Ok");
+        .expect("a 10004 code is the idempotent case whatever the status");
     assert_eq!(outcome, R2BucketCreation::AlreadyExists);
 }
 
@@ -210,9 +259,142 @@ fn list_buckets_decodes_wrapped_buckets_array() {
     assert_eq!(buckets[1].name.as_deref(), Some("two"));
     assert_eq!(buckets[1].jurisdiction.as_deref(), Some("eu"));
 
+    // A response with no `result_info` is the last (and only) page.
     let requests = transport.recorded();
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, crate::client::HttpMethod::Get);
-    assert!(requests[0].url.ends_with("/accounts/acct-test/r2/buckets"));
+    assert!(
+        requests[0]
+            .url
+            .ends_with("/accounts/acct-test/r2/buckets?per_page=1000"),
+        "{}",
+        requests[0].url
+    );
+}
+
+/// Issue #490: R2's bucket list is cursor-paginated and the client used to send
+/// no `per_page` and follow no cursor, so it returned Cloudflare's first page
+/// (default 20 rows) as if it were the whole account. That made "bucket absent"
+/// indistinguishable from "bucket not on page 1" — the live probe's
+/// absent-after-delete check could pass vacuously.
+#[test]
+fn list_buckets_follows_the_result_info_cursor_across_pages() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "one" } ] },
+                 "result_info": { "cursor": "cur/one+two=", "per_page": 1 } }"#,
+        ),
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "two" } ] },
+                 "result_info": { "cursor": "cur-2", "per_page": 1 } }"#,
+        ),
+        // Empty cursor = last page (Cloudflare signals the end both by omitting
+        // the field and by sending "").
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "three" } ] },
+                 "result_info": { "cursor": "", "per_page": 1 } }"#,
+        ),
+    ]));
+    let client = cf_client(transport.clone());
+
+    let buckets = runtime()
+        .block_on(client.list_r2_buckets())
+        .expect("list should walk every page");
+    let names: Vec<&str> = buckets.iter().filter_map(|b| b.name.as_deref()).collect();
+    assert_eq!(names, ["one", "two", "three"]);
+
+    let requests = transport.recorded();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0].url.ends_with("?per_page=1000"),
+        "{}",
+        requests[0].url
+    );
+    // The opaque cursor is percent-encoded, so `/` and `+` cannot corrupt the
+    // query string or be re-read as a path separator.
+    assert!(
+        requests[1]
+            .url
+            .ends_with("?per_page=1000&cursor=cur%2Fone%2Btwo%3D"),
+        "{}",
+        requests[1].url
+    );
+    assert!(
+        requests[2].url.ends_with("?per_page=1000&cursor=cur-2"),
+        "{}",
+        requests[2].url
+    );
+}
+
+/// A server that repeats the cursor it was just handed makes no progress; the
+/// walk must terminate rather than spin. Same for a page with no rows.
+#[test]
+fn list_buckets_terminates_on_a_repeated_cursor_or_an_empty_page() {
+    let repeated = |body: &str| ok(200, body);
+    let transport = Arc::new(RecordingTransport::new(vec![
+        repeated(
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "one" } ] },
+                 "result_info": { "cursor": "stuck" } }"#,
+        ),
+        repeated(
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "two" } ] },
+                 "result_info": { "cursor": "stuck" } }"#,
+        ),
+    ]));
+    let client = cf_client(transport.clone());
+    let buckets = runtime()
+        .block_on(client.list_r2_buckets())
+        .expect("a repeated cursor must stop the walk");
+    assert_eq!(buckets.len(), 2);
+    assert_eq!(transport.recorded().len(), 2);
+
+    // An empty page ends the walk even when a fresh cursor is offered.
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "one" } ] },
+                 "result_info": { "cursor": "c1" } }"#,
+        ),
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [] },
+                 "result_info": { "cursor": "c2" } }"#,
+        ),
+    ]));
+    let client = cf_client(transport.clone());
+    let buckets = runtime()
+        .block_on(client.list_r2_buckets())
+        .expect("an empty page must stop the walk");
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(transport.recorded().len(), 2);
+}
+
+/// A failure on page 2 must surface, not be reported as a short-but-complete
+/// list — the partial answer is the vacuous-pass hazard all over again.
+#[test]
+fn list_buckets_propagates_an_error_from_a_later_page() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        ok(
+            200,
+            r#"{ "success": true, "errors": [], "result": { "buckets": [ { "name": "one" } ] },
+                 "result_info": { "cursor": "c1" } }"#,
+        ),
+        ok(
+            400,
+            r#"{ "success": false, "errors": [ { "code": 10001, "message": "bad cursor" } ] }"#,
+        ),
+    ]));
+    let client = cf_client(transport);
+    let error = runtime()
+        .block_on(client.list_r2_buckets())
+        .expect_err("a mid-walk failure must not read as a complete list");
+    assert!(
+        matches!(error, CloudflareError::Api { status: 400, .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -324,6 +506,34 @@ fn ensure_tenant_bucket_is_idempotent_when_bucket_exists() {
     assert_eq!(provision.name, r2_bucket_name_for_tenant("tenant-acme"));
     // Already existed -> not created this call, but still reported as provisioned.
     assert!(!provision.created);
+}
+
+/// Issue #490: `r2_bucket_name_for_tenant` is infallible by design and happily
+/// derives `ferrogate-8785c455…` for `""`. That is fine for a derivation and
+/// wrong for a provisioning entry point — an identity-free tenant id is a caller
+/// bug, and provisioning real storage (and, via #462, a real credential) for it
+/// would hide the bug behind a success.
+#[test]
+fn ensure_tenant_bucket_rejects_an_identity_free_tenant_id_before_any_request() {
+    for tenant in ["", "   ", "___", "-", "..."] {
+        let transport = Arc::new(RecordingTransport::new(vec![]));
+        let client = cf_client(transport.clone());
+        let error = runtime()
+            .block_on(client.ensure_tenant_r2_bucket(tenant))
+            .unwrap_err();
+        assert!(
+            matches!(error, CloudflareError::Config(_)),
+            "tenant {tenant:?} produced {error:?}"
+        );
+        // Rejected before the wire, so nothing was provisioned.
+        assert!(transport.recorded().is_empty());
+    }
+
+    // The derivation itself stays infallible — only the entry point gates.
+    assert_eq!(
+        r2_bucket_name_for_tenant(""),
+        "ferrogate-8785c4553f8630e6c14fd8e22a998d48"
+    );
 }
 
 /// R2's documented bucket-name rules: 3-63 chars, `[a-z0-9-]` only, never

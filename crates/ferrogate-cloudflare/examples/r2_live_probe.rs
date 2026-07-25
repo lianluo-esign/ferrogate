@@ -13,6 +13,11 @@
 //! assertion phase is propagated), and re-running idempotent-create against the
 //! existing bucket is exercised too.
 //!
+//! Both list assertions depend on `list_r2_buckets` walking every page (issue
+//! #490): on a page-1-only list the "probe visible" check fails spuriously and
+//! the "absent after delete" check passes vacuously, because the probe name
+//! need never have been on the first page at all.
+//!
 //! Opt-in only — requires (same convention as `d1_live_probe`):
 //!   FERROGATE_CF_ACCOUNT_ID  — Cloudflare account id
 //!   FERROGATE_CF_API_TOKEN   — account API token with **Workers R2 Storage**
