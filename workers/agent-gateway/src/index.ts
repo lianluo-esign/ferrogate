@@ -31,7 +31,15 @@ import {
 } from "./schedule";
 import type { ScheduleKind } from "./schedule";
 import { handleContainer } from "./container";
-import { handleGitCredential } from "./git-credential";
+import {
+  brokerAudit,
+  brokerAuthorize,
+  brokerClose,
+  brokerRecordMint,
+  brokerRegister,
+  handleGitCredential,
+} from "./git-credential";
+import type { BrokerRunRecord } from "./git-credential";
 
 // Container/sandbox class for the CONTAINER_SANDBOX binding (issue #415).
 // Deploy-time enablement (test gate, live validation): the prebuilt
@@ -132,6 +140,14 @@ export interface Env {
   /** GitHub API origin; defaults to `https://api.github.com` (GHES: `/api/v3`). */
   GITHUB_API_BASE_URL?: string;
 }
+
+/**
+ * Durable Object storage key holding the run's brokered git credential record
+ * (issue #475): the grant, the callback-capability fingerprint, the operation
+ * counter, the audit ring, and the outstanding revocation handle. Read and
+ * written ONLY through the `brokerRecord*` seam below.
+ */
+const BROKER_RECORD_KEY = "ferrogate:git-credential:record";
 
 /** Lifecycle status vocabulary mirrored by the Rust `CloudflareRunStatus`. */
 export type RunStatus =
@@ -436,6 +452,53 @@ export class AgentGateway extends Agent<Env, AgentGatewayState> {
     return scheduleCancel(this, selector);
   }
 
+  // ---- Brokered git credential verbs (issue #475) -----------------------
+  //
+  // The run's credential grant lives HERE, in the run's own Durable Object,
+  // and the `/git-credential/get` callback path reads it from here rather than
+  // from the request body. That is the whole point: the container is the
+  // untrusted party, so a grant it could supply is a grant it could forge.
+  // Only `gitCredentialRegister` writes one, and only the control-plane-gated
+  // `/git-credential/register` route can call it.
+
+  /** DO storage seam for the broker verbs (`GitCredentialHost`). */
+  async brokerRecordGet(): Promise<BrokerRunRecord | undefined> {
+    return this.ctx.storage.get<BrokerRunRecord>(BROKER_RECORD_KEY);
+  }
+
+  async brokerRecordPut(record: BrokerRunRecord): Promise<void> {
+    await this.ctx.storage.put(BROKER_RECORD_KEY, record);
+  }
+
+  async brokerRecordDelete(): Promise<void> {
+    await this.ctx.storage.delete(BROKER_RECORD_KEY);
+  }
+
+  /** RPC: register this run's grant + callback-capability fingerprint. */
+  async gitCredentialRegister(registration: unknown) {
+    return brokerRegister(this, registration);
+  }
+
+  /** RPC: authorize one helper callback, charge the budget, audit the row. */
+  async gitCredentialAuthorize(callback: unknown, capability: string, nowUnix: number) {
+    return brokerAuthorize(this, callback, capability, nowUnix);
+  }
+
+  /** RPC: retain the just-minted token as this run's revocation handle. */
+  async gitCredentialRecordMint(operationId: string, token: string, expiresAtUnix: number) {
+    return brokerRecordMint(this, operationId, token, expiresAtUnix);
+  }
+
+  /** RPC: close the grant and surrender the outstanding token for revocation. */
+  async gitCredentialClose() {
+    return brokerClose(this);
+  }
+
+  /** RPC: this run's material-free credential audit rows. */
+  async gitCredentialAudit() {
+    return brokerAudit(this);
+  }
+
   /**
    * The ONE method name FerroGate-minted schedules call back into (pinned by
    * `SCHEDULE_DISPATCH_METHOD` — callers can never schedule arbitrary agent
@@ -524,7 +587,7 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Unauthenticated liveness probe (no secret exposed).
@@ -565,11 +628,16 @@ export default {
     // 1e. Brokered git credential routes (issue #475): the container's git
     //     credential helper calls back here PER GIT OPERATION instead of
     //     holding a secret. The Worker authorizes the operation against the
-    //     run's grant, mints a repo-scoped GitHub App installation token, and
-    //     answers git — so nothing GitHub-shaped ever rests in the container,
-    //     and every use is audited. Fails closed (501) with no App bound.
+    //     grant REGISTERED IN THE RUN'S DURABLE OBJECT (never against a grant
+    //     the caller supplies), mints a repo-scoped GitHub App installation
+    //     token, answers git, and records a material-free audit row — so
+    //     nothing GitHub-shaped ever rests in the container, and every use is
+    //     counted. Auth is checked per verb INSIDE: `register`/`revoke`/`audit`
+    //     take GATEWAY_CONTROL_TOKEN, while `get` — the only verb the untrusted
+    //     container can reach — takes the run-scoped callback capability and
+    //     NOT the gateway control token. Fails closed (501) with no App bound.
     if (url.pathname.startsWith("/git-credential/")) {
-      return handleGitCredential(request, env, url);
+      return handleGitCredential(request, env, url, ctx);
     }
 
     // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in

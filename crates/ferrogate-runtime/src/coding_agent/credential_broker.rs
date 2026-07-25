@@ -18,6 +18,22 @@
 //! repo, mints a repo-scoped token that lives for that operation, and records
 //! an audit event.
 //!
+//! ## Where the grant lives, and why that is the whole design
+//!
+//! The control plane registers a [`BrokerGrantRegistration`] against the run's
+//! Durable Object *before* the container starts, over a control-plane-only
+//! route. The callback path then authorizes against **that** record. It never
+//! accepts a grant from the request body: the container is the untrusted party,
+//! so a grant it could supply is a grant it could forge — which was exactly the
+//! defect the #475 code review found in the first cut of the Worker.
+//!
+//! The registration carries a *fingerprint* of the run's callback capability,
+//! never the capability itself ([`broker_capability_fingerprint`]). The raw
+//! capability goes to the container; the gateway can only ever check one, not
+//! mint or replay one, and the fingerprint mixes in the run's
+//! [`BrokerCallbackBinding::audience`], so a capability lifted out of one
+//! tenant's run authenticates nothing in another's.
+//!
 //! ## What actually rests inside the container
 //!
 //! Honest accounting, because "the token never touches the container" is a
@@ -26,9 +42,15 @@
 //! | Artifact | Where it lives | What an injected process gets from it |
 //! |---|---|---|
 //! | GitHub App private key | Worker secret, control plane only | nothing — never crosses the boundary |
-//! | Installation token | Worker memory + the `git` process for one operation | must win a race against a live `git` |
-//! | Callback capability | Container (env/file) | can ask *this gateway* for git ops on *one* repo, every one audited and counted |
+//! | Installation token | the `git` process for one operation; the run's Durable Object as the revocation handle | must win a race against a live `git`; the DO copy is platform-side and unreachable from the container |
+//! | Callback capability | Container (env/file) | can ask *this gateway* for git ops on *one* repo, every one audited and counted — and nothing else: it is **not** the gateway control token and opens no other route |
 //! | `known_hosts` / git config | Container, world-readable on purpose | nothing; it is public key material |
+//!
+//! The Durable Object copy of the token is a named cost, not an oversight.
+//! `DELETE /installation/token` authenticates *with the token being revoked* and
+//! GitHub offers no revoke-by-id, so a broker that retains nothing can revoke
+//! nothing. The copy is superseded and revoked when the next operation asks for
+//! a credential, and deleted at run close.
 //!
 //! The exchange the design makes is deliberate: a stolen callback capability
 //! buys an attacker exactly the access the run already had (one repo, until the
@@ -65,6 +87,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::coding_agent::error::{CodingAgentError, CodingAgentPhase};
 use crate::coding_agent::materialize::{
@@ -268,6 +291,10 @@ pub struct GitCredentialCallback {
 /// helper response without it passing back through here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokeredCredentialLease {
+    /// Tenant the run belongs to. Present so a lease, like every other record
+    /// on this path, is attributable to one tenant rather than to a bare
+    /// `run_id` — the gap flagged on #472's `WriteBackGrant` and inherited here.
+    pub tenant_id: String,
     /// `sha256:` id of this specific authorization. Joins the helper response,
     /// the audit event, and the GitHub-side token in one row.
     pub operation_id: String,
@@ -459,6 +486,8 @@ impl InstallationTokenRequest {
 /// promised.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitCredentialAuditEvent {
+    /// Tenant the run belongs to — every credential-path record carries one.
+    pub tenant_id: String,
     pub run_id: String,
     pub grant_id: String,
     pub repo_id: String,
@@ -484,16 +513,23 @@ pub struct GitCredentialAuditEvent {
 pub struct BrokerCallbackBinding {
     /// HTTPS endpoint the helper POSTs to.
     pub broker_url: String,
+    pub tenant_id: String,
     pub run_id: String,
     pub grant_id: String,
     /// Audience the callback capability is minted for, so a capability lifted
-    /// out of one run cannot be replayed against another gateway route.
+    /// out of one run cannot be replayed against another run, tenant or route.
+    ///
+    /// This is **checked**, not decorative: it is the prefix mixed into
+    /// [`broker_capability_fingerprint`], which is what the gateway stores and
+    /// compares a presented capability against. Two runs that were somehow
+    /// handed the same secret string still have different fingerprints.
     pub audience: String,
 }
 
 impl BrokerCallbackBinding {
     pub fn new(
         broker_url: impl Into<String>,
+        tenant_id: impl Into<String>,
         run_id: impl Into<String>,
         grant_id: impl Into<String>,
     ) -> Result<Self, CodingAgentError> {
@@ -503,16 +539,18 @@ impl BrokerCallbackBinding {
                 "credential broker URL must be https",
             ));
         }
+        let tenant_id = tenant_id.into();
         let run_id = run_id.into();
         let grant_id = grant_id.into();
-        if run_id.trim().is_empty() || grant_id.trim().is_empty() {
+        if tenant_id.trim().is_empty() || run_id.trim().is_empty() || grant_id.trim().is_empty() {
             return Err(CodingAgentError::credential(
-                "broker callback binding requires a run id and a grant id",
+                "broker callback binding requires a tenant id, a run id and a grant id",
             ));
         }
-        let audience = format!("ferrogate:git-credential:{run_id}");
+        let audience = broker_audience(&tenant_id, &run_id);
         Ok(Self {
             broker_url,
+            tenant_id,
             run_id,
             grant_id,
             audience,
@@ -526,10 +564,125 @@ impl BrokerCallbackBinding {
             broker_url: self.broker_url.clone(),
         }
     }
+
+    /// Fingerprint of `capability` under this binding's audience — the value
+    /// the control plane registers with the gateway. The capability itself is
+    /// handed to the container and never to the gateway.
+    pub fn capability_fingerprint(&self, capability: &str) -> String {
+        broker_capability_fingerprint(&self.audience, capability)
+    }
+}
+
+/// The audience a run's callback capability is minted for. Mirrors
+/// `brokerAudience` in `workers/agent-gateway/src/git-credential.ts`; the two
+/// MUST produce byte-identical strings or no capability verifies.
+pub fn broker_audience(tenant_id: &str, run_id: &str) -> String {
+    format!("ferrogate:git-credential:{tenant_id}:{run_id}")
+}
+
+/// Lowercase-hex SHA-256 of `"{audience}\n{capability}"`.
+///
+/// Deliberately **not** `opaque_reference_fingerprint`: that one prefixes
+/// `sha256:`, and this value has to be byte-identical to what
+/// `capabilityFingerprint` in the Worker computes with WebCrypto, which returns
+/// bare hex. Mixing the audience in is what binds a capability to one tenant's
+/// run — a bare hash of the secret would verify anywhere it was replayed.
+pub fn broker_capability_fingerprint(audience: &str, capability: &str) -> String {
+    let digest = Sha256::digest(format!("{audience}\n{capability}").as_bytes());
+    format!("{digest:x}")
+}
+
+/// The grant record the control plane registers with the gateway before a run
+/// starts — the `POST /git-credential/register` body, owned in Rust so the two
+/// halves of the contract cannot drift. Field names are the Worker's
+/// (`camelCase`) because this type *is* the wire shape.
+///
+/// Note what is absent: the callback capability. Only
+/// [`Self::capability_fingerprint`] travels, so the gateway can check a
+/// presented capability but can never mint or replay one, and there is no
+/// secret on this request at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerGrantRecord {
+    pub tenant_id: String,
+    pub run_id: String,
+    pub grant_id: String,
+    pub repo_id: String,
+    pub host: String,
+    pub namespace: String,
+    pub name: String,
+    /// **Not a secret** — the integer that makes per-user authorization
+    /// storable without a per-user secret.
+    pub installation_id: u64,
+    /// GitHub permission map, derived from the grant's scope.
+    pub permissions: BTreeMap<String, String>,
+    pub write_capable: bool,
+    pub expires_at_unix: u64,
+    /// #472 delivery variant; only `brokered_per_operation` has a callback.
+    pub delivery: String,
+    /// `sha256:…` of the grant's `cf://` reference. Never the value.
+    pub credential_fingerprint: String,
+}
+
+/// [`BrokerGrantRecord`] plus the capability fingerprint: the whole register body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerGrantRegistration {
+    pub grant: BrokerGrantRecord,
+    /// Lowercase hex SHA-256, 64 chars — see [`broker_capability_fingerprint`].
+    pub capability_fingerprint: String,
+}
+
+impl BrokerGrantRegistration {
+    /// Build the registration for a bound broker. The capability is consumed to
+    /// produce a fingerprint and is **not** retained anywhere in the result.
+    pub fn build(
+        binding: &BrokerCallbackBinding,
+        repo: &RepoCoordinates,
+        grant: &RepoCredentialGrant,
+        token_request: &InstallationTokenRequest,
+        capability: &str,
+    ) -> Result<Self, CodingAgentError> {
+        if capability.len() < 32 {
+            return Err(CodingAgentError::credential(
+                "a run callback capability must be at least 32 characters of entropy",
+            ));
+        }
+        if binding.run_id != grant.run_id() || binding.grant_id != grant.grant_id() {
+            return Err(CodingAgentError::credential(
+                "callback binding and grant must name the same run and grant",
+            ));
+        }
+        Ok(Self {
+            grant: BrokerGrantRecord {
+                tenant_id: binding.tenant_id.clone(),
+                run_id: grant.run_id().to_string(),
+                grant_id: grant.grant_id().to_string(),
+                repo_id: repo.canonical_id(),
+                host: repo.host.clone(),
+                namespace: repo.namespace.clone(),
+                name: repo.name.clone(),
+                installation_id: token_request.installation_id,
+                permissions: token_request.permissions().clone(),
+                write_capable: grant.scope().is_write_capable(),
+                expires_at_unix: grant.expires_at_unix(),
+                delivery: grant.delivery().as_str().to_string(),
+                credential_fingerprint: grant.credential_ref().fingerprint(),
+            },
+            capability_fingerprint: binding.capability_fingerprint(capability),
+        })
+    }
 }
 
 /// git config lines the container image applies so `git` uses the broker and
 /// refuses to weaken transport security.
+///
+/// `helper_command` names a helper binary that **does not ship yet** — a small
+/// program that reads git's `key=value` stdin block, POSTs it to
+/// `/git-credential/get` with the run's callback capability, and writes
+/// `username=`/`password=` back. Until it exists these lines configure a helper
+/// that is not there, and nothing clones. Stated here rather than in a doc so
+/// the next reader of this function knows before they rely on it.
 ///
 /// `credential.useHttpPath=true` is **load-bearing, not tidiness**: without it
 /// git sends only `protocol` and `host`, the broker cannot tell
@@ -554,8 +707,10 @@ pub fn git_helper_config_lines(helper_command: &str) -> Vec<String> {
     ]
 }
 
-/// Environment variables that disable transport verification. The bootstrap
-/// path refuses to start an instance whose environment contains any of them.
+/// Environment variables that disable or reroute transport verification.
+/// [`ContainerGitEnvironment::prepare`] — the only constructor of a container's
+/// git environment in this crate — refuses an instance whose environment
+/// contains any of them.
 pub const FORBIDDEN_TRANSPORT_ENV: [&str; 3] =
     ["GIT_SSL_NO_VERIFY", "GIT_SSH_VARIANT", "SSH_ASKPASS"];
 
@@ -653,6 +808,59 @@ pub fn validate_transport_env<'a>(
     Ok(())
 }
 
+/// The git environment a container is started with: the `known_hosts` body, the
+/// git config lines, and the callback binding — produced only by
+/// [`Self::prepare`], which runs every transport check first.
+///
+/// **Scope, stated honestly.** This is the single constructor in this crate; it
+/// makes the checks *unskippable for anything that builds a container git
+/// environment through FerroGate's Rust types*. It does not by itself make
+/// host-key verification "on" for a deployed run: no production start path
+/// constructs one yet, and the brokered path is HTTPS-only, so `known_hosts` is
+/// only reached if a run is ever configured for SSH. See
+/// `docs/cloudflare-git-credential-broker.md` for what is and is not wired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerGitEnvironment {
+    /// Absolute path the `known_hosts` body is written to inside the container.
+    pub known_hosts_path: String,
+    /// Public key material, safe in an image layer.
+    pub known_hosts: String,
+    /// `git config` lines, in application order.
+    pub git_config: Vec<String>,
+    /// Where the helper calls back, and under which audience.
+    pub callback: BrokerCallbackBinding,
+}
+
+impl ContainerGitEnvironment {
+    /// Compose the environment, refusing anything that weakens verification.
+    ///
+    /// `env_names` is the instance environment the isolation tier is about to
+    /// apply; `ssh_config` is the effective `ssh_config` body (empty when the
+    /// image ships none).
+    pub fn prepare<'a>(
+        callback: BrokerCallbackBinding,
+        helper_command: &str,
+        host: &str,
+        ssh_config: &str,
+        env_names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, CodingAgentError> {
+        if helper_command.trim().is_empty() {
+            return Err(CodingAgentError::credential(
+                "a brokered container needs a credential helper command; without one \
+                 git would fall through to a prompt or an inherited helper",
+            ));
+        }
+        validate_transport_env(env_names)?;
+        validate_ssh_hardening(ssh_config)?;
+        Ok(Self {
+            known_hosts_path: "/etc/ssh/ssh_known_hosts".to_string(),
+            known_hosts: github_known_hosts(host),
+            git_config: git_helper_config_lines(helper_command),
+            callback,
+        })
+    }
+}
+
 /// The gateway-side authorization engine for one run's credential callbacks.
 ///
 /// Holds the grant, the repo it covers, and the mint parameters. Every callback
@@ -661,6 +869,7 @@ pub fn validate_transport_env<'a>(
 /// [`GitCredentialAuditEvent`].
 #[derive(Debug, Clone)]
 pub struct GitCredentialBroker {
+    tenant_id: String,
     repo: RepoCoordinates,
     grant: RepoCredentialGrant,
     token_request: InstallationTokenRequest,
@@ -673,10 +882,18 @@ impl GitCredentialBroker {
     /// [`CredentialDelivery::EphemeralFile`] grant has no callback to serve, and
     /// serving one anyway would hand out a second credential.
     pub fn bind(
+        tenant_id: impl Into<String>,
         repo: RepoCoordinates,
         grant: RepoCredentialGrant,
         token_request: InstallationTokenRequest,
     ) -> Result<Self, CodingAgentError> {
+        let tenant_id = tenant_id.into();
+        if tenant_id.trim().is_empty() {
+            return Err(CodingAgentError::credential(
+                "a credential broker must be bound to a tenant; run_id alone is not \
+                 an attribution",
+            ));
+        }
         if !matches!(
             grant.delivery(),
             CredentialDelivery::BrokeredPerOperation { .. }
@@ -702,12 +919,17 @@ impl GitCredentialBroker {
             ));
         }
         Ok(Self {
+            tenant_id,
             repo,
             grant,
             token_request,
             operation_budget: DEFAULT_BROKER_OPERATION_BUDGET,
             operations_used: 0,
         })
+    }
+
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
     }
 
     /// Tighten (never widen) the per-run operation budget.
@@ -747,6 +969,7 @@ impl GitCredentialBroker {
         let sequence = self.operations_used;
         let decision = self.decide(callback, now_unix, sequence);
         let event = GitCredentialAuditEvent {
+            tenant_id: self.tenant_id.clone(),
             run_id: self.grant.run_id().to_string(),
             grant_id: self.grant.grant_id().to_string(),
             repo_id: self.repo.canonical_id(),
@@ -859,6 +1082,7 @@ impl GitCredentialBroker {
             sequence
         ));
         BrokerDecision::Approve(Box::new(BrokeredCredentialLease {
+            tenant_id: self.tenant_id.clone(),
             operation_id,
             username: INSTALLATION_TOKEN_USERNAME.to_string(),
             repo_id: self.repo.canonical_id(),

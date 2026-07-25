@@ -15,7 +15,23 @@
 the `CredentialDelivery::BrokeredPerOperation` variant of the #472 contract).
 
 Code: `crates/ferrogate-runtime/src/coding_agent/credential_broker.rs`,
-`workers/agent-gateway/src/git-credential.ts`.
+`workers/agent-gateway/src/git-credential.ts`,
+`workers/agent-gateway/test/git-credential.test.ts`.
+
+## Acceptance scorecard — read this before believing anything below
+
+The first cut of this slice was rejected in code review for claiming more than
+it did. This table is the corrective: it is the authoritative statement of what
+is proven, and every "no" below is a deliberate admission, not an omission.
+
+| #475 acceptance box | State | Where |
+|---|---|---|
+| Egress posture satisfying #471 | **Posture chosen and enforceable; not live-validated** | [Egress posture](#egress-posture-the-471-decision-this-slice-makes) |
+| Clone from a container with a short-lived scoped credential | **Not met** — no in-container helper binary ships yet, so nothing clones | [What still needs deployment](#what-still-needs-deployment-not-provable-here) |
+| Credential revoked at run end on both paths, proven by test | **Mechanism met and tested; no Rust caller drives it yet** | [Issuance and revocation](#issuance-and-revocation) |
+| Host-key verification ON with pinned keys | **Keys verified; enforcement available, not wired to a start path** | [Host-key verification](#host-key-verification) |
+| Test proving the credential is not in logs / run events / memory | **Partially met** — the Worker audit surface is asserted material-free; no deployed-run evidence | [Credential never reaches logs](#credential-never-reaches-logs-run-events-or-427-memory) |
+| Threat-model note | **Met** | [What still rests in the container](#what-still-rests-in-the-container--honest-accounting) |
 
 ## The problem in one sentence
 
@@ -27,13 +43,22 @@ exfiltrated.
 ## The shape
 
 ```
+control plane                      agent-gateway Worker              GitHub
+-------------                      --------------------              ------
+before the run starts
+  POST /git-credential/register ──▶ run's Durable Object:
+    {grant, capabilityFingerprint}    grant + fingerprint + budget + audit ring
+    (bearer: GATEWAY_CONTROL_TOKEN)   ^^^^^ the ONLY writer of a grant
+
 container                          agent-gateway Worker              GitHub
 ---------                          --------------------              ------
 git fetch
   └─ credential.helper ──POST──▶ /git-credential/get
-        (run-scoped                  authorize vs. grant:
-         callback capability,        run · grant · repo · op · budget
-         NOT a GitHub token)              │
+        (bearer: the RUN-SCOPED       load the grant FROM THE DO
+         callback capability,         verify capability vs. fingerprint
+         NOT a GitHub token,          authorize: run · grant · repo · op
+         NOT the control token)       charge the budget, write the audit row
+                                          │
                                           ├─ sign App JWT (RS256, ≤10 min)
                                           ├──── POST /app/installations/{id}
                                           │        /access_tokens
@@ -41,28 +66,58 @@ git fetch
                                           │         permissions:{…}}      ──▶
                                           │   ◀── {token, expires_at: +1h}
         ◀── username=x-access-token ──────┘
-            password=<token>              emit material-free audit row
-  └─ git speaks to github.com with it for THIS operation
+            password=<token>              retain the token as the run's ONE
+  └─ git speaks to github.com               outstanding revocation handle
+     with it for THIS operation
+
+next operation                     supersedes ── DELETE /installation/token ──▶
+                                   (the previous token dies immediately)
 
 run finalize (success AND failure)
-  control plane ──POST──▶ /git-credential/revoke ── DELETE /installation/token ──▶
+  POST /git-credential/revoke ────▶ delete the grant (no further mint is
+    {runId}                         possible) ── DELETE /installation/token ──▶
+    (bearer: GATEWAY_CONTROL_TOKEN)
 ```
 
 The container is configured with a **callback binding**, not a credential:
-`{ broker_url, run_id, grant_id, audience }` plus a run-scoped bearer
+`{ broker_url, tenant_id, run_id, grant_id, audience }` plus a run-scoped bearer
 capability. That capability is a *gateway* capability — presenting it to
-github.com achieves nothing, it works only against this route, only for this
-run, only for the granted repo, only until the grant expires, and every use is
-counted and logged.
+github.com achieves nothing, it works only against `/git-credential/get`, only
+for this run, only for the granted repo, only until the grant expires or the run
+is closed, and every use is counted and logged.
+
+Two properties make that sentence true rather than aspirational, and both were
+missing from the first cut of this slice:
+
+1. **The grant is not something the caller supplies.** `/git-credential/get`
+   reads it from the run's Durable Object, where only the control-plane-gated
+   `register` route can have put it. A grant in the request body is ignored.
+   (`test/git-credential.test.ts`, *"refuses a grant supplied by the caller"* —
+   the test fails against the pre-rework route.)
+2. **The capability is not `GATEWAY_CONTROL_TOKEN`.** That token also opens
+   `/control/*`, `/container/*`, `/memory/*` and `/schedule/*`; a container
+   holding it would have the whole gateway. `get` is the only verb the container
+   can reach and it accepts only the run's own capability — checked against a
+   fingerprint in the run's DO that mixes in the run's `audience`, so a
+   capability lifted out of one tenant's run authenticates nothing in another's.
 
 ### What still rests in the container — honest accounting
 
 | Artifact | Where | What injected code gets from it |
 |---|---|---|
 | GitHub App private key | Worker secret | nothing — never crosses the boundary |
-| Installation token | `git` process memory, one operation | must win a race against a live `git` |
-| Callback capability | container env/file | ask *this gateway* for git ops on *one* repo, audited and budgeted |
+| Installation token | `git` process memory for one operation; the run's Durable Object as the revocation handle | must win a race against a live `git`; the DO copy is platform-side and unreachable from the container |
+| Callback capability | container env/file | ask *this gateway* for git ops on *one* repo, audited and budgeted — and **nothing else**: it is not the gateway control token and opens no other route |
+| Callback binding (`broker_url`, ids, audience) | container | nothing; non-secret routing information |
 | `known_hosts`, git config | container, world-readable | nothing; public key material |
+
+The Durable Object copy of the token is a deliberate, named cost. GitHub has no
+API to revoke an installation token by id — `DELETE /installation/token`
+authenticates *with the token being revoked* — so a broker that retains nothing
+can revoke nothing, which is what the first cut of this slice got wrong. The
+copy lives in the run's own DO, is returned by no route, is superseded and
+revoked the moment the next operation asks for a credential, and is deleted at
+run close.
 
 There is no delivery in which a `git` subprocess authenticates to GitHub
 without a credential existing in that subprocess's memory for the length of the
@@ -72,6 +127,53 @@ already had; a stolen `GITHUB_TOKEN` buys durable, silent, off-platform access
 to everything that token could reach.
 
 ## Wire contract
+
+| verb | caller | bearer |
+|---|---|---|
+| `POST /git-credential/register` | control plane, before the run starts | `GATEWAY_CONTROL_TOKEN` |
+| `POST /git-credential/get` | the container's credential helper | the **run-scoped capability** |
+| `POST /git-credential/revoke` | control plane, at run finalize | `GATEWAY_CONTROL_TOKEN` |
+| `GET /git-credential/audit?runId=` | control plane | `GATEWAY_CONTROL_TOKEN` |
+
+`get` is the only verb reachable from the container, and it is the only one that
+does **not** take the gateway control token.
+
+### `POST /git-credential/register`
+
+Owned in Rust as `BrokerGrantRegistration` (`credential_broker.rs`) so the two
+halves of the contract cannot drift; the field names are `camelCase` because
+that type *is* the wire shape.
+
+```json
+{
+  "grant": {
+    "tenantId": "tenant-a", "runId": "run-1", "grantId": "grant-1",
+    "repoId": "github:github.com/acme/app",
+    "host": "github.com", "namespace": "acme", "name": "app",
+    "installationId": 4242,
+    "permissions": { "contents": "read", "metadata": "read" },
+    "writeCapable": false, "expiresAtUnix": 1800000900,
+    "delivery": "brokered_per_operation",
+    "credentialFingerprint": "sha256:…"
+  },
+  "capabilityFingerprint": "ee84134b…"
+}
+```
+
+→ `{ "registered": true, "audience": "ferrogate:git-credential:tenant-a:run-1" }`
+
+**The capability itself is never posted here.** The control plane hands the raw
+capability to the container and registers only
+`sha256_hex("<audience>\n<capability>")`
+(`broker_capability_fingerprint` in Rust, `capabilityFingerprint` in
+TypeScript — the same test vector is pinned in both suites). So the gateway can
+check a presented capability but can never mint or replay one, and there is no
+secret on the register request at all.
+
+Mixing the audience in is what binds a capability to one tenant's run: the same
+secret string fingerprints differently for `tenant-b`, or for `run-2`. The
+`audience` field on `BrokerCallbackBinding` is therefore checked, not decorative
+— which it was not in the first cut.
 
 ### `POST /git-credential/get`
 
@@ -91,15 +193,26 @@ anything the broker does not authorize on. The Rust `GitCredentialQuery` has
 **no `password` field**, so a credential cannot ride back into the control
 plane on the request path even if a helper forwards the whole block.
 
+There is no `grant` field. If a caller sends one it is ignored: the grant is
+loaded from the run's Durable Object.
+
 Approved (200):
 
 ```json
-{ "username": "x-access-token", "password": "<installation token>", "expiresAtUnix": 1800000900 }
+{ "username": "x-access-token", "password": "<installation token>",
+  "expiresAtUnix": 1800000900, "operationId": "…" }
 ```
 
 Refused (403): `{ "error": "<deny code>", "detail": "…" }`. The helper renders a
 refusal as an **empty credential block** on stdout, so `git` fails the
-operation rather than prompting or retrying.
+operation rather than prompting or retrying. An unregistered run and a wrong
+capability both answer `unauthorized` — the route must not be an oracle for
+which run ids exist. A malformed body is a 400 (`invalid_json`), never an
+uncaught Worker exception.
+
+`expiresAtUnix` is what the helper is told; it is **not** what bounds the
+token's life. GitHub fixes that at one hour and does not accept a shorter
+request. Revocation is the bound — see below.
 
 Deny codes (`broker_deny_codes` in Rust, `DENY` in TypeScript — they must stay
 in step): `run_mismatch`, `grant_mismatch`, `grant_expired`,
@@ -109,10 +222,27 @@ in step): `run_mismatch`, `grant_mismatch`, `grant_expired`,
 
 ### `POST /git-credential/revoke`
 
-`{ "token": "…" }` → `{ "outcome": "revoked" | "already_expired" | "failed", "code"? }`,
+`{ "runId": "run-1" }` →
+`{ "outcome": "revoked" | "already_expired" | "failed", "code"?, "operationsUsed": n }`,
 mapping onto the #472 `RevocationOutcome`. HTTP 401 from GitHub means the token
 is already dead, which *is* neutralization, so it is reported as
-`already_expired` rather than a failure.
+`already_expired` rather than a failure; `failed` answers 502, because a failed
+revocation is an incident.
+
+It takes a **run id, not a token** — deliberately. The earlier form required the
+caller to present the minted token, which nothing in the system could do, so the
+route had zero possible callers. The Worker holds the run's outstanding token
+itself; `revoke` deletes the grant first (so no further token can ever be
+minted for that run, even if the call to GitHub then fails) and revokes second.
+
+### `GET /git-credential/audit?runId=`
+
+`{ "rows": [ … ], "operationsUsed": n }` — the run's material-free audit rows,
+the TypeScript twin of the Rust `GitCredentialAuditEvent`. One row per callback,
+approve **and** deny, each carrying `tenantId`, `runId`, `grantId`, `repoId`,
+`operation`, `decisionCode`, `sequence`, `occurredAtUnix`, the
+`credentialFingerprint`, and on approval an `operationId`. There is no field a
+token could be written into.
 
 ### `credential.useHttpPath=true` is load-bearing
 
@@ -145,13 +275,37 @@ requestable, so:
   GitHub's hour can only ever be shortened by the grant, never extended.
 
 **Revoke** — `DELETE {api_base}/installation/token`, authenticated *with the
-token being revoked*, 204 on success. It is the `RevocationPoint` on the
-#472 grant, and `CodingRunReceipt` cannot be constructed without a
-`CredentialRevocation`, so "revoked on success and on failure" is a property of
-the type rather than of anyone's care.
+token being revoked*, 204 on success. Because that endpoint needs the token, the
+Worker retains exactly one outstanding token per run in the run's Durable
+Object; it is revoked at two points:
 
-**Budget** — a run gets `DEFAULT_BROKER_OPERATION_BUDGET` (32) callbacks.
-Denials consume budget too; otherwise probing the broker is free.
+- **on supersession** — when the next callback asks for a credential, the
+  previous operation's token is revoked in `ctx.waitUntil`, so a run's tokens do
+  not accumulate and each one's real life is roughly one git operation, not an
+  hour;
+- **at run finalize** — `POST /git-credential/revoke` on the success path and on
+  the failure path.
+
+Honest limits on that claim. `CodingRunReceipt` still cannot be constructed
+without a `CredentialRevocation`, so the *type* forces a receipt — but the Rust
+side only records the outcome; **no Rust production caller drives the revoke
+route yet** (`materialize.rs` records, it does not call). And if the Worker is
+evicted between the mint and a crash of the control plane, the DO copy survives
+eviction (durable storage), but nothing re-drives revocation on its own: there
+is no sweeper. Both gaps are wiring, not design, and both are listed under
+[what still needs deployment](#what-still-needs-deployment-not-provable-here).
+
+**Budget** — a run gets `DEFAULT_BROKER_OPERATION_BUDGET` (32) callbacks, and
+the counter is stored in the run's Durable Object and incremented inside the
+same DO method that authorizes, so concurrent callbacks cannot race past it.
+Denials consume budget too; otherwise probing the broker is free. Both halves
+behave the same way — the TypeScript side used to accept `operationsUsed` from
+the request body and never write it back, which meant the budget was not
+enforced at all.
+
+**Deny-code parity** — ten codes, one list, both languages
+(`broker_deny_codes` in Rust, `DENY` in TypeScript). The TypeScript side was
+missing `delivery_not_brokered`; it is present and tested now.
 
 ## Host-key verification
 
@@ -173,6 +327,18 @@ Pinning means a GitHub key rotation (as in March 2023, when the RSA key was
 replaced) requires editing the constant. That is the cost of verification and
 it is the correct cost.
 
+**How much of this is ON, stated precisely.** `ContainerGitEnvironment::prepare`
+is the single constructor of a container's git environment in this crate: it
+runs `validate_transport_env` and `validate_ssh_hardening` before it will hand
+back a `known_hosts` body, the git config lines, or the callback binding, so the
+checks are unskippable *for anything that builds that environment through
+FerroGate's Rust types*. What it does **not** do is make host-key verification
+on for a deployed run: no production start path constructs one yet, and the
+brokered path is HTTPS-only, so `known_hosts` matters only if a run is ever
+configured for SSH. The earlier text here claimed a bootstrap path that refused
+to start such an instance; there was no such path. The acceptance box stays
+**unmet** until a start path calls this.
+
 ## Credential never reaches logs, run events, or #427 memory
 
 Enforced structurally, not by review:
@@ -182,14 +348,29 @@ Enforced structurally, not by review:
   mint and streams the answer into the helper response. The test
   `no_broker_type_can_render_key_material` renders the broker, the decision and
   the audit event through both `Debug` and serde and asserts no token-shaped
-  material appears.
+  material appears. **Be clear about what that test is worth:** it cannot fail
+  today, because there is no field to leak from — it is a guard against someone
+  adding one, not evidence about a component that ever holds a token.
+- The falsifiable Rust twin is
+  `a_registration_carries_the_fingerprint_and_never_the_capability`: it feeds a
+  real capability string in and asserts it does not come back out of the
+  registration, in `Debug` or in JSON.
 - `GitCredentialAuditEvent` is ids, fingerprints and timestamps only. The
   credential appears as `credential_fingerprint` (`sha256:…` of the `cf://`
-  reference), never as a value or a path.
-- The Worker never logs the minted token, never persists it in the Durable
-  Object, and never returns a GitHub response body in an error — only fixed
-  error strings and status codes, because a GitHub body can echo request
-  material.
+  reference), never as a value or a path. `tenantId` is on every row: the
+  credential path used to bind `run_id` + `grant_id` + `repo_id` only, the same
+  gap flagged on #472's `WriteBackGrant`.
+- On the Worker — the only component that ever holds a token — the token is
+  never logged, never placed on a run event, never returned by `audit`, and
+  never accompanied by a GitHub response body in an error (only fixed error
+  strings and status codes, because a GitHub body can echo request material).
+  `test/git-credential.test.ts` asserts the audit surface the control plane
+  reads back contains no token-shaped material. It **is** retained in the run's
+  Durable Object as the revocation handle — see the accounting table above; the
+  earlier text claimed otherwise and was wrong the moment revocation became
+  real.
+- Not proven here: that no token appears in logs, run events or #427 memory *in
+  a deployed run*. That needs a live Cloudflare deployment.
 
 ---
 
@@ -277,6 +458,25 @@ code change.
 - **Behaviour of `git`'s helper protocol under the pinned container image.**
   The parser follows the documented `key=value` block format; it has not been
   exercised against a real `git` binary in a real Cloudflare Container.
+- **The mint and revoke round trips.** `vitest-pool-workers` 0.18 exposes no
+  outbound fetch mock, so no test here reaches
+  `POST /app/installations/{id}/access_tokens` or
+  `DELETE /installation/token`. Everything up to and including the mint
+  *decision* is tested; the two `fetch` calls themselves are not.
+
+### Verified in this environment
+
+`workers/agent-gateway`: `npx tsc --noEmit` clean, `npx vitest run` 26/26 across
+`test/control.test.ts` (#413) and `test/git-credential.test.ts` (#475).
+`cargo test -p ferrogate-runtime credential_broker`: 37/37. The
+grant-forgery test was watched failing against the pre-rework route before the
+fix was restored.
+
+To reproduce, install with **`npm install --legacy-peer-deps`**, not `npm ci`:
+`package-lock.json` predates the `devDependencies` block (`npm ci` reports
+`Missing: @cloudflare/vitest-pool-workers … from lock file`), and `agents@0.0.109`
+declares an unsatisfiable `react` peer through `@ai-sdk/react`. Regenerating the
+lockfile shifts ~1400 transitive lines and is left to its own slice.
 
 ---
 
@@ -288,27 +488,61 @@ code change.
 2. **The in-container helper binary.** `git_helper_config_lines` names a helper
    command; the helper itself (a ~50-line static binary or shell script that
    reads git's stdin block, POSTs it, and writes `username=`/`password=` back)
-   ships with the coding-agent image and is not in this slice.
-3. **Grant registration in the run's Durable Object.** The Worker route accepts
-   the grant record on the request today; wiring it to the run DO so the hot
-   path needs no round trip is a control-plane slice.
-4. **Live proof of clone + push + revoke**, and the negative test that a token
+   ships with the coding-agent image and is not in this slice. **Until it
+   exists nothing clones**, which is why that acceptance box is unmet.
+3. **A Rust caller for `register` and `revoke`.** The routes exist, are tested,
+   and are the authoritative side of the contract; `BrokerGrantRegistration` is
+   the register body. What is missing is the control-plane code that POSTs them
+   at run start and run finalize. Until then revocation is *performed by the
+   route* but *driven by nobody*.
+4. **A sweeper for orphaned tokens.** If a run is never finalized, its
+   outstanding token survives in the DO until GitHub's hour elapses. A DO alarm
+   or a control-plane reconcile closes that window; neither is in this slice.
+5. **Live proof of clone + push + revoke**, and the negative test that a token
    never appears in logs/run events/memory *in a deployed run* rather than in
    unit tests.
-5. **`tsc`/`vitest` for the new Worker module** — `workers/agent-gateway`
-   has no `node_modules` in this environment, so the TypeScript was not
-   type-checked here.
 
-## What this does NOT settle: the #471 egress tension
+## Egress posture: the #471 decision this slice makes
 
-Moving the credential out of the container removes the exfiltration *target*.
-It does not close the egress hole. If public egress stays open, the agent can
-still reach `api.anthropic.com` directly and bypass metering, guardrails and
-#428 spend caps. The allowlist / proxied-git / detection-only decision in #471
-is still required, and this design constrains it in one useful way: because git
-authenticates through the gateway, the **GatewayProxied** posture is now
-implementable without giving the container a credential — the strongest posture
-became the cheapest one.
+#475 says the egress posture must be *picked and proven*, not assumed. Picked:
+**egress allowlist**, containing the FerroGate gateway and `github.com`, and
+nothing else. Not `enableInternet = true`, and not detection-only.
+
+Why the allowlist and not the alternatives:
+
+- **Proxied git** (tunnelling the git transport through the gateway) would be
+  strictly stronger, and brokering makes it *possible* — the container needs no
+  credential to talk to a proxy. It is rejected here only on cost: it means
+  implementing the git smart-HTTP protocol in a Worker, and it buys little once
+  the credential is already gone and every authentication is audited.
+- **Detection-only** is explicitly the weakest option in the issue and is
+  rejected: it reconciles after the fact rather than preventing.
+
+What the platform actually enforces, from the code rather than from intent:
+
+- `AgentSandbox` pins `enableInternet = false` (`workers/agent-gateway/src/index.ts`).
+  Cloudflare enforces this **outside** the container, so code inside — including
+  model-authored code — cannot switch it back on.
+- `/container/start` rejects `enableInternet: true` / `directPublicEgress: true`
+  unconditionally, rejects wildcards, rejects any host outside
+  `CONTAINER_GOVERNED_EGRESS_HOSTS`, and rejects LLM-provider hostnames outright
+  (`validateEgressAllowlist`, `container.ts`). Unset or empty
+  `CONTAINER_GOVERNED_EGRESS_HOSTS` means **sealed**, not open.
+- `github.com` is a bare hostname and is not on the provider denylist, so an
+  operator can authorize it; the gateway host must be authorized too, or the
+  credential helper cannot call back.
+
+So the deployment posture is: `CONTAINER_GOVERNED_EGRESS_HOSTS =
+"<gateway host>,github.com"`, and a run's `egressAllowlist` naming exactly
+those two. `api.anthropic.com` and friends are unreachable by construction —
+that is the #471 property.
+
+**What is still unproven:** that Cloudflare's `setAllowedHosts` blocks a
+determined process inside a real container in production. That is a live
+platform claim, it is derived here from Cloudflare's Containers "Handle
+outbound traffic" documentation and from the code path, and it needs a deployed
+run to become evidence. This slice therefore *chooses and encodes* a posture; it
+does not yet *prove enforcement*.
 
 ## Related
 
@@ -319,4 +553,5 @@ became the cheapest one.
   (`docs/cloudflare-secrets-tenancy.md`).
 - #415 — container isolation and deny-by-default egress
   (`docs/cloudflare-container-isolation.md`).
-- #471 — egress posture; unresolved and still required.
+- #471 — egress posture; this slice picks the **allowlist** option and encodes
+  it, but platform enforcement is still unproven in a deployed run.

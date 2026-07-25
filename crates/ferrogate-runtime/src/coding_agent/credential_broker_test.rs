@@ -15,6 +15,9 @@ use crate::ActingPrincipal;
 
 const NOW: u64 = 1_800_000_000;
 
+/// Every record on the credential path is attributable to a tenant (#472 gap).
+const TENANT: &str = "tenant-a";
+
 fn principal() -> ActingPrincipal {
     ActingPrincipal {
         subject: "api-key-1".to_string(),
@@ -54,6 +57,7 @@ fn token_request(scope: &RepoCredentialScope) -> InstallationTokenRequest {
 fn grant(scope: RepoCredentialScope) -> RepoCredentialGrant {
     let binding = BrokerCallbackBinding::new(
         "https://gateway.example.com/git-credential",
+        TENANT,
         "run-1",
         "grant-1",
     )
@@ -74,14 +78,14 @@ fn grant(scope: RepoCredentialScope) -> RepoCredentialGrant {
 fn read_only_broker() -> GitCredentialBroker {
     let scope = RepoCredentialScope::read_only(&repo());
     let request = token_request(&scope);
-    GitCredentialBroker::bind(repo(), grant(scope), request).expect("broker")
+    GitCredentialBroker::bind(TENANT, repo(), grant(scope), request).expect("broker")
 }
 
 fn write_broker() -> GitCredentialBroker {
     let write_grant = write_back_grant(WriteBackOperation::PushBranch);
     let scope = RepoCredentialScope::with_write_back(&repo(), &write_grant).expect("scope");
     let request = token_request(&scope);
-    GitCredentialBroker::bind(repo(), grant(scope), request).expect("broker")
+    GitCredentialBroker::bind(TENANT, repo(), grant(scope), request).expect("broker")
 }
 
 fn callback(operation: GitOperation, stdin: &str) -> GitCredentialCallback {
@@ -268,7 +272,7 @@ fn refuses_to_broker_a_file_delivered_grant() {
         token_request(&scope).revocation_point(),
     )
     .expect("grant");
-    let error = GitCredentialBroker::bind(repo(), file_grant, token_request(&scope))
+    let error = GitCredentialBroker::bind(TENANT, repo(), file_grant, token_request(&scope))
         .expect_err("must refuse");
     assert!(format!("{error}").contains("brokered_per_operation"));
 }
@@ -280,7 +284,8 @@ fn refuses_a_grant_scoped_to_another_repo() {
     let request =
         InstallationTokenRequest::for_scope("https://api.github.com", 4242, &other, &scope)
             .expect("token request");
-    let error = GitCredentialBroker::bind(repo(), grant(scope), request).expect_err("must refuse");
+    let error =
+        GitCredentialBroker::bind(TENANT, repo(), grant(scope), request).expect_err("must refuse");
     assert!(format!("{error}").contains("scoped to"));
 }
 
@@ -382,10 +387,20 @@ fn helper_config_forces_the_repo_path_onto_every_callback() {
 
 // ---- nothing here can carry key material -------------------------------
 
-/// Structural proof for the "credential must never reach logs, run events, or
-/// #427 memory" requirement: render every type on the approve path through both
-/// `Debug` and serde and assert no token-shaped material can appear, because
-/// none of them has a field to hold one.
+/// Regression guard for the "credential must never reach logs, run events, or
+/// #427 memory" requirement on the Rust half: render every type on the approve
+/// path through `Debug` and serde and assert no token-shaped material appears.
+///
+/// Read this for what it is. It cannot fail *today*, because none of these
+/// types has a field a token could be written into — that is the property, and
+/// the test is what makes adding such a field a red build rather than a review
+/// catch. It proves nothing about the component that actually holds a token,
+/// which is the Worker; the tests that cover that are in
+/// `workers/agent-gateway/test/git-credential.test.ts`, where the audit surface
+/// the control plane reads back is asserted to be material-free. The genuinely
+/// falsifiable Rust twin is
+/// `a_registration_carries_the_fingerprint_and_never_the_capability`, which
+/// feeds a real secret in and asserts it does not come back out.
 #[test]
 fn no_broker_type_can_render_key_material() {
     let mut broker = write_broker();
@@ -417,11 +432,12 @@ fn no_broker_type_can_render_key_material() {
 fn callback_binding_projects_onto_the_contract_delivery() {
     let binding = BrokerCallbackBinding::new(
         "https://gateway.example.com/git-credential/",
+        TENANT,
         "run-1",
         "g-1",
     )
     .expect("binding");
-    assert_eq!(binding.audience, "ferrogate:git-credential:run-1");
+    assert_eq!(binding.audience, "ferrogate:git-credential:tenant-a:run-1");
     assert_eq!(
         binding.delivery(),
         CredentialDelivery::BrokeredPerOperation {
@@ -433,5 +449,187 @@ fn callback_binding_projects_onto_the_contract_delivery() {
 
 #[test]
 fn callback_binding_refuses_plaintext_broker_url() {
-    assert!(BrokerCallbackBinding::new("http://gateway.example.com", "run-1", "g-1").is_err());
+    assert!(
+        BrokerCallbackBinding::new("http://gateway.example.com", TENANT, "run-1", "g-1").is_err()
+    );
+}
+
+// ---- the run-scoped callback capability --------------------------------
+
+/// The gateway stores a FINGERPRINT of the run's capability, never the
+/// capability. Rust computes it here and TypeScript computes it in
+/// `capabilityFingerprint`; if the two ever disagree no capability verifies, so
+/// the expected value is pinned as a literal in BOTH suites (the TS twin is
+/// `workers/agent-gateway/test/git-credential.test.ts`).
+#[test]
+fn capability_fingerprint_matches_the_worker_derivation() {
+    let audience = broker_audience(TENANT, "run-1");
+    assert_eq!(audience, "ferrogate:git-credential:tenant-a:run-1");
+    assert_eq!(
+        broker_capability_fingerprint(&audience, "0123456789abcdef0123456789abcdef"),
+        "ee84134bacdd989b5ebaa6cabb4e28b5d73279590d78de0f63d94019ec443719"
+    );
+}
+
+/// The audience is mixed in, so the SAME secret string fingerprints differently
+/// for another tenant or another run. That is what stops a capability lifted
+/// out of one container from authenticating another run.
+#[test]
+fn the_same_secret_is_a_different_capability_in_another_run() {
+    let secret = "0123456789abcdef0123456789abcdef";
+    let mine = broker_capability_fingerprint(&broker_audience(TENANT, "run-1"), secret);
+    assert_ne!(
+        mine,
+        broker_capability_fingerprint(&broker_audience(TENANT, "run-2"), secret)
+    );
+    assert_ne!(
+        mine,
+        broker_capability_fingerprint(&broker_audience("tenant-b", "run-1"), secret)
+    );
+}
+
+#[test]
+fn a_registration_carries_the_fingerprint_and_never_the_capability() {
+    let scope = RepoCredentialScope::read_only(&repo());
+    let capability = "0123456789abcdef0123456789abcdef";
+    let binding = BrokerCallbackBinding::new(
+        "https://gateway.example.com/git-credential",
+        TENANT,
+        "run-1",
+        "grant-1",
+    )
+    .expect("binding");
+    let registration = BrokerGrantRegistration::build(
+        &binding,
+        &repo(),
+        &grant(scope.clone()),
+        &token_request(&scope),
+        capability,
+    )
+    .expect("registration");
+
+    assert_eq!(registration.grant.tenant_id, TENANT);
+    assert_eq!(registration.grant.delivery, "brokered_per_operation");
+    assert_eq!(registration.grant.installation_id, 4242);
+    assert!(!registration.grant.write_capable);
+    assert_eq!(
+        registration.capability_fingerprint,
+        binding.capability_fingerprint(capability)
+    );
+    // The whole point: the secret is not recoverable from what was registered.
+    let rendered = format!(
+        "{registration:?}{}",
+        serde_json::to_string(&registration).expect("registration json")
+    );
+    assert!(!rendered.contains(capability));
+    // camelCase, because this type IS the Worker's wire shape.
+    let wire = serde_json::to_value(&registration).expect("wire");
+    assert!(wire["capabilityFingerprint"].is_string());
+    assert!(wire["grant"]["installationId"].is_number());
+}
+
+#[test]
+fn a_registration_refuses_a_low_entropy_capability() {
+    let scope = RepoCredentialScope::read_only(&repo());
+    let binding = BrokerCallbackBinding::new(
+        "https://gateway.example.com/git-credential",
+        TENANT,
+        "run-1",
+        "grant-1",
+    )
+    .expect("binding");
+    assert!(BrokerGrantRegistration::build(
+        &binding,
+        &repo(),
+        &grant(scope.clone()),
+        &token_request(&scope),
+        "short",
+    )
+    .is_err());
+}
+
+#[test]
+fn a_broker_must_be_bound_to_a_tenant() {
+    let scope = RepoCredentialScope::read_only(&repo());
+    let request = token_request(&scope);
+    assert!(GitCredentialBroker::bind("  ", repo(), grant(scope), request).is_err());
+}
+
+#[test]
+fn the_audit_event_and_the_lease_are_attributable_to_a_tenant() {
+    let mut broker = read_only_broker();
+    let (decision, event) = broker.authorize(&callback(GitOperation::Fetch, GRANTED_STDIN), NOW);
+    assert_eq!(event.tenant_id, TENANT);
+    assert_eq!(decision.lease().expect("lease").tenant_id, TENANT);
+}
+
+// ---- the container git environment -------------------------------------
+
+fn callback_binding() -> BrokerCallbackBinding {
+    BrokerCallbackBinding::new(
+        "https://gateway.example.com/git-credential",
+        TENANT,
+        "run-1",
+        "grant-1",
+    )
+    .expect("binding")
+}
+
+#[test]
+fn the_container_git_environment_pins_host_keys_and_the_helper() {
+    let prepared = ContainerGitEnvironment::prepare(
+        callback_binding(),
+        "/usr/local/bin/ferrogate-git-credential",
+        "github.com",
+        "Host *\n  StrictHostKeyChecking yes\n",
+        ["PATH", "HOME"],
+    )
+    .expect("environment");
+    assert_eq!(prepared.known_hosts_path, "/etc/ssh/ssh_known_hosts");
+    assert_eq!(prepared.known_hosts.lines().count(), 3);
+    assert!(prepared
+        .git_config
+        .iter()
+        .any(|line| line == "credential.useHttpPath=true"));
+    assert!(prepared
+        .git_config
+        .iter()
+        .any(|line| line.contains("ferrogate-git-credential")));
+}
+
+/// The claim this replaces used to be "the bootstrap path refuses to start an
+/// instance whose environment contains any of them" — with no bootstrap path.
+/// There is one now, and these are the refusals it performs.
+#[test]
+fn the_container_git_environment_refuses_weakened_verification() {
+    for env in [
+        vec!["PATH", "GIT_SSL_NO_VERIFY"],
+        vec!["SSH_ASKPASS"],
+        vec!["git_ssh_variant"],
+    ] {
+        assert!(ContainerGitEnvironment::prepare(
+            callback_binding(),
+            "/usr/local/bin/helper",
+            "github.com",
+            "",
+            env.clone(),
+        )
+        .is_err());
+    }
+    assert!(ContainerGitEnvironment::prepare(
+        callback_binding(),
+        "/usr/local/bin/helper",
+        "github.com",
+        "Host github.com\n  StrictHostKeyChecking accept-new\n",
+        ["PATH"],
+    )
+    .is_err());
+    assert!(ContainerGitEnvironment::prepare(
+        callback_binding(),
+        "   ",
+        "github.com",
+        "",
+        ["PATH"],
+    )
+    .is_err());
 }

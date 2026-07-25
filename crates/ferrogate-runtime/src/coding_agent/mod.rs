@@ -141,10 +141,11 @@ pub use bootstrap::{
     GovernedLlmEgress, TaskBrief, UnenforcedEgressAcknowledgement,
 };
 pub use credential_broker::{
-    broker_deny_codes, git_helper_config_lines, github_known_hosts, validate_ssh_hardening,
-    validate_transport_env, BrokerCallbackBinding, BrokerDecision, BrokeredCredentialLease,
-    GitCredentialAuditEvent, GitCredentialBroker, GitCredentialCallback, GitCredentialQuery,
-    GitOperation, InstallationTokenRequest, DEFAULT_BROKER_OPERATION_BUDGET,
+    broker_audience, broker_capability_fingerprint, broker_deny_codes, git_helper_config_lines,
+    github_known_hosts, validate_ssh_hardening, validate_transport_env, BrokerCallbackBinding,
+    BrokerDecision, BrokerGrantRecord, BrokerGrantRegistration, BrokeredCredentialLease,
+    ContainerGitEnvironment, GitCredentialAuditEvent, GitCredentialBroker, GitCredentialCallback,
+    GitCredentialQuery, GitOperation, InstallationTokenRequest, DEFAULT_BROKER_OPERATION_BUDGET,
     FORBIDDEN_TRANSPORT_ENV, GITHUB_INSTALLATION_TOKEN_TTL_SECS, GITHUB_SSH_HOST_KEYS,
     INSTALLATION_TOKEN_USERNAME,
 };
