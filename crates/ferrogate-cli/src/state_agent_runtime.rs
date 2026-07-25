@@ -1590,6 +1590,44 @@ impl AppState {
             .find(|dispatch| dispatch.action == action)
     }
 
+    /// #503: the worker_id currently (or ever) holding the lease on `run_id`'s
+    /// `action` dispatch, if any -- the run-state bridge's ownership proof.
+    ///
+    /// Deliberately NOT built on [`AppState::self_hosted_dispatch_for_run`]'s
+    /// durable fallback: that fallback filters out an already-acknowledged
+    /// dispatch (correct for its own use, cancel-derivation, where nothing is
+    /// left to re-derive a cancel from), but a worker acks its `StartRun` lease
+    /// almost immediately after taking it and then keeps reporting telemetry
+    /// for the run's entire execution -- excluding acked rows here would
+    /// reject every legitimate in-flight report, not just forged ones.
+    ///
+    /// `None` means either the run has no `action` dispatch at all (a run
+    /// created through a non-worker path) or the dispatch exists but has not
+    /// yet been leased to any worker; both must be treated as "no owner", not
+    /// "any worker may act."
+    fn self_hosted_dispatch_lease_owner(
+        &self,
+        run_id: &str,
+        action: SelfHostedRunAction,
+    ) -> Option<String> {
+        let records = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.run_records(),
+            Err(poisoned) => poisoned.into_inner().queue.run_records(),
+        };
+        if let Some(record) = records
+            .iter()
+            .find(|record| record.dispatch.run_id == run_id && record.dispatch.action == action)
+        {
+            return record.assigned_worker_id.clone();
+        }
+        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
+            .into_iter()
+            .find(|record| {
+                record.run_id == run_id && record.action == self_hosted_run_action_as_str(action)
+            })
+            .and_then(|record| record.assigned_worker_id)
+    }
+
     /// #474 (rework): project a worker-reported run state onto the canonical
     /// `agent_runs` row, closing the worker -> gateway gap that made the async
     /// job protocol's collect verb inert.
@@ -1601,12 +1639,15 @@ impl AppState {
     /// `409 agent_job_not_terminal` permanently. Worker telemetry now advances
     /// the same row it describes.
     ///
-    /// Trust boundary: the report is only applied when the run row exists AND
-    /// belongs to the SAME tenant as the reporting worker's registration, so a
-    /// worker can never terminalize (or write output onto) another tenant's
-    /// run by naming its id. A run that is already terminal is never re-opened
-    /// or overwritten -- the first terminal state wins, so a late/duplicate
-    /// report cannot rewrite a collected result.
+    /// Trust boundary: the report is only applied when the run row exists,
+    /// belongs to the SAME tenant as the reporting worker's registration, AND
+    /// (#503) the reporting worker holds the run's `StartRun` dispatch lease
+    /// -- so a worker can never terminalize (or write output onto) a run it
+    /// was never dispatched to, whether that run belongs to another tenant, a
+    /// sibling worker in its own tenant, or was created through a non-worker
+    /// path with no dispatch at all. A run that is already terminal is never
+    /// re-opened or overwritten -- the first terminal state wins, so a
+    /// late/duplicate report cannot rewrite a collected result.
     ///
     /// Returns the newly recorded status when the row moved, `None` when the
     /// report carried nothing actionable (nothing is ever fabricated).
@@ -1626,6 +1667,23 @@ impl AppState {
             warn!(
                 run_id,
                 "self-hosted worker reported state for an agent run owned by another tenant; \
+                 the report was stored as telemetry but NOT applied to the run"
+            );
+            return None;
+        }
+        // #503: tenant match alone is not lease ownership -- any worker in the
+        // tenant could otherwise terminalize (or attach output to) a run it was
+        // never dispatched to. Require the reporting worker to hold the run's
+        // StartRun lease; a run with no dispatch, or one leased to nobody or to
+        // a different worker, must reject the report just like a cross-tenant
+        // one does.
+        let leased_worker_id =
+            self.self_hosted_dispatch_lease_owner(run_id, SelfHostedRunAction::StartRun);
+        if leased_worker_id.as_deref() != Some(event.worker_id.as_str()) {
+            warn!(
+                run_id,
+                worker_id = %event.worker_id,
+                "self-hosted worker reported state for a run it does not hold the lease for; \
                  the report was stored as telemetry but NOT applied to the run"
             );
             return None;
