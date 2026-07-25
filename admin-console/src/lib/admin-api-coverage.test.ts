@@ -1,0 +1,462 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { APP_ROUTES } from "@/lib/app-routes";
+import { RESOURCE_ROUTES } from "@/resources";
+
+// Console <-> Admin API control-plane coverage gate (#463, epic #313).
+//
+// Epic #313's acceptance box 1 — "every Admin API control-plane group in the
+// contract has a console page (or a documented deliberate exclusion)" — was a
+// ONE-TIME manual gap analysis with nothing re-checking it, so a new
+// `/admin/v1/<group>` could land without any operator surface and nobody would
+// notice. This is the console counterpart of the Rust parity gate
+// (`openapi_operations_are_covered_or_reviewed` in `ferrogate-cli-core`, whose
+// `REVIEWED_EXCLUSIONS` discipline — owner + specific reason, never a rubber
+// stamp — is mirrored below).
+//
+// WHERE COVERAGE COMES FROM
+// -------------------------
+// Nothing here duplicates a hand-written list of console pages. Coverage is
+// DERIVED from the console's own sources of truth, so it cannot drift:
+//
+//   1. the generic resource registry — `RESOURCE_ROUTES`, each entry carrying
+//      the `basePath` it actually calls (e.g. `/admin/v1/providers`) and the
+//      route it is mounted at; and
+//   2. the bespoke pages — parsed out of the ROUTER (`src/App.tsx`): every
+//      `<Route path={APP_ROUTES.x} element={routeElement(YPage)} />` is paired
+//      with the `@/pages/<file>` its component lazily imports, and that page's
+//      source is scanned for the `/admin/v1/<group>` endpoints it calls.
+//
+// Deriving from real call sites (rather than matching kebab names) is what
+// makes the gate honest: a group counts as covered only when a REGISTERED route
+// leads to code that actually talks to that group's endpoints.
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const consoleRoot = path.resolve(testDir, "..", "..");
+// Same relative hop as `scripts/check-api-types-drift.mjs`: the committed
+// contract lives at <repo-root>/docs/openapi/admin-api.openapi.json.
+const specPath = path.join(consoleRoot, "..", "docs", "openapi", "admin-api.openapi.json");
+const appTsxPath = path.join(consoleRoot, "src", "App.tsx");
+const pagesDir = path.join(consoleRoot, "src", "pages");
+
+const ADMIN_V1_PREFIX = "/admin/v1/";
+
+/** A console surface that serves one or more Admin API control-plane groups. */
+interface ConsoleSurface {
+  /** How the surface is built: generic CRUD registry vs a hand-written page. */
+  kind: "resource-registry" | "bespoke-page";
+  /** The route it is mounted at (proven registered, not assumed). */
+  route: string;
+  /** Registry resource key, or `src/pages/<file>.tsx` for a bespoke page. */
+  source: string;
+}
+
+/**
+ * A reviewed decision that a control-plane group carries NO console surface.
+ * Mirrors the Rust gate's `ReviewedExclusion`: an entry removes the group from
+ * the gap set, so it must name an owner and a specific reason. "Not needed" is
+ * not a reason; a deferral must say what the eventual UI is and where it is
+ * tracked.
+ */
+interface DeliberateExclusion {
+  owner: string;
+  reason: string;
+}
+
+const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
+  // Read-only cost-burn rollup (#428 slice B-surface): GET-only, no write verbs,
+  // and it renders the SAME per-tenant billing period the wallets + metering
+  // cockpit already owns. A standalone page would strand it away from the spend
+  // controls operators act on, so the surface is deferred until the billing/ops
+  // cockpit grows its per-agent spend panel next to `/app/wallets` and
+  // `/app/metering`. Deferred, needs UI — tracked on the #313 chain as the
+  // #428 cost-governance follow-up.
+  "agent-cost-burn": {
+    owner: "billing/ops cockpit (#428 follow-up, #313 chain)",
+    reason:
+      "read-only per-agent cost-burn rollup for a billing period; its operator UI belongs as a spend panel inside the existing wallets/metering cockpit rather than a standalone page — deferred, needs UI",
+  },
+  // Unattributed ("Unknown" virtual-key) agent activity: a read-only triage
+  // correlation list consumed today through `ferrogate ctl
+  // observed-agent-activity list` during incident/attribution work. Its natural
+  // console home is an "unattributed activity" view alongside `/app/agent-runs`,
+  // not a page of its own; until that lands it stays operator/CLI-only.
+  // Deferred, needs UI — #313 chain, agent-observability item.
+  "observed-agent-activity": {
+    owner: "agent observability (#313 chain)",
+    reason:
+      "read-only unattributed-agent-activity correlation list used for CLI/operator triage; belongs as an 'unattributed' view on the agent-runs page — deferred, needs UI",
+  },
+  // Legacy compatibility read: `/admin/v1/tenants` lists tenant references
+  // DERIVED from API-key configuration, not durable records — there is nothing
+  // to create, edit or delete. The console already renders the durable tenant
+  // registry (`/admin/v1/tenant-accounts`) at `/app/tenants`, so a page here
+  // would duplicate that route with a strictly weaker, non-editable dataset.
+  tenants: {
+    owner: "tenancy (superseded by tenant-accounts)",
+    reason:
+      "derived-from-API-key-config compatibility read with no durable records; the console renders the authoritative tenant-accounts registry at /app/tenants instead",
+  },
+};
+
+/**
+ * Groups whose console surface is deliberately NOT named after the API group.
+ * The gate does not need this map to compute coverage (coverage is derived from
+ * real call sites) — it exists so every divergence between the contract's
+ * vocabulary and the operator-facing IA is written down and VERIFIED: each
+ * entry is asserted against the surface actually resolved, so a rename on
+ * either side fails the test instead of silently rotting a comment.
+ */
+const EXPECTED_NON_IDENTITY_SURFACES: Readonly<Record<string, { source: string; why: string }>> =
+  {
+    // The console's tenant IA is keyed on the durable registry, and the generic
+    // resource is named after the API group it calls, not the route it mounts.
+    "self-hosted-worker-records": {
+      source: "self-hosted-workers",
+      why: "durable worker records are the data behind the operator-facing 'self-hosted workers' resource; the record/registration split is an API detail",
+    },
+    // `/app/api-keys` is taken by the bespoke virtual-keys page (the operator's
+    // primary key surface), so the native api-keys CRUD mounts at a distinct
+    // route rather than renaming the API group.
+    "api-keys": {
+      source: "api-keys-native",
+      why: "native API keys mount at /app/api-keys-native because /app/api-keys is the bespoke virtual-keys page",
+    },
+    // Provider fleet health is one operator screen; the three reads that feed it
+    // (health, catalogued models, adapters, extensions) are separate API groups.
+    "provider-models": {
+      source: "ops-provider-health",
+      why: "provider catalogue read feeding the single provider-health ops screen",
+    },
+    "framework-adapters": {
+      source: "ops-provider-health",
+      why: "adapter inventory read feeding the single provider-health ops screen",
+    },
+    extensions: {
+      source: "ops-provider-health",
+      why: "extension inventory read feeding the single provider-health ops screen",
+    },
+    // The dashboard IS the overview endpoint's page; naming it 'overview' would
+    // duplicate the app root.
+    overview: {
+      source: "dashboard",
+      why: "the overview read backs the /app dashboard landing page",
+    },
+    // Billing IA groups the metering reads onto one page, and the outbox
+    // dead-letter queue is presented as 'billing dead letters'.
+    "metering-events": {
+      source: "billing-metering",
+      why: "metering reads are consolidated onto one billing metering page",
+    },
+    "metering-export-status": {
+      source: "billing-metering",
+      why: "metering reads are consolidated onto one billing metering page",
+    },
+    "usage-aggregates": {
+      source: "billing-metering",
+      why: "metering reads are consolidated onto one billing metering page",
+    },
+    "billing-outbox-dead-letters": {
+      source: "billing-dead-letters",
+      why: "the outbox implementation detail is dropped from the operator-facing page name",
+    },
+    // Ops screens are namespaced under an 'ops-' prefix in the page layer.
+    config: { source: "ops-config", why: "gateway config reload/validate lives under the ops IA" },
+    drain: { source: "ops-drain", why: "drain control lives under the ops IA" },
+    status: { source: "ops-status", why: "gateway status lives under the ops IA" },
+    observability: {
+      source: "ops-observability",
+      why: "observability snapshot lives under the ops IA",
+    },
+    "gateway-configs": {
+      source: "ops-gateway-configs",
+      why: "gateway config profiles live under the ops IA",
+    },
+    "provider-health": {
+      source: "ops-provider-health",
+      why: "provider health lives under the ops IA",
+    },
+    "request-log-exports": {
+      source: "ops-observability",
+      why: "log export jobs are driven from the observability ops screen",
+    },
+    // Remaining renames: catalogue/cockpit page names that read better than the
+    // API group name.
+    tools: { source: "tools-catalog", why: "the tools read renders the tool catalogue page" },
+    wallets: { source: "billing-wallets", why: "wallets are part of the billing cockpit IA" },
+    "payment-methods": {
+      source: "billing-payment-methods",
+      why: "payment methods are part of the billing cockpit IA",
+    },
+    "self-hosted-runs": {
+      source: "self-hosted-runs",
+      why: "identity page name, but mounted under the /app/workers/* IA rather than /app/self-hosted-runs",
+    },
+  };
+
+// ---------------------------------------------------------------------------
+// Pure helpers — the gate's logic, testable against synthetic input so we can
+// prove it FAILS when it should without touching the real contract.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every distinct control-plane group in the contract: the first path segment
+ * after `/admin/v1/`. `/admin/v1/guardrail-policies/{id}/activate` -> `guardrail-policies`.
+ */
+export function extractControlPlaneGroups(specJson: string): string[] {
+  const spec = JSON.parse(specJson) as { paths?: Record<string, unknown> };
+  const groups = new Set<string>();
+  for (const apiPath of Object.keys(spec.paths ?? {})) {
+    const group = controlPlaneGroupOf(apiPath);
+    if (group) groups.add(group);
+  }
+  return [...groups].sort();
+}
+
+function controlPlaneGroupOf(apiPath: string): string | undefined {
+  if (!apiPath.startsWith(ADMIN_V1_PREFIX)) return undefined;
+  const segment = apiPath.slice(ADMIN_V1_PREFIX.length).split("/")[0];
+  // `{tenant_id}` style templates are never a group name.
+  if (!segment || segment.startsWith("{")) return undefined;
+  return segment;
+}
+
+/** Groups with neither a console surface nor a reviewed exclusion. */
+export function findUncoveredGroups(
+  groups: readonly string[],
+  surfaces: ReadonlyMap<string, ConsoleSurface>,
+  exclusions: Readonly<Record<string, DeliberateExclusion>>,
+): string[] {
+  return groups.filter((group) => !surfaces.has(group) && !(group in exclusions)).sort();
+}
+
+/** Exclusions that no longer match any contract group (the map has rotted). */
+export function findStaleExclusions(
+  groups: readonly string[],
+  exclusions: Readonly<Record<string, DeliberateExclusion>>,
+): string[] {
+  const contract = new Set(groups);
+  return Object.keys(exclusions)
+    .filter((group) => !contract.has(group))
+    .sort();
+}
+
+/** Exclusions that DID get a console surface and should now be deleted. */
+export function findObsoleteExclusions(
+  surfaces: ReadonlyMap<string, ConsoleSurface>,
+  exclusions: Readonly<Record<string, DeliberateExclusion>>,
+): string[] {
+  return Object.keys(exclusions)
+    .filter((group) => surfaces.has(group))
+    .sort();
+}
+
+// ---------------------------------------------------------------------------
+// Coverage resolution from the console's own sources of truth.
+// ---------------------------------------------------------------------------
+
+/** Generic CRUD resources: each registered route declares the group it calls. */
+function resolveRegistrySurfaces(): Map<string, ConsoleSurface> {
+  const surfaces = new Map<string, ConsoleSurface>();
+  for (const route of RESOURCE_ROUTES) {
+    const group = controlPlaneGroupOf(route.config.basePath);
+    if (!group) continue;
+    surfaces.set(group, {
+      kind: "resource-registry",
+      route: route.path,
+      source: route.config.key,
+    });
+  }
+  return surfaces;
+}
+
+/** Bespoke pages, read out of the router: route path -> `pages/<file>` name. */
+function resolveRegisteredBespokePages(): Map<string, string> {
+  const app = readFileSync(appTsxPath, "utf8");
+  const componentToPage = new Map<string, string>();
+  for (const match of app.matchAll(
+    /const (\w+) = lazy\(\(\) => import\("@\/pages\/([\w-]+)"\)\)/g,
+  )) {
+    componentToPage.set(match[1], match[2]);
+  }
+  const pageToRoute = new Map<string, string>();
+  for (const match of app.matchAll(
+    /path=\{APP_ROUTES\.(\w+)\}[\s\S]{0,160}?routeElement\((\w+)\)/g,
+  )) {
+    const routeKey = match[1] as keyof typeof APP_ROUTES;
+    const page = componentToPage.get(match[2]);
+    const route = APP_ROUTES[routeKey];
+    // Keep the shallowest route for a page reached by several paths.
+    if (page && route && !pageToRoute.has(page)) pageToRoute.set(page, route);
+  }
+  return pageToRoute;
+}
+
+/** The `/admin/v1/<group>` endpoints a page's source actually calls. */
+function groupsCalledBy(pageFile: string): string[] {
+  const source = readFileSync(path.join(pagesDir, `${pageFile}.tsx`), "utf8");
+  const groups = new Set<string>();
+  for (const match of source.matchAll(/["'`]\/admin\/v1\/([\w-]+)/g)) groups.add(match[1]);
+  return [...groups];
+}
+
+function resolveConsoleSurfaces(): Map<string, ConsoleSurface> {
+  const surfaces = resolveRegistrySurfaces();
+  // Deterministic order so a group served by several pages always resolves to
+  // the same surface regardless of router edit order.
+  const pages = [...resolveRegisteredBespokePages().entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  for (const [page, route] of pages) {
+    for (const group of groupsCalledBy(page)) {
+      // The generic registry wins: it is the declared owner of its basePath.
+      if (surfaces.has(group)) continue;
+      surfaces.set(group, { kind: "bespoke-page", route, source: page });
+    }
+  }
+  return surfaces;
+}
+
+const contractGroups = extractControlPlaneGroups(readFileSync(specPath, "utf8"));
+const consoleSurfaces = resolveConsoleSurfaces();
+
+describe("Admin API control-plane groups (contract)", () => {
+  it("parses a non-trivial set of groups out of the committed contract", () => {
+    // A parsing regression that silently yielded {} would make the gate vacuous.
+    expect(contractGroups.length).toBeGreaterThan(40);
+    expect(contractGroups).toContain("guardrail-policies");
+    expect(contractGroups).toContain("agent-cost-burn");
+    expect(contractGroups.every((group) => /^[a-z][a-z0-9-]*$/.test(group))).toBe(true);
+  });
+
+  it("takes the first segment after /admin/v1/ as the group", () => {
+    const spec = JSON.stringify({
+      paths: {
+        "/admin/v1/guardrail-policies/{id}/activate": {},
+        "/admin/v1/guardrail-policies": {},
+        "/admin/v1/wallets/{tenant_id}/ledger": {},
+        "/v1/chat/completions": {},
+        "/healthz": {},
+        "/admin/v1/": {},
+      },
+    });
+    expect(extractControlPlaneGroups(spec)).toEqual(["guardrail-policies", "wallets"]);
+  });
+});
+
+describe("console coverage of the Admin API control plane (#313 acceptance box 1)", () => {
+  it("resolves surfaces only from registered routes and real page files", () => {
+    for (const [group, surface] of consoleSurfaces) {
+      expect(surface.route, `group ${group} resolved to an empty route`).toMatch(/^\/app/);
+      if (surface.kind === "bespoke-page") {
+        // Prove the page exists on disk — never trust the router text alone.
+        expect(
+          existsSync(path.join(pagesDir, `${surface.source}.tsx`)),
+          `group ${group} maps to missing page src/pages/${surface.source}.tsx`,
+        ).toBe(true);
+        expect(Object.values(APP_ROUTES)).toContain(surface.route);
+      } else {
+        expect(RESOURCE_ROUTES.map((route) => route.path)).toContain(surface.route);
+      }
+    }
+    // Both discovery mechanisms must contribute, or one silently broke.
+    const kinds = [...consoleSurfaces.values()].map((surface) => surface.kind);
+    expect(kinds.filter((kind) => kind === "resource-registry").length).toBeGreaterThan(15);
+    expect(kinds.filter((kind) => kind === "bespoke-page").length).toBeGreaterThan(15);
+  });
+
+  it("covers every control-plane group with a console surface or a reviewed exclusion", () => {
+    const uncovered = findUncoveredGroups(contractGroups, consoleSurfaces, DELIBERATE_EXCLUSIONS);
+    expect(
+      uncovered,
+      `Admin API control-plane group(s) with no console surface: ${uncovered.join(", ")}.\n` +
+        "Add a console page (a generic resource in src/resources/index.ts, or a bespoke page " +
+        "registered in src/App.tsx that calls the group's /admin/v1/<group> endpoints), or add a " +
+        "DELIBERATE_EXCLUSIONS entry in this file naming an owner and a SPECIFIC reason " +
+        "(see epic #313 acceptance box 1).",
+    ).toEqual([]);
+  });
+
+  it("fails when a new control-plane group has neither a surface nor an exclusion", () => {
+    // The negative case: a synthetic group proves the gate is not vacuous,
+    // without mutating the committed contract.
+    const synthetic = [...contractGroups, "brand-new-thing"];
+    expect(
+      findUncoveredGroups(synthetic, consoleSurfaces, DELIBERATE_EXCLUSIONS),
+    ).toEqual(["brand-new-thing"]);
+    // ...and it passes again once the group is owned, either way.
+    expect(
+      findUncoveredGroups(synthetic, consoleSurfaces, {
+        ...DELIBERATE_EXCLUSIONS,
+        "brand-new-thing": { owner: "test", reason: "synthetic" },
+      }),
+    ).toEqual([]);
+    const withSurface = new Map(consoleSurfaces).set("brand-new-thing", {
+      kind: "bespoke-page",
+      route: "/app/brand-new-thing",
+      source: "brand-new-thing",
+    });
+    expect(findUncoveredGroups(synthetic, withSurface, DELIBERATE_EXCLUSIONS)).toEqual([]);
+  });
+});
+
+describe("DELIBERATE_EXCLUSIONS hygiene", () => {
+  it("gives every exclusion an owner and a specific, non-empty rationale", () => {
+    for (const [group, exclusion] of Object.entries(DELIBERATE_EXCLUSIONS)) {
+      expect(exclusion.owner.trim(), `exclusion ${group} has no owner`).not.toBe("");
+      // Long enough that "n/a" or "not needed" cannot pass as review.
+      expect(
+        exclusion.reason.trim().length,
+        `exclusion ${group} needs a real rationale, not a rubber stamp`,
+      ).toBeGreaterThan(40);
+    }
+  });
+
+  it("rejects an exclusion for a group the contract no longer has", () => {
+    expect(findStaleExclusions(contractGroups, DELIBERATE_EXCLUSIONS)).toEqual([]);
+    expect(
+      findStaleExclusions(contractGroups, {
+        ...DELIBERATE_EXCLUSIONS,
+        "removed-group": { owner: "test", reason: "synthetic" },
+      }),
+    ).toEqual(["removed-group"]);
+  });
+
+  it("rejects an exclusion for a group that now HAS a console surface", () => {
+    expect(findObsoleteExclusions(consoleSurfaces, DELIBERATE_EXCLUSIONS)).toEqual([]);
+    const covered = [...consoleSurfaces.keys()][0];
+    expect(
+      findObsoleteExclusions(consoleSurfaces, {
+        ...DELIBERATE_EXCLUSIONS,
+        [covered]: { owner: "test", reason: "synthetic" },
+      }),
+    ).toEqual([covered]);
+  });
+});
+
+describe("documented group -> surface renames", () => {
+  it("matches the surface each renamed group actually resolves to", () => {
+    for (const [group, expected] of Object.entries(EXPECTED_NON_IDENTITY_SURFACES)) {
+      const surface = consoleSurfaces.get(group);
+      expect(surface, `documented rename for ${group} has no surface`).toBeDefined();
+      expect(surface?.source, `${group} -> ${expected.why}`).toBe(expected.source);
+    }
+  });
+
+  it("only documents renames that are genuinely not the identity mapping", () => {
+    // A group whose surface already matches its own name does not belong in the
+    // rename table; keeping it there would make the table meaningless noise.
+    const identity = Object.entries(EXPECTED_NON_IDENTITY_SURFACES)
+      .filter(([group, expected]) => group === expected.source && !isRenamedRoute(group))
+      .map(([group]) => group);
+    expect(identity).toEqual([]);
+  });
+});
+
+/** True when the route the surface mounts at is not `/app/<group>`. */
+function isRenamedRoute(group: string): boolean {
+  const surface = consoleSurfaces.get(group);
+  return surface !== undefined && surface.route !== `/app/${group}`;
+}
