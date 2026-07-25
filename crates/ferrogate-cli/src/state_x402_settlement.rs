@@ -72,6 +72,7 @@ use ferrogate_storage::{
 };
 
 use super::AppState;
+use crate::config::{x402_hold_ttl_floor_secs, X402ReconcilerConfig};
 
 /// A durable success/failure classification produced by the injected settlement
 /// verifier/reconciler BEFORE any database mutation (no external work runs
@@ -141,7 +142,13 @@ pub(crate) struct PaidEgressOpen {
     pub policy_revision: i64,
     pub decision: String,
     pub reason_code: String,
-    /// Seconds the hold stays live before it is TTL-eligible for release.
+    /// REQUESTED seconds the hold stays live before it is TTL-eligible for
+    /// release. This is a per-request runtime parameter and is NEVER the
+    /// effective TTL on its own: [`X402SettlementLoop::open`] clamps it UP to
+    /// the config-validated money-safety floor (issues #400/#401), so a
+    /// short-lived request can never produce a hold that auto-releases before
+    /// the reconciler could capture a payment confirmed on-chain. A request may
+    /// always ask for a LONGER hold.
     pub hold_ttl_secs: i64,
 }
 
@@ -203,18 +210,30 @@ type CommitObserver = Arc<dyn Fn(&'static str) -> Option<CommitFault> + Send + S
 
 /// The runtime coordinator that composes the wallet-hold and payment-attempt
 /// primitives into the managed paid-egress loop. Cheap to construct per request;
-/// holds only an `Arc` to the shared repositories and the (production no-op)
-/// commit observer.
+/// holds only an `Arc` to the shared repositories, the money-safety hold-TTL
+/// floor, and the (production no-op) commit observer.
 #[derive(Clone)]
 pub(crate) struct X402SettlementLoop {
     repositories: Arc<RuntimeStorageRepositories>,
+    /// Money-safety floor (seconds) every wallet hold TTL is clamped UP to at
+    /// [`X402SettlementLoop::open`] (issue #401).
+    ///
+    /// PRIVATE and derivable only by [`Self::hold_ttl_floor_secs`] from an
+    /// `X402ReconcilerConfig`, never accepted as a raw number: every constructor
+    /// takes the reconciler CONFIG, so no caller (present or future) can hand
+    /// the loop a floor of its own choosing or forget one entirely.
+    hold_ttl_floor_secs: i64,
     observer: CommitObserver,
 }
 
 impl X402SettlementLoop {
-    pub(crate) fn new(repositories: Arc<RuntimeStorageRepositories>) -> Self {
+    pub(crate) fn new(
+        repositories: Arc<RuntimeStorageRepositories>,
+        reconciler: &X402ReconcilerConfig,
+    ) -> Self {
         Self {
             repositories,
+            hold_ttl_floor_secs: Self::hold_ttl_floor_secs(reconciler),
             observer: Arc::new(|_| None),
         }
     }
@@ -225,12 +244,68 @@ impl X402SettlementLoop {
     #[cfg(test)]
     pub(crate) fn with_observer(
         repositories: Arc<RuntimeStorageRepositories>,
+        reconciler: &X402ReconcilerConfig,
         observer: CommitObserver,
     ) -> Self {
         Self {
             repositories,
+            hold_ttl_floor_secs: Self::hold_ttl_floor_secs(reconciler),
             observer,
         }
+    }
+
+    /// Resolves the #401 clamp floor from the reconciler config, via the SAME
+    /// [`x402_hold_ttl_floor_secs`] the #400 config-load validation uses -- one
+    /// definition, two callers, so the load-time check and the runtime clamp can
+    /// never drift.
+    ///
+    /// Gated on `enabled` for exactly the reason the #400 validation is: only
+    /// the reconciler captures a `submitted` attempt on this path, so only an
+    /// enabled reconciler opens the money-loss window the floor protects -- and
+    /// while disabled its timing fields are never validated, so a floor derived
+    /// from them would enforce an unvalidated number. Disabled therefore yields
+    /// a `0` floor, which `max(requested, 0)` leaves untouched (hold TTLs are
+    /// always positive).
+    fn hold_ttl_floor_secs(reconciler: &X402ReconcilerConfig) -> i64 {
+        if !reconciler.enabled {
+            return 0;
+        }
+        x402_hold_ttl_floor_secs(reconciler)
+    }
+
+    /// The money-safety clamp (issue #401). `x402_reconciler.hold_ttl_secs` is
+    /// validated at config load to strictly outlive the settlement confirmation
+    /// window, but the wallet hold's real TTL arrives here as a PER-REQUEST
+    /// parameter -- so without this clamp the validated invariant could be
+    /// bypassed at runtime by a short request TTL, and a payment confirmed
+    /// on-chain could find its hold already auto-released (stablecoin delivered,
+    /// wallet never charged).
+    ///
+    /// `effective = max(requested, floor)`: a request may always ask for a
+    /// LONGER hold, never a shorter one than the validated floor.
+    ///
+    /// CLAMP, not reject: the floor is a safety minimum, and holding a tenant's
+    /// own credits slightly longer is strictly recoverable (the #354 sweeper and
+    /// the reconciler both release/settle it), whereas rejecting the egress
+    /// request would turn an operator's TTL misconfiguration into user-visible
+    /// request failures. This also matches the loop's standing conservative
+    /// posture -- when in doubt, RETAIN the hold, never take the money-losing
+    /// branch. The clamp is logged at `warn!` so the misconfiguration is
+    /// diagnosable rather than silent.
+    fn effective_hold_ttl_secs(&self, requested_secs: i64, attempt_id: &str) -> i64 {
+        if requested_secs >= self.hold_ttl_floor_secs {
+            return requested_secs;
+        }
+        tracing::warn!(
+            attempt_id = %attempt_id,
+            requested_hold_ttl_secs = requested_secs,
+            effective_hold_ttl_secs = self.hold_ttl_floor_secs,
+            "x402 open: per-request wallet hold TTL is below the validated \
+             x402_reconciler money-safety floor (confirmation_deadline_secs + \
+             reconcile_check_delay_secs + one tick); clamping up so a payment \
+             confirmed on-chain cannot find its hold already auto-released"
+        );
+        self.hold_ttl_floor_secs
     }
 
     /// Runs one storage primitive through the commit-outcome fault seam. In
@@ -265,12 +340,17 @@ impl X402SettlementLoop {
     /// Sequences `reserve (wallet hold) -> create (payment attempt)`. Idempotent
     /// on `attempt_id`: a replay returns the existing attempt without a second
     /// hold or a second row.
+    ///
+    /// This is the ONE place a hold TTL becomes a wallet-hold `expires_at` for
+    /// paid egress, so the #401 money-safety clamp lives here rather than at any
+    /// call site: `open.hold_ttl_secs` is a REQUEST, never the effective TTL.
     pub(crate) async fn open(
         &self,
         open: &PaidEgressOpen,
         now_unix: i64,
     ) -> Result<OpenOutcome, StorageError> {
-        let expires_at = now_unix.saturating_add(open.hold_ttl_secs);
+        let hold_ttl_secs = self.effective_hold_ttl_secs(open.hold_ttl_secs, &open.attempt_id);
+        let expires_at = now_unix.saturating_add(hold_ttl_secs);
         let reservation = self
             .repositories
             .reserve_wallet_credits(
@@ -745,9 +825,13 @@ fn transition_attempt(transition: PaymentAttemptTransition) -> StoredPaymentAtte
 
 impl AppState {
     /// Production accessor: the paid-egress settle/release loop bound to this
-    /// node's shared repositories. Cheap; construct one per request.
+    /// node's shared repositories AND to this node's current money-safety
+    /// hold-TTL floor. Cheap; construct one per request -- and because the floor
+    /// is re-read from `self.config` here, a `/admin/v1/config/reload` that
+    /// retunes the reconciler applies to the very next opened hold with no
+    /// restart, exactly like the sweeper/reconciler tick loops.
     pub(crate) fn x402_settlement_loop(&self) -> X402SettlementLoop {
-        X402SettlementLoop::new(Arc::clone(&self.repositories))
+        X402SettlementLoop::new(Arc::clone(&self.repositories), &self.config.x402_reconciler)
     }
 
     /// Test accessor for the shared repositories handle, so a test can build a

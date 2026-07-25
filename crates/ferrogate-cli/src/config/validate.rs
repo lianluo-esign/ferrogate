@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_providers::RoutingStrategy;
 
+use super::types::{x402_confirmation_window_secs, x402_hold_ttl_floor_secs};
 use super::{CacheMode, Config, McpAuthType, McpTransport};
 
 struct WorkflowToolNames {
@@ -335,6 +336,12 @@ impl Config {
     /// Only enforced when `x402_reconciler.enabled = true`: a disabled reconciler
     /// (the default) never captures a submitted attempt on this path, so the
     /// default all-off config always passes.
+    ///
+    /// The window/floor arithmetic itself lives in
+    /// [`x402_confirmation_window_secs`] / [`x402_hold_ttl_floor_secs`] because
+    /// the RUNTIME clamp in `X402SettlementLoop::open` (issue #401) must enforce
+    /// the exact same floor against the per-request hold TTL. One definition,
+    /// two callers: the load-time check and the runtime clamp can never drift.
     fn validate_x402_reconciler(&self) -> AnyResult<()> {
         let reconciler = &self.x402_reconciler;
         if !reconciler.enabled {
@@ -344,14 +351,13 @@ impl Config {
         // Slack margin: one reconciler tick. After an attempt's confirmation
         // deadline elapses the reconciler can take up to a full `tick_interval`
         // before its next scan drives the capture, so the hold must survive that
-        // extra tick too.
+        // extra tick too. (Both computed by the shared helpers; `floor` is
+        // `confirmation_window + 1`, so `hold < floor` is exactly the original
+        // "must be STRICTLY greater than the window" predicate.)
         let slack_secs = i64::try_from(reconciler.tick_interval_secs).unwrap_or(i64::MAX);
-        let confirmation_window = reconciler
-            .confirmation_deadline_secs
-            .saturating_add(reconciler.reconcile_check_delay_secs)
-            .saturating_add(slack_secs);
+        let confirmation_window = x402_confirmation_window_secs(reconciler);
 
-        if reconciler.hold_ttl_secs <= confirmation_window {
+        if reconciler.hold_ttl_secs < x402_hold_ttl_floor_secs(reconciler) {
             bail!(
                 "field x402_reconciler.hold_ttl_secs: the wallet hold TTL ({hold}s) must strictly \
                  outlive the settlement confirmation window (confirmation_deadline_secs {deadline}s \

@@ -20,7 +20,7 @@ use ferrogate_storage::{
 use proptest::prelude::*;
 
 use super::*;
-use crate::config::Config;
+use crate::config::{x402_hold_ttl_floor_secs, Config, X402ReconcilerConfig};
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -33,7 +33,11 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 const TENANT: &str = "tenant-x402";
 
 fn seed_state(balance_credits: i64) -> AppState {
-    let state = AppState::new(Config::default());
+    seed_state_with_config(Config::default(), balance_credits)
+}
+
+fn seed_state_with_config(config: Config, balance_credits: i64) -> AppState {
+    let state = AppState::new(config);
     block_on(state.upsert_wallet(StoredWallet {
         id: TENANT.into(),
         tenant_id: TENANT.into(),
@@ -86,6 +90,17 @@ async fn reservation_status(state: &AppState, attempt_id: &str) -> Option<String
         .into_iter()
         .find(|r| r.id == attempt_id)
         .map(|r| r.status)
+}
+
+async fn reservation_expires_at(state: &AppState, attempt_id: &str) -> Option<i64> {
+    state
+        .repositories_arc()
+        .list_wallet_reservations(TENANT)
+        .await
+        .expect("list reservations")
+        .into_iter()
+        .find(|r| r.id == attempt_id)
+        .map(|r| r.expires_at_unix)
 }
 
 async fn attempt_state(state: &AppState, attempt_id: &str) -> String {
@@ -482,6 +497,8 @@ fn async_timeout_before_capture_yields_outcome_unknown_and_retains_hold() {
     // false failure/release that would spend stablecoin for free.
     let faulted = X402SettlementLoop::with_observer(
         Arc::clone(&repositories),
+        // Disabled reconciler = no floor; the clamp has its own tests below.
+        &X402ReconcilerConfig::default(),
         one_shot_fault("settle_wallet_reservation", CommitFault::UnknownPreCommit),
     );
     let outcome = block_on(faulted.finalize("t1", &settled_evidence(), 300)).expect("finalize");
@@ -535,6 +552,8 @@ fn async_timeout_after_attempt_transition_never_releases_and_converges() {
     // is reported unknown. The loop must NOT release; re-entry converges.
     let faulted = X402SettlementLoop::with_observer(
         Arc::clone(&repositories),
+        // Disabled reconciler = no floor; the clamp has its own tests below.
+        &X402ReconcilerConfig::default(),
         one_shot_fault("settle_payment_attempt", CommitFault::UnknownPostCommit),
     );
     let outcome = block_on(faulted.finalize("t2", &settled_evidence(), 300)).expect("finalize");
@@ -694,4 +713,170 @@ proptest! {
             .sum();
         prop_assert_eq!(captured_total + released_total, authorized_total);
     }
+}
+
+// --------------------------------------------------------------------------
+// #401: the PER-REQUEST hold TTL cannot bypass #400's validated floor
+//
+// `x402_reconciler.hold_ttl_secs` is validated at config load but the real
+// wallet hold TTL arrives as a per-request parameter, so without a clamp the
+// validation is false assurance: a short runtime hold auto-releases before the
+// reconciler can capture a payment that IS confirmed on-chain (stablecoin
+// delivered, wallet never charged). `X402SettlementLoop::open` -- the one place
+// a TTL becomes a wallet-hold `expires_at` -- clamps every request UP to the
+// shared floor.
+// --------------------------------------------------------------------------
+
+/// A deliberately NON-default reconciler config: every component differs from
+/// the shipped defaults (900/60/30 -> 600/45/17), so a clamp test can never pass
+/// by accidentally agreeing with a default. Floor = 600 + 45 + 17 + 1 = 663.
+fn clamp_reconciler_config() -> X402ReconcilerConfig {
+    X402ReconcilerConfig {
+        enabled: true,
+        tick_interval_secs: 17,
+        max_reconciles_per_tick: 100,
+        reconcile_check_delay_secs: 45,
+        confirmation_deadline_secs: 600,
+        hold_ttl_secs: 7_200,
+    }
+}
+
+fn clamp_config(reconciler: X402ReconcilerConfig) -> Config {
+    Config {
+        x402_reconciler: reconciler,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn open_clamps_a_below_floor_request_ttl_up_to_the_validated_floor() {
+    let reconciler = clamp_reconciler_config();
+    let floor = x402_hold_ttl_floor_secs(&reconciler);
+    let state = seed_state_with_config(clamp_config(reconciler), 10_000);
+    let loop_ = state.x402_settlement_loop();
+
+    // The bypass a caller could otherwise attempt: a 1-second hold.
+    let mut request = open_request("clamp-low", 500);
+    request.hold_ttl_secs = 1;
+    block_on(loop_.open(&request, 100)).expect("open");
+
+    assert_eq!(
+        block_on(reservation_expires_at(&state, "clamp-low")),
+        Some(100 + floor),
+        "a below-floor request TTL must be clamped up to the validated floor"
+    );
+}
+
+#[test]
+fn open_keeps_a_request_ttl_longer_than_the_validated_floor() {
+    let reconciler = clamp_reconciler_config();
+    let floor = x402_hold_ttl_floor_secs(&reconciler);
+    let state = seed_state_with_config(clamp_config(reconciler), 10_000);
+    let loop_ = state.x402_settlement_loop();
+
+    // The clamp is a FLOOR, not an override: a longer request is honoured.
+    let mut request = open_request("clamp-high", 500);
+    request.hold_ttl_secs = floor + 5_000;
+    block_on(loop_.open(&request, 100)).expect("open");
+
+    assert_eq!(
+        block_on(reservation_expires_at(&state, "clamp-high")),
+        Some(100 + floor + 5_000),
+        "a request may always ask for a LONGER hold than the floor"
+    );
+}
+
+#[test]
+fn clamp_floor_is_exactly_the_config_validation_boundary() {
+    // Anti-drift: the runtime clamp and the #400 config-load check must be the
+    // same number for the SAME config. If someone retunes one predicate without
+    // the other, this fails.
+    let reconciler = clamp_reconciler_config();
+    let floor = x402_hold_ttl_floor_secs(&reconciler);
+
+    clamp_config(X402ReconcilerConfig {
+        hold_ttl_secs: floor,
+        ..reconciler.clone()
+    })
+    .validate()
+    .expect("a hold TTL exactly at the shared floor must pass config validation");
+
+    let error = format!(
+        "{:#}",
+        clamp_config(X402ReconcilerConfig {
+            hold_ttl_secs: floor - 1,
+            ..reconciler.clone()
+        })
+        .validate()
+        .expect_err("one second below the shared floor must fail config validation")
+    );
+    assert!(
+        error.contains("field x402_reconciler.hold_ttl_secs"),
+        "validation must reject exactly at floor - 1: {error}"
+    );
+
+    // ... and the clamp the runtime actually applies is that same floor.
+    let state = seed_state_with_config(clamp_config(reconciler), 10_000);
+    let mut request = open_request("clamp-boundary", 500);
+    request.hold_ttl_secs = 1;
+    block_on(state.x402_settlement_loop().open(&request, 0)).expect("open");
+    assert_eq!(
+        block_on(reservation_expires_at(&state, "clamp-boundary")),
+        Some(floor),
+        "the runtime clamp must use the same floor the config validation enforces"
+    );
+}
+
+#[test]
+fn a_clamped_hold_outlives_the_confirmation_deadline_check_delay_and_one_tick() {
+    // The #400 invariant, asserted end-to-end at this seam: even for a request
+    // that asked for an absurdly short hold, the hold that lands in the wallet
+    // expires no earlier than `confirmation_deadline + check_delay + one tick`
+    // after it was opened -- so the reconciler always still has a live hold to
+    // capture when it resolves a payment confirmed on-chain.
+    let reconciler = clamp_reconciler_config();
+    let state = seed_state_with_config(clamp_config(reconciler.clone()), 10_000);
+    let opened_at = 1_000;
+
+    let mut request = open_request("clamp-invariant", 500);
+    request.hold_ttl_secs = 30; // shorter than even the reconcile check delay
+    block_on(state.x402_settlement_loop().open(&request, opened_at)).expect("open");
+
+    let expires_at =
+        block_on(reservation_expires_at(&state, "clamp-invariant")).expect("hold exists");
+    // Recomputed straight from the config fields (NOT via the shared helper) so
+    // this assertion still means what #400 says even if the helper changes.
+    let earliest_safe_capture = opened_at
+        + reconciler.confirmation_deadline_secs
+        + reconciler.reconcile_check_delay_secs
+        + reconciler.tick_interval_secs as i64;
+    assert!(
+        expires_at > earliest_safe_capture,
+        "clamped hold expires at {expires_at}, which does not strictly outlive the \
+         confirmation window ending at {earliest_safe_capture}"
+    );
+}
+
+#[test]
+fn a_disabled_reconciler_leaves_the_request_ttl_untouched() {
+    // The clamp mirrors the #400 validation's own `enabled` gate exactly: while
+    // the reconciler is disabled nothing captures a submitted attempt on this
+    // path (so the money-loss window does not exist) AND its timing fields are
+    // never validated (so clamping to a floor derived from them would enforce an
+    // unvalidated number).
+    let reconciler = X402ReconcilerConfig {
+        enabled: false,
+        ..clamp_reconciler_config()
+    };
+    let state = seed_state_with_config(clamp_config(reconciler), 10_000);
+
+    let mut request = open_request("clamp-disabled", 500);
+    request.hold_ttl_secs = 30;
+    block_on(state.x402_settlement_loop().open(&request, 100)).expect("open");
+
+    assert_eq!(
+        block_on(reservation_expires_at(&state, "clamp-disabled")),
+        Some(130),
+        "a disabled reconciler must not impose an unvalidated floor"
+    );
 }

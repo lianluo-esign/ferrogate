@@ -23,6 +23,10 @@ mod validation_tests;
 pub(crate) use self::secrets::resolve_env_placeholders;
 #[allow(unused_imports)]
 pub(crate) use self::snapshot::config_snapshot_id;
+/// The one x402 hold-TTL money-safety floor (issues #400/#401), shared by the
+/// config-load validation and the runtime clamp in `X402SettlementLoop::open`.
+#[allow(unused_imports)]
+pub(crate) use self::types::x402_hold_ttl_floor_secs;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
     AccessLogMode, AdminApiConfig, AdminConfig, AgentRuntimeConfig, AgentRuntimeExternalConfig,

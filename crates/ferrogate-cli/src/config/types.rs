@@ -416,10 +416,53 @@ pub(crate) struct X402ReconcilerConfig {
     ///
     /// NOTE: the settlement open path currently receives the hold TTL as a
     /// call-site runtime parameter (`X402NegotiationContext.hold_ttl_secs`); the
-    /// egress-path wiring that sources it FROM this field is remaining work,
-    /// tracked alongside the deferred capture-past-TTL wallet change on #400.
+    /// egress-path wiring that sources it FROM this field is remaining work
+    /// (issue #401 box 1, blocked on #381), tracked alongside the deferred
+    /// capture-past-TTL wallet change on #400. Until that lands, the per-request
+    /// value cannot BYPASS this invariant: `X402SettlementLoop::open` clamps
+    /// every requested TTL up to [`x402_hold_ttl_floor_secs`], the same floor
+    /// `validate()` enforces here (issue #401 box 3).
     #[serde(default = "default_x402_reconciler_hold_ttl_secs")]
     pub(crate) hold_ttl_secs: i64,
+}
+
+/// The settlement confirmation window (seconds) a wallet hold must survive:
+/// `confirmation_deadline_secs + reconcile_check_delay_secs + one reconciler
+/// tick of slack` (issue #400).
+///
+/// The reconciler only resolves a `submitted` attempt after it has queried the
+/// chain: an attempt is not eligible for a re-check until
+/// `reconcile_check_delay_secs` have elapsed, an absent transfer is not declared
+/// FAIL until `confirmation_deadline_secs` after submission, and the reconciler
+/// scans on a `tick_interval_secs` cadence so it may take one more tick to
+/// notice a now-due attempt.
+///
+/// Saturating throughout: an operator-supplied `u64` tick larger than `i64::MAX`
+/// (or component sums that overflow) must produce an absurdly LARGE window --
+/// which rejects/clamps conservatively -- never a wrapped small one.
+pub(crate) fn x402_confirmation_window_secs(reconciler: &X402ReconcilerConfig) -> i64 {
+    let slack_secs = i64::try_from(reconciler.tick_interval_secs).unwrap_or(i64::MAX);
+    reconciler
+        .confirmation_deadline_secs
+        .saturating_add(reconciler.reconcile_check_delay_secs)
+        .saturating_add(slack_secs)
+}
+
+/// THE single definition of the money-safety floor for an x402 wallet hold TTL
+/// (issues #400, #401): the smallest TTL that STRICTLY outlives
+/// [`x402_confirmation_window_secs`], i.e. `window + 1`.
+///
+/// Two callers, one definition, so they can never drift:
+/// 1. `Config::validate_x402_reconciler` rejects any config whose
+///    `x402_reconciler.hold_ttl_secs` is below this floor (issue #400);
+/// 2. `X402SettlementLoop::open` clamps every PER-REQUEST hold TTL up to this
+///    floor, so the runtime parameter cannot bypass (1) (issue #401).
+///
+/// A hold shorter than this can auto-release before the reconciler is able to
+/// capture a payment that IS confirmed on-chain: the stablecoin is delivered but
+/// the wallet is never charged.
+pub(crate) fn x402_hold_ttl_floor_secs(reconciler: &X402ReconcilerConfig) -> i64 {
+    x402_confirmation_window_secs(reconciler).saturating_add(1)
 }
 
 fn default_x402_reconciler_tick_interval_secs() -> u64 {
