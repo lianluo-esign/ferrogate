@@ -137,7 +137,7 @@ fn manifest_groups_variants_under_versions_newest_first() {
 
 #[test]
 fn storage_summary_uses_effective_quota_and_saturates_remaining_bytes() {
-    let summary = build_asset_storage_summary(30, Some(50), None);
+    let summary = build_asset_storage_summary(30, Some(50), None, None);
     assert_eq!(summary.object, "asset_storage_summary");
     assert_eq!(summary.used_bytes, 30);
     assert_eq!(summary.quota_bytes, Some(50));
@@ -147,13 +147,13 @@ fn storage_summary_uses_effective_quota_and_saturates_remaining_bytes() {
     assert_eq!(summary.presigned_upload.max_object_bytes, None);
     assert_eq!(summary.presigned_upload.url_ttl_seconds, None);
 
-    let over_quota = build_asset_storage_summary(75, Some(50), None);
+    let over_quota = build_asset_storage_summary(75, Some(50), None, None);
     assert_eq!(over_quota.remaining_bytes, Some(0));
 }
 
 #[test]
 fn storage_summary_exposes_presign_limits_only_when_bucket_is_available() {
-    let summary = build_asset_storage_summary(7, None, Some((5_000, 900)));
+    let summary = build_asset_storage_summary(7, None, None, Some((5_000, 900)));
     assert_eq!(summary.quota_bytes, None);
     assert_eq!(summary.remaining_bytes, None);
     assert_eq!(summary.inline_upload_max_bytes, INLINE_ASSET_MAX_BYTES);
@@ -168,14 +168,30 @@ fn storage_summary_reports_the_plan_quota_tightened_per_object_ceiling() {
     // A tenant whose cumulative asset-storage quota is SMALLER than the global
     // operator ceiling sees the tighter quota-derived limit, since a single
     // object can never exceed the whole tenant quota.
-    let tightened = build_asset_storage_summary(0, Some(4_096), Some((5_000, 900)));
+    let tightened = build_asset_storage_summary(0, Some(4_096), None, Some((5_000, 900)));
     assert!(tightened.presigned_upload.enabled);
     assert_eq!(tightened.presigned_upload.max_object_bytes, Some(4_096));
 
     // A tenant whose quota is LARGER than the global ceiling stays bounded by
     // the operator ceiling (the tighter of the two wins).
-    let bounded = build_asset_storage_summary(0, Some(10_000), Some((5_000, 900)));
+    let bounded = build_asset_storage_summary(0, Some(10_000), None, Some((5_000, 900)));
     assert_eq!(bounded.presigned_upload.max_object_bytes, Some(5_000));
+}
+
+#[test]
+fn storage_summary_reports_the_dedicated_per_object_ceiling_independently() {
+    // #259: a dedicated per-object ceiling tightens the advertised presigned
+    // limit AND the inline cap independently of the cumulative quota -- here it
+    // binds tighter than both the global ceiling and the (larger) cumulative
+    // quota.
+    let summary = build_asset_storage_summary(0, Some(10_000), Some(2_048), Some((5_000, 900)));
+    assert_eq!(summary.presigned_upload.max_object_bytes, Some(2_048));
+    assert_eq!(summary.inline_upload_max_bytes, 2_048);
+
+    // A None per-object ceiling is a no-op: the cumulative quota / global
+    // ceiling alone bound the advertised limits, exactly as before #259.
+    let unbounded = build_asset_storage_summary(0, Some(4_096), None, Some((5_000, 900)));
+    assert_eq!(unbounded.presigned_upload.max_object_bytes, Some(4_096));
 }
 
 #[test]

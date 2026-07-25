@@ -505,6 +505,16 @@ impl FerroGateway {
             )
             .await;
         }
+        if scope_type != QuotaScopeKind::Tenant && payload.asset_max_object_bytes.is_some() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_quota_policy",
+                "asset_max_object_bytes is tenant-only because stored assets and usage are tenant-owned",
+                &ctx.request_id,
+            )
+            .await;
+        }
         let now = now_unix_seconds();
         let existing = state
             .get_quota_policy(scope_type, scope_id)
@@ -547,6 +557,15 @@ impl FerroGateway {
                 } else {
                     None
                 },
+                asset_max_object_bytes: if scope_type == QuotaScopeKind::Tenant {
+                    payload.asset_max_object_bytes.or_else(|| {
+                        existing
+                            .as_ref()
+                            .and_then(|existing| existing.asset_max_object_bytes)
+                    })
+                } else {
+                    None
+                },
                 alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_else(|| {
                     existing
                         .as_ref()
@@ -580,6 +599,11 @@ impl FerroGateway {
                 monthly_budget_usd: payload.monthly_budget_usd,
                 asset_storage_quota_bytes: if scope_type == QuotaScopeKind::Tenant {
                     payload.asset_storage_quota_bytes
+                } else {
+                    None
+                },
+                asset_max_object_bytes: if scope_type == QuotaScopeKind::Tenant {
+                    payload.asset_max_object_bytes
                 } else {
                     None
                 },
@@ -670,6 +694,7 @@ fn admin_quota_policy(policy: &StoredQuotaPolicy) -> AdminQuotaPolicy {
         tpm_limit: policy.tpm_limit,
         monthly_budget_usd: policy.monthly_budget_usd,
         asset_storage_quota_bytes: policy.asset_storage_quota_bytes,
+        asset_max_object_bytes: policy.asset_max_object_bytes,
         alert_threshold_pcts: policy.alert_threshold_pcts.clone(),
         monthly_egress_bytes_budget: policy.monthly_egress_bytes_budget,
         download_rpm_limit: policy.download_rpm_limit,

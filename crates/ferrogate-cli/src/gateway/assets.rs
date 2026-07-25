@@ -76,14 +76,21 @@ pub(crate) const INLINE_ASSET_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_ASSET_CACHE_CONTROL: &str = "private, max-age=0, must-revalidate";
 
 /// Per-request byte ceiling for an inline push: the inline buffering cap,
-/// further tightened to the tenant's cumulative asset storage quota when
-/// that is smaller (a single object can never exceed the whole quota).
-/// Replaces the former hard `MAX_ASSET_BYTES` constant with a
-/// plan/quota-driven limit (issue #259).
-fn inline_push_byte_limit(asset_storage_quota_bytes: Option<u64>) -> usize {
-    let limit = asset_storage_quota_bytes.map_or(INLINE_ASSET_MAX_BYTES, |quota| {
-        quota.min(INLINE_ASSET_MAX_BYTES)
-    });
+/// tightened to BOTH the tenant's dedicated per-object ceiling
+/// (`asset_max_object_bytes`, #259) and its cumulative asset storage quota
+/// whenever either is smaller (a single object can never exceed the whole
+/// quota, and the dedicated per-object cap binds individual object size
+/// independently). Keeps the inline path consistent with the presigned path's
+/// `effective_max_object_bytes`. Replaces the former hard `MAX_ASSET_BYTES`
+/// constant with a plan/quota-driven limit (issue #259). A `None` bound does
+/// not tighten anything.
+fn inline_push_byte_limit(
+    per_object_ceiling: Option<u64>,
+    asset_storage_quota_bytes: Option<u64>,
+) -> usize {
+    let limit = INLINE_ASSET_MAX_BYTES
+        .min(per_object_ceiling.unwrap_or(u64::MAX))
+        .min(asset_storage_quota_bytes.unwrap_or(u64::MAX));
     usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
@@ -483,6 +490,7 @@ impl FerroGateway {
         let body = build_asset_storage_summary(
             used_bytes,
             auth.effective_quota.asset_storage_quota_bytes,
+            auth.effective_quota.asset_max_object_bytes,
             presigned_limits,
         );
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -530,7 +538,10 @@ impl FerroGateway {
             .unwrap_or("application/octet-stream")
             .to_string();
 
-        let inline_limit = inline_push_byte_limit(auth.effective_quota.asset_storage_quota_bytes);
+        let inline_limit = inline_push_byte_limit(
+            auth.effective_quota.asset_max_object_bytes,
+            auth.effective_quota.asset_storage_quota_bytes,
+        );
         let content = match read_request_body(session, inline_limit).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -1939,18 +1950,20 @@ fn asset_summary(asset: &StoredAsset) -> AssetSummary {
 fn build_asset_storage_summary(
     used_bytes: u64,
     quota_bytes: Option<u64>,
+    per_object_ceiling: Option<u64>,
     presigned_limits: Option<(u64, u64)>,
 ) -> AssetStorageSummary {
     let (enabled, max_object_bytes, url_ttl_seconds) = match presigned_limits {
         Some((global_max_object_bytes, url_ttl_seconds)) => {
             // Report the plan/quota-driven effective per-object ceiling (issue
-            // #259), not the raw global operator constant: a single object can
-            // never exceed the tenant's whole cumulative asset-storage quota, so
-            // the advertised limit is tightened to that quota when it is smaller
-            // (matching what the presigned upload-intent path enforces).
-            let effective_max_object_bytes = quota_bytes.map_or(global_max_object_bytes, |quota| {
-                global_max_object_bytes.min(quota)
-            });
+            // #259), not the raw global operator constant: the advertised limit
+            // is tightened to BOTH the tenant's dedicated per-object ceiling
+            // (`asset_max_object_bytes`) and its cumulative asset-storage quota
+            // when either is smaller, matching what the presigned upload-intent
+            // path enforces via `effective_max_object_bytes`.
+            let effective_max_object_bytes = global_max_object_bytes
+                .min(per_object_ceiling.unwrap_or(u64::MAX))
+                .min(quota_bytes.unwrap_or(u64::MAX));
             (
                 true,
                 Some(effective_max_object_bytes),
@@ -1964,7 +1977,7 @@ fn build_asset_storage_summary(
         used_bytes,
         quota_bytes,
         remaining_bytes: quota_bytes.map(|quota| quota.saturating_sub(used_bytes)),
-        inline_upload_max_bytes: inline_push_byte_limit(quota_bytes) as u64,
+        inline_upload_max_bytes: inline_push_byte_limit(per_object_ceiling, quota_bytes) as u64,
         presigned_upload: AssetPresignedUploadConstraints {
             enabled,
             max_object_bytes,
@@ -2208,25 +2221,36 @@ mod tests {
 
     #[test]
     fn inline_push_byte_limit_is_the_buffering_cap_when_quota_is_unset_or_larger() {
-        // No quota configured: the inline path buffers up to its own cap.
+        // No per-object ceiling and no cumulative quota: the inline path
+        // buffers up to its own cap.
         assert_eq!(
-            inline_push_byte_limit(None),
+            inline_push_byte_limit(None, None),
             INLINE_ASSET_MAX_BYTES as usize
         );
-        // A quota larger than the inline cap can't loosen the inline cap.
+        // A cumulative quota larger than the inline cap can't loosen the cap.
         assert_eq!(
-            inline_push_byte_limit(Some(INLINE_ASSET_MAX_BYTES * 100)),
+            inline_push_byte_limit(None, Some(INLINE_ASSET_MAX_BYTES * 100)),
             INLINE_ASSET_MAX_BYTES as usize
         );
     }
 
     #[test]
-    fn inline_push_byte_limit_tightens_to_a_smaller_plan_quota() {
-        // A per-plan quota smaller than the inline cap drives the limit --
+    fn inline_push_byte_limit_tightens_to_a_smaller_cumulative_quota() {
+        // A cumulative quota smaller than the inline cap drives the limit --
         // this is the plan/quota-driven replacement for the old hard
         // MAX_ASSET_BYTES constant (issue #259).
-        assert_eq!(inline_push_byte_limit(Some(4_096)), 4_096);
-        assert_eq!(inline_push_byte_limit(Some(0)), 0);
+        assert_eq!(inline_push_byte_limit(None, Some(4_096)), 4_096);
+        assert_eq!(inline_push_byte_limit(None, Some(0)), 0);
+    }
+
+    #[test]
+    fn inline_push_byte_limit_tightens_to_a_dedicated_per_object_ceiling() {
+        // #259: the dedicated per-object ceiling caps the inline path too, and
+        // can bind TIGHTER than the cumulative quota independently of it.
+        assert_eq!(inline_push_byte_limit(Some(2_048), None), 2_048);
+        assert_eq!(inline_push_byte_limit(Some(2_048), Some(8_192)), 2_048);
+        // A None per-object ceiling is a no-op: the cumulative quota still binds.
+        assert_eq!(inline_push_byte_limit(None, Some(8_192)), 8_192);
     }
 }
 

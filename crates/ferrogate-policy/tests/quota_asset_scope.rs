@@ -19,12 +19,24 @@ fn policy(scope_type: QuotaScopeKind, scope_id: &str, bytes: u64) -> StoredQuota
         tpm_limit: None,
         monthly_budget_usd: None,
         asset_storage_quota_bytes: Some(bytes),
+        asset_max_object_bytes: None,
         alert_threshold_pcts: Vec::new(),
         enabled: true,
         created_at_unix: 1,
         updated_at_unix: 1,
         monthly_egress_bytes_budget: None,
         download_rpm_limit: None,
+    }
+}
+
+/// Builds a policy carrying ONLY a per-object ceiling (#259): the cumulative
+/// `asset_storage_quota_bytes` is cleared so a resolved value proves the
+/// dedicated `asset_max_object_bytes` field resolves on its own.
+fn per_object_policy(scope_type: QuotaScopeKind, scope_id: &str, bytes: u64) -> StoredQuotaPolicy {
+    StoredQuotaPolicy {
+        asset_storage_quota_bytes: None,
+        asset_max_object_bytes: Some(bytes),
+        ..policy(scope_type, scope_id, 0)
     }
 }
 
@@ -78,6 +90,7 @@ fn explicit_scope_value_replaces_the_plan_default() {
         default_monthly_budget_usd: None,
         asset_hosting_enabled: true,
         default_asset_storage_quota_bytes: Some(50),
+        default_asset_max_object_bytes: None,
         extension_tools_enabled: false,
         created_at_unix: 1,
         updated_at_unix: 1,
@@ -96,6 +109,72 @@ fn explicit_scope_value_replaces_the_plan_default() {
         .asset_storage_quota_bytes,
         Some(1_000)
     );
+}
+
+/// #259: the dedicated per-object ceiling resolves with EXACTLY the
+/// `asset_storage_quota_bytes` rules -- tenant-scoped override wins, else plan
+/// default, and narrower scopes cannot supply it -- while staying fully
+/// independent of the cumulative quota.
+#[test]
+fn per_object_ceiling_resolves_independently_of_the_cumulative_quota() {
+    // A tenant-scoped per-object override resolves on its own.
+    assert_eq!(
+        resolve(
+            vec![per_object_policy(QuotaScopeKind::Tenant, "tenant", 4_096)],
+            None
+        )
+        .asset_max_object_bytes,
+        Some(4_096)
+    );
+    // Narrower scopes cannot supply it, exactly like the cumulative quota.
+    for (scope_type, scope_id) in [
+        (QuotaScopeKind::Project, "project"),
+        (QuotaScopeKind::Workspace, "workspace"),
+        (QuotaScopeKind::Key, "key"),
+    ] {
+        assert_eq!(
+            resolve(vec![per_object_policy(scope_type, scope_id, 4_096)], None)
+                .asset_max_object_bytes,
+            None
+        );
+    }
+
+    // Plan default fills in when no tenant policy overrides it; a tenant policy
+    // override replaces the plan default -- and neither touches the cumulative
+    // asset_storage_quota_bytes, proving the two caps resolve independently.
+    let plan = StoredPlan {
+        id: "plan".into(),
+        name: "Plan".into(),
+        slug: "plan".into(),
+        mcp_enabled: false,
+        self_hosted_workers_enabled: false,
+        admin_console_seats: None,
+        default_model_allowlist: Vec::new(),
+        default_rpm_limit: None,
+        default_tpm_limit: None,
+        default_monthly_budget_usd: None,
+        asset_hosting_enabled: true,
+        default_asset_storage_quota_bytes: Some(1_000_000),
+        default_asset_max_object_bytes: Some(64_000),
+        extension_tools_enabled: false,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+        default_monthly_egress_bytes_budget: None,
+        default_download_rpm_limit: None,
+    };
+    // No policy: both caps come from the plan, each from its own default.
+    let resolved = resolve(Vec::new(), Some(&plan));
+    assert_eq!(resolved.asset_max_object_bytes, Some(64_000));
+    assert_eq!(resolved.asset_storage_quota_bytes, Some(1_000_000));
+
+    // A tenant policy that overrides ONLY the per-object ceiling leaves the
+    // cumulative quota on the plan default -- the two are not coupled.
+    let resolved = resolve(
+        vec![per_object_policy(QuotaScopeKind::Tenant, "tenant", 8_192)],
+        Some(&plan),
+    );
+    assert_eq!(resolved.asset_max_object_bytes, Some(8_192));
+    assert_eq!(resolved.asset_storage_quota_bytes, Some(1_000_000));
 }
 
 proptest! {

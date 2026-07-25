@@ -93,6 +93,12 @@ pub struct EffectiveQuota {
     pub monthly_budget_usd: Option<f64>,
     pub monthly_budget_scope: Option<QuotaScopeSelector>,
     pub asset_storage_quota_bytes: Option<u64>,
+    /// #259: dedicated per-object asset byte ceiling (each individual object
+    /// must be <= this), resolved exactly like `asset_storage_quota_bytes` --
+    /// a tenant-scoped policy override wins, else the plan default -- but
+    /// distinct from and independent of that cumulative cap. `None` means no
+    /// dedicated per-object ceiling applies.
+    pub asset_max_object_bytes: Option<u64>,
     /// #262 (egress governance): tightest monthly egress/download byte budget
     /// across the chain, resolved with the same `min`-across-the-chain rule as
     /// `rpm_limit`/`monthly_budget_usd` (nearest scope overrides but can never
@@ -212,6 +218,11 @@ pub fn resolve_effective_quota(
         );
         if policy.scope_type == QuotaScopeKind::Tenant {
             effective.asset_storage_quota_bytes = policy.asset_storage_quota_bytes;
+            // #259: the per-object ceiling resolves exactly like the cumulative
+            // quota above -- tenant-scoped override wins -- but is tracked
+            // independently, so a tenant can tighten individual-object size
+            // without touching its cumulative storage budget (and vice versa).
+            effective.asset_max_object_bytes = policy.asset_max_object_bytes;
         }
     }
     if let Some(plan) = plan {
@@ -261,6 +272,11 @@ pub fn resolve_effective_quota(
         effective.asset_storage_quota_bytes = effective
             .asset_storage_quota_bytes
             .or(plan.default_asset_storage_quota_bytes);
+        // #259: same plan-default fallback as the cumulative quota above -- the
+        // plan's per-object default fills in only when no tenant policy set it.
+        effective.asset_max_object_bytes = effective
+            .asset_max_object_bytes
+            .or(plan.default_asset_max_object_bytes);
     }
     effective
 }
@@ -326,6 +342,7 @@ mod tests {
             tpm_limit,
             monthly_budget_usd,
             asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
             alert_threshold_pcts: Vec::new(),
             enabled,
             created_at_unix: 1,
@@ -353,6 +370,7 @@ mod tests {
             tpm_limit: None,
             monthly_budget_usd: None,
             asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
             alert_threshold_pcts: Vec::new(),
             enabled: true,
             created_at_unix: 1,
@@ -808,6 +826,7 @@ mod tests {
             updated_at_unix: 1,
             asset_hosting_enabled: true,
             default_asset_storage_quota_bytes: Some(1_000_000),
+            default_asset_max_object_bytes: Some(250_000),
             extension_tools_enabled: true,
             default_monthly_egress_bytes_budget: Some(5_000_000),
             default_download_rpm_limit: Some(120),

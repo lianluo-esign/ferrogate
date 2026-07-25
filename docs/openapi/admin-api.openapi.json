@@ -23294,6 +23294,15 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "default_asset_max_object_bytes": {
+            "description": "The plan's per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           }
         },
         "additionalProperties": false,
@@ -23773,6 +23782,15 @@
             "format": "int64",
             "minimum": 0
           },
+          "asset_max_object_bytes": {
+            "description": "Tenant-only override of the plan per-object asset byte ceiling (issue #259); a per-object (not cumulative) cap, independent of asset_storage_quota_bytes; must be null for project, workspace, and key scopes.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
           "alert_threshold_pcts": {
             "type": "array",
             "items": {
@@ -23858,6 +23876,15 @@
           },
           "asset_storage_quota_bytes": {
             "description": "Tenant-only override of the plan asset storage quota; rejected for project, workspace, and key scopes.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "asset_max_object_bytes": {
+            "description": "Tenant-only override of the plan per-object asset byte ceiling (issue #259); a per-object (not cumulative) cap, independent of asset_storage_quota_bytes; rejected for project, workspace, and key scopes.",
             "type": [
               "integer",
               "null"
@@ -23964,6 +23991,15 @@
             "type": "boolean"
           },
           "default_asset_storage_quota_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "default_asset_max_object_bytes": {
+            "description": "Per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.",
             "type": [
               "integer",
               "null"
@@ -24081,6 +24117,15 @@
             ]
           },
           "default_asset_storage_quota_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "default_asset_max_object_bytes": {
+            "description": "Per-object (not cumulative) default asset byte ceiling (issue #259), independent of default_asset_storage_quota_bytes.",
             "type": [
               "integer",
               "null"

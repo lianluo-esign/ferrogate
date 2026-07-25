@@ -232,6 +232,9 @@ CREATE TABLE IF NOT EXISTS quota_policies (
     asset_storage_quota_bytes INTEGER,
     monthly_egress_bytes_budget INTEGER,
     download_rpm_limit INTEGER,
+    -- Per-object (not cumulative) asset byte ceiling, tenant-only (#259);
+    -- distinct from the cumulative asset_storage_quota_bytes above.
+    asset_max_object_bytes INTEGER,
     UNIQUE (scope_type, scope_id)
 );
 
@@ -257,7 +260,10 @@ CREATE TABLE IF NOT EXISTS plans (
     default_asset_storage_quota_bytes INTEGER,
     extension_tools_enabled INTEGER NOT NULL DEFAULT 0,
     default_monthly_egress_bytes_budget INTEGER,
-    default_download_rpm_limit INTEGER
+    default_download_rpm_limit INTEGER,
+    -- Per-object (not cumulative) default asset byte ceiling (#259); distinct
+    -- from the cumulative default_asset_storage_quota_bytes above.
+    default_asset_max_object_bytes INTEGER
 );
 
 -- Seed the default 'free' plan every tenant lands on unless assigned another,

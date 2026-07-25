@@ -329,28 +329,62 @@ async fn commit_verify_reports_not_uploaded_when_the_object_is_absent() {
 #[test]
 fn effective_per_object_ceiling_is_plan_quota_driven_with_a_global_default() {
     // #259: the per-object ceiling replaces a fixed constant with a
-    // plan/quota-driven limit. A tenant with no quota (unlimited storage) keeps
-    // the operator's global ceiling as the sane default.
+    // plan/quota-driven limit. A tenant with no dedicated per-object ceiling and
+    // no cumulative quota (unlimited storage) keeps the operator's global
+    // ceiling as the sane default.
     assert_eq!(
-        effective_max_object_bytes(5 * 1024 * 1024 * 1024, None),
+        effective_max_object_bytes(5 * 1024 * 1024 * 1024, None, None),
         5 * 1024 * 1024 * 1024
     );
-    // A tenant whose plan quota is SMALLER than the global ceiling is capped to
-    // its quota: a single object can never exceed the whole tenant quota.
+    // A tenant whose cumulative quota is SMALLER than the global ceiling is
+    // capped to its quota: a single object can never exceed the whole tenant
+    // quota. (The dedicated per-object ceiling is unset here.)
     assert_eq!(
-        effective_max_object_bytes(5 * 1024 * 1024 * 1024, Some(50 * 1024 * 1024)),
+        effective_max_object_bytes(5 * 1024 * 1024 * 1024, None, Some(50 * 1024 * 1024)),
         50 * 1024 * 1024
     );
-    // A tenant whose plan quota is LARGER than the global ceiling stays bounded
-    // by the operator ceiling (the tighter of the two always wins).
+    // A tenant whose cumulative quota is LARGER than the global ceiling stays
+    // bounded by the operator ceiling (the tighter always wins).
     assert_eq!(
-        effective_max_object_bytes(1024 * 1024, Some(10 * 1024 * 1024 * 1024)),
+        effective_max_object_bytes(1024 * 1024, None, Some(10 * 1024 * 1024 * 1024)),
         1024 * 1024
     );
     // Equal bounds resolve to that shared value.
-    assert_eq!(effective_max_object_bytes(4096, Some(4096)), 4096);
-    // A zero quota admits nothing -- degenerate but well-defined.
-    assert_eq!(effective_max_object_bytes(4096, Some(0)), 0);
+    assert_eq!(effective_max_object_bytes(4096, None, Some(4096)), 4096);
+    // A zero cumulative quota admits nothing -- degenerate but well-defined.
+    assert_eq!(effective_max_object_bytes(4096, None, Some(0)), 0);
+}
+
+#[test]
+fn dedicated_per_object_ceiling_binds_independently_of_the_cumulative_quota() {
+    // #259: the dedicated per-object ceiling can be TIGHTER than the cumulative
+    // quota and wins, even though the tenant's whole-store budget is far larger.
+    assert_eq!(
+        effective_max_object_bytes(
+            5 * 1024 * 1024 * 1024,        // global operator ceiling (loose)
+            Some(1024 * 1024),             // dedicated per-object ceiling (1 MiB)
+            Some(10 * 1024 * 1024 * 1024), // cumulative quota (10 GiB, loose)
+        ),
+        1024 * 1024
+    );
+    // The cumulative quota can still bind tighter than the per-object ceiling --
+    // the min of all three always wins.
+    assert_eq!(
+        effective_max_object_bytes(5000, Some(4096), Some(1024)),
+        1024
+    );
+    // A None per-object ceiling is a NO-OP: behavior is exactly the old
+    // min(global, cumulative).
+    assert_eq!(effective_max_object_bytes(5000, None, Some(2048)), 2048);
+    assert_eq!(effective_max_object_bytes(5000, None, None), 5000);
+    // A per-object ceiling looser than both global and cumulative doesn't
+    // loosen anything -- the tighter of the other two still wins.
+    assert_eq!(
+        effective_max_object_bytes(4096, Some(1024 * 1024), Some(8192)),
+        4096
+    );
+    // A zero per-object ceiling admits nothing -- degenerate but well-defined.
+    assert_eq!(effective_max_object_bytes(4096, Some(0), None), 0);
 }
 
 #[test]

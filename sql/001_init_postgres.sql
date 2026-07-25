@@ -2496,3 +2496,30 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 55 (#259): a DEDICATED per-object asset byte ceiling, independent
+-- of the cumulative asset_storage_quota_bytes. quota_policies gets a tenant-only
+-- override column (mirroring asset_storage_quota_bytes: assets and their usage
+-- are tenant-owned, so a project/workspace/key value would be write-only), and
+-- plans gets the tenant-wide default the effective-quota merge falls back to.
+-- Each individual asset object must be <= this; it does NOT bound cumulative
+-- storage. Added via the insert-first/IF FOUND gate so only the startup that
+-- records the migration runs the DDL, and a failed ALTER rolls the ledger row
+-- back for a clean retry. Idempotent ADD COLUMN IF NOT EXISTS; the tenant-only
+-- CHECK mirrors quota_policies_asset_storage_tenant_only.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (55, '055_asset_max_object_bytes')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE quota_policies
+            ADD COLUMN IF NOT EXISTS asset_max_object_bytes BIGINT;
+        ALTER TABLE quota_policies
+            ADD CONSTRAINT quota_policies_asset_max_object_tenant_only
+            CHECK (asset_max_object_bytes IS NULL OR scope_type = 'tenant');
+        ALTER TABLE plans
+            ADD COLUMN IF NOT EXISTS default_asset_max_object_bytes BIGINT;
+    END IF;
+END
+$$;

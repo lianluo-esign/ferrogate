@@ -3662,6 +3662,7 @@ impl PostgresControlPlaneStore {
         let rpm_limit = policy.rpm_limit.map(saturating_i64);
         let tpm_limit = policy.tpm_limit.map(saturating_i64);
         let asset_storage_quota_bytes = policy.asset_storage_quota_bytes.map(saturating_i64);
+        let asset_max_object_bytes = policy.asset_max_object_bytes.map(saturating_i64);
         let monthly_egress_bytes_budget = policy.monthly_egress_bytes_budget.map(saturating_i64);
         let download_rpm_limit = policy.download_rpm_limit.map(saturating_i64);
         let created_at_unix = policy.created_at_unix;
@@ -3687,9 +3688,9 @@ impl PostgresControlPlaneStore {
                  (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
                   monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                   alert_threshold_pcts_json, asset_storage_quota_bytes, \
-                  monthly_egress_bytes_budget, download_rpm_limit) \
+                  monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes) \
                  VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11::text::jsonb, \
-                  $12, $13, $14) \
+                  $12, $13, $14, $15) \
                  ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
                  model_allowlist_json = EXCLUDED.model_allowlist_json, \
                  rpm_limit = EXCLUDED.rpm_limit, tpm_limit = EXCLUDED.tpm_limit, \
@@ -3698,7 +3699,8 @@ impl PostgresControlPlaneStore {
                  alert_threshold_pcts_json = EXCLUDED.alert_threshold_pcts_json, \
                  asset_storage_quota_bytes = EXCLUDED.asset_storage_quota_bytes, \
                  monthly_egress_bytes_budget = EXCLUDED.monthly_egress_bytes_budget, \
-                 download_rpm_limit = EXCLUDED.download_rpm_limit",
+                 download_rpm_limit = EXCLUDED.download_rpm_limit, \
+                 asset_max_object_bytes = EXCLUDED.asset_max_object_bytes",
                 &[
                     &policy.id,
                     &policy.scope_type.as_str(),
@@ -3714,6 +3716,7 @@ impl PostgresControlPlaneStore {
                     &asset_storage_quota_bytes,
                     &monthly_egress_bytes_budget,
                     &download_rpm_limit,
+                    &asset_max_object_bytes,
                 ],
             )
             .await
@@ -3747,7 +3750,7 @@ impl PostgresControlPlaneStore {
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes, \
-                 monthly_egress_bytes_budget, download_rpm_limit \
+                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes \
                  FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
@@ -3778,7 +3781,7 @@ impl PostgresControlPlaneStore {
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
                  alert_threshold_pcts_json::text, asset_storage_quota_bytes, \
-                 monthly_egress_bytes_budget, download_rpm_limit \
+                 monthly_egress_bytes_budget, download_rpm_limit, asset_max_object_bytes \
                  FROM quota_policies ORDER BY id ASC",
                 &[],
             )
@@ -3827,6 +3830,8 @@ impl PostgresControlPlaneStore {
         let admin_console_seats = plan.admin_console_seats.map(i64::from);
         let default_asset_storage_quota_bytes =
             plan.default_asset_storage_quota_bytes.map(saturating_i64);
+        let default_asset_max_object_bytes =
+            plan.default_asset_max_object_bytes.map(saturating_i64);
         let default_monthly_egress_bytes_budget =
             plan.default_monthly_egress_bytes_budget.map(saturating_i64);
         let default_download_rpm_limit = plan.default_download_rpm_limit.map(saturating_i64);
@@ -3853,10 +3858,10 @@ impl PostgresControlPlaneStore {
                   default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                   updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                   extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                  default_download_rpm_limit) \
+                  default_download_rpm_limit, default_asset_max_object_bytes) \
                  VALUES \
                  ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, \
-                  $16, $17) \
+                  $16, $17, $18) \
                  ON CONFLICT (id) DO UPDATE SET \
                  name = EXCLUDED.name, slug = EXCLUDED.slug, \
                  mcp_enabled = EXCLUDED.mcp_enabled, \
@@ -3871,7 +3876,8 @@ impl PostgresControlPlaneStore {
                  default_asset_storage_quota_bytes = EXCLUDED.default_asset_storage_quota_bytes, \
                  extension_tools_enabled = EXCLUDED.extension_tools_enabled, \
                  default_monthly_egress_bytes_budget = EXCLUDED.default_monthly_egress_bytes_budget, \
-                 default_download_rpm_limit = EXCLUDED.default_download_rpm_limit",
+                 default_download_rpm_limit = EXCLUDED.default_download_rpm_limit, \
+                 default_asset_max_object_bytes = EXCLUDED.default_asset_max_object_bytes",
                 &[
                     &plan.id,
                     &plan.name,
@@ -3890,6 +3896,7 @@ impl PostgresControlPlaneStore {
                     &plan.extension_tools_enabled,
                     &default_monthly_egress_bytes_budget,
                     &default_download_rpm_limit,
+                    &default_asset_max_object_bytes,
                 ],
             )
             .await
@@ -3921,7 +3928,7 @@ impl PostgresControlPlaneStore {
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                  extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                 default_download_rpm_limit \
+                 default_download_rpm_limit, default_asset_max_object_bytes \
                  FROM plans WHERE id = $1",
                 &[&id],
             )
@@ -3954,7 +3961,7 @@ impl PostgresControlPlaneStore {
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
                  extension_tools_enabled, default_monthly_egress_bytes_budget, \
-                 default_download_rpm_limit \
+                 default_download_rpm_limit, default_asset_max_object_bytes \
                  FROM plans ORDER BY id ASC",
                 &[],
             )
@@ -9471,6 +9478,7 @@ fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, Storage
         asset_storage_quota_bytes: row.get::<_, Option<i64>>(11).map(nonnegative_u64),
         monthly_egress_bytes_budget: row.get::<_, Option<i64>>(12).map(nonnegative_u64),
         download_rpm_limit: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
+        asset_max_object_bytes: row.get::<_, Option<i64>>(14).map(nonnegative_u64),
     })
 }
 
@@ -9494,6 +9502,7 @@ fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageError> {
         extension_tools_enabled: row.get::<_, bool>(14),
         default_monthly_egress_bytes_budget: row.get::<_, Option<i64>>(15).map(nonnegative_u64),
         default_download_rpm_limit: row.get::<_, Option<i64>>(16).map(nonnegative_u64),
+        default_asset_max_object_bytes: row.get::<_, Option<i64>>(17).map(nonnegative_u64),
     })
 }
 
@@ -11965,6 +11974,10 @@ fn default_free_plan() -> StoredPlan {
         // the `stored_assets` schema.
         asset_hosting_enabled: true,
         default_asset_storage_quota_bytes: Some(10 * 1024 * 1024),
+        // #259: no dedicated per-object ceiling on the free plan -- individual
+        // objects stay bounded by the operator's global presign ceiling and
+        // the cumulative quota above, exactly as before this field existed.
+        default_asset_max_object_bytes: None,
         // Compute-adjacent like mcp_enabled/self_hosted_workers_enabled --
         // gated off by default (issue #183).
         extension_tools_enabled: false,
@@ -12009,6 +12022,15 @@ pub struct StoredPlan {
     pub asset_hosting_enabled: bool,
     #[serde(default)]
     pub default_asset_storage_quota_bytes: Option<u64>,
+    /// Per-object (not cumulative) default asset byte ceiling (issue #259):
+    /// each individual asset object must be <= this. Independent of the
+    /// cumulative `default_asset_storage_quota_bytes`; a tenant-scoped
+    /// `StoredQuotaPolicy.asset_max_object_bytes` overrides it exactly as
+    /// `asset_storage_quota_bytes` overrides the cumulative default. `None`
+    /// means "no dedicated per-object default" (the presign path then falls
+    /// back to the operator ceiling / cumulative quota alone).
+    #[serde(default)]
+    pub default_asset_max_object_bytes: Option<u64>,
     /// #262 (egress governance): tenant-wide default monthly egress/download
     /// byte budget, the floor `resolve_effective_quota` applies when no
     /// explicit `quota_policies.monthly_egress_bytes_budget` is set anywhere
@@ -12648,6 +12670,13 @@ pub struct StoredQuotaPolicy {
     /// "no override, fall back to the plan default".
     #[serde(default)]
     pub asset_storage_quota_bytes: Option<u64>,
+    /// Tenant-only override of `StoredPlan.default_asset_max_object_bytes`
+    /// (issue #259): a per-object (not cumulative) asset byte ceiling, distinct
+    /// from the cumulative `asset_storage_quota_bytes` above. Tenant-owned for
+    /// the same reason; `None` means "no override, fall back to the plan
+    /// default".
+    #[serde(default)]
+    pub asset_max_object_bytes: Option<u64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[75, 90, 95]`) that fire
     /// a one-time webhook notification each, strictly before the 100% hard
     /// deny in `AppState::monthly_budget_exceeded` (issue #170). Empty
@@ -12688,6 +12717,12 @@ pub fn validate_quota_policy(policy: &StoredQuotaPolicy) -> Result<(), StorageEr
     if policy.scope_type != QuotaScopeKind::Tenant && policy.asset_storage_quota_bytes.is_some() {
         return Err(StorageError::Runtime(
             "asset_storage_quota_bytes is tenant-only because stored assets and usage are tenant-owned"
+                .into(),
+        ));
+    }
+    if policy.scope_type != QuotaScopeKind::Tenant && policy.asset_max_object_bytes.is_some() {
+        return Err(StorageError::Runtime(
+            "asset_max_object_bytes is tenant-only because stored assets and usage are tenant-owned"
                 .into(),
         ));
     }
@@ -17321,6 +17356,7 @@ mod tests {
             tpm_limit: Some(500_000),
             monthly_budget_usd: Some(250.0),
             asset_storage_quota_bytes: Some(104_857_600),
+            asset_max_object_bytes: Some(1_048_576),
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -17338,6 +17374,7 @@ mod tests {
             tpm_limit: None,
             monthly_budget_usd: None,
             asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -17354,6 +17391,7 @@ mod tests {
         assert_eq!(tenant_policy.rpm_limit, Some(1_000));
         assert_eq!(tenant_policy.monthly_budget_usd, Some(250.0));
         assert_eq!(tenant_policy.asset_storage_quota_bytes, Some(104_857_600));
+        assert_eq!(tenant_policy.asset_max_object_bytes, Some(1_048_576));
         assert_eq!(
             tenant_policy.model_allowlist,
             vec!["fast-chat", "smart-chat"]
@@ -17389,6 +17427,7 @@ mod tests {
             tpm_limit: None,
             monthly_budget_usd: None,
             asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,
@@ -17407,6 +17446,7 @@ mod tests {
             tpm_limit: Some(10_000),
             monthly_budget_usd: Some(10.0),
             asset_storage_quota_bytes: None,
+            asset_max_object_bytes: None,
             alert_threshold_pcts: vec![],
             monthly_egress_bytes_budget: None,
             download_rpm_limit: None,

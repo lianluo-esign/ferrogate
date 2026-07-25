@@ -555,6 +555,7 @@ fn quota_policy_round_trips_through_real_supabase() {
         tpm_limit: Some(500_000),
         monthly_budget_usd: Some(250.5),
         asset_storage_quota_bytes: Some(10_485_760),
+        asset_max_object_bytes: Some(4_194_304),
         alert_threshold_pcts: vec![50, 90],
         enabled: true,
         created_at_unix: 1,
@@ -575,6 +576,7 @@ fn quota_policy_round_trips_through_real_supabase() {
         tpm_limit: None,
         monthly_budget_usd: None,
         asset_storage_quota_bytes: Some(52_428_800),
+        asset_max_object_bytes: Some(1_048_576),
         alert_threshold_pcts: vec![],
         enabled: false,
         created_at_unix: 1,
@@ -595,6 +597,9 @@ fn quota_policy_round_trips_through_real_supabase() {
     assert_eq!(policy.tpm_limit, None);
     assert_eq!(policy.monthly_budget_usd, None);
     assert_eq!(policy.asset_storage_quota_bytes, Some(52_428_800));
+    // #259: the dedicated per-object ceiling survives the Postgres roundtrip
+    // independently of the cumulative quota above.
+    assert_eq!(policy.asset_max_object_bytes, Some(1_048_576));
     // #262: the second upsert reset both egress columns to NULL, proving they
     // survive the Postgres roundtrip (were Some on the first write).
     assert_eq!(policy.monthly_egress_bytes_budget, None);

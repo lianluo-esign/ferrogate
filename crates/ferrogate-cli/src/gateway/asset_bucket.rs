@@ -886,8 +886,8 @@ fn build_deploy_body(completion_token: &str) -> Vec<u8> {
     // module part
     body.push_str(&format!("--{b}\r\n"));
     body.push_str(&format!(
-        "Content-Disposition: form-data; name=\"{0}\"; filename=\"{0}\"\r\n",
-        WSA_MAIN_MODULE_FILENAME
+        "Content-Disposition: form-data; name=\"{WSA_MAIN_MODULE_FILENAME}\"; \
+         filename=\"{WSA_MAIN_MODULE_FILENAME}\"\r\n"
     ));
     body.push_str("Content-Type: application/javascript+module\r\n\r\n");
     body.push_str(WSA_STATIC_MAIN_MODULE);

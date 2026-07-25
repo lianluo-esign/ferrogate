@@ -1041,6 +1041,9 @@ pub(crate) struct AdminPlan {
     pub(crate) default_monthly_budget_usd: Option<f64>,
     pub(crate) asset_hosting_enabled: bool,
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    /// #259: per-object (not cumulative) default asset byte ceiling, independent
+    /// of `default_asset_storage_quota_bytes`.
+    pub(crate) default_asset_max_object_bytes: Option<u64>,
     pub(crate) extension_tools_enabled: bool,
     /// #262: tenant-wide default monthly egress byte budget / download RPM.
     pub(crate) default_monthly_egress_bytes_budget: Option<u64>,
@@ -1079,6 +1082,8 @@ pub(crate) struct AdminPlanMutation {
     pub(crate) asset_hosting_enabled: Option<bool>,
     #[serde(default)]
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) default_asset_max_object_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) extension_tools_enabled: Option<bool>,
     #[serde(default)]
@@ -1256,6 +1261,8 @@ pub(crate) struct AdminTenantResolvedDefaults {
     pub(crate) self_hosted_workers_enabled: bool,
     pub(crate) asset_hosting_enabled: bool,
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    /// #259: the plan's per-object (not cumulative) default asset byte ceiling.
+    pub(crate) default_asset_max_object_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1383,6 +1390,10 @@ pub(crate) struct AdminQuotaPolicy {
     /// Tenant-only override of `StoredPlan.default_asset_storage_quota_bytes`
     /// (issue #188). `None` means the tenant's plan default applies.
     pub(crate) asset_storage_quota_bytes: Option<u64>,
+    /// Tenant-only override of `StoredPlan.default_asset_max_object_bytes`
+    /// (issue #259): a per-object (not cumulative) ceiling, independent of
+    /// `asset_storage_quota_bytes`. `None` means the plan default applies.
+    pub(crate) asset_max_object_bytes: Option<u64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[50, 90]`) that fire a
     /// one-time proactive alert webhook when spend first crosses them
     /// (issue #170) -- distinct from the unconditional 100% hard-deny in
@@ -1413,6 +1424,8 @@ pub(crate) struct AdminQuotaPolicyMutation {
     pub(crate) monthly_budget_usd: Option<f64>,
     #[serde(default)]
     pub(crate) asset_storage_quota_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) asset_max_object_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) alert_threshold_pcts: Option<Vec<u8>>,
     #[serde(default)]

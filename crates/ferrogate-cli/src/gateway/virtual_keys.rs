@@ -718,6 +718,9 @@ impl FerroGateway {
             default_asset_storage_quota_bytes: plan
                 .as_ref()
                 .and_then(|plan| plan.default_asset_storage_quota_bytes),
+            default_asset_max_object_bytes: plan
+                .as_ref()
+                .and_then(|plan| plan.default_asset_max_object_bytes),
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
