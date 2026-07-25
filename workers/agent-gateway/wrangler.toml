@@ -9,8 +9,18 @@ name = "ferrogate-agent-gateway"
 main = "src/index.ts"
 
 # Pin the compatibility date; the Agents SDK + DO RPC require a recent runtime.
+#
+# `enable_ctx_exports` (#471): the governed-egress path is INOPERATIVE without it.
+# `@cloudflare/containers` resolves the outbound interceptor through
+# `ctx.exports.ContainerProxy`, so `setAllowedHosts`/`setDeniedHosts` throw
+# "ctx.exports is undefined" on any runtime where the flag is off — which it is by
+# default before compatibility date 2025-11-17. The failure is fail-CLOSED
+# (`/container/start` returns `container_error`, the Rust client refuses the run) but it
+# means the gateway-tethered posture could never be applied. Setting the flag rather than
+# moving the date keeps every other dated behaviour change out of this deployment.
+# test/container-egress.test.ts fails if this flag is removed.
 compatibility_date = "2025-06-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "enable_ctx_exports"]
 
 # --- Durable Object binding -------------------------------------------------
 # The gateway hosts one agent Durable Object class. `getAgentByName(env.AGENT_GATEWAY, name)`

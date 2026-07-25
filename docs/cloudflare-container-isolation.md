@@ -147,6 +147,17 @@ produces an untethered agent:
    only widen it, never shrink it. Cloudflare evaluates `deniedHosts` first and
    it overrides everything, so an over-broad allowlist still cannot reach a
    provider.
+
+   **Runtime prerequisite.** `setAllowedHosts` / `setDeniedHosts` resolve their
+   outbound interceptor through `ctx.exports.ContainerProxy`, and `ctx.exports`
+   is off by default before compatibility date **2025-11-17**. This Worker pins
+   `2025-06-01`, so `wrangler.toml` requests the `enable_ctx_exports`
+   compatibility flag explicitly. Without it every tethered start rejects with
+   `container_error` — fail-closed, but the gateway-tethered posture could never
+   be applied at all. `test/container-egress.test.ts` fails if the flag is
+   dropped, and the vitest harness reads the date and flags out of
+   `wrangler.toml` so the suite can never run on different runtime settings
+   than the deployment.
 5. **Attestation.** The start response carries the posture the Worker *actually
    applied* (`egress: { directPublicEgress, posture, allowedHosts, deniedHosts }`)
    and `ContainerControlClient::start` **fails the start**
@@ -351,6 +362,27 @@ agent-worker (environment):
   mock transport, evidence, and the fail-closed snapshot error
   (`cloudflare_container_backend_test.rs`); the registry gating
   (`backends_test.rs`); and `tsc --noEmit` for `container.ts`.
+- **Worker-side enforcement, offline in workerd (`workers/agent-gateway/test/container-egress.test.ts`).**
+  The first #471 pass tested only the side that *sends* the configuration, and
+  7 of 7 mutations to the Worker half survived — including flipping
+  `AgentSandbox { enableInternet = false }` to `true`. This suite boots a real
+  `AgentSandbox` Durable Object under `@cloudflare/vitest-pool-workers` (no
+  Docker, no CF account) and observes the **applied** posture instead:
+  `enableInternet` is read off the live instance; the allow/deny lists are read
+  back through the SDK's `effectiveAllowedHosts` / `effectiveDeniedHosts` after
+  `/container/start` ran; the verdicts come from `ContainerProxy` — Cloudflare's
+  own egress decision function, reached through the interceptor the SDK actually
+  registered — so a denial is Cloudflare's documented 520 and anything else means
+  the request left; the returned attestation is compared against that applied
+  state; and `wrangler.toml` is asserted to bind `AgentSandbox` (the one failure
+  mode attestation provably cannot detect). Each of these was verified by
+  mutating the enforcing line and watching the suite fail.
+- **Not observable from any test (platform behaviour, LIVE-CF only).** Whether
+  Cloudflare *honours* `enableInternet = false` outside the container, and
+  whether root inside the container can defeat the filter, cannot be observed in
+  workerd: a container engine is required, and workerd provides none. The suite
+  above pins everything up to that boundary — the value the platform is handed,
+  and what Cloudflare's own decision function does with it — and stops there.
 - **Not-tested (LIVE-CF, the test gate owns it):** the end-to-end run of a code
   step in a real Cloudflare sandbox capturing stdout/exit needs a bound
   `CONTAINER_SANDBOX` + a Workers-Paid account + network. After the #415 rework

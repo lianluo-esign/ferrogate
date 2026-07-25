@@ -229,3 +229,58 @@ fn prepare_fails_when_identity_is_unusable() {
     let error = backend.prepare(prepare_request()).unwrap_err();
     assert!(matches!(error, IsolationError::Backend(_)));
 }
+
+#[test]
+fn a_start_whose_session_policy_disables_governed_egress_never_reaches_the_worker() {
+    // The session's OWN network policy has to reach the start spec. `IsolationPolicy::
+    // validate` does not stop this case — it rejects `direct_public_egress: true` but
+    // says nothing about `governed_egress: false` — so the only thing standing between
+    // an ungoverned session and a started container is `start_spec` reading the policy
+    // this backend was prepared with. Feed it a default policy instead and the start
+    // below succeeds, having asked the Worker to fence nothing.
+    let mut backend = backend(vec![
+        ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "preparedId": "prep-1" }"#),
+        // Deliberately available: a start that should never be issued would consume it.
+        ok(
+            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
+        ),
+    ]);
+    let mut request = prepare_request();
+    request.policy.network_policy.governed_egress = false;
+    let prepared = backend
+        .prepare(request)
+        .expect("validate() admits this policy");
+
+    let error = backend.start(prepared).unwrap_err();
+    match error {
+        IsolationError::Backend(message) => {
+            assert!(message.contains("governed_egress"), "got {message}");
+        }
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+    // Fails BEFORE the wire: no container was started at all.
+    assert_eq!(
+        backend.client().transport().paths(),
+        vec!["https://ferrogate-agent-gateway.example.workers.dev/container/prepare"]
+    );
+}
+
+#[test]
+fn the_sealed_session_policy_is_the_one_that_starts() {
+    // The control for the test above: the same path with the shipped default policy
+    // reaches the Worker and starts. Without this, "refuses everything" would pass.
+    let mut backend = backend(vec![
+        ok(r#"{ "instance": "fg.tenant-a.sess-1.run-9", "preparedId": "prep-1" }"#),
+        ok(
+            r#"{ "instance": "fg.tenant-a.sess-1.run-9", "instanceId": "cf-abc", "running": true,
+             "egress": { "directPublicEgress": false, "posture": "sealed",
+                         "allowedHosts": [], "deniedHosts": [] } }"#,
+        ),
+    ]);
+    let prepared = backend.prepare(prepare_request()).unwrap();
+    let started = backend.start(prepared).unwrap();
+    assert_eq!(started.instance_id, "cf-abc");
+    assert!(!started.evidence.network_policy.direct_public_egress);
+}
