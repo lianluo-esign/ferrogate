@@ -285,20 +285,34 @@ until all acceptance criteria are satisfied.
 When the workflow is run as an **autonomous, parallel multi-agent loop** (fan
 work out across worktree-isolated subagents and keep iterating), follow the
 binding constraints in `docs/autonomous-dev-loop.md`: advance Project-board
-sub-issues only up to **In review & Test** (never to Done — a separate test
-agent owns that lane); read the Projects GraphQL API (`gh project ...`) only at
-key nodes and cache the board dump to protect the limited Projects quota; cap
-code-developing subagents at **3 in parallel**; pick maximally file-separated
-slices; integrate by cherry-pick + re-verify-combined + push + status-move; and
-**delete each worktree the moment its slice is integrated** to bound disk use.
+sub-issues only up to **In review** (never further — separate code-review and
+test agents own the lanes past it); read the Projects GraphQL API
+(`gh project ...`) only at key nodes and cache the board dump to protect the
+limited Projects quota; cap code-developing subagents at **3 in parallel**; pick
+maximally file-separated slices; integrate by cherry-pick + re-verify-combined +
+push + status-move; and **delete each worktree the moment its slice is
+integrated** to bound disk use.
 
-That loop pairs with a separate **test gate** agent that watches only the
-**In review & Test** lane and takes each item to **Done** (pass, with
-`ferrogate-test` end-to-end coverage) or back to **Ready** with a
-`gate-rejected` label (fail). The two-agent choreography, the board handoff, and
-the shared GraphQL-quota discipline are documented in `docs/autonomous-dev-loop.md`
-and surfaced by the `skills/ferrogate-multi-agent-loop` skill (with role-specific
-`skills/ferrogate-dev-loop` and `skills/ferrogate-test` skills).
+That loop is one of **three** sessions, each owning one lane of the board
+**Backlog → Ready → In progress → In review → Testing → Done**:
+
+- the **dev agent** (code generation only) takes work from Backlog/Ready through
+  **In progress** to **In review** and stops. `cargo test`/`cargo build` plus the
+  repo's local gates are its whole proof obligation — it does not self-review and
+  does not run end-to-end tests;
+- the **code-review agent** watches **In review** and moves passing items to
+  **Testing**;
+- the **test gate** watches **Testing**, completes the end-to-end
+  `ferrogate-test` coverage, and takes each item to **Done**.
+
+**Any stage that finds a problem returns the issue to `Ready`** (the
+`gate-rejected`-style return path) with its findings in a comment, so `Ready` is
+also the dev agent's rework inbox and an issue may cross the board more than
+once. The three-agent choreography, the board handoff, and the shared
+GraphQL-quota discipline are documented in `docs/autonomous-dev-loop.md` and
+surfaced by the `skills/ferrogate-multi-agent-loop` skill (the shared three-role
+reference, with role-specific `skills/ferrogate-dev-loop`,
+`skills/ferrogate-code-review`, and `skills/ferrogate-test` skills).
 
 ## AI Gateway Standards
 
