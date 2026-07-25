@@ -470,7 +470,7 @@ Subcommands:
 - `wallets` — Manage tenant credit wallets and settlement
 - `payment-methods` — Manage stored payment methods
 - `billing-events` — Inspect billing events and outbox dead letters
-- `usage` — Inspect usage aggregates, reports, and metering
+- `usage` — Inspect usage aggregates, reports, metering, and agent cost-burn
 - `request-logs` — Inspect and export retained request logs
 - `audit-events` — List retained Admin API audit events
 - `observed-agent-activity` — List observed agent/run activity correlations
@@ -5631,7 +5631,7 @@ Options:
 
 #### `ferrogate ctl usage`
 
-Inspect usage aggregates, reports, and metering
+Inspect usage aggregates, reports, metering, and agent cost-burn
 
 Subcommands:
 
@@ -5639,6 +5639,7 @@ Subcommands:
 - `reports` — List usage reports
 - `metering-events` — List raw metering events
 - `metering-export-status` — Show metering exporter status
+- `cost-burn` — List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)
 
 ##### `ferrogate ctl usage aggregates`
 
@@ -5718,6 +5719,31 @@ Options:
 ##### `ferrogate ctl usage metering-export-status`
 
 Show metering exporter status
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl usage cost-burn`
+
+List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)
 
 Arguments:
 

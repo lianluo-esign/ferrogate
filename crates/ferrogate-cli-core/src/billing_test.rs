@@ -151,11 +151,12 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "listUsageReports",
         "listAdminMeteringEvents",
         "listAdminMeteringExportStatus",
+        "listAdminAgentCostBurn",
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 7 (wallets) + 3 (payment-methods) + 3 (billing-events) + 4 (usage) = 17.
-    assert_eq!(manifest.len(), 17);
+    // 7 (wallets) + 3 (payment-methods) + 3 (billing-events) + 5 (usage) = 18.
+    assert_eq!(manifest.len(), 18);
 }
 
 #[test]
@@ -322,6 +323,9 @@ fn usage_verbs_map_to_their_collections_and_preserve_filters() {
     let status = build_usage("metering-export-status", &ResourceInput::new()).unwrap();
     assert_eq!(status.path, "/admin/v1/metering-export-status");
 
+    let cost_burn = build_usage("cost-burn", &ResourceInput::new()).unwrap();
+    assert_eq!(cost_burn.path, "/admin/v1/agent-cost-burn");
+
     // Pagination and a server-side filter are folded into the query verbatim.
     let filtered = build_usage(
         "aggregates",
@@ -338,6 +342,43 @@ fn usage_verbs_map_to_their_collections_and_preserve_filters() {
     assert!(filtered
         .query
         .contains(&("limit".to_string(), "50".to_string())));
+}
+
+#[test]
+fn cost_burn_reads_the_period_rollup_and_preserves_filters() {
+    // listAdminAgentCostBurn (#428) is a read-only GET on its own collection; the
+    // only parameters it declares are `period` plus offset/limit pagination, and
+    // all three must reach the wire exactly as the operator asked.
+    let plain = build_usage("cost-burn", &ResourceInput::new()).unwrap();
+    assert_eq!(plain.method, Method::GET);
+    assert_eq!(plain.path, "/admin/v1/agent-cost-burn");
+    // No period is invented client-side: omitting it lets the server apply its
+    // documented default (the current UTC month).
+    assert!(plain.query.iter().all(|(key, _)| key != "period"));
+
+    let scoped = build_usage(
+        "cost-burn",
+        &ResourceInput::new().with_list(
+            ListParams::new()
+                .with_page(PageRequest {
+                    offset: 20,
+                    limit: Some(10),
+                })
+                .with_filter("period", "2026-06"),
+        ),
+    )
+    .unwrap();
+    assert_eq!(scoped.method, Method::GET);
+    assert_eq!(scoped.path, "/admin/v1/agent-cost-burn");
+    assert!(scoped
+        .query
+        .contains(&("period".to_string(), "2026-06".to_string())));
+    assert!(scoped
+        .query
+        .contains(&("offset".to_string(), "20".to_string())));
+    assert!(scoped
+        .query
+        .contains(&("limit".to_string(), "10".to_string())));
 }
 
 #[test]

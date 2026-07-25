@@ -56,6 +56,17 @@
 //! #388 and is now driven by the `billing-events replay` verb — a first-class
 //! `POST .../{report_id}/replay` recovery action alongside the read-only
 //! `dead-letters` listing.
+//!
+//! ## Per-agent cost-burn lives with usage, not with the agent family (#428)
+//!
+//! `listAdminAgentCostBurn` (`GET /admin/v1/agent-cost-burn`) is keyed by agent
+//! but is a *spend* read: one durable, tenant-scoped `accumulated_usd` rollup per
+//! `(tenant, agent_key, period)` billing window. It answers "what did each agent
+//! cost me this month", which is the same question `usage aggregates` and
+//! `usage reports` answer at other granularities, so it is declared as
+//! `usage cost-burn` rather than under the #362 `agent-*` lifecycle groups (which
+//! configure agents, not their spend). Like every other verb here it transports
+//! the server's exact money representation and never recomputes it.
 
 use crate::command::{CommandGroup, GroupDescriptor, VerbDescriptor};
 use crate::error::CliResult;
@@ -82,6 +93,9 @@ pub const METERING_EVENTS: ResourceApi = ResourceApi::new("/admin/v1/metering-ev
 /// `/admin/v1/metering-export-status` — metering exporter status (read view).
 pub const METERING_EXPORT_STATUS: ResourceApi =
     ResourceApi::new("/admin/v1/metering-export-status");
+/// `/admin/v1/agent-cost-burn` — durable per-agent runtime cost-burn for a
+/// billing period (read view, #428).
+pub const AGENT_COST_BURN: ResourceApi = ResourceApi::new("/admin/v1/agent-cost-burn");
 
 /// Tenant wallets: read/create/settings plus the two settlement-affecting
 /// actions and the ledger read.
@@ -210,14 +224,14 @@ pub fn build_billing_events(verb: &str, input: &ResourceInput) -> CliResult<Requ
 }
 
 /// Usage and metering read surface: aggregates, generated reports, raw metering
-/// events, and metering exporter status.
+/// events, metering exporter status, and per-agent runtime cost-burn.
 pub struct UsageGroup;
 
 impl CommandGroup for UsageGroup {
     fn descriptor(&self) -> GroupDescriptor {
         GroupDescriptor::new(
             "usage",
-            "Inspect usage aggregates, reports, and metering",
+            "Inspect usage aggregates, reports, metering, and agent cost-burn",
             vec![
                 VerbDescriptor::api(
                     "aggregates",
@@ -235,6 +249,11 @@ impl CommandGroup for UsageGroup {
                     "Show metering exporter status",
                     "listAdminMeteringExportStatus",
                 ),
+                VerbDescriptor::api(
+                    "cost-burn",
+                    "List per-agent runtime cost-burn for a billing period (--filter period=YYYY-MM)",
+                    "listAdminAgentCostBurn",
+                ),
             ],
         )
     }
@@ -242,12 +261,20 @@ impl CommandGroup for UsageGroup {
 
 /// Build the request for a `usage` verb. Each verb reads its own collection with
 /// pagination/filters preserved; no verb recomputes any usage value client-side.
+///
+/// `cost-burn` reads the #428 durable per-agent runtime cost-burn rollup. The
+/// operation declares exactly three query parameters — `period` (`YYYY-MM`, the
+/// billing window; the server defaults to the current UTC month when omitted)
+/// plus the shared `offset`/`limit` pagination — all of which ride the generic
+/// `input.list` filter/page channel verbatim, so the CLI neither invents a
+/// parameter nor rounds the server-owned `accumulated_usd` totals it returns.
 pub fn build_usage(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "aggregates" => USAGE_AGGREGATES.read(&[], &input.list),
         "reports" => USAGE_REPORTS.read(&[], &input.list),
         "metering-events" => METERING_EVENTS.read(&[], &input.list),
         "metering-export-status" => METERING_EXPORT_STATUS.read(&[], &input.list),
+        "cost-burn" => AGENT_COST_BURN.read(&[], &input.list),
         other => Err(crate::error::CliError::usage(format!(
             "verb '{other}' is not a usage verb"
         ))),
