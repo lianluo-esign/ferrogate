@@ -675,13 +675,30 @@ fn live_overview_aggregate_pushdown_matches_repositories() {
     assert_eq!(governance.quota_policies, 2);
     assert_eq!(governance.policy_rules, 1);
 
-    // Tenant scoping pushes `WHERE tenant = $1` into every count/sum: no leak.
+    // Tenant scoping pushes the scope predicate into every count/sum: no leak.
     let scoped =
         block_on(repositories.overview_aggregate(Some("tenant-a"), &current_month)).unwrap();
     assert_eq!(scoped.tenants, 1);
     assert_eq!(scoped.projects, 2);
     assert_eq!(scoped.assets, 2);
     assert_eq!(scoped.asset_storage_bytes, 300);
+    // #339 regression guard: agent_runs / self_hosted_worker_registrations key
+    // `tenant` as the `org:`-prefixed composite storage key, so a raw `tenant = $1`
+    // pushdown matched nothing under tenant scope and returned a false-zero (also
+    // nulling the failed-run / unhealthy-worker alerts). These two fields plus
+    // their by_status buckets must equal the in-memory fold's tenant-scope counts
+    // (mirrors the in-memory twin above): 3 runs (succeeded/failed/running) and
+    // 2 workers (active/draining) for tenant-a, tenant-b's excluded.
+    assert_eq!(scoped.agent_runs, 3);
+    assert_eq!(scoped.agent_runs_by_status.get("succeeded"), Some(&1));
+    assert_eq!(scoped.agent_runs_by_status.get("failed"), Some(&1));
+    assert_eq!(scoped.agent_runs_by_status.get("running"), Some(&1));
+    assert_eq!(scoped.self_hosted_workers, 2);
+    assert_eq!(scoped.self_hosted_workers_by_status.get("active"), Some(&1));
+    assert_eq!(
+        scoped.self_hosted_workers_by_status.get("draining"),
+        Some(&1)
+    );
     assert_eq!(scoped.usage_lifetime.total_tokens, 165);
     assert_eq!(scoped.usage_current_month.total_tokens, 150);
     // #458 tenant-scoped breakdowns + RBAC no-leak under the SQL pushdown.

@@ -1713,17 +1713,29 @@ impl PostgresControlPlaneStore {
         )
         .await?;
 
+        // agent_runs / self_hosted_worker_registrations key `tenant` as the
+        // org:-prefixed composite storage key built by `tenant_storage_key`
+        // (`org:{org}|team:{team}|project:{project}|workspace:{workspace}|user:{user}|api_key:{api_key}`),
+        // NOT a bare tenant id. The in-memory fold scopes these two by the bare
+        // `tenant.organization_id`, so raw `tenant = $1` equality would match
+        // nothing under tenant scope and return a false-zero (#339). Scope by the
+        // `org:{scope}|` prefix instead: the `|` delimiter right after the org
+        // segment makes the prefix true iff `organization_id == $1`, producing the
+        // identical membership set to `in_scope`. `starts_with` is a literal prefix
+        // test (no LIKE metacharacter interpretation), so no escaping is needed.
         let (agent_runs, agent_runs_by_status) = Self::overview_status_histogram(
             &transaction,
             "SELECT status, COUNT(*)::bigint FROM agent_runs \
-             WHERE ($1::text IS NULL OR tenant = $1) GROUP BY status",
+             WHERE ($1::text IS NULL OR starts_with(tenant, 'org:' || $1 || '|')) \
+             GROUP BY status",
             scope,
         )
         .await?;
         let (self_hosted_workers, self_hosted_workers_by_status) = Self::overview_status_histogram(
             &transaction,
             "SELECT status, COUNT(*)::bigint FROM self_hosted_worker_registrations \
-             WHERE ($1::text IS NULL OR tenant = $1) GROUP BY status",
+             WHERE ($1::text IS NULL OR starts_with(tenant, 'org:' || $1 || '|')) \
+             GROUP BY status",
             scope,
         )
         .await?;
