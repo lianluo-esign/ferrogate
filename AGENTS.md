@@ -292,6 +292,14 @@ code-developing subagents at **3 in parallel**; pick maximally file-separated
 slices; integrate by cherry-pick + re-verify-combined + push + status-move; and
 **delete each worktree the moment its slice is integrated** to bound disk use.
 
+That loop pairs with a separate **test gate** agent that watches only the
+**In review & Test** lane and takes each item to **Done** (pass, with
+`ferrogate-test` end-to-end coverage) or back to **Ready** with a
+`gate-rejected` label (fail). The two-agent choreography, the board handoff, and
+the shared GraphQL-quota discipline are documented in `docs/autonomous-dev-loop.md`
+and surfaced by the `skills/ferrogate-multi-agent-loop` skill (with role-specific
+`skills/ferrogate-dev-loop` and `skills/ferrogate-test` skills).
+
 ## AI Gateway Standards
 
 For AI gateway changes, verify these surfaces deliberately:
