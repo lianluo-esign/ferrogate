@@ -13,7 +13,10 @@
 
 mod support;
 
-use support::{free_addr, http_request, http_request_bytes, start_gateway, wait_for_gateway};
+use support::{
+    free_addr, http_request, http_request_bytes, start_gateway, start_ready_gateway,
+    wait_for_gateway,
+};
 
 #[test]
 fn static_site_bundle_publish_serve_and_cache_round_trip() {
@@ -221,6 +224,150 @@ fn static_site_bundle_publish_serve_and_cache_round_trip() {
     assert!(
         audit.contains("site.publish"),
         "expected a site.publish audit event: {audit}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+// End-to-end proof for #397 over the REAL HTTP serve path: prior bundle versions
+// are retained immutably, and moving the `serving` channel to a retained prior
+// version actually re-points what `GET /sites/...` returns (write-path ==
+// read-path, closing the #188 write-succeeds/runtime-ignores gap). This is the
+// gate-owned harness the #397 dev handoff called for.
+#[test]
+fn channel_move_rollback_repoints_served_bytes_over_http() {
+    let Ok(dsn) = std::env::var("FERROGATE_SUPABASE_DSN") else {
+        eprintln!(
+            "skipping channel_move_rollback_repoints_served_bytes_over_http: \
+             FERROGATE_SUPABASE_DSN is not set"
+        );
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    // Boot via the retrying helper: against a REMOTE Supabase session pooler the
+    // gateway's boot-time pool acquisition (a ~1s deadline) can transiently miss
+    // its window and the process exits at "initialize schema". `start_ready_gateway`
+    // treats that early exit as a broken startup and relaunches on a fresh port,
+    // so a loaded-pooler moment retries instead of failing the whole E2E.
+    let (mut gateway, gateway_addr) = start_ready_gateway(&config_path, |addr| {
+        std::fs::write(&config_path, sites_config(addr, &dsn)).unwrap();
+    });
+
+    // Unique site per run: the retained bundles are immutable, so a fixed name
+    // would 409 on re-run. The api key `asset-secret` is bound to org_demo, so
+    // the tenant stays org_demo (only the site name varies).
+    let site = format!("rollback-{}", std::process::id());
+    let serve_path = format!("/sites/org_demo/{site}/");
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"org_demo","name":"Org Demo","slug":"org-demo"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200")
+            || register.contains("HTTP/1.1 201")
+            || register.contains("HTTP/1.1 409"),
+        "tenant registration failed: {register}"
+    );
+
+    // 1. Publish v1 (1.0.0). serving resolves to 1.0.0.
+    let v1_zip = build_stored_zip(&[("index.html", b"<!doctype html><h1>V1</h1>")]);
+    let pub1 = String::from_utf8_lossy(&http_request_bytes(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{site}/1.0.0"),
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/zip",
+            "X-Site-Public: true",
+        ],
+        &v1_zip,
+    ))
+    .into_owned();
+    assert!(pub1.contains("HTTP/1.1 200"), "v1 publish failed: {pub1}");
+
+    let serve_after_v1 = http_request(&gateway_addr, "GET", &serve_path, &[], "");
+    assert!(
+        serve_after_v1.contains("HTTP/1.1 200") && serve_after_v1.contains("<h1>V1</h1>"),
+        "expected V1 served after v1 publish: {serve_after_v1}"
+    );
+
+    // 2. Publish v2 (1.0.1). The publish CAS atomically moves serving -> 1.0.1.
+    let v2_zip = build_stored_zip(&[("index.html", b"<!doctype html><h1>V2</h1>")]);
+    let pub2 = String::from_utf8_lossy(&http_request_bytes(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{site}/1.0.1"),
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/zip",
+            "X-Site-Public: true",
+        ],
+        &v2_zip,
+    ))
+    .into_owned();
+    assert!(pub2.contains("HTTP/1.1 200"), "v2 publish failed: {pub2}");
+
+    let serve_after_v2 = http_request(&gateway_addr, "GET", &serve_path, &[], "");
+    assert!(
+        serve_after_v2.contains("HTTP/1.1 200") && serve_after_v2.contains("<h1>V2</h1>"),
+        "expected V2 served after v2 publish (serving re-pointed by publish CAS): {serve_after_v2}"
+    );
+    assert!(
+        !serve_after_v2.contains("<h1>V1</h1>"),
+        "V2 serve must not leak V1 bytes: {serve_after_v2}"
+    );
+
+    // 3. ROLLBACK: move the serving channel back to the RETAINED 1.0.0 bundle.
+    let rollback = http_request(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{site}/channels/serving?version=1.0.0"),
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert!(
+        rollback.contains("HTTP/1.1 200"),
+        "serving-channel rollback move failed: {rollback}"
+    );
+
+    // 4. The serve path now returns V1 again: the channel move re-points the
+    //    served bytes (write==read, #188) AND the prior bundle was retained (#397).
+    let serve_rolled_back = http_request(&gateway_addr, "GET", &serve_path, &[], "");
+    assert!(
+        serve_rolled_back.contains("HTTP/1.1 200") && serve_rolled_back.contains("<h1>V1</h1>"),
+        "rollback must re-point serving to the retained V1 bundle: {serve_rolled_back}"
+    );
+    assert!(
+        !serve_rolled_back.contains("<h1>V2</h1>"),
+        "after rollback the serve path must not return V2: {serve_rolled_back}"
+    );
+
+    // 5. Same-version republish is rejected as immutable (#397 retain guarantee).
+    let republish = String::from_utf8_lossy(&http_request_bytes(
+        &gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{site}/1.0.0"),
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/zip",
+            "X-Site-Public: true",
+        ],
+        &build_stored_zip(&[("index.html", b"<!doctype html><h1>TAMPERED</h1>")]),
+    ))
+    .into_owned();
+    assert!(
+        republish.contains("HTTP/1.1 409"),
+        "republishing a retained immutable version must be 409 site_version_immutable: {republish}"
     );
 
     gateway.kill().unwrap();
