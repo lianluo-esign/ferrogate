@@ -105,3 +105,17 @@ fresh work.
    never build in the primary working directory.
 5. Default to **zero GraphQL per loop tick**; git + REST keep flowing when the
    Projects quota is exhausted — defer board reads/moves, batch after reset.
+
+## Loop prompts
+
+Each role's cron directive lives in its own skill, so a session can copy the one
+it needs without reading the others:
+
+| Role | Watches | Loop prompt |
+| --- | --- | --- |
+| Dev (code generation only) | `Backlog` + `Ready` | `skills/ferrogate-dev-loop` → "Loop prompt (dev session)" |
+| Code review | `In review` | `skills/ferrogate-code-review` → "Loop prompt (code-review session)" |
+| Test (E2E) | `Testing` | `skills/ferrogate-test` → "Loop prompt (test session)" |
+
+All three are started with `/loop 5m <directive>` and share one GitHub GraphQL
+quota — which is why every directive carries the same rationing clause.

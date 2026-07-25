@@ -96,3 +96,19 @@ in the `ferrogate-test-strategy` skill.
   it on normal and error paths, and verify the exact generated name is absent.
   Never replace this with prefix-wide deletion; another live scenario may own a
   matching schema concurrently.
+
+## Loop prompt (test session)
+
+Start this session's cron with `/loop 5m` and the directive below. Note the lane
+changed: this session now watches **Testing**, not the old "In review & Test".
+
+```
+请读取 GitHub Project 看板中 Testing 泳道的 issues 持续做针对性端到端覆盖测试。
+测试通过后把 issue 移动到 Done；发现任何问题则把 issue 打回 Ready 泳道并加
+gate-rejected 标签，在评论中写明未满足的验收项与证据（命令、输出、复现步骤）。
+1- 最多 3 个 sub agent 并行测试。
+2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，三个 session 共用同一份配额）；
+   只在关键节点读看板，其余一律用 REST (gh api) 与 board-test-lane 缓存。
+3- 你负责端到端测试与 ferrogate-test harness，不写产品代码；
+   发现产品代码缺陷打回 Ready 交给 dev agent 修复。
+```

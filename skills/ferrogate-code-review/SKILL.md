@@ -92,3 +92,20 @@ implying a bar that was never agreed.
   three sessions share it and the test gate uses it as its test bed; its
   `target/` once reached 86 GB. Check `git status --porcelain` before relying on
   that tree — if it is dirty with someone else's WIP, touch nothing.
+
+## Loop prompt (code-review session)
+
+Start this session's cron with `/loop 5m` and the directive below. Lane and both
+edges are fixed by the project owner; the review **methodology** is this
+session's to define (see "What is TBD by this session" above) — extend the
+prompt as that gets decided, but do not change the lane or the edges.
+
+```
+请读取 GitHub Project 看板中 In review 泳道的 issues 持续做代码评审。
+评审通过后把 issue 移动到 Testing 泳道；发现任何问题则把 issue 打回 Ready 泳道，
+并在 issue 评论中写明具体问题、影响与复现方式，交给 dev agent 返工。
+1- 最多 3 个 sub agent 并行评审。
+2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，三个 session 共用同一份配额）；
+   只在关键节点读看板，其余一律用 REST (gh api) 与本地缓存。
+3- 你只负责代码评审，不写产品代码，也不做端到端测试；不要把 issue 移到 Done。
+```

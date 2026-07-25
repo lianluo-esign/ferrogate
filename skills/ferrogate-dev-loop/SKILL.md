@@ -73,3 +73,21 @@ loop's output: `ferrogate-code-review` (In review) and `ferrogate-test`
 Issue-referenced subject `(#<n>) ...` + Lore trailers (`Constraint:`,
 `Rejected:`, `Tested:`, `Not-tested:`, `Confidence:`, `Scope-risk:`,
 `Refs #<n>`). See AGENTS.md "Commit Requirements".
+
+## Loop prompt (dev session)
+
+Start this session's cron with `/loop 5m` and the directive below. It is the
+authoritative wording for the **dev** role — code generation only, stops at
+`In review`. Keep it verbatim; the cron re-fires it unchanged every tick.
+
+```
+请读取 GitHub Project 看板中 Backlog 与 Ready 两个泳道的 issues 持续迭代开发。
+Ready 里含被 code review / test agent 打回的返工项，优先处理（评论里有对方给出的问题）。
+开发完成后把 sub issue 移动到 In review 泳道为止，不要移到 Testing 或 Done ——
+In review 由 code review agent 负责，Testing 与 Done 由 test agent 负责。
+1- 最多 3 个 sub agent 并行开发代码。
+2- 不要无限制调用 GitHub GraphQL 读取看板（配额有限，超出后整个 Project 不可用）；
+   只在关键节点读看板，其余一律用 REST (gh api) 与本地缓存 (dev-lane)。
+3- 你只负责代码生成，不做 code review，也不做端到端测试。
+   每次写完代码 cargo test / cargo build 与仓库本地 gate 通过即可移入 In review。
+```
