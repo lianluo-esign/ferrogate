@@ -17,12 +17,14 @@
 // (`OnChainSettlementRpc`, mockable, no live network) for the transaction
 // signature's status/amount and applies an EXPLICIT trust order:
 //
-//   * a confirmed on-chain transfer of the EXACT owed atomic amount
+//   * a confirmed on-chain transfer that COVERS the owed atomic amount (equal to
+//     it, or -- per the x402 SVM `exact` scheme, where a matching transfer MAY
+//     exceed the required amount and MUST NOT be less -- greater than it, #469)
 //       -> SETTLE  (capture the hold, attempt -> settled);
 //   * a transfer the chain definitively REJECTED, or one still ABSENT past the
 //     confirmation deadline
 //       -> FAIL    (release the hold, attempt -> failed);
-//   * anything still PENDING / absent-before-deadline, or an amount MISMATCH
+//   * anything still PENDING / absent-before-deadline, or an UNDERPAYMENT
 //       -> remain `outcome_unknown` (hold RETAINED), advancing the backoff
 //          cursor. NEVER a guess, NEVER a false terminal.
 //
@@ -70,8 +72,8 @@ use super::*;
 pub(crate) enum OnChainSettlementStatus {
     /// The transfer confirmed/finalized on-chain. `settled_atomic_amount` is the
     /// ACTUAL transferred atomic amount (canonical decimal string) the RPC
-    /// observed; the reconciler compares it to the owed amount and only settles
-    /// on an exact match.
+    /// observed; the reconciler compares it to the owed amount as an INTEGER and
+    /// settles only when it COVERS what is owed (equal or greater, #469).
     Confirmed { settled_atomic_amount: String },
     /// The transaction landed on-chain but the chain REJECTED it (dropped,
     /// errored, insufficient funds, etc.). A definite failure regardless of the
@@ -168,28 +170,69 @@ impl OnChainSettlementRpc for UnboundOnChainRpc {
 /// so the trust order is unit-testable in isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReconcileDecision {
-    /// Confirmed on-chain transfer of the exact owed amount -> SETTLE.
-    Settle { settled_atomic_amount: String },
+    /// Confirmed on-chain transfer that COVERS the owed amount -> SETTLE.
+    Settle {
+        /// The amount actually observed on-chain, carried through verbatim so the
+        /// durable evidence records what the chain saw (not what was owed).
+        settled_atomic_amount: String,
+        /// `Some(excess)` when the confirmed transfer EXCEEDED the owed amount
+        /// (`settled - owed`, decimal); `None` on an exact transfer. Keeps an
+        /// overpaid settlement distinguishable from an exact one instead of
+        /// flattening the two (#469). The excess is the payer's -- it is never
+        /// added to what the wallet hold captures.
+        overpayment_atomic_amount: Option<String>,
+    },
     /// Definitive failure (chain-rejected, or absent past the deadline) -> FAIL.
     Fail { failure_code: String },
     /// Still pending / absent-before-deadline -> remain `outcome_unknown`,
     /// advance backoff.
     Pending,
-    /// Confirmed on-chain, but the transferred amount does NOT match what is
-    /// owed. Fail-closed: NEVER settle a wrong-amount transfer, and NEVER release
-    /// (the money moved) -- retain the hold in `outcome_unknown` and flag it
-    /// loudly for an operator.
+    /// Confirmed on-chain, but the transferred amount does NOT cover what is owed
+    /// (an UNDERPAYMENT, or an amount that is not a parseable atomic value).
+    /// Fail-closed: NEVER settle a short transfer, and NEVER release (the money
+    /// moved) -- retain the hold in `outcome_unknown` and flag it loudly for an
+    /// operator.
     Mismatch { observed_atomic_amount: String },
 }
 
-/// Two canonical decimal atomic-amount strings denote the same value. Parses to
-/// `u128` (the on-chain domain is `u64`; `u128` cannot overflow) so `"01000"`
-/// and `"1000"` compare equal; a parse failure is fail-closed (treated as a
-/// mismatch, never an accidental settle).
-fn atomic_amounts_match(expected: &str, observed: &str) -> bool {
-    match (expected.parse::<u128>(), observed.parse::<u128>()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+/// Classify a CONFIRMED on-chain transfer against what is owed, on PARSED INTEGER
+/// atomic amounts. Never a string comparison: lexically `"10" < "9"`, which would
+/// read a spec-valid overpayment as an underpayment and fail it closed.
+///
+/// The x402 SVM `exact` scheme (`scheme_exact_svm.md` 1.4) defines a MATCHING
+/// transfer as one that MAY EXCEED `PaymentRequirements.amount` and MUST NOT be
+/// less than it, so:
+///
+///   * `settled >= owed` -> SETTLE. Exact and overpaid are both spec-valid; the
+///     overpaid case additionally carries `settled - owed` so the evidence stays
+///     honest about which one happened (#469).
+///   * `settled  < owed` -> MISMATCH, fail-closed. An underpayment is never
+///     settled; that is the money-protective direction and is unchanged.
+///
+/// Both sides parse to `u128` (the on-chain domain is `u64`, so neither the
+/// comparison nor the excess subtraction can overflow), which also makes `"01000"`
+/// and `"1000"` equal. No float ever touches this path. A value that is not a
+/// canonical unsigned decimal amount stays fail-closed as a MISMATCH: an
+/// unparseable amount is NEVER treated as satisfying the owed threshold.
+fn decide_confirmed_amount(
+    expected_atomic_amount: &str,
+    settled_atomic_amount: String,
+) -> ReconcileDecision {
+    match (
+        expected_atomic_amount.parse::<u128>(),
+        settled_atomic_amount.parse::<u128>(),
+    ) {
+        (Ok(owed), Ok(settled)) if settled >= owed => ReconcileDecision::Settle {
+            overpayment_atomic_amount: (settled > owed).then(|| (settled - owed).to_string()),
+            settled_atomic_amount,
+        },
+        // Everything else is fail-closed, exactly as before: a transfer SHORT of
+        // what is owed, or an amount either side of which does not parse as a
+        // canonical unsigned decimal (never silently taken as "covers the owed
+        // amount").
+        _ => ReconcileDecision::Mismatch {
+            observed_atomic_amount: settled_atomic_amount,
+        },
     }
 }
 
@@ -221,17 +264,7 @@ fn decide_reconcile(
     match status {
         OnChainSettlementStatus::Confirmed {
             settled_atomic_amount,
-        } => {
-            if atomic_amounts_match(expected_atomic_amount, &settled_atomic_amount) {
-                ReconcileDecision::Settle {
-                    settled_atomic_amount,
-                }
-            } else {
-                ReconcileDecision::Mismatch {
-                    observed_atomic_amount: settled_atomic_amount,
-                }
-            }
-        }
+        } => decide_confirmed_amount(expected_atomic_amount, settled_atomic_amount),
         OnChainSettlementStatus::Failed { .. } => ReconcileDecision::Fail {
             failure_code: "x402_onchain_settlement_rejected".to_string(),
         },
@@ -275,20 +308,28 @@ fn attempt_transaction_signature(attempt: &StoredPaymentAttempt) -> Option<Strin
 /// The per-attempt outcome counters are DISJOINT: every scanned attempt bumps
 /// exactly one of `settled`/`failed`/`pending`/`mismatch`/`unresolved`/`skipped`/
 /// `errored`, so `settled + failed + pending + mismatch + unresolved + skipped +
-/// errored == scanned`.
+/// errored == scanned`. `overpaid` is the one deliberate exception: it is a
+/// BREAKOUT of `settled`, not an outcome of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct X402ReconcileReport {
     /// Post-submission candidates fetched this tick (<= `max_reconciles_per_tick`).
     pub(crate) scanned: u64,
-    /// Confirmed exact-amount transfers driven to `settled` (hold captured).
+    /// Confirmed transfers COVERING the owed amount driven to `settled` (hold
+    /// captured) -- exact transfers and spec-valid overpayments alike (#469).
     pub(crate) settled: u64,
+    /// How many of `settled` were OVERPAYMENTS (`settled > owed`). NOT disjoint:
+    /// every overpaid attempt is also counted in `settled`. Broken out so an
+    /// overpayment is visible in the tick summary instead of hiding inside a plain
+    /// settle -- the hold still captures only the owed amount.
+    pub(crate) overpaid: u64,
     /// Definitive failures driven to `failed` (hold released).
     pub(crate) failed: u64,
     /// Still pending / absent-before-deadline: re-parked `outcome_unknown`, hold
     /// retained, backoff cursor advanced.
     pub(crate) pending: u64,
-    /// Confirmed on-chain but WRONG amount: fail-closed, hold retained in
-    /// `outcome_unknown`, flagged for an operator. Never settled, never released.
+    /// Confirmed on-chain but SHORT of (or unparseable against) the owed amount:
+    /// fail-closed, hold retained in `outcome_unknown`, flagged for an operator.
+    /// Never settled, never released.
     pub(crate) mismatch: u64,
     /// The chosen edge could not be proven complete across an async boundary:
     /// hold retained, left for idempotent re-entry. Never a false terminal.
@@ -305,7 +346,12 @@ pub(crate) struct X402ReconcileReport {
 /// The per-attempt reconcile outcome, folded into [`X402ReconcileReport`]. Errors
 /// are an OUTCOME, not a `Result`, so a single attempt can never abort the batch.
 enum ReconcileOutcome {
-    Settled,
+    /// Driven to `settled` (hold captured). `overpaid` records whether the
+    /// confirmed transfer exceeded the owed amount, so the tick summary can break
+    /// out overpayments without a second comparison (#469).
+    Settled {
+        overpaid: bool,
+    },
     Failed,
     Pending,
     Mismatch,
@@ -399,6 +445,7 @@ impl AppState {
         tracing::info!(
             scanned = report.scanned,
             settled = report.settled,
+            overpaid = report.overpaid,
             failed = report.failed,
             pending = report.pending,
             mismatch = report.mismatch,
@@ -430,7 +477,12 @@ impl AppState {
                 .reconcile_one_attempt(rpc, &loop_, attempt, now_unix, confirmation_deadline_secs)
                 .await;
             match outcome {
-                ReconcileOutcome::Settled => report.settled = report.settled.saturating_add(1),
+                ReconcileOutcome::Settled { overpaid } => {
+                    report.settled = report.settled.saturating_add(1);
+                    if overpaid {
+                        report.overpaid = report.overpaid.saturating_add(1);
+                    }
+                }
                 ReconcileOutcome::Failed => report.failed = report.failed.saturating_add(1),
                 ReconcileOutcome::Pending => report.pending = report.pending.saturating_add(1),
                 ReconcileOutcome::Mismatch => report.mismatch = report.mismatch.saturating_add(1),
@@ -447,8 +499,10 @@ impl AppState {
     /// Reconcile ONE attempt: recover its signature, query the injected RPC, and
     /// drive the loop's SETTLE / FAIL / UNKNOWN edge per the trust order. Every
     /// failure path is an isolated [`ReconcileOutcome`], never a `?`-propagated
-    /// abort of the batch. The hold is only ever CAPTURED on a confirmed exact
-    /// amount, only ever RELEASED on a definite failure, and otherwise RETAINED.
+    /// abort of the batch. The hold is only ever CAPTURED on a confirmed transfer
+    /// that COVERS the owed amount (and then only for the owed amount the hold
+    /// reserved), only ever RELEASED on a definite failure, and otherwise
+    /// RETAINED.
     async fn reconcile_one_attempt<R: OnChainSettlementRpc>(
         &self,
         rpc: &R,
@@ -515,18 +569,60 @@ impl AppState {
         match decision {
             ReconcileDecision::Settle {
                 settled_atomic_amount,
+                overpayment_atomic_amount,
             } => {
                 let evidence = SettlementEvidence::Settled {
                     transaction_signature: &signature,
+                    // The amount the CHAIN transferred, not the amount owed: an
+                    // overpaid settlement therefore persists a
+                    // `settled_atomic_amount` that differs from the attempt's
+                    // `atomic_amount`, keeping the two cases distinguishable in the
+                    // durable row (#469).
                     settled_atomic_amount: &settled_atomic_amount,
                     response: attempt.settlement_response.as_deref(),
+                };
+                // The wallet capture (`settle_wallet_reservation`) debits exactly
+                // the amount the hold reserved -- the OWED amount -- and takes no
+                // amount argument, so an overpayment can never over-capture. The
+                // excess stayed with the payee on-chain; it is the payer's, and
+                // FerroGate neither captures nor sweeps it. Only the audit trail
+                // changes.
+                let audit_message = match overpayment_atomic_amount.as_deref() {
+                    Some(excess) => {
+                        tracing::info!(
+                            attempt_id = %attempt.id,
+                            owed = %attempt.atomic_amount,
+                            settled = %settled_atomic_amount,
+                            excess = %excess,
+                            // Logged at the DECISION (the audit event below is
+                            // recorded only once the edge proves the terminal).
+                            "x402 reconcile: confirmed on-chain OVERPAYMENT (spec-valid, \
+                             settled > owed); driving SETTLE with the hold capturing the owed \
+                             amount only"
+                        );
+                        format!(
+                            "confirmed on-chain transfer EXCEEDING the owed amount (owed {}, \
+                             settled {}, excess {}); captured the wallet hold reserved for the \
+                             owed amount only -- the excess is the payer's and is NOT captured \
+                             -- and settled the attempt",
+                            attempt.atomic_amount, settled_atomic_amount, excess
+                        )
+                    }
+                    None => format!(
+                        "confirmed on-chain transfer of the exact owed amount ({}); captured the \
+                         wallet hold and settled the attempt",
+                        attempt.atomic_amount
+                    ),
                 };
                 self.drive_terminal_edge(
                     loop_,
                     attempt,
                     &evidence,
                     now_unix,
-                    ReconcileOutcome::Settled,
+                    ReconcileOutcome::Settled {
+                        overpaid: overpayment_atomic_amount.is_some(),
+                    },
+                    &audit_message,
                 )
                 .await
             }
@@ -541,6 +637,8 @@ impl AppState {
                     &evidence,
                     now_unix,
                     ReconcileOutcome::Failed,
+                    "on-chain evidence proved the transfer did not settle; released the wallet \
+                     hold and failed the attempt",
                 )
                 .await
             }
@@ -571,9 +669,10 @@ impl AppState {
             ReconcileDecision::Mismatch {
                 observed_atomic_amount,
             } => {
-                // Fail-closed money-safety anomaly: a confirmed transfer of the
-                // WRONG amount. Never settle, never release -- retain the hold in
-                // outcome_unknown and leave a loud, inspectable audit trail.
+                // Fail-closed money-safety anomaly: a confirmed transfer that does
+                // NOT cover what is owed (short, or an unparseable amount). Never
+                // settle, never release -- retain the hold in outcome_unknown and
+                // leave a loud, inspectable audit trail.
                 let outcome = match loop_
                     .finalize(
                         &attempt.id,
@@ -596,14 +695,16 @@ impl AppState {
                     attempt_id = %attempt.id,
                     expected = %attempt.atomic_amount,
                     observed = %observed_atomic_amount,
-                    "x402 reconcile: on-chain amount MISMATCH; hold retained, NOT settled (fail-closed)"
+                    "x402 reconcile: on-chain amount does NOT cover what is owed; hold retained, \
+                     NOT settled (fail-closed)"
                 );
                 self.record_x402_reconcile_audit(
                     attempt,
                     "x402.settlement.amount_mismatch",
                     &format!(
-                        "on-chain transfer confirmed a different amount (expected {}, observed {}); \
-                         hold retained, attempt left outcome_unknown pending operator review",
+                        "on-chain transfer confirmed an amount that does not cover what is owed \
+                         (expected at least {}, observed {}); hold retained, attempt left \
+                         outcome_unknown pending operator review",
                         attempt.atomic_amount, observed_atomic_amount
                     ),
                 );
@@ -616,6 +717,11 @@ impl AppState {
     /// terminal records the money-decision audit and returns `terminal`; an edge
     /// left unresolved across an async boundary retains the hold
     /// (`Unresolved`); any other (raced) result is a safe `Skipped`.
+    ///
+    /// `audit_message` is the caller's description of the money decision it drove
+    /// (an exact settle, an overpaid settle, a release); the audit `action` still
+    /// comes from the edge the loop actually PROVED, never from the caller's
+    /// intent, so the recorded verb can never outrun the evidence.
     async fn drive_terminal_edge(
         &self,
         loop_: &super::state_x402_settlement::X402SettlementLoop,
@@ -623,24 +729,15 @@ impl AppState {
         evidence: &SettlementEvidence<'_>,
         now_unix: i64,
         terminal: ReconcileOutcome,
+        audit_message: &str,
     ) -> ReconcileOutcome {
         match loop_.finalize(&attempt.id, evidence, now_unix).await {
             Ok(EdgeOutcome::Settled { .. }) => {
-                self.record_x402_reconcile_audit(
-                    attempt,
-                    "x402.settlement.settled",
-                    "confirmed on-chain transfer of the exact amount; captured the wallet hold \
-                     and settled the attempt",
-                );
+                self.record_x402_reconcile_audit(attempt, "x402.settlement.settled", audit_message);
                 terminal
             }
             Ok(EdgeOutcome::Failed { .. }) => {
-                self.record_x402_reconcile_audit(
-                    attempt,
-                    "x402.settlement.failed",
-                    "on-chain evidence proved the transfer did not settle; released the wallet \
-                     hold and failed the attempt",
-                );
+                self.record_x402_reconcile_audit(attempt, "x402.settlement.failed", audit_message);
                 terminal
             }
             Ok(EdgeOutcome::OutcomeUnknown { .. }) => {

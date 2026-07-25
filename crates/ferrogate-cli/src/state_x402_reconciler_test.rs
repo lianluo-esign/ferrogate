@@ -9,8 +9,12 @@
 // and captures the hold; a definitively-failed/absent-past-deadline transfer
 // fails it and releases the hold; a still-pending transfer stays outcome_unknown
 // with the hold retained and the backoff cursor advanced; on-chain RPC beats a
-// conflicting merchant success header; an amount mismatch is NEVER settled
-// (fail-closed, hold retained); one bad attempt in a batch never aborts the rest;
+// conflicting merchant success header; a spec-valid OVERPAYMENT settles while
+// capturing only the owed hold and stays distinguishable from an exact settle in
+// the persisted evidence, whereas an UNDERPAYMENT is NEVER settled (fail-closed,
+// hold retained) and the amount comparison is integer, not lexical (#469); the
+// amount comparison is proven on u64 boundaries and unparseable amounts;
+// one bad attempt in a batch never aborts the rest;
 // a signatureless attempt is re-parked, never failed; disabled is a complete
 // no-op; and concurrent reconciles (barrier, no sleeps) settle each attempt
 // exactly once. Live on-chain RPC is not runnable here, so the fake stands in for
@@ -540,6 +544,177 @@ fn reconcile_amount_mismatch_is_never_settled_fail_closed() {
 }
 
 // --------------------------------------------------------------------------
+// #469: a spec-valid OVERPAYMENT settles and captures only the owed hold
+// --------------------------------------------------------------------------
+
+/// The observed on-chain amount persisted on the attempt row (the durable
+/// evidence that separates an overpaid settlement from an exact one).
+async fn stored_settled_atomic_amount(state: &AppState, attempt_id: &str) -> Option<String> {
+    state
+        .repositories_arc()
+        .get_payment_attempt(attempt_id)
+        .await
+        .expect("get attempt")
+        .expect("attempt exists")
+        .settled_atomic_amount
+}
+
+/// The message of the audit event recorded for `attempt_id` with `action`.
+fn audit_message(state: &AppState, attempt_id: &str, action: &str) -> String {
+    block_on(state.repositories_arc().audit_events())
+        .into_iter()
+        .find(|event| event.target == attempt_id && event.action == action)
+        .unwrap_or_else(|| panic!("audit event {action} for {attempt_id}"))
+        .message
+}
+
+#[test]
+fn reconcile_confirmed_overpayment_settles_and_captures_only_the_owed_hold() {
+    // The x402 SVM `exact` scheme calls a transfer that EXCEEDS the required
+    // amount a MATCHING transfer. Before #469 the reconciler required an exact
+    // match, so this confirmed-on-chain money was classified a mismatch and parked
+    // in outcome_unknown forever: the merchant kept the funds, the hold was never
+    // captured, and the tenant's credits stayed reserved. It must settle.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let sig = signature(50);
+    seed_outcome_unknown(&state, "over1", 500, &sig);
+
+    // Owed 1_000_000 atomic; the payer transferred 1_500_000.
+    let rpc = FakeOnChainRpc::default().with(
+        &sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: "1500000".into(),
+        },
+    );
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(report.scanned, 1);
+    assert_eq!(report.settled, 1, "an overpayment is a spec-valid settle");
+    assert_eq!(report.overpaid, 1, "and is broken out as an overpayment");
+    assert_eq!(
+        report.mismatch, 0,
+        "an overpayment is NOT the fail-closed mismatch case"
+    );
+    assert_eq!(report.pending, 0);
+    assert_eq!(report.errored, 0);
+
+    assert_eq!(
+        block_on(attempt_state(&state, "over1")),
+        PAYMENT_ATTEMPT_SETTLED,
+        "terminal, not stranded in outcome_unknown"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "over1")).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED),
+        "the hold is CAPTURED"
+    );
+    // The capture debits ONLY the credits the hold reserved for the owed amount --
+    // the on-chain excess is the payer's and is never swept into the capture.
+    assert_eq!(
+        block_on(wallet_balance(&state)),
+        9_500,
+        "captured the owed hold (500 credits), never more"
+    );
+
+    // Evidence stays honest: the durable row records what the CHAIN transferred,
+    // which differs from what was owed.
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "over1")).as_deref(),
+        Some("1500000"),
+        "the observed on-chain amount is persisted verbatim"
+    );
+    let message = audit_message(&state, "over1", "x402.settlement.settled");
+    assert!(
+        message.contains("EXCEEDING") && message.contains("excess 500000"),
+        "the audit event names the overpayment and its excess: {message}"
+    );
+}
+
+#[test]
+fn reconcile_overpaid_and_exact_settlements_are_not_flattened_together() {
+    // Two attempts settle in the SAME batch -- one exact, one overpaid. Both reach
+    // `settled`, but their persisted evidence must stay distinguishable.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let exact_sig = signature(51);
+    let over_sig = signature(52);
+    seed_outcome_unknown(&state, "e1", 500, &exact_sig);
+    seed_outcome_unknown(&state, "e2", 500, &over_sig);
+
+    let rpc = FakeOnChainRpc::default()
+        .with(
+            &exact_sig,
+            OnChainSettlementStatus::Confirmed {
+                settled_atomic_amount: OWED_ATOMIC.into(),
+            },
+        )
+        .with(
+            &over_sig,
+            OnChainSettlementStatus::Confirmed {
+                settled_atomic_amount: "1000001".into(),
+            },
+        );
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(report.settled, 2, "both settle");
+    assert_eq!(report.overpaid, 1, "exactly one of them overpaid");
+
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "e1")).as_deref(),
+        Some(OWED_ATOMIC),
+        "the exact settle records the owed amount"
+    );
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "e2")).as_deref(),
+        Some("1000001"),
+        "the overpaid settle records the larger observed amount"
+    );
+    let exact_message = audit_message(&state, "e1", "x402.settlement.settled");
+    let over_message = audit_message(&state, "e2", "x402.settlement.settled");
+    assert!(
+        exact_message.contains("exact owed amount"),
+        "exact audit message: {exact_message}"
+    );
+    assert!(
+        over_message.contains("EXCEEDING") && over_message.contains("excess 1"),
+        "overpaid audit message: {over_message}"
+    );
+    assert_ne!(
+        exact_message, over_message,
+        "an overpaid settlement is never flattened into an exact one"
+    );
+    // Each hold captured for its own owed amount only.
+    assert_eq!(block_on(wallet_balance(&state)), 10_000 - 500 - 500);
+}
+
+#[test]
+fn reconcile_underpayment_still_fails_closed_next_to_an_overpayment() {
+    // #469 relaxes ONLY the upper side: a transfer SHORT of what is owed keeps the
+    // money-protective fail-closed behaviour (never settled, never released).
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let under_sig = signature(53);
+    seed_outcome_unknown(&state, "u1", 500, &under_sig);
+
+    let rpc = FakeOnChainRpc::default().with(
+        &under_sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: "999999".into(),
+        },
+    );
+    let report = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(report.settled, 0, "an underpayment is NEVER settled");
+    assert_eq!(report.overpaid, 0);
+    assert_eq!(report.mismatch, 1, "it stays the fail-closed mismatch");
+    assert_eq!(
+        block_on(attempt_state(&state, "u1")),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "u1")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "hold retained, never captured on a short transfer"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 10_000);
+}
+
+// --------------------------------------------------------------------------
 // Per-attempt error isolation: one bad attempt never aborts the batch
 // --------------------------------------------------------------------------
 
@@ -866,7 +1041,7 @@ fn concurrent_reconciles_settle_each_attempt_exactly_once() {
 
 #[test]
 fn trust_order_decision_table() {
-    // Confirmed exact -> settle.
+    // Confirmed exact -> settle, and NOT flagged as an overpayment.
     assert_eq!(
         decide_reconcile(
             OnChainSettlementStatus::Confirmed {
@@ -878,10 +1053,12 @@ fn trust_order_decision_table() {
             900,
         ),
         ReconcileDecision::Settle {
-            settled_atomic_amount: "1000000".into()
+            settled_atomic_amount: "1000000".into(),
+            overpayment_atomic_amount: None,
         }
     );
-    // Confirmed but wrong amount (even with a leading-zero form) -> never settle.
+    // Confirmed SHORT of the owed amount (even with a leading-zero form) -> never
+    // settle: underpayment stays fail-closed.
     assert_eq!(
         decide_reconcile(
             OnChainSettlementStatus::Confirmed {
@@ -908,7 +1085,8 @@ fn trust_order_decision_table() {
             900,
         ),
         ReconcileDecision::Settle {
-            settled_atomic_amount: "01000000".into()
+            settled_atomic_amount: "01000000".into(),
+            overpayment_atomic_amount: None,
         }
     );
     // Chain-rejected -> fail regardless of the deadline.
@@ -964,5 +1142,152 @@ fn trust_order_decision_table() {
             900,
         ),
         ReconcileDecision::Pending
+    );
+}
+
+// --------------------------------------------------------------------------
+// #469: the confirmed-amount comparison is INTEGER, not lexical
+// --------------------------------------------------------------------------
+
+/// `decide_reconcile` for a CONFIRMED transfer, with the deadline inputs pinned
+/// (they are irrelevant to a confirmed status).
+fn decide_confirmed(owed: &str, settled: &str) -> ReconcileDecision {
+    decide_reconcile(
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: settled.into(),
+        },
+        owed,
+        Some(200),
+        100_000,
+        900,
+    )
+}
+
+fn settle(settled: &str, overpayment: Option<&str>) -> ReconcileDecision {
+    ReconcileDecision::Settle {
+        settled_atomic_amount: settled.into(),
+        overpayment_atomic_amount: overpayment.map(str::to_string),
+    }
+}
+
+fn mismatch(observed: &str) -> ReconcileDecision {
+    ReconcileDecision::Mismatch {
+        observed_atomic_amount: observed.into(),
+    }
+}
+
+#[test]
+fn confirmed_amount_comparison_is_integer_not_lexical() {
+    // Overpayment settles, carrying the excess (settled - owed) as evidence.
+    assert_eq!(
+        decide_confirmed("1000000", "1500000"),
+        settle("1500000", Some("500000")),
+        "a transfer exceeding the owed amount is spec-valid and settles"
+    );
+    // Exact settles with NO excess.
+    assert_eq!(
+        decide_confirmed("1000000", "1000000"),
+        settle("1000000", None)
+    );
+    // Underpayment -- by a single atomic unit -- still fails closed.
+    assert_eq!(decide_confirmed("1000000", "999999"), mismatch("999999"));
+
+    // THE LEXICAL TRAP. A string comparison reads "10" < "9" (it compares '1'
+    // against '9'), so a lexical implementation would call this overpayment an
+    // underpayment and fail-close confirmed money...
+    assert_eq!(
+        decide_confirmed("9", "10"),
+        settle("10", Some("1")),
+        "owed 9, settled 10 must SETTLE -- a string compare would say \"10\" < \"9\""
+    );
+    // ...and its mirror: lexically "9" > "10", so a lexical implementation would
+    // SETTLE a real underpayment. Integer comparison rejects it.
+    assert_eq!(
+        decide_confirmed("10", "9"),
+        mismatch("9"),
+        "owed 10, settled 9 must NOT settle -- a string compare would say \"9\" > \"10\""
+    );
+
+    // Leading zeros are canonicalised by the parse on both sides.
+    assert_eq!(
+        decide_confirmed("1000000", "01500000"),
+        settle("01500000", Some("500000"))
+    );
+    assert_eq!(
+        decide_confirmed("01000000", "1000000"),
+        settle("1000000", None)
+    );
+}
+
+#[test]
+fn confirmed_amount_comparison_handles_u64_boundaries_without_overflow() {
+    let max = u64::MAX.to_string();
+    let max_minus_one = (u64::MAX - 1).to_string();
+
+    // The largest representable on-chain amount, paid exactly.
+    assert_eq!(decide_confirmed(&max, &max), settle(&max, None));
+    // One atomic unit short of it is still an underpayment.
+    assert_eq!(
+        decide_confirmed(&max, &max_minus_one),
+        mismatch(&max_minus_one)
+    );
+    // One atomic unit over the u64 domain: the comparison and the excess are done
+    // in u128, so the maximal overpayment neither overflows nor wraps.
+    assert_eq!(
+        decide_confirmed("1", &max),
+        settle(&max, Some(&(u64::MAX as u128 - 1).to_string()))
+    );
+    assert_eq!(
+        decide_confirmed(&max_minus_one, &max),
+        settle(&max, Some("1"))
+    );
+    // Zero owed: any confirmed transfer covers it.
+    assert_eq!(decide_confirmed("0", "0"), settle("0", None));
+    assert_eq!(decide_confirmed("0", "1"), settle("1", Some("1")));
+}
+
+#[test]
+fn confirmed_amount_that_does_not_parse_stays_fail_closed() {
+    // An amount that is not a canonical unsigned decimal is NEVER treated as
+    // satisfying the owed threshold -- it is the pre-#469 conservative behaviour,
+    // deliberately unchanged: mismatch, hold retained, operator review.
+    for observed in [
+        "",
+        "abc",
+        "1.5",                                       // no decimal point on the atomic path
+        "-1",                                        // negative is not an atomic amount
+        " 1000000",                                  // whitespace is not canonical
+        "1e6",                                       // no float/exponent notation on the money path
+        "1_000_000", // Rust literal separators are not a wire format
+        "99999999999999999999999999999999999999999", // wider than u128
+    ] {
+        assert_eq!(
+            decide_confirmed("1000000", observed),
+            mismatch(observed),
+            "unparseable observed amount {observed:?} must fail closed"
+        );
+    }
+    // An unparseable OWED amount is equally fail-closed: with nothing to compare
+    // against, a confirmed transfer can never be proven to cover it.
+    assert_eq!(
+        decide_confirmed("not-a-number", "1000000"),
+        mismatch("1000000")
+    );
+    assert_eq!(decide_confirmed("", "1000000"), mismatch("1000000"));
+
+    // Documented quirk of the parse path, INHERITED unchanged from the pre-#469
+    // `atomic_amounts_match` (both use `str::parse`): Rust's integer parser
+    // accepts an explicit leading `+`, so "+1000000" is the integer 1000000 and
+    // settles as an exact transfer -- exactly as it did before this change. Pinned
+    // here so the behaviour is a recorded decision rather than a surprise; the
+    // value is still parsed as an INTEGER, never taken on trust as a string.
+    assert_eq!(
+        decide_confirmed("1000000", "+1000000"),
+        settle("+1000000", None)
+    );
+    assert_eq!(
+        decide_confirmed("1000000", "+999999"),
+        mismatch("+999999"),
+        "the leading `+` never bypasses the underpayment check"
     );
 }
