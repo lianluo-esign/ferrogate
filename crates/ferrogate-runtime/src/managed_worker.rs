@@ -1426,6 +1426,9 @@ impl ManagedWorkerScheduler {
     where
         C: AgentWorkerControlClient,
     {
+        // TODO(#428 slice B): call cloudflare_agent_cost::should_dispatch(ledger,
+        // policy, identity) here to refuse dispatch to an over-budget CF-hosted
+        // agent once a durable burn ledger is threaded through the scheduler.
         self.validate_request(&request)?;
         self.check_concurrency(&request)?;
         let template = self.select_template(&request)?;
