@@ -87,7 +87,16 @@ pub(crate) struct AdminSessionClaims {
     pub(crate) exp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` is hand-written — matching the redacting impls on `HttpRequest` /
+/// `HttpResponse` in `ferrogate-cloudflare` — because `password` is a **user's
+/// plaintext password**, the one secret in this crate we never even persist
+/// (only [`hash_password`] output reaches storage). A derived `Debug` would
+/// put it one `{:?}` away from a log line: this type is built by
+/// `serde_json::from_slice` in the `POST /v1/admin/register` route, so any
+/// future `tracing::debug!(?payload)`, validation-error context, `unwrap()`
+/// panic or failing `assert_eq!` would render the password verbatim
+/// (issue #492).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminRegisterRequest {
     pub organization_name: String,
     pub email: String,
@@ -96,10 +105,33 @@ pub struct AdminRegisterRequest {
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminRegisterRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminRegisterRequest")
+            .field("organization_name", &self.organization_name)
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("display_name", &self.display_name)
+            .finish()
+    }
+}
+
+/// `Debug` is hand-written for the same reason as [`AdminRegisterRequest`]
+/// above: `password` is a user's plaintext password and must never reach a
+/// rendered string (issue #492).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminLoginRequest {
     pub email: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for AdminLoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminLoginRequest")
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

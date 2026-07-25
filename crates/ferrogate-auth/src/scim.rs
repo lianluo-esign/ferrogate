@@ -34,9 +34,27 @@ use crate::util::{
 /// carrying exactly this scope.
 const SCIM_PROVISION_SCOPE: &str = "scim.provision";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The one-time reply to `POST /admin/v1/scim/token`. `token` is the **only
+/// time** the freshly minted SCIM provisioning secret exists in plaintext —
+/// storage keeps a hash — so `Debug` is hand-written (the same treatment
+/// `ferrogate-cloudflare` gives its minted R2 credential in `HttpResponse`).
+/// A derived `Debug` would render the live token from any `{:?}`: a
+/// `tracing::debug!(?response)` on the mint path, an `anyhow` chain, an
+/// `unwrap()` panic, or a failing assertion in a test that happens to hold
+/// one. Only the length survives, which is enough to triage a truncation
+/// without disclosing the secret (issue #492).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminScimTokenResponse {
     pub token: String,
+}
+
+impl std::fmt::Debug for AdminScimTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminScimTokenResponse")
+            .field("token", &"<redacted>")
+            .field("token_len", &self.token.len())
+            .finish()
+    }
 }
 
 /// Mints a SCIM provisioning token for the caller's own tenant (issue #161).

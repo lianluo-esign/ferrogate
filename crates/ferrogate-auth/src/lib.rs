@@ -88,3 +88,7 @@ mod hardening_test;
 #[cfg(test)]
 #[path = "admin_console_test.rs"]
 mod admin_console_test;
+
+#[cfg(test)]
+#[path = "credential_debug_test.rs"]
+mod credential_debug_test;

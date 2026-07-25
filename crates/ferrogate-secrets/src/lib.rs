@@ -165,12 +165,33 @@ impl SecretResolver for EnvSecretResolver {
 /// standard `VAULT_ADDR`/`VAULT_TOKEN`/`VAULT_CACERT` environment variables
 /// (matching Vault's own CLI conventions) so operators don't need
 /// FerroGate-specific configuration to point at an existing Vault install.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written — following [`crate::SecretRef`]'s neighbors in
+/// `ferrogate-cloudflare` (`HttpRequest`, `HttpResponse`, `ResolvedToken`) —
+/// because `token` is a **live Vault token**: a credential that reads every
+/// secret the mount exposes. A derived `Debug` would render it from any
+/// `{:?}` anywhere, and this type is reachable from several of them: the
+/// [`SecretResolver`] trait requires `Debug`, [`VaultSecretResolver`] derives
+/// it over this struct, and [`SecretResolverRegistry`] derives it over that.
+/// So a single `tracing::debug!(?registry)`, `unwrap()` panic, `anyhow` chain
+/// or failing assertion would otherwise spill the token (issue #492).
+#[derive(Clone)]
 pub struct VaultConfig {
     pub address: String,
     pub token: String,
     pub ca_cert_path: Option<String>,
     pub timeout: Duration,
+}
+
+impl std::fmt::Debug for VaultConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultConfig")
+            .field("address", &self.address)
+            .field("token", &"<redacted>")
+            .field("ca_cert_path", &self.ca_cert_path)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl VaultConfig {
@@ -558,6 +579,10 @@ mod cloudflare_test;
 #[cfg(test)]
 #[path = "cloudflare_caps_test.rs"]
 mod cloudflare_caps_test;
+
+#[cfg(test)]
+#[path = "vault_debug_test.rs"]
+mod vault_debug_test;
 
 #[cfg(test)]
 mod tests {
