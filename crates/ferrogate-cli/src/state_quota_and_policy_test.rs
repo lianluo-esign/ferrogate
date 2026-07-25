@@ -618,6 +618,185 @@ fn streaming_modes_reject_before_dispatch_or_force_shadow_evaluation() {
     .is_some());
 }
 
+/// #383: the three STREAMING guardrail outcomes must each persist a per-check
+/// evidence row, in exactly the shape the live `guardrail-supabase` scenario
+/// polls for (`guardrail_evaluations` JOIN `guardrail_check_evaluations`):
+///
+/// | policy                 | evidence the operator must be able to read      |
+/// |------------------------|-------------------------------------------------|
+/// | `stream-reject-policy` | check `verdict=skipped`, `error_kind=streaming_unsupported` |
+/// | `stream-shadow-policy` | evaluation `enforcement_status=not_enforced` with a check row |
+/// | `stream-buffer-policy` | check `verdict=error`, `error_kind=guardrail_stream_buffer_limit_exceeded` |
+///
+/// Two of the three paths synthesize their check row (no detector ever ran),
+/// which is the part that is easy to lose: without it the evaluation row has
+/// no child and the operator-facing JOIN returns nothing at all. The
+/// assertions below mirror the live query so a regression here fails
+/// hermetically instead of only against Supabase.
+#[test]
+fn streaming_outcomes_persist_per_check_evidence_for_every_policy_mode() {
+    let shared = SharedAppState::with_source_path(Config::default(), None);
+    for (policy_id, streaming, org) in [
+        (
+            "stream-reject-policy",
+            PolicyStreamingMode::RejectStreaming,
+            "org-stream-reject",
+        ),
+        (
+            "stream-shadow-policy",
+            PolicyStreamingMode::ShadowAfterComplete,
+            "org-stream-shadow",
+        ),
+        (
+            "stream-buffer-policy",
+            PolicyStreamingMode::BufferAndEnforce,
+            "org-stream-buffer",
+        ),
+    ] {
+        let mut policy = durable_guardrail_revision(
+            policy_id,
+            1,
+            "split-secret",
+            PolicyScopeSelector {
+                organization_ids: vec![org.to_string()],
+                ..PolicyScopeSelector::default()
+            },
+        );
+        policy.streaming = streaming;
+        policy.checks[0].id = "split-stream-output".to_string();
+        policy.checks[0].stage = DetectorStage::Response;
+        shared.create_guardrail_policy_revision(policy).unwrap();
+        shared
+            .activate_guardrail_policy_revision(policy_id, 1, "test-admin", 1, false)
+            .unwrap();
+    }
+
+    // reject_streaming: refused before provider dispatch, at the REQUEST stage.
+    let reject_tenant = ferrogate_core::TenantContext {
+        organization_id: Some("org-stream-reject".to_string()),
+        ..Default::default()
+    };
+    assert!(match_guardrail_for_test_with_streaming(
+        &shared.current(),
+        GuardrailStage::Request,
+        &reject_tenant,
+        None,
+        None,
+        "safe",
+        true,
+    )
+    .is_some());
+
+    // shadow_after_complete: the stream already reached the client, so the
+    // response evaluation is recorded but not enforced.
+    let shadow_tenant = ferrogate_core::TenantContext {
+        organization_id: Some("org-stream-shadow".to_string()),
+        ..Default::default()
+    };
+    assert!(match_guardrail_for_test_with_streaming(
+        &shared.current(),
+        GuardrailStage::Response,
+        &shadow_tenant,
+        None,
+        None,
+        "contains split-secret",
+        true,
+    )
+    .is_none());
+
+    // buffer_and_enforce: the guarded buffer overflowed before first-byte
+    // release, so no detector ran and the failure is synthesized.
+    let buffer_tenant = ferrogate_core::TenantContext {
+        organization_id: Some("org-stream-buffer".to_string()),
+        ..Default::default()
+    };
+    let envelope = ferrogate_guardrails::GuardrailEnvelope::from_text(
+        ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+        DetectorStage::Response,
+        ferrogate_guardrails::ContentSource::Assistant,
+        "test.response",
+        "",
+    );
+    assert!(
+        block_on(shared.current().guardrail_streaming_buffer_failure(
+            GuardrailEvaluationContext {
+                request_id: "stream-buffer-overflow",
+                trace_id: None,
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                actor_api_key_id: None,
+                tenant: &buffer_tenant,
+                service_account_id: None,
+                gateway_config_id: None,
+                model: Some("fast-chat"),
+                provider: Some("openai"),
+                streaming: true,
+                envelope: &envelope,
+                managed_action: None,
+                action_fingerprint: None,
+            },
+            "guardrail_stream_buffer_limit_exceeded",
+        ))
+        .is_some()
+    );
+
+    // The live gate reads evidence as `guardrail_evaluations` JOIN
+    // `guardrail_check_evaluations`: an evaluation row with no child check row
+    // is invisible to it, so assert over the join, not over either side alone.
+    let state = shared.current();
+    let evaluations = state
+        .repositories
+        .list_guardrail_evaluations(None)
+        .expect("guardrail evaluations must be readable");
+    let checks = state
+        .repositories
+        .list_guardrail_check_evaluations(None)
+        .expect("guardrail check evaluations must be readable");
+    let joined = checks
+        .iter()
+        .filter_map(|check| {
+            evaluations
+                .iter()
+                .find(|evaluation| evaluation.id == check.evaluation_id)
+                .map(|evaluation| (evaluation, check))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        joined.iter().any(|(evaluation, check)| {
+            evaluation.policy_id == "stream-reject-policy"
+                && check.verdict == "skipped"
+                && check.error_kind.as_deref() == Some("streaming_unsupported")
+        }),
+        "reject_streaming must persist a skipped per-check evidence row: {joined:#?}",
+    );
+    assert!(
+        joined.iter().any(|(evaluation, _)| {
+            evaluation.policy_id == "stream-shadow-policy"
+                && evaluation.enforcement_status == "not_enforced"
+        }),
+        "shadow_after_complete must persist a not_enforced evaluation with per-check evidence: {joined:#?}",
+    );
+    assert!(
+        joined.iter().any(|(evaluation, check)| {
+            evaluation.policy_id == "stream-buffer-policy"
+                && check.verdict == "error"
+                && check.error_kind.as_deref() == Some("guardrail_stream_buffer_limit_exceeded")
+        }),
+        "a streaming buffer overflow must persist an errored per-check evidence row: {joined:#?}",
+    );
+    // Sanitization is part of the contract: the synthesized rows must never
+    // carry inspected content, only stable tokens.
+    assert!(checks.iter().all(|check| {
+        check
+            .error_kind
+            .as_deref()
+            .is_none_or(|kind| !kind.contains("split-secret"))
+    }));
+}
+
 #[test]
 fn streaming_buffer_limits_use_configured_error_action_and_sanitized_evidence() {
     let shared = SharedAppState::with_source_path(Config::default(), None);

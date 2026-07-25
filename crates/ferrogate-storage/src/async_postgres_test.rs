@@ -40,6 +40,89 @@ fn async_pool_retains_typed_timeout_and_transaction_search_path() {
     assert_eq!(pool.metrics_snapshot(), Default::default());
 }
 
+/// Hermetic invariant behind #237/#238/#239/#250/#383: EVERY Postgres
+/// control-plane transaction must pin `search_path` to the configured
+/// `postgres_schema` before it touches a table, because every statement in this
+/// crate names its tables BARE. An unpinned transaction resolves against the
+/// connection-default schema (`public` on stock Supabase roles), so its rows
+/// split away from the schema the rest of the control plane uses -- silently,
+/// wherever the caller only warn-logs the failure.
+///
+/// #383 was exactly this: `guardrail_evidence.rs` was the one module whose four
+/// transactions never pinned, so NO guardrail evaluation / per-check evidence
+/// ever reached a configured schema while the audit-event and request-log rows
+/// for the same request did. Only a live-Supabase scenario could see it. This
+/// test makes the same audit run with no database at all: a transaction may
+/// pin directly, or through a helper that composes the pin
+/// (`coordination_session_sql`, `enter_guardrail_evidence_transaction`).
+#[test]
+fn every_postgres_control_plane_transaction_pins_the_configured_search_path() {
+    const PIN_MARKERS: [&str; 3] = [
+        "transaction_search_path_sql",
+        "coordination_session_sql",
+        "enter_guardrail_evidence_transaction",
+    ];
+    /// The end of the method that opened the transaction: the first `}` at the
+    /// enclosing item's indentation (method bodies nest deeper). The pin may
+    /// legitimately come several statements in -- `initialize_schema` first
+    /// takes an advisory lock and creates the schema -- so the window is the
+    /// whole method rather than a fixed number of lines.
+    fn method_end(lines: &[&str], start: usize) -> usize {
+        lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| matches!(line.trim_end(), "}" | "    }"))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len())
+    }
+
+    let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut unpinned = Vec::new();
+    let mut scanned = 0_usize;
+    let mut pending = vec![source_dir];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read the storage source directory") {
+            let path = entry.expect("read a storage source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // Test modules build their own throwaway transactions.
+            if !name.ends_with(".rs") || name.ends_with("_test.rs") || name.contains("test_support")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read a storage source file");
+            let lines = source.lines().collect::<Vec<_>>();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("client.transaction()") {
+                    continue;
+                }
+                scanned += 1;
+                let window = lines[index..method_end(&lines, index)].join("\n");
+                if !PIN_MARKERS.iter().any(|marker| window.contains(marker)) {
+                    unpinned.push(format!("{}:{}", path.display(), index + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "the scan found no Postgres transactions at all; it has stopped protecting anything",
+    );
+    assert!(
+        unpinned.is_empty(),
+        "these Postgres transactions never pin `search_path`, so their bare table names resolve \
+         against the connection-default schema instead of the configured `postgres_schema` \
+         (#239/#383): {unpinned:?}",
+    );
+}
+
 #[test]
 fn acquisition_deadline_drops_pending_work_without_a_late_action() {
     struct DropSignal(Option<std::sync::mpsc::Sender<()>>);

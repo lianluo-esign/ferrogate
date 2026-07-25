@@ -14,9 +14,11 @@ use crate::schema_routing_test_support::{
     block_on, count_rows, run_sql, serialize_db_test, unique_schema, SchemaGuard,
 };
 use crate::{
-    PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories, StoredAgentRun,
-    StoredAuditEvent, StoredPermission, StoredSelfHostedRunDispatch,
-    StoredSelfHostedWorkerRegistration, StoredWallet, POSTGRES_SCHEMA_SQL,
+    GuardrailEvaluationQuery, GuardrailEvaluationRepository, PostgresStorageConfig,
+    PostgresTlsMode, RuntimeStorageRepositories, StoredAgentRun, StoredAuditEvent,
+    StoredGuardrailCheckEvaluation, StoredGuardrailEvaluation, StoredPermission,
+    StoredSelfHostedRunDispatch, StoredSelfHostedWorkerRegistration, StoredWallet,
+    POSTGRES_SCHEMA_SQL,
 };
 use ferrogate_core::TenantContext;
 
@@ -911,6 +913,200 @@ fn live_initialize_schema_provisions_the_configured_schema_not_public() {
         ),
         1,
         "the configured schema's migration ledger must record head 50",
+    );
+
+    // Teardown is handled by `_guard` (RAII), which also runs on panic.
+}
+
+/// #383 (guardrail evidence): the MULTI-statement `append_guardrail_evidence`
+/// writer -- and its three readers -- must land / resolve their
+/// `guardrail_evaluations` + `guardrail_check_evaluations` rows in the
+/// configured schema, not `public`.
+///
+/// `guardrail_evidence.rs` was the ONLY Postgres control-plane module that
+/// opened bare transactions with no `SET LOCAL search_path` (every other
+/// module pins it, directly or through `coordination_session_sql`). On a
+/// configured `postgres_schema` the guardrail evidence statements therefore
+/// resolved against the connection default (`public` on stock Supabase roles),
+/// so evidence never reached the schema everything else wrote to -- and since
+/// the runtime persists guardrail evidence from a detached `spawn_blocking`
+/// task that only `warn!`s on failure, the loss was silent. Live symptom
+/// (#383): `guardrail-supabase` fails on the FIRST assertion that reads these
+/// two tables while every audit-event / request-log assertion before it passes.
+#[test]
+fn live_guardrail_evidence_writes_to_configured_schema_not_public() {
+    let Some(dsn) = dsn_or_skip("live_guardrail_evidence_writes_to_configured_schema_not_public")
+    else {
+        return;
+    };
+    let _db = serialize_db_test();
+    let schema = unique_schema("ferrogate_cp_guardrail_test");
+    let tenant_id = format!("tenant-{schema}");
+    let evaluation_id = format!("guardrail-eval-{schema}");
+    let check_id = format!("{evaluation_id}/split-stream-output");
+    let _guard = SchemaGuard::new(&dsn, &schema).also(format!(
+        "DELETE FROM public.guardrail_check_evaluations WHERE id = '{check_id}'; \
+         DELETE FROM public.guardrail_evaluations WHERE id = '{evaluation_id}';"
+    ));
+
+    // Shadow both evidence tables in `public` WITHOUT the FK or RLS -- they
+    // only need to catch a misrouted insert (and, without a shadow, an
+    // unpinned write would merely error instead of proving WHERE it went).
+    run_sql(
+        &dsn,
+        &format!(
+            "CREATE TABLE IF NOT EXISTS public.guardrail_evaluations ( \
+                 id TEXT PRIMARY KEY, request_id TEXT NOT NULL, trace_id TEXT, \
+                 agent_run_id TEXT, subject_id TEXT, tenant_id TEXT, \
+                 scope_type TEXT NOT NULL, scope_id TEXT NOT NULL, target TEXT NOT NULL, \
+                 stage TEXT NOT NULL, mode TEXT NOT NULL, policy_id TEXT NOT NULL, \
+                 policy_revision BIGINT NOT NULL, verdict TEXT NOT NULL, action TEXT NOT NULL, \
+                 enforcement_status TEXT NOT NULL, occurred_at_unix BIGINT NOT NULL, \
+                 action_fingerprint TEXT, decision TEXT, decision_reason TEXT, \
+                 evaluation_json JSONB NOT NULL); \
+             CREATE TABLE IF NOT EXISTS public.guardrail_check_evaluations ( \
+                 id TEXT PRIMARY KEY, evaluation_id TEXT NOT NULL, check_id TEXT NOT NULL, \
+                 detector_id TEXT NOT NULL, detector_version TEXT NOT NULL, \
+                 verdict TEXT NOT NULL, action TEXT NOT NULL, \
+                 enforcement_status TEXT NOT NULL, error_kind TEXT, check_json JSONB NOT NULL); \
+             DELETE FROM public.guardrail_check_evaluations WHERE id = '{check_id}'; \
+             DELETE FROM public.guardrail_evaluations WHERE id = '{evaluation_id}';"
+        ),
+    );
+
+    let repositories = open_repositories(&dsn, &schema);
+    // The shape the streaming guardrail paths persist: a `not_enforced`
+    // shadow-after-complete evaluation plus its per-check row, which is
+    // exactly what the live scenario polls for.
+    repositories
+        .append_guardrail_evaluation(
+            StoredGuardrailEvaluation {
+                id: evaluation_id.clone(),
+                request_id: format!("fg-{schema}"),
+                trace_id: None,
+                agent_run_id: None,
+                subject_id: None,
+                tenant: TenantContext {
+                    organization_id: Some(tenant_id.clone()),
+                    ..TenantContext::default()
+                },
+                scope_type: "tenant".into(),
+                scope_id: tenant_id.clone(),
+                target: "model=fast-chat;provider=openai".into(),
+                protocol: "chat_completions".into(),
+                stage: "response".into(),
+                mode: "enforce".into(),
+                policy_id: "stream-shadow-policy".into(),
+                policy_revision: 1,
+                verdict: "fail".into(),
+                action: "block".into(),
+                enforcement_status: "not_enforced".into(),
+                latency_ms: 1,
+                finding_category_counts: std::collections::BTreeMap::new(),
+                finding_count: 0,
+                transformed: false,
+                input_fingerprint: "hmac-sha256:cp383".into(),
+                occurred_at_unix: 1_700_000_000,
+                action_fingerprint: None,
+                decision: None,
+                decision_reason: None,
+            },
+            vec![StoredGuardrailCheckEvaluation {
+                id: check_id.clone(),
+                evaluation_id: evaluation_id.clone(),
+                check_id: "split-stream-output".into(),
+                detector_id: "ferrogate.local".into(),
+                detector_version: "not_executed".into(),
+                config_digest: "sha256:cp383".into(),
+                verdict: "skipped".into(),
+                action: "block".into(),
+                enforcement_status: "not_enforced".into(),
+                latency_ms: 0,
+                finding_category_counts: std::collections::BTreeMap::new(),
+                finding_count: 0,
+                transformed: false,
+                used_fallback: false,
+                error_kind: Some("streaming_unsupported".into()),
+            }],
+        )
+        .expect("append guardrail evidence must not error");
+
+    // The three readers must resolve the SAME schema the write landed in --
+    // they opened bare transactions too, so an unpinned reader would report an
+    // empty evidence store even after a correctly routed write.
+    let evaluations = repositories
+        .list_guardrail_evaluations(Some(&tenant_id))
+        .expect("list guardrail evaluations must not error");
+    assert_eq!(
+        evaluations.len(),
+        1,
+        "the guardrail evaluation must be readable back from the configured schema",
+    );
+    let checks = repositories
+        .list_guardrail_check_evaluations(Some(&tenant_id))
+        .expect("list guardrail check evaluations must not error");
+    assert_eq!(
+        checks.len(),
+        1,
+        "the per-check evidence must be readable back from the configured schema",
+    );
+    let page = repositories
+        .query_guardrail_evaluations(&GuardrailEvaluationQuery {
+            tenant_id: Some(tenant_id.clone()),
+            error_kind: Some("streaming_unsupported".into()),
+            limit: 10,
+            ..GuardrailEvaluationQuery::default()
+        })
+        .expect("query guardrail evidence must not error");
+    assert_eq!(
+        page.total, 1,
+        "the evidence query (admin API surface) must resolve the configured schema",
+    );
+    drop(repositories);
+
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".guardrail_evaluations \
+                 WHERE id = '{evaluation_id}'"
+            )
+        ),
+        1,
+        "the guardrail evaluation must be persisted in the configured schema",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM \"{schema}\".guardrail_check_evaluations \
+                 WHERE id = '{check_id}'"
+            )
+        ),
+        1,
+        "the per-check evidence must be persisted in the configured schema",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM public.guardrail_evaluations \
+                 WHERE id = '{evaluation_id}'"
+            )
+        ),
+        0,
+        "the guardrail evaluation must NOT be misrouted to the public schema (#383)",
+    );
+    assert_eq!(
+        count_rows(
+            &dsn,
+            &format!(
+                "SELECT COUNT(*)::BIGINT FROM public.guardrail_check_evaluations \
+                 WHERE id = '{check_id}'"
+            )
+        ),
+        0,
+        "the per-check evidence must NOT be misrouted to the public schema (#383)",
     );
 
     // Teardown is handled by `_guard` (RAII), which also runs on panic.

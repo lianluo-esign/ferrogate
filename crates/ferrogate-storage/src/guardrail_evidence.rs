@@ -142,6 +142,38 @@ impl PostgresControlPlaneStore {
         StorageOperation::new(name, self.async_pool.statement_timeout())
     }
 
+    /// Prepare a freshly opened guardrail-evidence transaction.
+    ///
+    /// Every statement below writes `guardrail_evaluations` /
+    /// `guardrail_check_evaluations` BARE (unqualified), so the transaction
+    /// must first pin `search_path` to the configured `postgres_schema`
+    /// (#239) exactly like every other control-plane query does. Without the
+    /// pin the tables resolve against the connection default (`public` on
+    /// stock Supabase roles): the INSERT fails with `relation
+    /// "guardrail_evaluations" does not exist` (or, where a `public` shadow
+    /// table exists, silently lands there), and because guardrail evidence is
+    /// persisted from a detached `spawn_blocking` task the error is only
+    /// warn-logged — so on a non-default schema NO guardrail evidence ever
+    /// reached the configured schema while the audit/request-log rows for the
+    /// same request did (#383).
+    ///
+    /// The RLS context (`ferrogate.tenant_id` / `ferrogate.platform_mode`) is
+    /// set in the same round trip because both tables carry tenant-scoped RLS
+    /// policies.
+    async fn enter_guardrail_evidence_transaction(
+        &self,
+        transaction: &deadpool_postgres::Transaction<'_>,
+        tenant_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+            transaction
+                .batch_execute(search_path_sql)
+                .await
+                .map_err(postgres_error)?;
+        }
+        set_guardrail_rls_context(transaction, tenant_id).await
+    }
+
     async fn append_guardrail_evidence(
         &self,
         evaluation: &StoredGuardrailEvaluation,
@@ -157,8 +189,11 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         let transaction = client.transaction().await.map_err(postgres_error)?;
-        set_guardrail_rls_context(&transaction, evaluation.tenant.organization_id.as_deref())
-            .await?;
+        self.enter_guardrail_evidence_transaction(
+            &transaction,
+            evaluation.tenant.organization_id.as_deref(),
+        )
+        .await?;
         transaction
             .execute(
                 "INSERT INTO guardrail_evaluations \
@@ -243,7 +278,8 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         let transaction = client.transaction().await.map_err(postgres_error)?;
-        set_guardrail_rls_context(&transaction, tenant_id).await?;
+        self.enter_guardrail_evidence_transaction(&transaction, tenant_id)
+            .await?;
         let evaluations = transaction
             .query(
                 "SELECT evaluation_json::text FROM guardrail_evaluations \
@@ -319,7 +355,8 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         let transaction = client.transaction().await.map_err(postgres_error)?;
-        set_guardrail_rls_context(&transaction, query.tenant_id.as_deref()).await?;
+        self.enter_guardrail_evidence_transaction(&transaction, query.tenant_id.as_deref())
+            .await?;
 
         let count_sql =
             format!("SELECT count(*) FROM guardrail_evaluations AS evaluation WHERE {FILTER}");
@@ -386,7 +423,8 @@ impl PostgresControlPlaneStore {
             .acquire(operation.name(), operation.remaining("pool acquisition")?)
             .await?;
         let transaction = client.transaction().await.map_err(postgres_error)?;
-        set_guardrail_rls_context(&transaction, tenant_id).await?;
+        self.enter_guardrail_evidence_transaction(&transaction, tenant_id)
+            .await?;
         let checks = transaction
             .query(
                 "SELECT check_row.check_json::text FROM guardrail_check_evaluations AS check_row \
