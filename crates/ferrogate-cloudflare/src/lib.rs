@@ -68,6 +68,9 @@ pub use scopes::{TokenPermissionGroup, REQUIRED_TOKEN_PERMISSION_GROUPS};
 #[path = "backoff_test.rs"]
 mod backoff_test;
 #[cfg(test)]
+#[path = "client_test.rs"]
+mod client_test;
+#[cfg(test)]
 #[path = "config_test.rs"]
 mod config_test;
 #[cfg(test)]

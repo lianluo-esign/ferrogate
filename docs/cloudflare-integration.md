@@ -439,7 +439,7 @@ This table is the **authoritative** required-scope list and **matches the
 foundation client's preflight set byte-for-byte**. Source of truth:
 `REQUIRED_TOKEN_PERMISSION_GROUPS` at
 **`crates/ferrogate-cloudflare/src/scopes.rs:33`**, asserted by
-`CloudflareClient::preflight` at **`crates/ferrogate-cloudflare/src/client.rs:273`**
+`CloudflareClient::preflight` at **`crates/ferrogate-cloudflare/src/client.rs:333`**
 (an under-scoped token surfaces as `CloudflareError::MissingScope`, whose message
 names these groups via `required_group_names()`,
 `crates/ferrogate-cloudflare/src/error.rs:119`). Rows and access levels below are
@@ -452,6 +452,7 @@ copied verbatim from the code, in code order.
 | D1 | Read, Edit | D1-backed state |
 | Workers Scripts | Edit | Worker deployment |
 | Workers R2 Storage | Read, Edit | R2 object storage |
+| API Tokens | Write | minting/revoking bucket-scoped R2 API tokens (#462) |
 | Cloudflare Pages | Edit | Pages deployment |
 | Workflows (Workers Scripts) | Write, Edit | Workflows orchestration |
 
@@ -468,6 +469,10 @@ Notes:
   **Workers Scripts Edit** row (assets attach to a Worker deploy).
 - R2's optional S3 Access Key path is a *credential form*, not an extra permission
   group; the account-token equivalent is the **Workers R2 Storage** row.
+- **API Tokens (Write)** is the account-level group that lets the account token
+  *mint and revoke other tokens*. It is required by the #462 per-tenant scoped-R2
+  credential path (`POST`/`DELETE /accounts/{account_id}/tokens`); **Workers R2
+  Storage** alone lets you use R2 but not issue bucket-scoped tokens for it.
 - **Workers AI** (for the optional Llama Guard detector, §7) is deliberately
   **not** in this set — it is opt-in, so the code does not require it at preflight.
 

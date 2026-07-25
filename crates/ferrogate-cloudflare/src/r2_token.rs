@@ -81,8 +81,10 @@ pub const R2_DEFAULT_JURISDICTION: &str = "default";
 pub const R2_BUCKET_ITEM_READ_PERMISSION_GROUP_ID: &str = "6a018a9f2fc74eb6b293b0c548f38b39";
 
 /// Cloudflare permission-group id for **Workers R2 Storage Bucket Item Write**
-/// (read + write + list objects within the scoped bucket). Verified against the
-/// R2 authentication docs' Access-Policy example.
+/// (read + write + list objects within the scoped bucket). Verified against
+/// Cloudflare's R2 Data Catalog documentation, which is where the *Write* group
+/// id is published — the R2 authentication docs' Access-Policy example carries
+/// only the *Read* id above, so it is not a source for this constant (#489).
 pub const R2_BUCKET_ITEM_WRITE_PERMISSION_GROUP_ID: &str = "2efd5506f9c8494dacb1fa10a3e7d5b6";
 
 /// The access level a scoped R2 token grants over its single bucket.

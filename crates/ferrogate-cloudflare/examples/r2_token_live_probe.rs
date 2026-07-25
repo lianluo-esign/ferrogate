@@ -16,7 +16,10 @@
 //!    bucket-scoped — re-read via `GET /accounts/{account_id}/tokens/{id}` and
 //!    confirm its policy `resources` names exactly the probe bucket;
 //! 4. **revoke the token on BOTH success and failure** (RAII-style), then delete
-//!    the probe bucket.
+//!    the probe bucket. Cleanup is *unconditional in both directions*: a failing
+//!    revoke does not skip the bucket delete (and vice versa) — each failure is
+//!    reported and re-raised only after every cleanup step has been attempted,
+//!    so no probe bucket or live token is ever left behind (#489).
 //!
 //! Opt-in only — requires (same convention as `r2_live_probe`, #461):
 //!   FERROGATE_CF_ACCOUNT_ID  — Cloudflare account id
@@ -136,13 +139,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     .await;
 
-    // Cleanup runs on success AND failure: revoke the token, then delete bucket.
-    client.revoke_r2_token(&token_id).await?;
-    println!("revoked token: {token_id}");
-    client.delete_r2_bucket(&bucket).await?;
-    println!("deleted bucket: {bucket}");
+    // Cleanup runs on success AND failure, and every step runs even when an
+    // earlier one fails: a `?` on the revoke would return before the bucket
+    // delete and leak BOTH the probe bucket and a live token into the account
+    // (#489). Each outcome is captured and re-raised only after all cleanup.
+    let revoked = client.revoke_r2_token(&token_id).await;
+    match &revoked {
+        Ok(()) => println!("revoked token: {token_id}"),
+        Err(err) => eprintln!("cleanup WARNING: revoke of token {token_id} failed: {err}"),
+    }
+    let bucket_deleted = client.delete_r2_bucket(&bucket).await;
+    match &bucket_deleted {
+        Ok(()) => println!("deleted bucket: {bucket}"),
+        Err(err) => eprintln!("cleanup WARNING: delete of bucket {bucket} failed: {err}"),
+    }
 
     checks?;
+    revoked?;
+    bucket_deleted?;
     println!("r2_token_live_probe: PASS");
     Ok(())
 }

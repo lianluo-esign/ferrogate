@@ -66,11 +66,29 @@ impl std::fmt::Debug for HttpRequest {
 /// A transport-level response. `status` is the HTTP status; a non-2xx status is
 /// NOT an error at this layer — the client maps it to a typed
 /// [`CloudflareError`] after inspecting the envelope.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written — mirroring [`HttpRequest`] above, which redacts its
+/// bearer token — because a response `body` can now carry a **plaintext
+/// credential**: since #462 `POST /accounts/{account_id}/tokens` returns the
+/// one-time token `value` from which the R2 secret access key is derived. Only
+/// `status`, `retry_after` and `body_len` are rendered; the body bytes are
+/// never printed, so no `{:?}` in a log line, an error chain, a panic message
+/// or a test failure can spill a minted secret (issue #489).
+#[derive(Clone)]
 pub struct HttpResponse {
     pub status: u16,
     pub retry_after: Option<Duration>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("retry_after", &self.retry_after)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 /// The HTTP execution seam. The production impl is [`ReqwestTransport`]; tests

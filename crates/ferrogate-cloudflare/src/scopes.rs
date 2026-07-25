@@ -57,6 +57,11 @@ pub const REQUIRED_TOKEN_PERMISSION_GROUPS: &[TokenPermissionGroup] = &[
         used_by: "R2 object storage",
     },
     TokenPermissionGroup {
+        name: "API Tokens",
+        access: "Write",
+        used_by: "minting/revoking bucket-scoped R2 API tokens (#462)",
+    },
+    TokenPermissionGroup {
         name: "Cloudflare Pages",
         access: "Edit",
         used_by: "Pages deployment",
