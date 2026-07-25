@@ -18,7 +18,10 @@
 //!
 //! 1. [`AgentRuntimeUsageSample`] — the CF cost drivers for one agent/run over a
 //!    window (DO requests, GB-seconds duration, SQLite rows read/written, stored
-//!    bytes, WebSocket inbound messages, plus the already-metered egress USD).
+//!    bytes, WebSocket inbound messages, the already-metered egress USD, and —
+//!    since #473 — the Cloudflare **Containers** drivers in
+//!    [`ContainerUsageSample`], which is where a long-running coding agent
+//!    actually spends).
 //! 2. [`CfRuntimeCostModel`] — pure USD cost from a sample using configurable CF
 //!    pricing constants ([`CfRuntimePricing`]), broken out per resource class
 //!    ([`CostBreakdown`]).
@@ -97,6 +100,83 @@ pub const DEFAULT_STORAGE_USD_PER_GB_MONTH: f64 = 0.20;
 /// pressure is priced at the DO-request rate divided by this ratio.
 pub const WEBSOCKET_MESSAGES_PER_BILLED_REQUEST: f64 = 20.0;
 
+// ---------------------------------------------------------------------------
+// Cloudflare Containers pricing constants (issue #473)
+// ---------------------------------------------------------------------------
+//
+// The DO coefficients above price only the Workers/Durable-Object tier. A
+// long-running coding agent actually executes in the **container/sandbox** tier
+// (#415/#472), which Cloudflare bills on its own, entirely separate meters. With
+// those unpriced a container-heavy run scored near-zero container cost, so the
+// budget engine kept admitting it and the kill switch fired late or never.
+//
+// Source for every coefficient below: Cloudflare **Containers** pricing,
+// <https://developers.cloudflare.com/containers/pricing/> (as read 2026-07),
+// cross-checked against the CPU-pricing changelog
+// <https://developers.cloudflare.com/changelog/2025-11-21-new-cpu-pricing/>.
+//
+// Two properties of the CF meters are encoded deliberately:
+//
+// * **Memory and disk bill the PROVISIONED instance allocation** (the
+//   `lite`..`standard-4` tier chosen in `wrangler.toml`, see
+//   [`crate::ContainerInstanceTier`]) for the whole time the instance is awake —
+//   NOT the amount actually touched. **CPU bills ACTIVE usage only** (per the
+//   2025-11-21 change). The sample's field docs restate this so a telemetry feed
+//   cannot quietly report "used" memory where CF bills "provisioned".
+// * Billing runs "for every 10ms that they are actively running", starting when
+//   a request arrives / the instance is started and stopping when it sleeps.
+//
+// Deliberately NOT modelled here, and why:
+//
+// * **Free-tier inclusions** (25 GiB-hours memory, 375 vCPU-minutes CPU, 200
+//   GB-hours disk, 1 TB egress per month on Workers Paid). Same choice as the DO
+//   block above — this engine prices *marginal* usage so a per-agent cap is
+//   conservative.
+// * **Container image / registry storage.** Issue #473 assumed this was a
+//   billable axis; it is not. Cloudflare's Containers docs expose image storage
+//   as an **account limit**, not a metered charge — the pricing page carries no
+//   image/registry line item, and unused pre-warmed images are not billed. No
+//   coefficient is invented for it. If CF later meters it, it is a new
+//   coefficient here, not a fudge factor on an existing one.
+// * **The container's own Workers/Durable-Object overhead.** CF's docs note
+//   "each container has its own Durable Object", and that DO/Workers usage is
+//   already priced by the coefficients above — so the container axes are strictly
+//   *additive* and nothing is double-counted.
+// * **Workers Logs**, which containers bill at the standard Workers Logs rate.
+
+/// Container **CPU**: $0.000020 per vCPU-second of **active** CPU.
+/// Source: CF Containers pricing — CPU row (Workers Paid); the 2025-11-21 CPU
+/// pricing change made this actual-utilization rather than provisioned.
+pub const DEFAULT_CONTAINER_VCPU_USD_PER_SECOND: f64 = 0.000_020;
+
+/// Container **memory**: $0.0000025 per GiB-second of **provisioned** memory.
+/// Source: CF Containers pricing — Memory row (Workers Paid). Note the unit is
+/// **GiB** (binary, 2^30 bytes), unlike the DO storage meter's decimal GB.
+pub const DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND: f64 = 0.000_002_5;
+
+/// Container **disk**: $0.00000007 per GB-second of **provisioned** disk.
+/// Source: CF Containers pricing — Disk row (Workers Paid).
+pub const DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND: f64 = 0.000_000_07;
+
+/// Container **network egress**: $0.025 per GB.
+///
+/// Source: CF Containers pricing — Network egress table. The published rate is
+/// **region-tiered**: $0.025/GB North America & Europe,
+/// [`CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN`] for Oceania/Korea/Taiwan
+/// and [`CONTAINER_EGRESS_USD_PER_GB_ROW`] everywhere else. This default is the
+/// North America & Europe rate; a deployment in another region MUST override
+/// `container_egress_usd_per_gb` on [`CfRuntimePricing`] or it will under-price
+/// its own egress.
+pub const DEFAULT_CONTAINER_EGRESS_USD_PER_GB: f64 = 0.025;
+
+/// Container network egress for Oceania, Korea and Taiwan: $0.05 per GB.
+/// Source: CF Containers pricing — Network egress table.
+pub const CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN: f64 = 0.05;
+
+/// Container network egress for all other regions: $0.04 per GB.
+/// Source: CF Containers pricing — Network egress table.
+pub const CONTAINER_EGRESS_USD_PER_GB_ROW: f64 = 0.04;
+
 /// Unit scale for the "per million" list prices.
 pub const UNITS_PER_MILLION: f64 = 1_000_000.0;
 /// Bytes per gigabyte (decimal GB, as Cloudflare meters stored data).
@@ -112,6 +192,57 @@ pub const DEFAULT_WARN_FRACTION: f64 = 0.8;
 // ---------------------------------------------------------------------------
 // Usage sample
 // ---------------------------------------------------------------------------
+
+/// The Cloudflare **Containers** cost drivers observed for one agent/run over a
+/// metering window (issue #473).
+///
+/// Held as an `Option` on [`AgentRuntimeUsageSample::container`] precisely so a
+/// missing container telemetry feed is representable as **unavailable** rather
+/// than as an all-zero (i.e. free) container run — see the field docs there.
+/// Within a present feed the axes are plain `f64`: if the feed answered at all,
+/// it answered for every axis.
+///
+/// Units follow Cloudflare's meters exactly, including the **GiB vs GB**
+/// asymmetry (memory is metered in binary GiB, disk in decimal GB).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerUsageSample {
+    /// **Active** CPU consumed by the container instance. Unit:
+    /// **vCPU-seconds**. CF bills CPU on actual utilization (2025-11-21 change),
+    /// so this is *used* CPU time, not the instance tier's vCPU allocation
+    /// multiplied by wall-clock.
+    pub vcpu_seconds: f64,
+    /// **Provisioned** memory held for the time the instance was awake. Unit:
+    /// **GiB-seconds** (binary GiB). CF bills the instance tier's memory
+    /// allocation (e.g. `standard-4` = 12 GiB) for every awake second, NOT the
+    /// resident set — a feed reporting "used" memory here under-bills.
+    pub memory_gib_seconds: f64,
+    /// **Provisioned** disk held for the time the instance was awake. Unit:
+    /// **GB-seconds** (decimal GB). As with memory, CF bills the tier's disk
+    /// allocation (e.g. `standard-4` = 20 GB), not bytes written.
+    pub disk_gb_seconds: f64,
+    /// Container **network egress** in the window. Unit: **GB**. Priced by
+    /// [`CfRuntimePricing::container_egress_usd_per_gb`], which is region-tiered
+    /// upstream — distinct from
+    /// [`AgentRuntimeUsageSample::metered_egress_usd`], which is the
+    /// pre-computed model/tool/MCP *spend* pass-through and not a CF meter.
+    pub network_egress_gb: f64,
+}
+
+impl ContainerUsageSample {
+    /// A container feed that is **present and reports no billable container
+    /// activity**. Deliberately distinct from an absent feed
+    /// ([`AgentRuntimeUsageSample::container`] = `None`): this asserts the run
+    /// really did cost nothing in container time.
+    pub fn zero() -> Self {
+        Self {
+            vcpu_seconds: 0.0,
+            memory_gib_seconds: 0.0,
+            disk_gb_seconds: 0.0,
+            network_egress_gb: 0.0,
+        }
+    }
+}
 
 /// The Cloudflare cost drivers observed for one agent/run over a metering
 /// window. Every field documents its unit. This is the **input** to
@@ -145,10 +276,41 @@ pub struct AgentRuntimeUsageSample {
     /// taken as a pre-computed input from the existing tethered-egress metering.
     /// This engine **passes it through** and does NOT recompute it.
     pub metered_egress_usd: f64,
+    /// Cloudflare **Containers** drivers for the window (issue #473), or `None`
+    /// when **no container telemetry feed was available**.
+    ///
+    /// ## `None` means unavailable, never zero
+    ///
+    /// This is the same honesty rule as #458/#464. `None` and
+    /// `Some(ContainerUsageSample::zero())` are different claims:
+    ///
+    /// * `Some(..zero())` — the feed answered: this run really did burn no
+    ///   container time.
+    /// * `None` — **nobody asked, or nobody answered.** The container cost of
+    ///   this run is *unknown*.
+    ///
+    /// [`CfRuntimeCostModel::breakdown`] propagates the distinction: every
+    /// container class on [`CostBreakdown`] is `Option`, a `None` feed yields
+    /// `None` (serialized as JSON `null`, never `0`), and
+    /// [`CostBreakdown::total_is_complete`] goes false so `total_usd` is
+    /// explicitly readable as a **lower bound** rather than the whole cost.
+    /// [`AgentCostReceipt::container_cost_unavailable`] surfaces the same flag at
+    /// the top of the durable receipt.
+    ///
+    /// `#[serde(default)]` so a receipt minted before #473 (which carries no
+    /// container field at all) deserializes to `None` — "we do not know" — which
+    /// is exactly the truth about those records. It is deliberately NOT
+    /// `skip_serializing_if`: an absent feed must be *visible* as `null` on the
+    /// wire, not omitted.
+    #[serde(default)]
+    pub container: Option<ContainerUsageSample>,
 }
 
 impl AgentRuntimeUsageSample {
-    /// An all-zero sample (no billable activity in the window).
+    /// An all-zero sample: no billable activity in the window, **including a
+    /// present container feed reporting zero**. Use
+    /// [`Self::without_container_telemetry`] for the different claim "we have no
+    /// container telemetry at all".
     pub fn zero() -> Self {
         Self {
             do_requests: 0,
@@ -159,7 +321,17 @@ impl AgentRuntimeUsageSample {
             stored_window_seconds: 0.0,
             ws_inbound_messages: 0,
             metered_egress_usd: 0.0,
+            container: Some(ContainerUsageSample::zero()),
         }
+    }
+
+    /// This sample with its container feed marked **unavailable** (`None`) — the
+    /// shape a caller uses when the container metrics pull did not land. The
+    /// resulting cost is a lower bound, flagged as such throughout the breakdown
+    /// and receipt.
+    pub fn without_container_telemetry(mut self) -> Self {
+        self.container = None;
+        self
     }
 }
 
@@ -180,6 +352,42 @@ pub struct CfRuntimePricing {
     /// Incoming WebSocket messages counted as one DO request per this many
     /// messages (default [`WEBSOCKET_MESSAGES_PER_BILLED_REQUEST`]).
     pub websocket_messages_per_billed_request: f64,
+    /// Cloudflare Containers **CPU** rate, USD per vCPU-second of active CPU
+    /// (default [`DEFAULT_CONTAINER_VCPU_USD_PER_SECOND`]).
+    #[serde(default = "default_container_vcpu_usd_per_second")]
+    pub container_vcpu_usd_per_second: f64,
+    /// Cloudflare Containers **memory** rate, USD per GiB-second of provisioned
+    /// memory (default [`DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND`]).
+    #[serde(default = "default_container_memory_usd_per_gib_second")]
+    pub container_memory_usd_per_gib_second: f64,
+    /// Cloudflare Containers **disk** rate, USD per GB-second of provisioned
+    /// disk (default [`DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND`]).
+    #[serde(default = "default_container_disk_usd_per_gb_second")]
+    pub container_disk_usd_per_gb_second: f64,
+    /// Cloudflare Containers **network egress** rate, USD per GB (default
+    /// [`DEFAULT_CONTAINER_EGRESS_USD_PER_GB`], the North America & Europe
+    /// rate). Region-tiered upstream: override with
+    /// [`CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN`] or
+    /// [`CONTAINER_EGRESS_USD_PER_GB_ROW`] outside NA/EU.
+    #[serde(default = "default_container_egress_usd_per_gb")]
+    pub container_egress_usd_per_gb: f64,
+}
+
+// serde `default` hooks so a pricing config written before #473 (no container
+// keys) still deserializes, falling back to the CF list rates rather than to
+// `0.0` — a zero coefficient would silently re-introduce the very "containers
+// are free" bug this issue fixes.
+fn default_container_vcpu_usd_per_second() -> f64 {
+    DEFAULT_CONTAINER_VCPU_USD_PER_SECOND
+}
+fn default_container_memory_usd_per_gib_second() -> f64 {
+    DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND
+}
+fn default_container_disk_usd_per_gb_second() -> f64 {
+    DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND
+}
+fn default_container_egress_usd_per_gb() -> f64 {
+    DEFAULT_CONTAINER_EGRESS_USD_PER_GB
 }
 
 impl Default for CfRuntimePricing {
@@ -191,12 +399,35 @@ impl Default for CfRuntimePricing {
             sqlite_rows_written_usd_per_million: DEFAULT_SQLITE_ROWS_WRITTEN_USD_PER_MILLION,
             storage_usd_per_gb_month: DEFAULT_STORAGE_USD_PER_GB_MONTH,
             websocket_messages_per_billed_request: WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
+            container_vcpu_usd_per_second: DEFAULT_CONTAINER_VCPU_USD_PER_SECOND,
+            container_memory_usd_per_gib_second: DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
+            container_disk_usd_per_gb_second: DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
+            container_egress_usd_per_gb: DEFAULT_CONTAINER_EGRESS_USD_PER_GB,
         }
     }
 }
 
 /// USD cost of one window, split by resource class. `total_usd` is the sum of
 /// the per-class fields and is what a budget evaluates against.
+///
+/// ## Container classes are their own resource classes (#473)
+///
+/// Container spend is reported as four dedicated fields plus the
+/// [`Self::container_usd`] subtotal — never folded into `duration_usd` or an
+/// "other" bucket. The receipt exists for **attribution**; flattening the
+/// container tier (which is where a coding agent's money actually goes) into a
+/// DO bucket would defeat that.
+///
+/// ## `None` on a container class means unavailable, not zero
+///
+/// Each container field is `Option<f64>`: `None` == no container telemetry feed
+/// (see [`AgentRuntimeUsageSample::container`]), `Some(0.0)` == the feed
+/// reported no container activity. When the feed is absent, `total_usd` omits
+/// container spend and is therefore a **lower bound** —
+/// [`Self::total_is_complete`] returns `false` and
+/// [`Self::container_cost_is_unavailable`] returns `true` so no caller has to
+/// infer it. The fields are serialized unconditionally (as JSON `null`), so an
+/// operator reading a receipt sees "unknown", not "$0.00".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostBreakdown {
@@ -207,7 +438,44 @@ pub struct CostBreakdown {
     pub storage_usd: f64,
     pub websocket_usd: f64,
     pub metered_egress_usd: f64,
+    /// Container **CPU** (vCPU-seconds) cost. `None` == telemetry unavailable.
+    #[serde(default)]
+    pub container_vcpu_usd: Option<f64>,
+    /// Container **memory** (GiB-seconds) cost. `None` == telemetry unavailable.
+    #[serde(default)]
+    pub container_memory_usd: Option<f64>,
+    /// Container **disk** (GB-seconds) cost. `None` == telemetry unavailable.
+    #[serde(default)]
+    pub container_disk_usd: Option<f64>,
+    /// Container **network egress** (GB) cost. `None` == telemetry unavailable.
+    /// Distinct from [`Self::metered_egress_usd`], which is model/tool/MCP spend.
+    #[serde(default)]
+    pub container_egress_usd: Option<f64>,
+    /// Subtotal of the four container classes, or `None` when the container
+    /// telemetry feed is unavailable.
+    #[serde(default)]
+    pub container_usd: Option<f64>,
+    /// Sum of every **priced** class. Equals the seven DO/Workers/egress fields
+    /// plus [`Self::container_usd`] when container telemetry is available; when
+    /// it is not, this omits container spend entirely and is a lower bound —
+    /// check [`Self::total_is_complete`].
     pub total_usd: f64,
+}
+
+impl CostBreakdown {
+    /// `true` when container spend could **not** be priced because the telemetry
+    /// feed was absent. In that state [`Self::total_usd`] is a lower bound on the
+    /// real cost, not the cost.
+    pub fn container_cost_is_unavailable(&self) -> bool {
+        self.container_usd.is_none()
+    }
+
+    /// `true` when every resource class in the model was priced, i.e.
+    /// [`Self::total_usd`] is the complete cost of the window rather than a lower
+    /// bound.
+    pub fn total_is_complete(&self) -> bool {
+        !self.container_cost_is_unavailable()
+    }
 }
 
 /// Pure cost computation from an [`AgentRuntimeUsageSample`]. No I/O, no clock,
@@ -262,13 +530,44 @@ impl CfRuntimeCostModel {
         // Egress is a pass-through of the pre-metered USD; never recomputed.
         let metered_egress_usd = sample.metered_egress_usd;
 
+        // Cloudflare Containers (#473) — its own resource classes, on CF's own
+        // meters. `None` in == `None` out for every class: an absent telemetry
+        // feed must NOT collapse to $0.00 anywhere along this path.
+        let container_vcpu_usd = sample
+            .container
+            .map(|c| c.vcpu_seconds * p.container_vcpu_usd_per_second);
+        let container_memory_usd = sample
+            .container
+            .map(|c| c.memory_gib_seconds * p.container_memory_usd_per_gib_second);
+        let container_disk_usd = sample
+            .container
+            .map(|c| c.disk_gb_seconds * p.container_disk_usd_per_gb_second);
+        let container_egress_usd = sample
+            .container
+            .map(|c| c.network_egress_gb * p.container_egress_usd_per_gb);
+        let container_usd = match (
+            container_vcpu_usd,
+            container_memory_usd,
+            container_disk_usd,
+            container_egress_usd,
+        ) {
+            (Some(cpu), Some(mem), Some(disk), Some(egress)) => Some(cpu + mem + disk + egress),
+            _ => None,
+        };
+
+        // `unwrap_or(0.0)` is the ONLY arithmetic available for an unknown
+        // class, but it is not a silent zero: `container_usd` stays `None` on the
+        // breakdown, `total_is_complete()` reports false, and the receipt carries
+        // `container_cost_unavailable`, so this total is explicitly labelled a
+        // lower bound rather than passing itself off as the whole cost.
         let total_usd = do_requests_usd
             + duration_usd
             + sqlite_rows_read_usd
             + sqlite_rows_written_usd
             + storage_usd
             + websocket_usd
-            + metered_egress_usd;
+            + metered_egress_usd
+            + container_usd.unwrap_or(0.0);
 
         CostBreakdown {
             do_requests_usd,
@@ -278,6 +577,11 @@ impl CfRuntimeCostModel {
             storage_usd,
             websocket_usd,
             metered_egress_usd,
+            container_vcpu_usd,
+            container_memory_usd,
+            container_disk_usd,
+            container_egress_usd,
+            container_usd,
             total_usd,
         }
     }
@@ -540,6 +844,14 @@ pub struct AgentCostReceipt {
     /// Whether a budget threshold was crossed (i.e. the decision is not
     /// `Allow`).
     pub threshold_crossed: bool,
+    /// Whether the container telemetry feed was **unavailable** for this window
+    /// (#473). When `true`, [`Self::this_window_cost_usd`] and
+    /// [`Self::accumulated_burn_usd`] omit container spend and are **lower
+    /// bounds** — the decision below was taken on incomplete cost data. Hoisted
+    /// out of [`Self::breakdown`] so this shows up at the top of the durable
+    /// receipt instead of having to be inferred from a `null` deep inside it.
+    #[serde(default)]
+    pub container_cost_unavailable: bool,
     /// The enforcement decision.
     pub decision: BudgetDecision,
     /// Reference to the emitted cost/enforcement audit event.
@@ -566,6 +878,7 @@ impl AgentCostReceipt {
         );
         Ok(Self {
             threshold_crossed: !decision.permits_dispatch() || decision.is_terminal(),
+            container_cost_unavailable: breakdown.container_cost_is_unavailable(),
             attribution,
             sample: sample.clone(),
             this_window_cost_usd: breakdown.total_usd,

@@ -17,8 +17,10 @@ use super::{
     evaluate, should_dispatch, AgentBudgetPolicy, AgentBurnLedger, AgentBurnLedgerError,
     AgentCostAttribution, AgentCostGovernor, AgentCostReceipt, AgentRuntimeUsageSample,
     AgentRuntimeUsageSource, BudgetDecision, CfRuntimeCostModel, CfRuntimePricing,
-    CostGovernorError, CostWindow, InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource,
-    StorageAgentBurnLedger, DEFAULT_DO_REQUEST_USD_PER_MILLION,
+    ContainerUsageSample, CostGovernorError, CostWindow, InMemoryAgentBurnLedger, KillMode,
+    ScriptedUsageSource, StorageAgentBurnLedger, DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
+    DEFAULT_CONTAINER_EGRESS_USD_PER_GB, DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
+    DEFAULT_CONTAINER_VCPU_USD_PER_SECOND, DEFAULT_DO_REQUEST_USD_PER_MILLION,
     DEFAULT_DURATION_USD_PER_MILLION_GB_SECONDS, DEFAULT_SQLITE_ROWS_READ_USD_PER_MILLION,
     DEFAULT_SQLITE_ROWS_WRITTEN_USD_PER_MILLION, DEFAULT_STORAGE_USD_PER_GB_MONTH,
     DEFAULT_WARN_FRACTION, SECONDS_PER_BILLING_MONTH, WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
@@ -86,6 +88,52 @@ fn pricing_defaults_match_named_constants() {
         WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
         "ws ratio",
     );
+    // Cloudflare Containers coefficients (#473).
+    assert_close(
+        p.container_vcpu_usd_per_second,
+        DEFAULT_CONTAINER_VCPU_USD_PER_SECOND,
+        "container vcpu price",
+    );
+    assert_close(
+        p.container_memory_usd_per_gib_second,
+        DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
+        "container memory price",
+    );
+    assert_close(
+        p.container_disk_usd_per_gb_second,
+        DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
+        "container disk price",
+    );
+    assert_close(
+        p.container_egress_usd_per_gb,
+        DEFAULT_CONTAINER_EGRESS_USD_PER_GB,
+        "container egress price",
+    );
+}
+
+#[test]
+fn container_pricing_defaults_are_the_published_cloudflare_rates() {
+    // Pinned so a silent edit to a rate is a failing test, not a mis-bill.
+    // Source: <https://developers.cloudflare.com/containers/pricing/> (2026-07).
+    assert_close(DEFAULT_CONTAINER_VCPU_USD_PER_SECOND, 0.000_020, "vCPU-s");
+    assert_close(
+        DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
+        0.000_002_5,
+        "GiB-s",
+    );
+    assert_close(
+        DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
+        0.000_000_07,
+        "GB-s",
+    );
+    // Region-tiered egress; the default is the North America & Europe rate.
+    assert_close(DEFAULT_CONTAINER_EGRESS_USD_PER_GB, 0.025, "egress NA/EU");
+    assert_close(
+        super::CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN,
+        0.05,
+        "egress Oceania/KR/TW",
+    );
+    assert_close(super::CONTAINER_EGRESS_USD_PER_GB_ROW, 0.04, "egress RoW");
 }
 
 #[test]
@@ -99,6 +147,7 @@ fn cost_breakdown_is_exact_on_known_inputs() {
         stored_window_seconds: SECONDS_PER_BILLING_MONTH, // * 1 month * $0.20 = $0.40
         ws_inbound_messages: 40_000_000,                  // /20 = 2M requests * $0.15 = $0.30
         metered_egress_usd: 1.25,                         // pass-through
+        container: Some(ContainerUsageSample::zero()),    // present feed, $0.00
     };
     let model = CfRuntimeCostModel::new();
     let b = model.breakdown(&sample);
@@ -109,8 +158,252 @@ fn cost_breakdown_is_exact_on_known_inputs() {
     assert_close(b.storage_usd, 0.40, "storage");
     assert_close(b.websocket_usd, 0.30, "websocket");
     assert_close(b.metered_egress_usd, 1.25, "egress");
+    assert_eq!(
+        b.container_usd,
+        Some(0.0),
+        "present container feed, no burn"
+    );
+    assert!(b.total_is_complete(), "every class priced");
     assert_close(b.total_usd, 55.26, "total");
     assert_close(model.cost_usd(&sample), 55.26, "cost_usd == total");
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Containers cost arithmetic (#473)
+// ---------------------------------------------------------------------------
+
+/// A container-only sample: the four CF Containers meters, no DO/Workers or
+/// model spend, so each class is asserted in isolation.
+fn container_only(container: ContainerUsageSample) -> AgentRuntimeUsageSample {
+    AgentRuntimeUsageSample {
+        container: Some(container),
+        ..AgentRuntimeUsageSample::zero()
+    }
+}
+
+#[test]
+fn container_cost_breakdown_is_exact_on_known_inputs() {
+    // Published CF Containers rates (Workers Paid), chosen to land on round USD:
+    //   vCPU   1_000_000 vCPU-s   * $0.000020   = $20.00
+    //   memory 4_000_000 GiB-s    * $0.0000025  = $10.00
+    //   disk 100_000_000 GB-s     * $0.00000007 =  $7.00
+    //   egress       400 GB       * $0.025      = $10.00
+    //                                    subtotal $47.00
+    let sample = container_only(ContainerUsageSample {
+        vcpu_seconds: 1_000_000.0,
+        memory_gib_seconds: 4_000_000.0,
+        disk_gb_seconds: 100_000_000.0,
+        network_egress_gb: 400.0,
+    });
+    let model = CfRuntimeCostModel::new();
+    let b = model.breakdown(&sample);
+
+    assert_close(b.container_vcpu_usd.expect("vcpu"), 20.0, "container vcpu");
+    assert_close(
+        b.container_memory_usd.expect("memory"),
+        10.0,
+        "container memory",
+    );
+    assert_close(b.container_disk_usd.expect("disk"), 7.0, "container disk");
+    assert_close(
+        b.container_egress_usd.expect("egress"),
+        10.0,
+        "container egress",
+    );
+    assert_close(
+        b.container_usd.expect("subtotal"),
+        47.0,
+        "container subtotal",
+    );
+
+    // Container spend is its OWN resource class: nothing leaked into the
+    // DO/Workers buckets or the model-spend pass-through.
+    assert_close(b.duration_usd, 0.0, "not folded into DO duration");
+    assert_close(b.do_requests_usd, 0.0, "not folded into DO requests");
+    assert_close(b.storage_usd, 0.0, "not folded into DO storage");
+    assert_close(b.metered_egress_usd, 0.0, "not folded into model egress");
+
+    assert!(b.total_is_complete(), "container feed present");
+    assert_close(b.total_usd, 47.0, "total");
+    assert_close(model.cost_usd(&sample), 47.0, "cost_usd == total");
+}
+
+#[test]
+fn container_cost_adds_to_the_do_workers_total_without_double_counting() {
+    // The DO/Workers sample from `cost_breakdown_is_exact_on_known_inputs`
+    // ($55.26) plus the $47.00 container sample above: the two tiers are
+    // additive, and `total_usd` stays the sum of the per-class fields.
+    let sample = AgentRuntimeUsageSample {
+        do_requests: 2_000_000,
+        duration_gb_seconds: 4_000_000.0,
+        sqlite_rows_read: 10_000_000,
+        sqlite_rows_written: 3_000_000,
+        stored_bytes: 2_000_000_000,
+        stored_window_seconds: SECONDS_PER_BILLING_MONTH,
+        ws_inbound_messages: 40_000_000,
+        metered_egress_usd: 1.25,
+        container: Some(ContainerUsageSample {
+            vcpu_seconds: 1_000_000.0,
+            memory_gib_seconds: 4_000_000.0,
+            disk_gb_seconds: 100_000_000.0,
+            network_egress_gb: 400.0,
+        }),
+    };
+    let b = CfRuntimeCostModel::new().breakdown(&sample);
+    assert_close(b.container_usd.expect("container"), 47.0, "container class");
+    assert_close(b.total_usd, 102.26, "55.26 DO/Workers + 47.00 container");
+
+    // `total_usd` is exactly the sum of every per-class field.
+    let summed = b.do_requests_usd
+        + b.duration_usd
+        + b.sqlite_rows_read_usd
+        + b.sqlite_rows_written_usd
+        + b.storage_usd
+        + b.websocket_usd
+        + b.metered_egress_usd
+        + b.container_vcpu_usd.expect("vcpu")
+        + b.container_memory_usd.expect("memory")
+        + b.container_disk_usd.expect("disk")
+        + b.container_egress_usd.expect("egress");
+    assert_close(b.total_usd, summed, "total == sum of per-class fields");
+}
+
+#[test]
+fn container_pricing_is_configurable_without_code_change() {
+    // Every container coefficient is overridable; doubling each doubles its
+    // class exactly, and nothing else moves.
+    let pricing = CfRuntimePricing {
+        container_vcpu_usd_per_second: DEFAULT_CONTAINER_VCPU_USD_PER_SECOND * 2.0,
+        container_memory_usd_per_gib_second: DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND * 2.0,
+        container_disk_usd_per_gb_second: DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND * 2.0,
+        // A deployment outside NA/EU overrides to the published regional rate.
+        container_egress_usd_per_gb: super::CONTAINER_EGRESS_USD_PER_GB_OCEANIA_KOREA_TAIWAN,
+        ..CfRuntimePricing::default()
+    };
+    let sample = container_only(ContainerUsageSample {
+        vcpu_seconds: 1_000_000.0,
+        memory_gib_seconds: 4_000_000.0,
+        disk_gb_seconds: 100_000_000.0,
+        network_egress_gb: 400.0,
+    });
+    let b = CfRuntimeCostModel::with_pricing(pricing).breakdown(&sample);
+    assert_close(b.container_vcpu_usd.expect("vcpu"), 40.0, "doubled vcpu");
+    assert_close(b.container_memory_usd.expect("mem"), 20.0, "doubled memory");
+    assert_close(b.container_disk_usd.expect("disk"), 14.0, "doubled disk");
+    // 400 GB * $0.05 = $20.00 at the Oceania/Korea/Taiwan rate.
+    assert_close(b.container_egress_usd.expect("egress"), 20.0, "region rate");
+    assert_close(b.total_usd, 94.0, "overridden coefficients drive the total");
+}
+
+// ---------------------------------------------------------------------------
+// Absent container telemetry is UNAVAILABLE, never zero (#473; cf. #458/#464)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn absent_container_telemetry_does_not_read_as_zero_cost() {
+    let model = CfRuntimeCostModel::new();
+
+    // (a) Feed ABSENT: every container class is `None`, the total is flagged
+    //     incomplete, and NOTHING anywhere claims $0.00 of container spend.
+    let absent = AgentRuntimeUsageSample::zero().without_container_telemetry();
+    assert_eq!(absent.container, None, "no container feed");
+    let b = model.breakdown(&absent);
+    assert_eq!(b.container_vcpu_usd, None, "vcpu unknown, not zero");
+    assert_eq!(b.container_memory_usd, None, "memory unknown, not zero");
+    assert_eq!(b.container_disk_usd, None, "disk unknown, not zero");
+    assert_eq!(b.container_egress_usd, None, "egress unknown, not zero");
+    assert_eq!(b.container_usd, None, "subtotal unknown, not zero");
+    assert!(b.container_cost_is_unavailable(), "flagged unavailable");
+    assert!(!b.total_is_complete(), "total is only a lower bound");
+
+    // (b) Feed PRESENT and genuinely zero: a DIFFERENT, stronger claim.
+    let present_zero = AgentRuntimeUsageSample::zero();
+    let b0 = model.breakdown(&present_zero);
+    assert_eq!(b0.container_usd, Some(0.0), "feed answered: really $0.00");
+    assert!(!b0.container_cost_is_unavailable(), "not unavailable");
+    assert!(b0.total_is_complete(), "total is the whole cost");
+
+    // The two states are not equal — `None` can never be mistaken for zero.
+    assert_ne!(b.container_usd, b0.container_usd);
+
+    // (c) On the wire the absent feed is an explicit `null`, never `0`, and it
+    //     is NOT omitted from the JSON.
+    let json = serde_json::to_value(&b).expect("serialize breakdown");
+    assert!(json.get("containerUsd").is_some(), "field is emitted");
+    assert!(json["containerUsd"].is_null(), "null, not 0");
+    assert!(json["containerVcpuUsd"].is_null(), "null, not 0");
+
+    // (d) The durable receipt hoists the flag to the top level, so an operator
+    //     reading a receipt knows the burn it acted on was a lower bound.
+    let id = identity("run-1");
+    let policy = AgentBudgetPolicy::new(100.0, "v1");
+    let decision = evaluate(&policy, 0.0, b.total_usd);
+    let receipt = AgentCostReceipt::assemble(&id, &absent, &b, b.total_usd, &policy, decision)
+        .expect("build");
+    assert!(
+        receipt.container_cost_unavailable,
+        "receipt says container cost is unknown"
+    );
+    let receipt_json = serde_json::to_value(&receipt).expect("serialize receipt");
+    assert_eq!(receipt_json["containerCostUnavailable"], true);
+    assert!(receipt_json["sample"]["container"].is_null(), "sample null");
+    let restored: AgentCostReceipt =
+        serde_json::from_value(receipt_json).expect("deserialize receipt");
+    assert_eq!(restored, receipt, "unavailability survives a round trip");
+}
+
+#[test]
+fn a_pre_473_sample_deserializes_as_unavailable_not_zero() {
+    // A usage sample minted before #473 carries no `container` key at all. The
+    // only honest reading is "we do not know", so it must land as `None`.
+    let legacy = serde_json::json!({
+        "doRequests": 1_000_000,
+        "durationGbSeconds": 0.0,
+        "sqliteRowsRead": 0,
+        "sqliteRowsWritten": 0,
+        "storedBytes": 0,
+        "storedWindowSeconds": 0.0,
+        "wsInboundMessages": 0,
+        "meteredEgressUsd": 0.0
+    });
+    let sample: AgentRuntimeUsageSample = serde_json::from_value(legacy).expect("deserialize");
+    assert_eq!(sample.container, None, "legacy record: container unknown");
+    let b = CfRuntimeCostModel::new().breakdown(&sample);
+    assert!(b.container_cost_is_unavailable());
+    assert!(!b.total_is_complete());
+
+    // A pricing config written before #473 likewise falls back to the CF list
+    // rates, NOT to 0.0 — a zero coefficient would re-introduce "containers are
+    // free" through the config file.
+    let legacy_pricing = serde_json::json!({
+        "doRequestUsdPerMillion": 0.15,
+        "durationUsdPerMillionGbSeconds": 12.50,
+        "sqliteRowsReadUsdPerMillion": 0.001,
+        "sqliteRowsWrittenUsdPerMillion": 1.00,
+        "storageUsdPerGbMonth": 0.20,
+        "websocketMessagesPerBilledRequest": 20.0
+    });
+    let pricing: CfRuntimePricing = serde_json::from_value(legacy_pricing).expect("deserialize");
+    assert_close(
+        pricing.container_vcpu_usd_per_second,
+        DEFAULT_CONTAINER_VCPU_USD_PER_SECOND,
+        "legacy config keeps the list rate, not 0",
+    );
+    assert_close(
+        pricing.container_memory_usd_per_gib_second,
+        DEFAULT_CONTAINER_MEMORY_USD_PER_GIB_SECOND,
+        "legacy config keeps the list rate, not 0",
+    );
+    assert_close(
+        pricing.container_disk_usd_per_gb_second,
+        DEFAULT_CONTAINER_DISK_USD_PER_GB_SECOND,
+        "legacy config keeps the list rate, not 0",
+    );
+    assert_close(
+        pricing.container_egress_usd_per_gb,
+        DEFAULT_CONTAINER_EGRESS_USD_PER_GB,
+        "legacy config keeps the list rate, not 0",
+    );
 }
 
 #[test]
@@ -647,6 +940,181 @@ fn throttle_records_burn_and_halts_dispatch_without_killing() {
         !block_on(gov.should_dispatch(&id)).expect("dispatch"),
         "over-warn agent is not dispatchable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #473: a container-heavy run now crosses the ceiling it used to slip under
+// ---------------------------------------------------------------------------
+
+/// The DO/Workers + model-spend side of one hour of a coding-agent run. Small,
+/// because the agent's real work happens in the container, not the DO:
+///
+/// ```text
+///   do_requests         200_000 /1e6 * $0.15   = $0.030
+///   duration        8_000 GB-s /1e6 * $12.50   = $0.100
+///   rows read     1_000_000 rows /1e6 * $0.001 = $0.001
+///   rows written    100_000 rows /1e6 * $1.00  = $0.100
+///   metered egress (model/tool spend)          = $0.250
+///                                       total    $0.481
+/// ```
+const NON_CONTAINER_USD: f64 = 0.481;
+
+/// One hour on a `standard-4` container instance (4 vCPU / 12 GiB / 20 GB disk —
+/// the tier a long-running coding agent uses), at the published CF rates:
+///
+/// ```text
+///   vCPU    4 * 3600 = 14_400 vCPU-s * $0.000020   = $0.28800
+///   memory 12 * 3600 = 43_200 GiB-s  * $0.0000025  = $0.10800
+///   disk   20 * 3600 = 72_000 GB-s   * $0.00000007 = $0.00504
+///   egress                    2 GB   * $0.025      = $0.05000
+///                                          total     $0.45104
+/// ```
+const CONTAINER_USD: f64 = 0.45104;
+
+fn coding_agent_hour() -> AgentRuntimeUsageSample {
+    AgentRuntimeUsageSample {
+        do_requests: 200_000,
+        duration_gb_seconds: 8_000.0,
+        sqlite_rows_read: 1_000_000,
+        sqlite_rows_written: 100_000,
+        stored_bytes: 0,
+        stored_window_seconds: 0.0,
+        ws_inbound_messages: 0,
+        metered_egress_usd: 0.25,
+        container: Some(ContainerUsageSample {
+            vcpu_seconds: 14_400.0,
+            memory_gib_seconds: 43_200.0,
+            disk_gb_seconds: 72_000.0,
+            network_egress_gb: 2.0,
+        }),
+    }
+}
+
+#[test]
+fn container_heavy_run_now_crosses_the_ceiling_it_previously_slipped_under() {
+    // The budget: a $0.90 ceiling, warn at 80% = $0.72.
+    const CEILING: f64 = 0.90;
+    let id = identity("run-coding-agent");
+
+    // ---- BEFORE #473: containers unpriced ---------------------------------
+    // The pre-#473 model saw only the DO/Workers drivers, i.e. exactly what this
+    // engine now computes when the container feed is absent: $0.481. That is
+    // under the $0.72 warn threshold, so the run is ALLOWED, the kill switch
+    // never fires, and the agent stays dispatchable — while really burning
+    // $0.93204/hour against a $0.90 cap.
+    let unpriced = coding_agent_hour().without_container_telemetry();
+    let mut before = governor(CEILING);
+    let r_before = block_on(before.enforce(&id, unpriced)).expect("enforce");
+    assert_close(
+        r_before.this_window_cost_usd,
+        NON_CONTAINER_USD,
+        "container spend scores as nothing",
+    );
+    assert!(
+        matches!(r_before.decision, BudgetDecision::Allow),
+        "the run slips under the ceiling: {:?}",
+        r_before.decision
+    );
+    assert!(!r_before.threshold_crossed, "no threshold crossed");
+    assert!(
+        before.control().calls().is_empty(),
+        "kill switch never fires on the under-counted run"
+    );
+    assert!(
+        block_on(before.should_dispatch(&id)).expect("dispatch"),
+        "the budget engine keeps admitting the run"
+    );
+    // ...but it is at least HONEST that it under-counted: the receipt is flagged
+    // rather than silently claiming the container tier was free.
+    assert!(
+        r_before.container_cost_unavailable,
+        "an under-counted run is flagged, not silently allowed"
+    );
+
+    // ---- AFTER #473: the same run, container feed priced -------------------
+    let priced = coding_agent_hour();
+    let mut after = governor(CEILING);
+    let r_after = block_on(after.enforce(&id, priced)).expect("enforce");
+
+    // Container spend lands in its OWN resource class, attributable per axis.
+    let b = &r_after.breakdown;
+    assert_close(b.container_vcpu_usd.expect("vcpu"), 0.288, "vcpu class");
+    assert_close(b.container_memory_usd.expect("mem"), 0.108, "memory class");
+    assert_close(b.container_disk_usd.expect("disk"), 0.00504, "disk class");
+    assert_close(b.container_egress_usd.expect("eg"), 0.05, "egress class");
+    assert_close(
+        b.container_usd.expect("subtotal"),
+        CONTAINER_USD,
+        "container subtotal",
+    );
+    assert!(b.total_is_complete(), "nothing left unpriced");
+    assert!(!r_after.container_cost_unavailable);
+
+    // The total is now the truth: $0.481 + $0.45104 = $0.93204 >= the $0.90
+    // ceiling. Note it also clears the $0.72 warn threshold that the unpriced
+    // run ($0.481) sat comfortably below.
+    assert_close(
+        r_after.this_window_cost_usd,
+        NON_CONTAINER_USD + CONTAINER_USD,
+        "total_usd stays the sum of the per-class fields",
+    );
+    assert_close(r_after.this_window_cost_usd, 0.93204, "priced hourly burn");
+    assert!(
+        NON_CONTAINER_USD < after.policy().warn_threshold_usd(),
+        "the unpriced cost was under even the warn threshold",
+    );
+    assert!(
+        r_after.this_window_cost_usd >= CEILING,
+        "the priced cost crosses the hard ceiling",
+    );
+
+    // And the enforcement actually happens: Kill, and the kill switch tears the
+    // run down through the control surface with the identity-derived name.
+    assert!(
+        matches!(r_after.decision, BudgetDecision::Kill { .. }),
+        "container-heavy run is killed: {:?}",
+        r_after.decision
+    );
+    assert!(r_after.threshold_crossed);
+    assert_eq!(
+        after.control().calls(),
+        &[MockCloudflareCall::CleanupRun {
+            run_ref: "fg.tenant-a.sess-1.run-coding-agent".to_string(),
+        }],
+        "the kill switch fires on the run the identity names"
+    );
+    assert!(
+        !block_on(after.should_dispatch(&id)).expect("dispatch"),
+        "no further dispatch for the over-budget agent"
+    );
+}
+
+#[test]
+fn container_spend_alone_can_exhaust_a_budget() {
+    // Even with ZERO model spend and a trivial DO footprint, container time
+    // alone must be able to trip the budget — otherwise a purely local
+    // (no-LLM-call) runaway loop in the sandbox is invisible to the cap.
+    let id = identity("run-loop");
+    let sample = container_only(ContainerUsageSample {
+        vcpu_seconds: 14_400.0,       // 4 vCPU * 1h
+        memory_gib_seconds: 43_200.0, // 12 GiB * 1h
+        disk_gb_seconds: 72_000.0,    // 20 GB * 1h
+        network_egress_gb: 2.0,
+    });
+    let mut gov = governor(0.40); // ceiling below the $0.45104 container burn
+    let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
+    assert_close(
+        receipt.this_window_cost_usd,
+        CONTAINER_USD,
+        "container only",
+    );
+    assert_close(receipt.breakdown.metered_egress_usd, 0.0, "no model spend");
+    assert!(
+        matches!(receipt.decision, BudgetDecision::Kill { .. }),
+        "container burn alone trips the cap: {:?}",
+        receipt.decision
+    );
+    assert_eq!(gov.control().calls().len(), 1, "kill switch fired");
 }
 
 #[test]
