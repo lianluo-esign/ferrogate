@@ -56,14 +56,17 @@
 //! `ferrogate-cloudflare` (e.g. a `WorkerScriptUpload` builder) — tracked as a
 //! future extraction.
 //!
-//! ## Live caveat: multipart content type
+//! ## Multipart content type
 //!
-//! `ferrogate_cloudflare::ReqwestTransport` hard-codes `application/json` for any
-//! request body, so the **production** multipart `PUT` should go through either a
-//! transport that honors [`McpWorkerSpec::content_type`] or the documented
-//! `wrangler deploy` shell-out ([`McpWorkerSpec::wrangler_deploy_command`]). The
-//! request *construction* here is faithful and fully modeled/tested; the live
-//! upload is the test agent's to prove (see the issue's deploy-fallback clause).
+//! The deploy `PUT` carries [`McpWorkerSpec::content_type`] (the
+//! `multipart/form-data; boundary=…` value) on its [`HttpRequest`], and the #411
+//! [`HttpRequest::content_type`] field is honored by
+//! `ferrogate_cloudflare::ReqwestTransport` (which defaults to `application/json`
+//! only when it is `None`). So the production multipart upload is sent with the
+//! correct type end to end; the documented `wrangler deploy` shell-out
+//! ([`McpWorkerSpec::wrangler_deploy_command`]) remains an equivalent CLI
+//! fallback. The request *construction* is faithful and fully modeled/tested;
+//! the live upload against real Cloudflare is the test agent's to prove.
 
 use std::sync::Arc;
 
@@ -318,7 +321,11 @@ impl McpWorkerDeployer {
             url: self.script_url(&spec.script_name),
             bearer_token: self.resolve_token()?,
             body: Some(spec.multipart_body()),
-            content_type: None,
+            // The module upload is `multipart/form-data` framed by the spec's
+            // fixed boundary; carry that content type so the #411-honoring
+            // transport (`ReqwestTransport`) sends it instead of defaulting to
+            // `application/json`, which Cloudflare would reject for a script PUT.
+            content_type: Some(spec.content_type()),
         })
     }
 

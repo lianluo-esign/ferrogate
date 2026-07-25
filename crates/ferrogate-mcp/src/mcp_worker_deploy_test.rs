@@ -139,6 +139,16 @@ fn deploy_puts_script_to_correct_url_with_bearer_and_body() {
         "https://api.cloudflare.com/client/v4/accounts/acct-777/workers/scripts/ferrogate-mcp-server"
     );
     assert_eq!(req.bearer_token, "plaintext-token");
+    // The module upload must carry the multipart content type (not the transport's
+    // `application/json` default), or Cloudflare rejects the script PUT.
+    assert_eq!(
+        req.content_type.as_deref(),
+        Some(spec.content_type().as_str())
+    );
+    assert_eq!(
+        req.content_type.as_deref(),
+        Some("multipart/form-data; boundary=----FerroGateMcpServerBoundary")
+    );
     let sent = String::from_utf8(req.body.unwrap()).unwrap();
     assert!(sent.contains("new_sqlite_classes"));
     assert!(sent.contains("durable_object_namespace"));
@@ -258,6 +268,8 @@ fn teardown_issues_delete_to_script_url() {
         "https://api.cloudflare.com/client/v4/accounts/acct-777/workers/scripts/ferrogate-mcp-server"
     );
     assert!(req.body.is_none());
+    // A bodyless DELETE sends no content type.
+    assert!(req.content_type.is_none());
     assert_eq!(req.bearer_token, "plaintext-token");
 }
 
@@ -286,6 +298,10 @@ fn build_deploy_request_is_inspectable_without_sending() {
 
     let req = deployer.build_deploy_request(&spec).unwrap();
     assert_eq!(req.method, HttpMethod::Put);
+    // The built request carries the spec's multipart content type so the
+    // #411-honoring transport sends `multipart/form-data; boundary=…` rather than
+    // defaulting to `application/json`.
+    assert_eq!(req.content_type, Some(spec.content_type()));
     // Nothing was sent by merely constructing the request.
     assert!(transport.captured.lock().unwrap().is_empty());
 }
