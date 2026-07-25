@@ -105,9 +105,23 @@ this sequence — in this order:
    ```
    Remove probe binaries and scratch artifacts the run produced. Do this on
    **FAIL** too — only the merge/push below is PASS-only.
-3. **Fast-forward `main` first, then merge the verified work onto it.** Never
-   merge onto a stale base.
-4. **Push to GitHub.** Gate-verified work that stays on a local branch is
+3. **Run the repo gates on anything you are about to commit — `fmt` is not
+   enough.** The gate itself has turned `main` red this way: a probe was
+   committed after `cargo fmt --all -- --check` passed, but nobody ran clippy,
+   and `clippy -D warnings` failed on `main` until the next iteration caught it.
+   Before committing gate-authored code run **all** of:
+   ```bash
+   cargo fmt --all -- --check
+   cargo clippy -p <crate> --all-targets -j8 -- -D warnings   # -D warnings, not bare clippy
+   cargo test -p <crate> -j8
+   python3 scripts/check-module-layout.py                     # lib.rs line caps
+   ```
+   Holding other people's code to a bar the gate does not meet itself is the
+   fastest way to lose the authority to reject anything.
+4. **Fast-forward `main` first, then merge the verified work onto it.** Never
+   merge onto a stale base. `origin/main` moves under you — three sessions share
+   it, so expect to rebase between the last check and the push.
+5. **Push to GitHub.** Gate-verified work that stays on a local branch is
    invisible to the rest of the loop and can be lost.
 
 Never merge-and-push on a FAIL: failing items go back to **Ready** with the
