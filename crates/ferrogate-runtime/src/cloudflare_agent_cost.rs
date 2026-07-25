@@ -49,9 +49,11 @@
 //! an over-budget agent hits exactly the DO the identity names.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::{error::Error, fmt};
 
 use async_trait::async_trait;
+use ferrogate_storage::RuntimeStorageRepositories;
 use serde::{Deserialize, Serialize};
 
 use crate::cloudflare_agent_memory::{AgentInstanceIdentity, AgentMemoryError};
@@ -574,15 +576,53 @@ impl AgentCostReceipt {
 // Burn ledger
 // ---------------------------------------------------------------------------
 
+/// A failure from a [`AgentBurnLedger`] backend.
+///
+/// Carried so the enforce path can **fail closed**: a durable-store read/write
+/// failure is propagated (folded into [`CostGovernorError::Ledger`]) rather than
+/// being silently treated as zero burn — an over-budget agent whose ledger
+/// errors must NOT be allowed to keep spending.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentBurnLedgerError {
+    /// The durable burn store failed to read or write. Carries the underlying
+    /// storage failure rendered as a message (kept as a `String` so this crate's
+    /// error type does not leak the storage error's concrete type).
+    Storage(String),
+}
+
+impl fmt::Display for AgentBurnLedgerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(m) => write!(f, "agent burn ledger storage failure: {m}"),
+        }
+    }
+}
+
+impl Error for AgentBurnLedgerError {}
+
 /// The store of accumulated per-agent burn the governor consults and updates.
 ///
-/// The in-memory [`InMemoryAgentBurnLedger`] backs unit tests; the **durable**
-/// implementation (a storage-backed, atomically-accumulating ledger) is slice B.
+/// The in-memory [`InMemoryAgentBurnLedger`] backs unit tests / single-process
+/// use; [`StorageAgentBurnLedger`] is the **durable**, atomically-accumulating
+/// backend over the landed `ferrogate-storage` per-agent burn facade (#428 slice
+/// B). Both fit this one abstraction.
+///
+/// `async` + `Result` so a durable (DB-backed) backend that does fallible I/O
+/// shares the same trait as the pure in-memory map; the in-memory impl simply
+/// wraps its infallible logic in `Ok(..)`.
+#[async_trait]
 pub trait AgentBurnLedger {
-    /// Current accumulated burn (USD) for the identity; `0.0` if unseen.
-    fn get(&self, identity: &AgentInstanceIdentity) -> f64;
-    /// Fold `cost_usd` into the identity's burn and return the new total.
-    fn add(&mut self, identity: &AgentInstanceIdentity, cost_usd: f64) -> f64;
+    /// Current accumulated burn (USD) for the identity; `Ok(0.0)` if unseen. An
+    /// `Err` is a store failure — the caller must fail closed, never read it as
+    /// zero burn.
+    async fn get(&self, identity: &AgentInstanceIdentity) -> Result<f64, AgentBurnLedgerError>;
+    /// Fold `cost_usd` into the identity's burn and return the new total (or a
+    /// store failure).
+    async fn add(
+        &mut self,
+        identity: &AgentInstanceIdentity,
+        cost_usd: f64,
+    ) -> Result<f64, AgentBurnLedgerError>;
 }
 
 /// Ledger key: the identity triple. Injective by construction (the same property
@@ -608,15 +648,100 @@ impl InMemoryAgentBurnLedger {
     }
 }
 
+#[async_trait]
 impl AgentBurnLedger for InMemoryAgentBurnLedger {
-    fn get(&self, identity: &AgentInstanceIdentity) -> f64 {
-        self.burn.get(&ledger_key(identity)).copied().unwrap_or(0.0)
+    async fn get(&self, identity: &AgentInstanceIdentity) -> Result<f64, AgentBurnLedgerError> {
+        Ok(self.burn.get(&ledger_key(identity)).copied().unwrap_or(0.0))
     }
 
-    fn add(&mut self, identity: &AgentInstanceIdentity, cost_usd: f64) -> f64 {
+    async fn add(
+        &mut self,
+        identity: &AgentInstanceIdentity,
+        cost_usd: f64,
+    ) -> Result<f64, AgentBurnLedgerError> {
         let entry = self.burn.entry(ledger_key(identity)).or_insert(0.0);
         *entry += cost_usd;
-        *entry
+        Ok(*entry)
+    }
+}
+
+/// A **durable** [`AgentBurnLedger`] over the landed `ferrogate-storage` atomic
+/// per-agent burn facade
+/// ([`RuntimeStorageRepositories::add_agent_burn`]/`get_agent_burn`, #428 slice
+/// B-storage). A per-agent budget survives a restart, and concurrent adds for
+/// one key can never lose an increment (the storage upsert accumulates and
+/// returns the new total in one atomic statement).
+///
+/// ## Identity → `(tenant_id, agent_key, period)` attribution
+///
+/// - `tenant_id` = the identity's [`AgentInstanceIdentity::tenant_id`].
+/// - `agent_key` = the identity's **[`AgentInstanceIdentity::session_id`]** — the
+///   STABLE per-agent identity, deliberately **NOT** the ephemeral `run_id`. A
+///   per-agent budget must fold **every run** of the same agent within a `period`
+///   into one accumulating total; keying on the session/agent component does
+///   exactly that, whereas keying on the per-run id would give each run its own
+///   untethered budget and defeat the cap. (The durable store documents the same
+///   choice for its `agent_key` column.)
+/// - `period` = an **injected** billing-window string (the storage layer reuses
+///   the `YYYY-MM` convention). It is supplied at construction so the ledger is
+///   deterministic and never reaches for a wall clock behind the caller's back —
+///   the injection seam the scheduler slice fills with the live period.
+pub struct StorageAgentBurnLedger {
+    repos: Arc<RuntimeStorageRepositories>,
+    period: String,
+}
+
+impl StorageAgentBurnLedger {
+    /// Build a durable ledger over `repos`, attributing all burn to `period` (a
+    /// `YYYY-MM` billing window). `period` is injected — not read from a clock —
+    /// so enforcement is deterministic and unit-testable.
+    pub fn new(repos: Arc<RuntimeStorageRepositories>, period: impl Into<String>) -> Self {
+        Self {
+            repos,
+            period: period.into(),
+        }
+    }
+
+    /// The billing period this ledger attributes burn to.
+    pub fn period(&self) -> &str {
+        &self.period
+    }
+
+    /// The `(tenant_id, agent_key)` the identity attributes burn to: tenant is
+    /// the identity's tenant; `agent_key` is the stable `session_id` (see the
+    /// type docs for why it is the agent component, not the per-run id).
+    fn attribution(identity: &AgentInstanceIdentity) -> (&str, &str) {
+        (identity.tenant_id.as_str(), identity.session_id.as_str())
+    }
+}
+
+#[async_trait]
+impl AgentBurnLedger for StorageAgentBurnLedger {
+    async fn get(&self, identity: &AgentInstanceIdentity) -> Result<f64, AgentBurnLedgerError> {
+        let (tenant_id, agent_key) = Self::attribution(identity);
+        match self
+            .repos
+            .get_agent_burn(tenant_id, agent_key, &self.period)
+            .await
+        {
+            // Unseen (no durable row yet) == zero burn.
+            Ok(None) => Ok(0.0),
+            Ok(Some(total)) => Ok(total),
+            // Fail closed: a store read failure is an error, NOT zero burn.
+            Err(e) => Err(AgentBurnLedgerError::Storage(e.to_string())),
+        }
+    }
+
+    async fn add(
+        &mut self,
+        identity: &AgentInstanceIdentity,
+        cost_usd: f64,
+    ) -> Result<f64, AgentBurnLedgerError> {
+        let (tenant_id, agent_key) = Self::attribution(identity);
+        self.repos
+            .add_agent_burn(tenant_id, agent_key, &self.period, cost_usd)
+            .await
+            .map_err(|e| AgentBurnLedgerError::Storage(e.to_string()))
     }
 }
 
@@ -737,6 +862,11 @@ pub enum CostGovernorError {
     Control(CloudflareControlSurfaceError),
     /// Obtaining a usage sample failed.
     Usage(String),
+    /// The burn ledger (durable store) failed. **Fail closed**: enforcement
+    /// propagates this rather than treating the failure as zero burn, so an
+    /// over-budget agent whose ledger read/write fails is NOT allowed to keep
+    /// spending.
+    Ledger(AgentBurnLedgerError),
 }
 
 impl fmt::Display for CostGovernorError {
@@ -748,11 +878,18 @@ impl fmt::Display for CostGovernorError {
             Self::InvalidPolicy(m) => write!(f, "invalid budget policy: {m}"),
             Self::Control(e) => write!(f, "cost-governance enforcement control call failed: {e}"),
             Self::Usage(m) => write!(f, "agent runtime usage source failed: {m}"),
+            Self::Ledger(e) => write!(f, "cost-governance burn ledger failed: {e}"),
         }
     }
 }
 
 impl Error for CostGovernorError {}
+
+impl From<AgentBurnLedgerError> for CostGovernorError {
+    fn from(error: AgentBurnLedgerError) -> Self {
+        Self::Ledger(error)
+    }
+}
 
 impl From<AgentMemoryError> for CostGovernorError {
     fn from(error: AgentMemoryError) -> Self {
@@ -825,8 +962,15 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
 
     /// Whether a NEW run for `identity` may be dispatched under the current
     /// accumulated burn. Delegates to the free [`should_dispatch`] guard.
-    pub fn should_dispatch(&self, identity: &AgentInstanceIdentity) -> bool {
-        should_dispatch(&self.ledger, &self.policy, identity)
+    ///
+    /// `async` + `Result` because the burn read is now fallible (durable
+    /// ledgers). A ledger error is **propagated** (fail closed) — the caller
+    /// treats both `Ok(false)` and `Err(_)` as "do not dispatch".
+    pub async fn should_dispatch(
+        &self,
+        identity: &AgentInstanceIdentity,
+    ) -> Result<bool, CostGovernorError> {
+        should_dispatch(&self.ledger, &self.policy, identity).await
     }
 
     /// Enforce the budget for one usage window of `identity`.
@@ -853,11 +997,16 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         let breakdown = self.cost_model.breakdown(&sample);
         let window_cost = breakdown.total_usd;
 
-        let prior_burn = self.ledger.get(identity);
+        // Fail closed: a ledger read/write failure propagates as
+        // `CostGovernorError::Ledger` (via `?`) BEFORE any budget decision, kill
+        // control call, or receipt — a storage error is never silently treated
+        // as zero burn, so an over-budget agent whose ledger errors cannot slip
+        // through as `Allow`.
+        let prior_burn = self.ledger.get(identity).await?;
         let decision = evaluate(&self.policy, prior_burn, window_cost);
 
         // Record the burn regardless of decision — it happened.
-        let accumulated_burn = self.ledger.add(identity, window_cost);
+        let accumulated_burn = self.ledger.add(identity, window_cost).await?;
 
         if let BudgetDecision::Kill { reason } = &decision {
             match self.kill_mode {
@@ -898,17 +1047,21 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
 }
 
 /// The dispatch guard the [`crate::ManagedWorkerScheduler`] consults before
-/// dispatching a new run: returns `true` only when the identity's accumulated
-/// burn still evaluates to [`BudgetDecision::Allow`]. Any throttle/degrade/kill
-/// pressure refuses the new dispatch. Pure — reads the ledger and evaluates the
-/// policy with a zero incremental cost.
-pub fn should_dispatch<L: AgentBurnLedger>(
+/// dispatching a new run: returns `Ok(true)` only when the identity's
+/// accumulated burn still evaluates to [`BudgetDecision::Allow`]. Any
+/// throttle/degrade/kill pressure refuses the new dispatch. Reads the ledger and
+/// evaluates the policy with a zero incremental cost.
+///
+/// A ledger error is **propagated** (fail closed) rather than swallowed into a
+/// zero burn: the scheduler treats both `Ok(false)` and `Err(_)` as "do not
+/// dispatch", so a store outage can never let an over-budget run through.
+pub async fn should_dispatch<L: AgentBurnLedger>(
     ledger: &L,
     policy: &AgentBudgetPolicy,
     identity: &AgentInstanceIdentity,
-) -> bool {
-    let burn = ledger.get(identity);
-    evaluate(policy, burn, 0.0).permits_dispatch()
+) -> Result<bool, CostGovernorError> {
+    let burn = ledger.get(identity).await?;
+    Ok(evaluate(policy, burn, 0.0).permits_dispatch())
 }
 
 #[cfg(test)]

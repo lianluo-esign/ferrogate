@@ -25,6 +25,13 @@ ferrogate-core = { path = "../ferrogate-core" }
 # (issue #413). Reuses the #405 shared client's injectable `HttpTransport` and
 # `TokenResolver` seams so every Cloudflare call is mockable with no network.
 ferrogate-cloudflare = { path = "../ferrogate-cloudflare" }
+# Durable per-agent cost-burn ledger backing (issue #428, slice B): the
+# `StorageAgentBurnLedger` in `cloudflare_agent_cost` is a non-test
+# `AgentBurnLedger` over the storage crate's atomic `add_agent_burn`/
+# `get_agent_burn` facade, so `ferrogate-storage` is now a runtime dependency
+# (promoted from a dev-dep). No cycle: `ferrogate-storage` does not depend on
+# `ferrogate-runtime`.
+ferrogate-storage = { path = "../ferrogate-storage" }
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
@@ -53,11 +60,6 @@ tokio.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
-# Cloudflare-hosted managed-worker control client (issue #412) reconciles run /
-# session status through the shared persistence row types; the storage crate is
-# test-only here (runtime keeps no storage dependency in non-test code) and does
-# not depend on ferrogate-runtime, so there is no dependency cycle.
-ferrogate-storage = { path = "../ferrogate-storage" }
 tempfile.workspace = true
 
 [features]

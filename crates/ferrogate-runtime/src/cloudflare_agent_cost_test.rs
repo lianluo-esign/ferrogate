@@ -9,12 +9,16 @@
 //   network: the control surface and usage source are mocks.
 
 use std::future::Future;
+use std::sync::Arc;
+
+use ferrogate_storage::{RuntimeStorageRepositories, StorageProviderKind};
 
 use super::{
-    evaluate, should_dispatch, AgentBudgetPolicy, AgentBurnLedger, AgentCostAttribution,
-    AgentCostGovernor, AgentCostReceipt, AgentRuntimeUsageSample, AgentRuntimeUsageSource,
-    BudgetDecision, CfRuntimeCostModel, CfRuntimePricing, CostGovernorError, CostWindow,
-    InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource, DEFAULT_DO_REQUEST_USD_PER_MILLION,
+    evaluate, should_dispatch, AgentBudgetPolicy, AgentBurnLedger, AgentBurnLedgerError,
+    AgentCostAttribution, AgentCostGovernor, AgentCostReceipt, AgentRuntimeUsageSample,
+    AgentRuntimeUsageSource, BudgetDecision, CfRuntimeCostModel, CfRuntimePricing,
+    CostGovernorError, CostWindow, InMemoryAgentBurnLedger, KillMode, ScriptedUsageSource,
+    StorageAgentBurnLedger, DEFAULT_DO_REQUEST_USD_PER_MILLION,
     DEFAULT_DURATION_USD_PER_MILLION_GB_SECONDS, DEFAULT_SQLITE_ROWS_READ_USD_PER_MILLION,
     DEFAULT_SQLITE_ROWS_WRITTEN_USD_PER_MILLION, DEFAULT_STORAGE_USD_PER_GB_MONTH,
     DEFAULT_WARN_FRACTION, SECONDS_PER_BILLING_MONTH, WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
@@ -275,14 +279,170 @@ fn in_memory_ledger_accumulates_per_identity() {
     let mut ledger = InMemoryAgentBurnLedger::new();
     let a = identity("run-a");
     let b = identity("run-b");
-    assert_close(ledger.get(&a), 0.0, "unseen is zero");
-    assert_close(ledger.add(&a, 2.5), 2.5, "first add returns total");
-    assert_close(ledger.add(&a, 1.5), 4.0, "second add accumulates");
-    assert_close(ledger.get(&a), 4.0, "get reflects burn");
+    assert_close(
+        block_on(ledger.get(&a)).expect("get a"),
+        0.0,
+        "unseen is zero",
+    );
+    assert_close(
+        block_on(ledger.add(&a, 2.5)).expect("add a"),
+        2.5,
+        "first add returns total",
+    );
+    assert_close(
+        block_on(ledger.add(&a, 1.5)).expect("add a"),
+        4.0,
+        "second add accumulates",
+    );
+    assert_close(
+        block_on(ledger.get(&a)).expect("get a"),
+        4.0,
+        "get reflects burn",
+    );
     // A different run is tracked independently.
-    assert_close(ledger.get(&b), 0.0, "distinct identity untouched");
-    assert_close(ledger.add(&b, 9.0), 9.0, "distinct identity");
-    assert_close(ledger.get(&a), 4.0, "first identity unchanged");
+    assert_close(
+        block_on(ledger.get(&b)).expect("get b"),
+        0.0,
+        "distinct identity untouched",
+    );
+    assert_close(
+        block_on(ledger.add(&b, 9.0)).expect("add b"),
+        9.0,
+        "distinct identity",
+    );
+    assert_close(
+        block_on(ledger.get(&a)).expect("get a"),
+        4.0,
+        "first identity unchanged",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable storage-backed burn ledger (#428 slice B-runtime)
+// ---------------------------------------------------------------------------
+
+/// An in-memory-backed [`RuntimeStorageRepositories`] (the same public ctor the
+/// B-storage tests use) to exercise [`StorageAgentBurnLedger`] through the real
+/// durable facade with no network.
+fn storage_repos() -> Arc<RuntimeStorageRepositories> {
+    Arc::new(RuntimeStorageRepositories::in_memory(
+        vec![StorageProviderKind::Memory],
+        16,
+        16,
+    ))
+}
+
+#[test]
+fn storage_ledger_accumulates_and_reads_through_the_durable_facade() {
+    let mut ledger = StorageAgentBurnLedger::new(storage_repos(), "2026-07");
+    let id = identity("run-1");
+    assert_close(
+        block_on(ledger.get(&id)).expect("unseen"),
+        0.0,
+        "unseen is zero",
+    );
+    assert_close(
+        block_on(ledger.add(&id, 2.5)).expect("add"),
+        2.5,
+        "first add returns durable total",
+    );
+    assert_close(
+        block_on(ledger.add(&id, 1.5)).expect("add"),
+        4.0,
+        "second add accumulates durably",
+    );
+    assert_close(
+        block_on(ledger.get(&id)).expect("read"),
+        4.0,
+        "get reads the durable accumulated total",
+    );
+}
+
+#[test]
+fn storage_ledger_folds_every_run_of_the_same_agent_into_one_budget() {
+    // Two DIFFERENT runs (run_id) of the SAME agent (session_id) must share one
+    // durable per-agent total — the whole point of keying on the stable agent
+    // component, not the per-run id.
+    let mut ledger = StorageAgentBurnLedger::new(storage_repos(), "2026-07");
+    let run_a = AgentInstanceIdentity::new("tenant-a", "sess-1", "run-a");
+    let run_b = AgentInstanceIdentity::new("tenant-a", "sess-1", "run-b");
+    block_on(ledger.add(&run_a, 3.0)).expect("run a");
+    block_on(ledger.add(&run_b, 4.0)).expect("run b");
+    assert_close(
+        block_on(ledger.get(&run_a)).expect("via run a"),
+        7.0,
+        "runs of one agent fold into a single budget",
+    );
+    assert_close(
+        block_on(ledger.get(&run_b)).expect("via run b"),
+        7.0,
+        "either run observes the shared per-agent total",
+    );
+}
+
+#[test]
+fn storage_ledger_keeps_distinct_agents_and_periods_independent() {
+    let repos = storage_repos();
+    let agent1 = AgentInstanceIdentity::new("tenant-a", "agent-1", "run-x");
+    let agent2 = AgentInstanceIdentity::new("tenant-a", "agent-2", "run-y");
+
+    // Distinct agents (session_id) under one period accumulate independently.
+    let mut jul = StorageAgentBurnLedger::new(repos.clone(), "2026-07");
+    block_on(jul.add(&agent1, 1.0)).expect("agent1 jul");
+    block_on(jul.add(&agent2, 2.0)).expect("agent2 jul");
+    assert_close(
+        block_on(jul.get(&agent1)).expect("a1"),
+        1.0,
+        "distinct agents independent",
+    );
+    assert_close(
+        block_on(jul.get(&agent2)).expect("a2"),
+        2.0,
+        "distinct agents independent",
+    );
+
+    // A different PERIOD over the SAME store + agent is a separate budget.
+    let mut aug = StorageAgentBurnLedger::new(repos, "2026-08");
+    assert_close(
+        block_on(aug.get(&agent1)).expect("aug unseen"),
+        0.0,
+        "a new period starts at zero",
+    );
+    block_on(aug.add(&agent1, 5.0)).expect("agent1 aug");
+    assert_close(
+        block_on(aug.get(&agent1)).expect("aug read"),
+        5.0,
+        "august burn is independent of july",
+    );
+    assert_close(
+        block_on(jul.get(&agent1)).expect("jul intact"),
+        1.0,
+        "july total unchanged by august writes",
+    );
+}
+
+/// A ledger whose reads/writes ALWAYS fail — used to prove the enforce path and
+/// the dispatch guard fail **closed** (propagate the error) instead of treating a
+/// storage failure as zero burn.
+struct FailingLedger;
+
+#[async_trait::async_trait]
+impl AgentBurnLedger for FailingLedger {
+    async fn get(&self, _identity: &AgentInstanceIdentity) -> Result<f64, AgentBurnLedgerError> {
+        Err(AgentBurnLedgerError::Storage(
+            "simulated store outage".into(),
+        ))
+    }
+
+    async fn add(
+        &mut self,
+        _identity: &AgentInstanceIdentity,
+        _cost_usd: f64,
+    ) -> Result<f64, AgentBurnLedgerError> {
+        Err(AgentBurnLedgerError::Storage(
+            "simulated store outage".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,15 +456,15 @@ fn should_dispatch_reflects_burn_against_policy() {
     let id = identity("run-1");
 
     // Fresh: allowed.
-    assert!(should_dispatch(&ledger, &policy, &id));
+    assert!(block_on(should_dispatch(&ledger, &policy, &id)).expect("dispatch"));
 
     // Cross the warn threshold -> throttle -> refuse dispatch.
-    ledger.add(&id, 8.5);
-    assert!(!should_dispatch(&ledger, &policy, &id));
+    block_on(ledger.add(&id, 8.5)).expect("add");
+    assert!(!block_on(should_dispatch(&ledger, &policy, &id)).expect("dispatch"));
 
     // Cross the ceiling -> kill -> refuse dispatch.
-    ledger.add(&id, 5.0);
-    assert!(!should_dispatch(&ledger, &policy, &id));
+    block_on(ledger.add(&id, 5.0)).expect("add");
+    assert!(!block_on(should_dispatch(&ledger, &policy, &id)).expect("dispatch"));
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +619,7 @@ fn allow_does_not_touch_the_control_surface() {
         "no destroy/cancel on allow"
     );
     // Still dispatchable.
-    assert!(gov.should_dispatch(&id));
+    assert!(block_on(gov.should_dispatch(&id)).expect("dispatch"));
 }
 
 #[test]
@@ -478,9 +638,13 @@ fn throttle_records_burn_and_halts_dispatch_without_killing() {
         "throttle performs no control call"
     );
     // The recorded burn IS the halt-dispatch flag the guard reads.
-    assert_close(gov.ledger().get(&id), 9.0, "burn recorded");
+    assert_close(
+        block_on(gov.ledger().get(&id)).expect("get"),
+        9.0,
+        "burn recorded",
+    );
     assert!(
-        !gov.should_dispatch(&id),
+        !block_on(gov.should_dispatch(&id)).expect("dispatch"),
         "over-warn agent is not dispatchable"
     );
 }
@@ -497,8 +661,16 @@ fn enforce_attributes_burn_per_identity() {
     block_on(gov.enforce(&run1, s(3.0))).expect("run1");
     block_on(gov.enforce(&run1, s(2.0))).expect("run1 again");
     block_on(gov.enforce(&run2, s(7.0))).expect("run2");
-    assert_close(gov.ledger().get(&run1), 5.0, "run1 accumulates");
-    assert_close(gov.ledger().get(&run2), 7.0, "run2 separate");
+    assert_close(
+        block_on(gov.ledger().get(&run1)).expect("run1"),
+        5.0,
+        "run1 accumulates",
+    );
+    assert_close(
+        block_on(gov.ledger().get(&run2)).expect("run2"),
+        7.0,
+        "run2 separate",
+    );
 }
 
 #[test]
@@ -515,7 +687,88 @@ fn enforce_rejects_an_invalid_identity_before_any_side_effect() {
         gov.control().calls().is_empty(),
         "no control call for an invalid identity"
     );
-    assert_close(gov.ledger().get(&bad), 0.0, "no burn recorded");
+    assert_close(
+        block_on(gov.ledger().get(&bad)).expect("get"),
+        0.0,
+        "no burn recorded",
+    );
+}
+
+#[test]
+fn governor_enforces_over_a_durable_storage_ledger_per_agent() {
+    // A governor wired to the DURABLE ledger: burn accumulates through the
+    // ferrogate-storage facade, folds every run of the same agent, and the
+    // dispatch guard reflects the durable total.
+    let ledger = StorageAgentBurnLedger::new(storage_repos(), "2026-07");
+    let mut gov = AgentCostGovernor::new(
+        CfRuntimeCostModel::new(),
+        AgentBudgetPolicy::new(10.0, "v1"), // warn $8, kill $10
+        ledger,
+        MockCloudflareControlSurface::new(),
+    );
+    let s = |usd: f64| AgentRuntimeUsageSample {
+        metered_egress_usd: usd,
+        ..AgentRuntimeUsageSample::zero()
+    };
+
+    // Run #1 of the agent: $4 -> Allow, durably recorded, still dispatchable.
+    let run1 = AgentInstanceIdentity::new("tenant-a", "sess-1", "run-1");
+    let r1 = block_on(gov.enforce(&run1, s(4.0))).expect("enforce run1");
+    assert!(matches!(r1.decision, BudgetDecision::Allow));
+    assert_close(r1.accumulated_burn_usd, 4.0, "durable burn recorded");
+    assert!(block_on(gov.should_dispatch(&run1)).expect("dispatch"));
+
+    // Run #2 of the SAME agent (different run_id): its $5 folds into the same
+    // durable per-agent total ($9) -> Throttle; dispatch is now refused for the
+    // agent regardless of which run asks.
+    let run2 = AgentInstanceIdentity::new("tenant-a", "sess-1", "run-2");
+    let r2 = block_on(gov.enforce(&run2, s(5.0))).expect("enforce run2");
+    assert!(matches!(r2.decision, BudgetDecision::Throttle { .. }));
+    assert_close(
+        r2.accumulated_burn_usd,
+        9.0,
+        "durable per-agent burn folds across runs",
+    );
+    assert!(
+        !block_on(gov.should_dispatch(&run1)).expect("dispatch"),
+        "over-warn agent is not dispatchable via its first run either",
+    );
+    assert!(!block_on(gov.should_dispatch(&run2)).expect("dispatch"));
+}
+
+#[test]
+fn enforce_fails_closed_when_the_ledger_errors() {
+    // A ledger/storage failure must NOT be swallowed into a zero burn (which
+    // would let an over-budget agent keep spending): enforce propagates the
+    // error and takes NO control side effect.
+    let mut gov = AgentCostGovernor::new(
+        CfRuntimeCostModel::new(),
+        AgentBudgetPolicy::new(1.0, "v1"),
+        FailingLedger,
+        MockCloudflareControlSurface::new(),
+    );
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let err = block_on(gov.enforce(&id, sample)).expect_err("ledger error must propagate");
+    assert!(
+        matches!(err, CostGovernorError::Ledger(_)),
+        "fail closed: a store error is not treated as zero burn"
+    );
+    assert!(
+        gov.control().calls().is_empty(),
+        "no destroy/cancel off a phantom zero burn"
+    );
+    // The dispatch guard also fails closed (propagates) rather than allowing.
+    assert!(
+        matches!(
+            block_on(gov.should_dispatch(&id)),
+            Err(CostGovernorError::Ledger(_))
+        ),
+        "dispatch guard fails closed on a ledger error"
+    );
 }
 
 // ---------------------------------------------------------------------------
