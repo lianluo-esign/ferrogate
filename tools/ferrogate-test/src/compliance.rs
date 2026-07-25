@@ -255,6 +255,10 @@ pub(crate) fn run_component_compliance_at(gateway_addr: &str) -> Result<()> {
     assert_component_contract(gateway_addr, &QuotaScopeContract::new(&fixture))?;
     assert_component_contract(gateway_addr, &TenantAssetQuotaContract::new(&fixture))?;
     assert_narrow_asset_quota_scopes_are_rejected(gateway_addr, &fixture)?;
+    // Runs last: it provisions the shared compliance tenant's prepaid wallet
+    // (a 0-credit, i.e. already-exhausted, wallet), which would otherwise 429
+    // the earlier chat/asset exercises before they reach their own gates.
+    assert_component_contract(gateway_addr, &WalletExhaustionContract::new(&fixture))?;
     Ok(())
 }
 
@@ -499,6 +503,131 @@ impl ComponentContract for TenantAssetQuotaContract<'_> {
         )?;
         Ok(())
     }
+}
+
+/// End-to-end proof for the prepaid-wallet balance gate (issue #169) as it
+/// flows through the `authenticate` -> `finalize_auth` -> `wallet_balance_exhausted`
+/// chain that issue #373 converted to `async` (dropping the last quota-read
+/// `block_on_sync_bridge`). A freshly created wallet starts at 0 credits, and
+/// `wallet_balance_exhausted` treats `balance <= 0` as exhausted, so creating
+/// the compliance tenant's wallet is the minimal exhausted-wallet fixture.
+struct WalletExhaustionContract<'a> {
+    fixture: &'a QuotaFixture,
+}
+
+impl<'a> WalletExhaustionContract<'a> {
+    fn new(fixture: &'a QuotaFixture) -> Self {
+        Self { fixture }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WalletExhaustionCase;
+
+#[derive(Debug, PartialEq)]
+struct WalletBalanceProjection {
+    balance_credits: i64,
+}
+
+impl ComponentContract for WalletExhaustionContract<'_> {
+    type Case = WalletExhaustionCase;
+    type Written = WalletBalanceProjection;
+    type Runtime = RuntimeDecision;
+
+    fn name(&self) -> &'static str {
+        "wallet-exhaustion-runtime"
+    }
+
+    fn cases(&self) -> Vec<Self::Case> {
+        vec![WalletExhaustionCase]
+    }
+
+    fn write(&self, gateway_addr: &str, _case: &Self::Case) -> Result<Self::Written> {
+        wallet_balance_projection(
+            gateway_addr,
+            "POST",
+            "/admin/v1/wallets",
+            r#"{"tenant_id":"compliance-tenant"}"#,
+            201,
+        )
+    }
+
+    fn read(&self, gateway_addr: &str, _case: &Self::Case) -> Result<Self::Written> {
+        wallet_balance_projection(
+            gateway_addr,
+            "GET",
+            "/admin/v1/wallets/compliance-tenant",
+            "",
+            200,
+        )
+    }
+
+    fn exercise(&self, gateway_addr: &str, _case: &Self::Case) -> Result<Self::Runtime> {
+        let auth = format!("Authorization: Bearer {}", self.fixture.key_secret);
+        runtime_decision(
+            gateway_addr,
+            "POST",
+            "/v1/chat/completions",
+            &[&auth, JSON_CONTENT],
+            r#"{"model":"fast-chat","messages":[]}"#,
+        )
+    }
+
+    fn verify(
+        &self,
+        _case: &Self::Case,
+        written: &Self::Written,
+        runtime: &Self::Runtime,
+    ) -> Result<()> {
+        if written.balance_credits > 0 {
+            bail!("wallet exhaustion fixture must start non-positive, got {written:?}");
+        }
+        if runtime.status != 429 || runtime.code.as_deref() != Some("wallet_balance_exhausted") {
+            bail!("runtime admitted a request against an exhausted prepaid wallet: {runtime:?}");
+        }
+        Ok(())
+    }
+
+    fn cleanup(&self, gateway_addr: &str, _case: &Self::Case) -> Result<()> {
+        // Wallets are not deletable (balance only ever moves through `/adjust`),
+        // so restore a positive balance to leave the shared compliance-tenant
+        // wallet non-exhausted for anything that runs after.
+        expect_status(
+            gateway_addr,
+            "POST",
+            "/admin/v1/wallets/compliance-tenant/adjust",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            r#"{"delta_credits":1000000}"#,
+            200,
+        )?;
+        Ok(())
+    }
+}
+
+fn wallet_balance_projection(
+    gateway_addr: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+    expected_status: u16,
+) -> Result<WalletBalanceProjection> {
+    let response = expect_json(
+        gateway_addr,
+        method,
+        path,
+        if body.is_empty() {
+            &[ADMIN_AUTH]
+        } else {
+            &[ADMIN_AUTH, JSON_CONTENT]
+        },
+        body,
+        expected_status,
+    )?;
+    Ok(WalletBalanceProjection {
+        balance_credits: response["wallet"]["balance_credits"]
+            .as_i64()
+            .context("wallet.balance_credits must be a signed integer")?,
+    })
 }
 
 fn bootstrap_quota_fixture(gateway_addr: &str) -> Result<QuotaFixture> {
