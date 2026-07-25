@@ -176,7 +176,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Observe an async agent job's status. Tenant-isolated: another tenant's run_id is reported as not found. */
+        /**
+         * Observe an async agent job's status. Tenant-isolated: another tenant's run_id is reported as not found.
+         * @description Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job.
+         */
         get: operations["getAgentJob"];
         put?: never;
         post?: never;
@@ -196,7 +199,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Read an agent job's incremental events from the existing agent-run timeline, resumable by event id. */
+        /**
+         * Read an agent job's incremental events from the existing agent-run timeline, resumable by a position cursor that survives retention.
+         * @description Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job.
+         */
         get: operations["listAgentJobEvents"];
         put?: never;
         post?: never;
@@ -216,7 +222,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Collect a terminal agent job's result by run_id. */
+        /**
+         * Collect a terminal agent job's result: the runtime-reported output carried on the run timeline plus its artifact evidence.
+         * @description Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job.
+         */
         get: operations["getAgentJobResult"];
         put?: never;
         post?: never;
@@ -2804,6 +2813,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/site-domains/{hostname}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem the DNS-TXT ownership challenge for a bound custom hostname (audited).
+         * @description Resolves _ferrogate-challenge.<hostname> and, only on an exact match with the value issued for this (tenant, hostname), promotes the binding to servable and adds it to the ACME domain set. A resolver that cannot answer returns 503 and never verifies (#488).
+         */
+        post: operations["verifySiteDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/assets/storage/summary": {
         parameters: {
             query?: never;
@@ -4075,6 +4104,8 @@ export interface components {
             after_event_id: string | null;
             next_after_event_id: string | null;
             has_more: boolean;
+            /** @description True when after_event_id could not be located in the run's current event set (retention pruned it, or the caller invented it) and this page therefore restarts from the run's oldest retained event. The caller may re-see events; a poll loop is never left with a permanently unusable cursor. */
+            cursor_reset: boolean;
             request_id: string;
         };
         AgentJobArtifact: {
@@ -6080,6 +6111,13 @@ export interface components {
             site: string;
             /** @description Equivalent path-based serve prefix, /sites/{tenant}/{site}/. */
             serve_path: string;
+            /**
+             * @description DNS ownership state as of now, expiry applied (#488). no_verification means no proof record exists. Only verified and grandfathered serve.
+             * @enum {string}
+             */
+            verification_state?: "no_verification" | "pending_verification" | "verified" | "grandfathered" | "expired";
+            /** @description Whether a request arriving on this hostname is actually served. False for every state without a live DNS ownership proof (#488). */
+            serving?: boolean;
             /** Format: int64 */
             created_at_unix: number;
             /** Format: int64 */
@@ -6103,6 +6141,7 @@ export interface components {
             object: "site_domain";
             site_domain: components["schemas"]["AdminSiteDomain"];
             acme: components["schemas"]["AdminSiteDomainAcme"];
+            verification?: components["schemas"]["AdminSiteDomainVerification"];
         };
         AdminSiteDomainList: {
             /** @constant */
@@ -6492,6 +6531,39 @@ export interface components {
             /** @description Test-only escape hatch permitting http:// resource origins. MUST be false in production. */
             allow_insecure_local_resources?: boolean;
         };
+        /** @description The DNS-TXT ownership proof (or in-flight challenge) for one (tenant, hostname) pair (#488). A bound hostname only serves while this resolves to verified or grandfathered. */
+        AdminSiteDomainVerification: {
+            /** @constant */
+            object: "site_domain_verification";
+            /**
+             * @description State as of now, with token/re-verification expiry applied.
+             * @enum {string}
+             */
+            state: "pending_verification" | "verified" | "grandfathered" | "expired";
+            serves: boolean;
+            tenant_id: string;
+            hostname: string;
+            site: string;
+            /** @description The DNS name to publish the TXT record at, _ferrogate-challenge.<hostname>. */
+            challenge_record_name: string;
+            /** @constant */
+            challenge_record_type: "TXT";
+            /** @description The exact TXT value to publish: a digest bound to this tenant, hostname, and issued token. */
+            challenge_record_value: string;
+            /** Format: int64 */
+            issued_at_unix: number;
+            /** Format: int64 */
+            token_expires_at_unix: number;
+            /** Format: int64 */
+            verified_at_unix?: number | null;
+            /** Format: int64 */
+            verification_expires_at_unix?: number | null;
+            /** Format: int64 */
+            last_checked_at_unix?: number | null;
+            last_failure_reason?: string | null;
+            /** Format: int64 */
+            attempt_count: number;
+        };
     };
     responses: {
         /** @description API key mutation response. */
@@ -6807,6 +6879,15 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["DeleteWorkspaceResponse"];
+            };
+        };
+        /** @description Too many requests. */
+        TooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
     };
@@ -7172,6 +7253,7 @@ export interface operations {
             405: components["responses"]["MethodNotAllowed"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -7205,7 +7287,7 @@ export interface operations {
     listAgentJobEvents: {
         parameters: {
             query?: {
-                /** @description Resume after this event id (from a previous page's next_after_event_id). */
+                /** @description Resume after this cursor. Pass a previous page's next_after_event_id (an opaque "<occurred_at_unix>:<event id>" position token, which stays resolvable after the event it names is pruned); a bare event id copied from data[].id is also accepted. An unresolvable cursor is NOT an error: the page restarts from the oldest retained event with cursor_reset=true. */
                 after_event_id?: string;
                 limit?: number;
             };
@@ -12923,6 +13005,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    verifySiteDomain: {
+        parameters: {
+            query?: {
+                /** @description Whose challenge to redeem. Required for a platform-operator key; a tenant-scoped key is always pinned to its own tenant. */
+                tenant?: string;
+            };
+            header?: never;
+            path: {
+                hostname: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ownership verified; the hostname now serves. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSiteDomainResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getAssetStorageSummary: {

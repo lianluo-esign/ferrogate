@@ -1057,6 +1057,48 @@ export const enRest = {
 
   // Agent runs correlation list (src/pages/agent-runs.tsx). Status/decision
   // enum tokens, tenant scope ids, and correlated counts stay data-driven.
+  // Async agent-job console (#474): the caller-facing submit -> observe ->
+  // collect -> cancel protocol's operator surface.
+  "page.agentJobs.title": "Agent jobs",
+  "page.agentJobs.description":
+    "Submit a long-running agent task, follow it by its durable run id, collect the runtime's result, and cancel it. Idempotent: re-submitting the same key returns the original job.",
+  "page.agentJobs.submit.title": "Submit a job",
+  "page.agentJobs.submit.action": "Submit",
+  "page.agentJobs.submit.accepted": "Accepted as {runId}.",
+  "page.agentJobs.submit.deduplicated": "Duplicate submission — this is the original job {runId}.",
+  "page.agentJobs.submit.error": "Submission failed: {message}",
+  "page.agentJobs.field.input": "Task",
+  "page.agentJobs.field.idempotencyKey": "Idempotency key",
+  "page.agentJobs.field.runId": "Job (run) id",
+  "page.agentJobs.field.status": "Status",
+  "page.agentJobs.field.runtimeReportedState": "Runtime-reported state",
+  "page.agentJobs.field.turns": "Turns executed",
+  "page.agentJobs.field.startedCompleted": "Started → completed",
+  "page.agentJobs.field.events": "Timeline events",
+  "page.agentJobs.field.requestId": "Request id",
+  "page.agentJobs.placeholder.input": "Describe the task the agent should run",
+  "page.agentJobs.placeholder.idempotencyKey": "Optional — reuse to retry safely",
+  "page.agentJobs.hint.idempotencyKey":
+    "A retry with the same key returns the original job instead of starting a second run. Leave blank and each submit is its own job.",
+  "page.agentJobs.track": "Track",
+  "page.agentJobs.prompt": "Submit a job above, or enter a job id to follow one.",
+  "page.agentJobs.loading": "Loading job {runId}…",
+  "page.agentJobs.error": "Could not read job {runId}: {message}",
+  "page.agentJobs.card.title": "Job {runId}",
+  "page.agentJobs.cancel": "Cancel job",
+  "page.agentJobs.cancel.error": "Cancel failed: {message}",
+  "page.agentJobs.result.title": "Result",
+  "page.agentJobs.result.pending": "The job is still running; the result is collectable once it is terminal.",
+  "page.agentJobs.result.loading": "Collecting the result…",
+  "page.agentJobs.result.output": "Output",
+  "page.agentJobs.result.noOutput": "The runtime recorded no terminal output.",
+  "page.agentJobs.result.artifacts": "Artifacts",
+  "page.agentJobs.result.noArtifacts": "No artifacts reported.",
+  "page.agentJobs.col.kind": "Kind",
+  "page.agentJobs.col.outcome": "Outcome",
+  "page.agentJobs.col.message": "Message",
+  "page.agentJobs.col.occurred": "Occurred",
+  "page.agentJobs.events.empty": "No timeline events yet.",
   "page.agentRuns.title": "Agent runs",
   "page.agentRuns.description":
     "Governed agent runs correlated across requests, billing, audit, and agent events. Open a run to see its full evidence-chain timeline (#304).",

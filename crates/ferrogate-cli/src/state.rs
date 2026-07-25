@@ -4016,6 +4016,21 @@ impl SelfHostedWorkerDispatchRuntime {
             .collect()
     }
 
+    /// The durable record for exactly one dispatch (#474 rework).
+    ///
+    /// Poll / ack / enqueue each mutate a SINGLE queue entry, so writing the
+    /// whole `storage_records()` snapshot through on every one of them made the
+    /// cost of a request scale with the lifetime size of the dispatch table.
+    /// Empty when the dispatch is not queued (nothing to write).
+    fn storage_records_for(&self, dispatch_id: &str) -> Vec<StoredSelfHostedRunDispatch> {
+        self.queue
+            .run_records()
+            .into_iter()
+            .filter(|record| record.dispatch.dispatch_id == dispatch_id)
+            .map(self_hosted_queue_record_to_storage)
+            .collect()
+    }
+
     fn poll_run(
         &mut self,
         request: SelfHostedRunPollRequest,
@@ -6856,6 +6871,10 @@ pub(crate) mod semantic_cache;
 
 #[path = "state_agent_runtime.rs"]
 mod state_agent_runtime;
+// #474: the terminal-status vocabulary is shared between the worker->gateway
+// run-state bridge and the caller-facing agent-job surface, so "done" is
+// defined exactly once.
+pub(crate) use state_agent_runtime::agent_run_status_is_terminal;
 // #357: observed unattributed virtual-API-key activity ("Unknown" running
 // agent activity) derived read-only from already-recorded evidence.
 #[path = "state_observed_activity.rs"]

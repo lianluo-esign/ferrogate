@@ -312,6 +312,57 @@ function resolveConsoleSurfaces(): Map<string, ConsoleSurface> {
   return surfaces;
 }
 
+// ---------------------------------------------------------------------------
+// Caller-facing (`/v1/`) groups that also owe a console surface (#474).
+//
+// The gate above deliberately scopes itself to `/admin/v1/`: most `/v1/` paths
+// are data-plane traffic (chat completions, embeddings, MCP) that no operator
+// screen could meaningfully render, so requiring a page for every one of them
+// would be noise. But a caller-facing CONTROL protocol — submit a durable job,
+// observe it, collect it, cancel it — is exactly the kind of surface an
+// operator needs, and #474's acceptance box asks for one.
+//
+// Listing a group here makes the requirement RECORDABLE: coverage is derived
+// from real call sites the same way as above, so deleting the page (or
+// renaming the endpoints out from under it) reddens this test instead of
+// silently un-covering the protocol. Removing an entry is the "reviewed
+// exclusion" and must be argued in review, exactly like DELIBERATE_EXCLUSIONS.
+const CALLER_FACING_TRACKED_GROUPS: Readonly<Record<string, { why: string }>> = {
+  "agent-jobs": {
+    why: "the #474 async agent-job protocol is a caller-facing CONTROL surface (submit/observe/collect/cancel over a durable run id), not data-plane traffic — operators need to follow and cancel a long-running job",
+  },
+};
+
+/** The `/v1/<group>` prefix a caller-facing path belongs to, if any. */
+function callerFacingGroupOf(apiPath: string): string | undefined {
+  if (!apiPath.startsWith("/v1/")) return undefined;
+  const segment = apiPath.slice("/v1/".length).split("/")[0];
+  if (!segment || segment.startsWith("{")) return undefined;
+  return segment;
+}
+
+/** Caller-facing `/v1/<group>` endpoints a page's source actually calls. */
+function callerFacingGroupsCalledBy(pageFile: string): string[] {
+  const source = readFileSync(path.join(pagesDir, `${pageFile}.tsx`), "utf8");
+  const groups = new Set<string>();
+  for (const match of source.matchAll(/["'`]\/v1\/([\w-]+)/g)) groups.add(match[1]);
+  return [...groups];
+}
+
+function resolveCallerFacingSurfaces(): Map<string, ConsoleSurface> {
+  const surfaces = new Map<string, ConsoleSurface>();
+  const pages = [...resolveRegisteredBespokePages().entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  for (const [page, route] of pages) {
+    for (const group of callerFacingGroupsCalledBy(page)) {
+      if (surfaces.has(group)) continue;
+      surfaces.set(group, { kind: "bespoke-page", route, source: page });
+    }
+  }
+  return surfaces;
+}
+
 const contractGroups = extractControlPlaneGroups(readFileSync(specPath, "utf8"));
 const consoleSurfaces = resolveConsoleSurfaces();
 
@@ -392,6 +443,46 @@ describe("console coverage of the Admin API control plane (#313 acceptance box 1
       source: "brand-new-thing",
     });
     expect(findUncoveredGroups(synthetic, withSurface, DELIBERATE_EXCLUSIONS)).toEqual([]);
+  });
+});
+
+describe("console coverage of tracked caller-facing groups (#474 acceptance box 1)", () => {
+  const callerFacingSurfaces = resolveCallerFacingSurfaces();
+  const callerFacingGroups = new Set(
+    Object.keys(JSON.parse(readFileSync(specPath, "utf8")).paths ?? {})
+      .map(callerFacingGroupOf)
+      .filter((group): group is string => group !== undefined),
+  );
+
+  it("keeps every tracked group in the contract (the list cannot rot)", () => {
+    for (const group of Object.keys(CALLER_FACING_TRACKED_GROUPS)) {
+      expect(callerFacingGroups.has(group), `/v1/${group} is no longer in the contract`).toBe(true);
+    }
+  });
+
+  it("gives every tracked caller-facing group a registered console surface", () => {
+    for (const [group, tracked] of Object.entries(CALLER_FACING_TRACKED_GROUPS)) {
+      const surface = callerFacingSurfaces.get(group);
+      expect(
+        surface,
+        `caller-facing group /v1/${group} has no console surface (${tracked.why}). ` +
+          "Add a bespoke page registered in src/App.tsx that calls its /v1/<group> endpoints, " +
+          "or delete the CALLER_FACING_TRACKED_GROUPS entry with a reviewed rationale.",
+      ).toBeDefined();
+      expect(
+        existsSync(path.join(pagesDir, `${surface!.source}.tsx`)),
+        `group /v1/${group} maps to missing page src/pages/${surface!.source}.tsx`,
+      ).toBe(true);
+      expect(Object.values(APP_ROUTES)).toContain(surface!.route);
+    }
+  });
+
+  it("resolves the #474 agent-jobs protocol to its own page", () => {
+    expect(callerFacingSurfaces.get("agent-jobs")).toEqual({
+      kind: "bespoke-page",
+      route: APP_ROUTES.agentJobs,
+      source: "agent-jobs",
+    });
   });
 });
 

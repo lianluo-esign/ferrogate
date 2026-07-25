@@ -593,7 +593,13 @@ impl AppState {
         mint_self_hosted_worker_client_certificate(&registration, &issuer, now).map(Some)
     }
 
-    fn rebuild_self_hosted_worker_dispatch_runtime(
+    /// Rebuild the in-process worker registry + lease queue from the durable
+    /// `self_hosted_worker_registrations` / `self_hosted_run_dispatches` tables.
+    ///
+    /// This is the restart mechanism: `try_new_with_repositories` runs the same
+    /// rebuild at startup, so calling it over shared repositories is what a
+    /// process restart looks like from the queue's point of view (#474 box 5).
+    pub(crate) fn rebuild_self_hosted_worker_dispatch_runtime(
         &self,
     ) -> Result<(), SelfHostedWorkerRecordError> {
         let registrations = crate::gateway::block_on_sync_bridge(
@@ -628,6 +634,8 @@ impl AppState {
         // is client-supplied; stamp the server clock so an expired identity cannot
         // report a past observed_at to pass validation.
         request.identity.observed_at_unix = now_unix_seconds();
+        // #474 (rework): a poll leases exactly one dispatch, so only that
+        // record is written through -- see `storage_records_for`.
         let (result, records) = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 let result = dispatch.poll_run(request);
@@ -635,7 +643,7 @@ impl AppState {
                     .as_ref()
                     .ok()
                     .and_then(|lease| lease.as_ref())
-                    .map(|_| dispatch.storage_records());
+                    .map(|lease| dispatch.storage_records_for(&lease.dispatch_id));
                 (result, records)
             }
             Err(poisoned) => {
@@ -645,7 +653,7 @@ impl AppState {
                     .as_ref()
                     .ok()
                     .and_then(|lease| lease.as_ref())
-                    .map(|_| dispatch.storage_records());
+                    .map(|lease| dispatch.storage_records_for(&lease.dispatch_id));
                 (result, records)
             }
         };
@@ -663,16 +671,24 @@ impl AppState {
         // is client-supplied; stamp the server clock so an expired identity cannot
         // report a past observed_at to pass validation.
         request.identity.observed_at_unix = now_unix_seconds();
+        // #474 (rework): an ack settles exactly one dispatch, so only that
+        // record is written through -- see `storage_records_for`.
         let (result, records) = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 let result = dispatch.ack_run(request);
-                let records = result.as_ref().ok().map(|_| dispatch.storage_records());
+                let records = result
+                    .as_ref()
+                    .ok()
+                    .map(|ack| dispatch.storage_records_for(&ack.dispatch_id));
                 (result, records)
             }
             Err(poisoned) => {
                 let mut dispatch = poisoned.into_inner();
                 let result = dispatch.ack_run(request);
-                let records = result.as_ref().ok().map(|_| dispatch.storage_records());
+                let records = result
+                    .as_ref()
+                    .ok()
+                    .map(|ack| dispatch.storage_records_for(&ack.dispatch_id));
                 (result, records)
             }
         };
@@ -848,6 +864,13 @@ impl AppState {
                 .append_self_hosted_worker_telemetry_event(stored_event.clone()),
         )
         .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        // #474: the worker -> gateway run-state bridge. Worker telemetry used to
+        // land ONLY in `self_hosted_worker_telemetry_events`, so the canonical
+        // `agent_runs.status` never left `queued` for a run the runtime actually
+        // finished and `GET /v1/agent-jobs/{id}/result` was a permanent 409. The
+        // report is projected onto the canonical run row here, at the single
+        // ingest seam every worker report passes through.
+        self.apply_worker_reported_run_state(&stored_event);
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after telemetry event write".into(),
@@ -1283,6 +1306,41 @@ impl AppState {
             .and_then(|run| run.trace_id)
     }
 
+    /// #474 (rework): the run's own timeline events ONLY, for the incremental
+    /// `/v1/agent-jobs/{run_id}/events` cursor feed.
+    ///
+    /// `agent_run_timeline` is the investigation view: it additionally loads
+    /// the run's request logs, billing events and audit events so a human can
+    /// see everything at once. A cursor poll loop calls its endpoint every few
+    /// seconds for the whole life of a minutes-to-hours job and needs none of
+    /// that, so this read materializes one collection instead of four -- the
+    /// same tenant filter, applied at the same place, over a quarter of the
+    /// work per poll.
+    ///
+    /// `None` means "no such run for this tenant" and is reported as 404, with
+    /// the run row itself filtered (the #185 rule) so a foreign id is never an
+    /// existence oracle.
+    pub(crate) fn agent_run_event_feed(
+        &self,
+        id: &str,
+        filter: &AgentRunFilter,
+    ) -> Option<Vec<StoredAgentRunEvent>> {
+        self.flush_evidence_writer();
+        let run = crate::gateway::block_on_sync_bridge(self.repositories.agent_run(id))
+            .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, filter));
+        let run_ids = [id.to_string()];
+        let events = crate::gateway::block_on_sync_bridge(
+            self.repositories.agent_run_events_for_runs(&run_ids),
+        )
+        .into_iter()
+        .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, filter))
+        .collect::<Vec<_>>();
+        if run.is_none() && events.is_empty() {
+            return None;
+        }
+        Some(events)
+    }
+
     pub(crate) fn agent_run_timeline(
         &self,
         id: &str,
@@ -1485,6 +1543,15 @@ impl AppState {
     /// agent-job cancel path address the SAME runtime dispatch the submit path
     /// enqueued (matching its framework adapter / workspace / session) instead
     /// of guessing those fields from the cancelling request.
+    ///
+    /// The in-process queue is only the FAST path. It is rebuilt from durable
+    /// rows at startup and on worker registration/rotation, so on a replica
+    /// that never served the submit it can legitimately be empty for a live
+    /// job. Falling through to the durable `self_hosted_run_dispatches` table
+    /// is what makes cancel a cluster-wide verb instead of a node-local one:
+    /// whichever replica answers `POST /v1/agent-jobs/{id}/cancel` finds the
+    /// start dispatch its peer wrote and enqueues a `cancel_run` that inherits
+    /// its worker-addressing fields (#474 rework).
     pub(crate) fn self_hosted_dispatch_for_run(
         &self,
         run_id: &str,
@@ -1494,10 +1561,136 @@ impl AppState {
             Ok(runtime) => runtime.queue.run_records(),
             Err(poisoned) => poisoned.into_inner().queue.run_records(),
         };
-        records
+        let queued = records
             .into_iter()
             .map(|record| record.dispatch)
-            .find(|dispatch| dispatch.run_id == run_id && dispatch.action == action)
+            .find(|dispatch| dispatch.run_id == run_id && dispatch.action == action);
+        if queued.is_some() {
+            return queued;
+        }
+        self.durable_self_hosted_dispatch_for_run(run_id, action)
+    }
+
+    /// Durable fallback for [`AppState::self_hosted_dispatch_for_run`]: read the
+    /// dispatch straight out of `self_hosted_run_dispatches`, the same rows the
+    /// lease queue is rebuilt from, so a node that never held the dispatch in
+    /// memory still resolves it. An already-acknowledged dispatch is skipped --
+    /// there is nothing left for the runtime to act on, and re-deriving a cancel
+    /// from a settled start would address a lease that no longer exists.
+    fn durable_self_hosted_dispatch_for_run(
+        &self,
+        run_id: &str,
+        action: SelfHostedRunAction,
+    ) -> Option<SelfHostedRunDispatch> {
+        crate::gateway::block_on_sync_bridge(self.repositories.self_hosted_run_dispatches())
+            .into_iter()
+            .filter(|record| record.run_id == run_id && record.acknowledged_status.is_none())
+            .filter_map(|record| self_hosted_queue_record_from_storage(record).ok())
+            .map(|record| record.dispatch)
+            .find(|dispatch| dispatch.action == action)
+    }
+
+    /// #474 (rework): project a worker-reported run state onto the canonical
+    /// `agent_runs` row, closing the worker -> gateway gap that made the async
+    /// job protocol's collect verb inert.
+    ///
+    /// Before this bridge existed the ONLY production writers of
+    /// `agent_runs.status` were the synchronous `/v1/agent-runs` harness, the
+    /// external-action seam, and the job submit/cancel handlers -- so a job the
+    /// runtime actually ran reported `queued` forever and `/result` answered
+    /// `409 agent_job_not_terminal` permanently. Worker telemetry now advances
+    /// the same row it describes.
+    ///
+    /// Trust boundary: the report is only applied when the run row exists AND
+    /// belongs to the SAME tenant as the reporting worker's registration, so a
+    /// worker can never terminalize (or write output onto) another tenant's
+    /// run by naming its id. A run that is already terminal is never re-opened
+    /// or overwritten -- the first terminal state wins, so a late/duplicate
+    /// report cannot rewrite a collected result.
+    ///
+    /// Returns the newly recorded status when the row moved, `None` when the
+    /// report carried nothing actionable (nothing is ever fabricated).
+    pub(crate) fn apply_worker_reported_run_state(
+        &self,
+        event: &StoredSelfHostedWorkerTelemetryEvent,
+    ) -> Option<String> {
+        let run_id = event
+            .run_id
+            .as_deref()
+            .or(event.agent_run_id.as_deref())
+            .map(str::trim)
+            .filter(|run_id| !run_id.is_empty())?;
+        let report = worker_reported_run_state(&event.kind, &event.event_json)?;
+        let run = self.agent_run_record(run_id)?;
+        if run.tenant.organization_id != event.tenant.organization_id {
+            warn!(
+                run_id,
+                "self-hosted worker reported state for an agent run owned by another tenant; \
+                 the report was stored as telemetry but NOT applied to the run"
+            );
+            return None;
+        }
+        if agent_run_status_is_terminal(&run.status) {
+            return None;
+        }
+        let terminal = agent_run_status_is_terminal(&report.status);
+        // A repeated non-terminal report with no new output is not evidence of
+        // anything; skip it so a chatty worker cannot flood the run timeline.
+        if !terminal && run.status == report.status && report.output.is_none() {
+            return None;
+        }
+        let occurred_at_unix = event
+            .occurred_at_unix
+            .or(event.ingested_at_unix)
+            .or_else(now_unix_seconds)
+            .unwrap_or_default();
+        let mut updated = run.clone();
+        updated.status = report.status.clone();
+        if let Some(turns) = report.turns_executed {
+            updated.turns_executed = turns;
+        }
+        if report.output.is_some() {
+            updated.output_recorded = true;
+        }
+        if updated.started_at_unix.is_none() {
+            updated.started_at_unix = Some(occurred_at_unix);
+        }
+        if terminal {
+            updated.completed_at_unix = Some(occurred_at_unix);
+        }
+        self.record_agent_run(updated);
+        // The state change is also an entry on the run's OWN timeline, so the
+        // `/v1/agent-jobs/{id}/events` cursor feed carries it and
+        // `/v1/agent-jobs/{id}/result` reads the terminal output from the same
+        // evidence every other agent-run view already reads.
+        self.record_agent_run_event(StoredAgentRunEvent {
+            id: format!("agent-run-worker-report:{}", event.id),
+            run_id: run_id.to_string(),
+            request_id: event
+                .request_id
+                .clone()
+                .unwrap_or_else(|| run.request_id.clone()),
+            trace_id: event.trace_id.clone().or_else(|| run.trace_id.clone()),
+            // The RUN's tenant, not the worker's: reads are filtered on this
+            // field, and the guard above already proved the two agree.
+            tenant: run.tenant.clone(),
+            turn: report.turns_executed.unwrap_or(run.turns_executed),
+            kind: if terminal {
+                "run_completed".to_string()
+            } else {
+                "run_state_reported".to_string()
+            },
+            target: format!("agent_run:{run_id}"),
+            outcome: report.status.clone(),
+            tool_call_id: None,
+            message: report.output.clone(),
+            occurred_at_unix: Some(occurred_at_unix),
+            action_fingerprint: None,
+            decision: None,
+            decision_reason: None,
+            output_disposition: None,
+        });
+        Some(report.status)
     }
 
     pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
@@ -1890,6 +2083,133 @@ pub(crate) const SELF_HOSTED_RUN_TIMELINE_EVENT_LIMIT: usize = 1_000;
 /// ids by loading four whole tables into memory.
 pub(crate) const AGENT_RUN_SUMMARY_SCAN_LIMIT: usize = 1_000;
 
+/// Max characters of worker-reported terminal output carried on the run
+/// timeline (#474). The timeline is evidence, not a blob store: a reference
+/// (PR url, commit sha, diff stat) and a short summary fit comfortably, while
+/// a multi-megabyte diff belongs on the artifact channel, which
+/// `GET /v1/agent-jobs/{run_id}/result` already surfaces as `artifacts`.
+pub(crate) const WORKER_REPORTED_OUTPUT_MAX_CHARS: usize = 64_000;
+
+/// A worker's report about a run, normalized onto the control plane's own
+/// vocabulary. Every field is optional evidence; nothing is invented.
+pub(crate) struct WorkerReportedRunState {
+    pub(crate) status: String,
+    pub(crate) output: Option<String>,
+    pub(crate) turns_executed: Option<u32>,
+}
+
+/// Run statuses that mean "this run will not change again" (#474). Shared by
+/// the worker->gateway bridge (which refuses to re-open a settled run) and the
+/// caller-facing job surface (which only serves `/result` in these states), so
+/// the two can never disagree about what "done" means.
+pub(crate) fn agent_run_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "timed_out" | "max_turns_exceeded" | "exhausted"
+    )
+}
+
+/// Map a worker-reported lifecycle word onto a canonical `agent_runs.status`.
+///
+/// Workers speak several dialects for the same event (`run.completed` as a
+/// telemetry *kind*, `{"state":"completed"}` and `{"status":"succeeded"}` as
+/// lifecycle bodies), so the token is normalized before matching. An
+/// unrecognized word returns `None` -- the run is left exactly as it was rather
+/// than being guessed into a state the caller would then collect.
+pub(crate) fn canonical_agent_run_status(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['.', '-', ' '], "_");
+    let token = normalized
+        .strip_prefix("run_")
+        .or_else(|| normalized.strip_prefix("job_"))
+        .or_else(|| normalized.strip_prefix("agent_run_"))
+        .unwrap_or(normalized.as_str());
+    let status = match token {
+        "started" | "running" | "in_progress" | "accepted" | "resumed" => "running",
+        "completed" | "complete" | "succeeded" | "success" | "finished" | "done" => "completed",
+        "failed" | "failure" | "error" | "errored" => "failed",
+        "cancelled" | "canceled" | "aborted" => "cancelled",
+        "timed_out" | "timeout" | "deadline_exceeded" => "timed_out",
+        "max_turns_exceeded" | "turn_limit_exceeded" => "max_turns_exceeded",
+        "exhausted" | "budget_exhausted" | "quota_exhausted" => "exhausted",
+        _ => return None,
+    };
+    Some(status.to_string())
+}
+
+/// Parse a worker telemetry event into a run report (#474).
+///
+/// The lifecycle body wins over the event kind, because a worker that sends
+/// `kind: "lifecycle"` puts the state in the body; a worker that names the
+/// event `run.completed` carries it in the kind. Either dialect is accepted,
+/// neither is required.
+pub(crate) fn worker_reported_run_state(
+    kind: &str,
+    event_json: &str,
+) -> Option<WorkerReportedRunState> {
+    let body = serde_json::from_str::<serde_json::Value>(event_json).ok();
+    let declared = body
+        .as_ref()
+        .and_then(|value| value.get("state").or_else(|| value.get("status")))
+        .and_then(serde_json::Value::as_str)
+        .and_then(canonical_agent_run_status);
+    let status = declared.or_else(|| canonical_agent_run_status(kind))?;
+    let output = body
+        .as_ref()
+        .and_then(worker_reported_output)
+        .map(|output| truncate_worker_output(&output));
+    let turns_executed = body
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("turns_executed")
+                .or_else(|| value.get("turns"))
+                .or_else(|| value.get("turn"))
+        })
+        .and_then(serde_json::Value::as_u64)
+        .map(|turns| u32::try_from(turns).unwrap_or(u32::MAX));
+    Some(WorkerReportedRunState {
+        status,
+        output,
+        turns_executed,
+    })
+}
+
+/// The terminal output a worker attached to its report, if any. A JSON string
+/// is taken verbatim; a structured value is re-serialized compactly so a
+/// worker reporting `{"output": {"pull_request": "..."}}` (the #472 work-product
+/// shape) is not silently dropped. Empty values stay `None`.
+fn worker_reported_output(body: &serde_json::Value) -> Option<String> {
+    for field in ["output", "result", "final_output", "summary", "message"] {
+        let Some(value) = body.get(field) else {
+            continue;
+        };
+        let rendered = match value {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(text) => text.trim().to_string(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        if !rendered.is_empty() {
+            return Some(rendered);
+        }
+    }
+    None
+}
+
+fn truncate_worker_output(output: &str) -> String {
+    if output.chars().count() <= WORKER_REPORTED_OUTPUT_MAX_CHARS {
+        return output.to_string();
+    }
+    let mut truncated: String = output
+        .chars()
+        .take(WORKER_REPORTED_OUTPUT_MAX_CHARS)
+        .collect();
+    truncated.push('…');
+    truncated
+}
+
 /// Shared assembly of the admin worker record from its already-filtered
 /// parts (issue #231): used by both the single-worker hot path (repository
 /// pushes the worker_id filter into SQL) and the bulk admin list.
@@ -2043,6 +2363,42 @@ fn mint_self_hosted_worker_client_certificate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unrecognized_worker_report_leaves_the_run_exactly_as_it_was() {
+        // Nothing is guessed: a state word the control plane does not understand
+        // must not move a run into a status a caller would then collect.
+        assert!(worker_reported_run_state("heartbeat", r#"{"cpu":0.5}"#).is_none());
+        assert!(worker_reported_run_state("lifecycle", r#"{"state":"pondering"}"#).is_none());
+        assert!(worker_reported_run_state("lifecycle", "not json").is_none());
+
+        // Dialects the control plane DOES understand, normalized onto one
+        // vocabulary.
+        for (kind, json, expected) in [
+            ("lifecycle", r#"{"state":"succeeded"}"#, "completed"),
+            ("lifecycle", r#"{"status":"error"}"#, "failed"),
+            ("run.cancelled", "{}", "cancelled"),
+            ("run_timed_out", "{}", "timed_out"),
+            ("lifecycle", r#"{"state":"in_progress"}"#, "running"),
+        ] {
+            assert_eq!(
+                worker_reported_run_state(kind, json).map(|report| report.status),
+                Some(expected.to_string()),
+                "{kind} / {json}"
+            );
+        }
+
+        // A structured work product is preserved rather than dropped.
+        let report = worker_reported_run_state(
+            "run.completed",
+            r#"{"state":"completed","output":{"pull_request":"https://example.test/pr/7"}}"#,
+        )
+        .expect("a completion report");
+        assert_eq!(
+            report.output.as_deref(),
+            Some(r#"{"pull_request":"https://example.test/pr/7"}"#)
+        );
+    }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()

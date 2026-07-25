@@ -48,6 +48,15 @@
 //! storage/query layer, before anything is shaped for the response, exactly as
 //! `handle_admin_agent_runs` does. A cross-tenant `run_id` resolves to `None`
 //! and is reported as 404 (not 403), so the surface is not an existence oracle.
+//!
+//! **How a job ever becomes terminal.** The collect verb is only meaningful if
+//! something advances `agent_runs.status` away from `queued`. Two writers do:
+//! the caller's own `POST .../cancel`, and -- for a job the runtime actually
+//! runs -- `AppState::apply_worker_reported_run_state`, the worker->gateway
+//! bridge on the telemetry ingest seam. The worker's report is projected onto
+//! the SAME run row and the SAME run timeline this surface reads, so `/result`
+//! returns the runtime's real output rather than a permanent
+//! `409 agent_job_not_terminal`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -96,13 +105,24 @@ const AGENT_JOB_WRITE_SCOPE: &str = "agent.runs.create";
 /// Scope required to observe a job (status / events / result).
 const AGENT_JOB_READ_SCOPE: &str = "agent.runs.read";
 
+/// Max jobs one tenant may hold OPEN (submitted, not yet acknowledged by the
+/// runtime) at once (#474 rework).
+///
+/// Every submit writes a durable dispatch row, and `/v1/agent-jobs` is the
+/// first surface that lets an ordinary tenant API key create those at will. The
+/// cap is per tenant and counts only in-flight work, so a tenant that keeps
+/// finishing its jobs is never throttled, while a runaway submit loop is
+/// refused with 429 instead of growing the shared dispatch table without bound.
+const AGENT_JOB_MAX_OPEN_PER_TENANT: usize = 200;
+
 /// Run statuses that mean "this job will not change again". A caller polling
 /// status stops here; `.../result` only answers 200 in these states.
+///
+/// Delegates to the shared classifier the worker->gateway bridge uses when it
+/// decides whether a reported state settles a run, so the collect verb and the
+/// writer of the state it collects can never disagree.
 fn agent_job_status_is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "timed_out" | "max_turns_exceeded" | "exhausted"
-    )
+    crate::state::agent_run_status_is_terminal(status)
 }
 
 /// Derive the durable job id from the tenant and the explicit idempotency key.
@@ -207,6 +227,12 @@ struct AgentJobEventPage {
     after_event_id: Option<String>,
     next_after_event_id: Option<String>,
     has_more: bool,
+    /// `true` when the supplied `after_event_id` could not be located in the
+    /// run's current event set (retention pruned it, or the caller invented
+    /// it) and the page therefore restarts from the run's oldest retained
+    /// event. The caller may see events it has already seen; it is never left
+    /// with a permanently unusable cursor.
+    cursor_reset: bool,
     request_id: String,
 }
 
@@ -470,6 +496,26 @@ impl FerroGateway {
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
 
+        // Retention gate (#474 rework). Reached only on a genuinely NEW job --
+        // a retry of an existing key deduplicates above and is never refused --
+        // so a tenant can always re-poll and cancel what it already has.
+        let open_jobs =
+            state.self_hosted_open_dispatch_count(&tenant_id, SelfHostedRunAction::StartRun);
+        if open_jobs >= AGENT_JOB_MAX_OPEN_PER_TENANT {
+            return write_json_error(
+                session,
+                StatusCode::TOO_MANY_REQUESTS,
+                "agent_job_open_limit_reached",
+                format!(
+                    "tenant already has {open_jobs} agent jobs in flight (limit \
+                     {AGENT_JOB_MAX_OPEN_PER_TENANT}); wait for or cancel an existing job before \
+                     submitting another"
+                ),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
         let now = now_unix_seconds();
         let workspace_id = auth
             .workspace_id
@@ -596,8 +642,7 @@ impl FerroGateway {
         run_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
-        {
+        let auth = match authenticate_agent_job_read(&state, headers, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -640,8 +685,7 @@ impl FerroGateway {
         query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
-        {
+        let auth = match authenticate_agent_job_read(&state, headers, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -658,22 +702,17 @@ impl FerroGateway {
                 .await;
             }
         };
-        let Some(timeline) = scoped_agent_job_timeline(&state, &auth, run_id) else {
+        // The poll loop reads the run's OWN events only -- not the full
+        // investigation timeline (request logs + billing + audit), which this
+        // endpoint never renders. See `AppState::agent_run_event_feed`.
+        let filter = AgentRunFilter {
+            organization_id: enforce_tenant_filter(&auth, None),
+            ..AgentRunFilter::default()
+        };
+        let Some(events) = state.agent_run_event_feed(run_id, &filter) else {
             return job_not_found(session, ctx, run_id).await;
         };
-        let page = match page_agent_job_events(timeline.agent_events, &cursor) {
-            Ok(page) => page,
-            Err(message) => {
-                return write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_event_cursor",
-                    message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let page = page_agent_job_events(events, &cursor);
         let response = AgentJobEventPage {
             object: "agent_job_event_page",
             run_id: run_id.to_string(),
@@ -681,6 +720,7 @@ impl FerroGateway {
             after_event_id: cursor.after_event_id.clone(),
             next_after_event_id: page.next_after_event_id,
             has_more: page.has_more,
+            cursor_reset: page.cursor_reset,
             data: page.data,
             request_id: ctx.request_id.clone(),
         };
@@ -695,8 +735,7 @@ impl FerroGateway {
         run_id: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, headers, AGENT_JOB_READ_SCOPE, &ctx.request_id).await
-        {
+        let auth = match authenticate_agent_job_read(&state, headers, &ctx.request_id).await {
             Ok(auth) => auth,
             Err(error) => return write_auth_error(session, ctx, error).await,
         };
@@ -903,6 +942,35 @@ fn cancel_agent_job_in_runtime(
         .map_err(|error| format!("agent job cancel could not reach the runtime: {error}"))
 }
 
+/// Authenticate an OBSERVE call (status / events / result).
+///
+/// `agent.runs.read` is the precise scope, but `agent.runs.create` is strictly
+/// broader in practice: a key that may start agent work billed to this tenant
+/// is already trusted with that work's evidence, and an async job whose caller
+/// cannot observe it is a write-only protocol. So a submitter may always follow
+/// its own job even when its key predates the read scope, while a read-only key
+/// still needs `agent.runs.read` and never gains the ability to submit or
+/// cancel (#474 rework). The read scope is tried FIRST so the denial message a
+/// key with neither scope sees names the narrower privilege it should be given.
+async fn authenticate_agent_job_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    request_id: &str,
+) -> Result<AuthContext, crate::auth::AuthError> {
+    match authenticate(state, headers, AGENT_JOB_READ_SCOPE, request_id).await {
+        Ok(auth) => Ok(auth),
+        Err(error) if error.code == "scope_denied" => {
+            match authenticate(state, headers, AGENT_JOB_WRITE_SCOPE, request_id).await {
+                Ok(auth) => Ok(auth),
+                // Report the READ scope's denial: it is the least privilege that
+                // would have satisfied the call.
+                Err(_) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Resolve a job's timeline with tenant isolation applied at the query layer.
 ///
 /// The `AgentRunFilter.organization_id` is pinned by `enforce_tenant_filter`
@@ -1054,38 +1122,87 @@ struct AgentJobEventSlice {
     data: Vec<StoredAgentRunEvent>,
     next_after_event_id: Option<String>,
     has_more: bool,
+    cursor_reset: bool,
+}
+
+/// The total order the feed is paged in: `(occurred_at_unix, id)`. Storage
+/// order is not a contract, so ordering explicitly is what makes a cursor a
+/// stable resume point across polls, backends and retries.
+fn agent_job_event_key(event: &StoredAgentRunEvent) -> (u64, String) {
+    (event.occurred_at_unix.unwrap_or_default(), event.id.clone())
+}
+
+/// Render a resume cursor as `"<occurred_at_unix>:<event id>"` (#474 rework).
+///
+/// The cursor used to be the bare event id, which made resumption depend on
+/// that event STILL EXISTING: once retention pruned it, the poll loop's cursor
+/// was permanently unresolvable. Emitting the position key instead makes the
+/// cursor self-describing -- "everything ordered at or before here is
+/// delivered" -- so the loop keeps working after the event it names is gone.
+fn agent_job_event_cursor_token(event: &StoredAgentRunEvent) -> String {
+    format!(
+        "{}:{}",
+        event.occurred_at_unix.unwrap_or_default(),
+        event.id
+    )
+}
+
+/// Parse a cursor into its position key.
+///
+/// Accepts both the composite token this endpoint emits and a bare event id
+/// copied out of `data[].id` (resolved by lookup, so a caller can page from any
+/// event it has actually seen). A leading numeric segment is what distinguishes
+/// the two; FerroGate's own event ids are never all-digits before their first
+/// `:` (`agent-job-submitted:<run>`, `agent-run-worker-report:<id>`).
+fn resolve_agent_job_cursor(after: &str, events: &[StoredAgentRunEvent]) -> Option<(u64, String)> {
+    if let Some((occurred_at, id)) = after.split_once(':') {
+        if let Ok(occurred_at) = occurred_at.parse::<u64>() {
+            return Some((occurred_at, id.to_string()));
+        }
+    }
+    events
+        .iter()
+        .find(|event| event.id == after)
+        .map(agent_job_event_key)
 }
 
 /// Order the run's timeline events deterministically and take the page after
-/// the cursor. Ordering by `(occurred_at_unix, id)` (not storage order) is what
-/// makes `after_event_id` a stable resume point for a long-poll loop.
+/// the cursor.
+///
+/// An unresolvable cursor is NOT an error: a poll loop whose cursor points at a
+/// pruned event restarts from the oldest retained event with `cursor_reset`
+/// set, so it self-heals (at the cost of re-seeing some events) instead of
+/// dying on a permanent 400.
 fn page_agent_job_events(
     mut events: Vec<StoredAgentRunEvent>,
     cursor: &AgentJobEventCursor,
-) -> Result<AgentJobEventSlice, String> {
-    events.sort_by(|left, right| {
-        left.occurred_at_unix
-            .unwrap_or_default()
-            .cmp(&right.occurred_at_unix.unwrap_or_default())
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let start = match cursor.after_event_id.as_deref() {
+) -> AgentJobEventSlice {
+    events.sort_by(|left, right| agent_job_event_key(left).cmp(&agent_job_event_key(right)));
+    let resolved = cursor
+        .after_event_id
+        .as_deref()
+        .map(|after| resolve_agent_job_cursor(after, &events));
+    let cursor_reset = matches!(resolved, Some(None));
+    let start = match resolved.flatten() {
         None => 0,
-        Some(after) => events
+        Some(key) => events
             .iter()
-            .position(|event| event.id == after)
-            .map(|index| index + 1)
-            .ok_or_else(|| format!("after_event_id {after} is not an event of this agent job"))?,
+            .position(|event| agent_job_event_key(event) > key)
+            .unwrap_or(events.len()),
     };
     let remaining = events.split_off(start);
     let has_more = remaining.len() > cursor.limit;
     let data: Vec<StoredAgentRunEvent> = remaining.into_iter().take(cursor.limit).collect();
-    let next_after_event_id = data.last().map(|event| event.id.clone());
-    Ok(AgentJobEventSlice {
+    let next_after_event_id = data
+        .last()
+        .map(agent_job_event_cursor_token)
+        .or_else(|| cursor.after_event_id.clone().filter(|_| !cursor_reset));
+    AgentJobEventSlice {
         data,
         next_after_event_id,
         has_more,
-    })
+        cursor_reset,
+    }
 }
 
 /// A run id is addressable when it is a single non-empty path segment.

@@ -371,22 +371,58 @@ impl AppState {
     /// Enqueue a schedule-originated dispatch into the self-hosted lease queue
     /// and write it through to durable storage, mirroring the poll/ack handlers.
     /// Idempotent on the dispatch id.
+    ///
+    /// #474 (rework): only the dispatch this call created is written through,
+    /// not the whole queue. `storage_records()` snapshots EVERY queued dispatch,
+    /// so persisting it made each enqueue an O(queue) burst of synchronous
+    /// upserts paid inside the request -- and `/v1/agent-jobs` is the first
+    /// surface that lets an ordinary tenant API key drive that at will. Enqueue
+    /// mutates exactly one record (it is an insert, idempotent on the dispatch
+    /// id), so writing that one record through is the same durable state at
+    /// O(1) cost per submit.
     pub(crate) fn enqueue_scheduled_self_hosted_dispatch(
         &self,
         dispatch: SelfHostedRunDispatch,
     ) -> Result<(), SelfHostedWorkerError> {
+        let dispatch_id = dispatch.dispatch_id.clone();
         let records = match self.self_hosted_dispatch.lock() {
             Ok(mut runtime) => {
                 runtime.enqueue_scheduled_dispatch(dispatch)?;
-                runtime.storage_records()
+                runtime.storage_records_for(&dispatch_id)
             }
             Err(poisoned) => {
                 let mut runtime = poisoned.into_inner();
                 runtime.enqueue_scheduled_dispatch(dispatch)?;
-                runtime.storage_records()
+                runtime.storage_records_for(&dispatch_id)
             }
         };
         persist_self_hosted_dispatch_records(&self.repositories, records)
+    }
+
+    /// How many self-hosted dispatches this tenant currently has in flight
+    /// (queued or leased, never acknowledged) for `action`.
+    ///
+    /// #474 (rework): the caller-facing job surface uses this to cap the number
+    /// of open jobs one tenant can hold, so an ordinary tenant API key cannot
+    /// grow the shared dispatch table without bound by submitting in a loop.
+    /// Only UNACKED dispatches count, so a tenant that keeps finishing its jobs
+    /// is never throttled.
+    pub(crate) fn self_hosted_open_dispatch_count(
+        &self,
+        tenant_id: &str,
+        action: SelfHostedRunAction,
+    ) -> usize {
+        let records = match self.self_hosted_dispatch.lock() {
+            Ok(runtime) => runtime.queue.run_records(),
+            Err(poisoned) => poisoned.into_inner().queue.run_records(),
+        };
+        records
+            .into_iter()
+            .filter(|record| record.acknowledged_status.is_none())
+            .filter(|record| {
+                record.dispatch.action == action && record.dispatch.tenant_id == tenant_id
+            })
+            .count()
     }
 
     /// Whether `dispatch_id` is still queued and unacknowledged.

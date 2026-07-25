@@ -18,6 +18,7 @@ const AssetsPage = lazy(() => import("@/pages/assets"));
 const WithheldAssetsPage = lazy(() => import("@/pages/withheld-assets"));
 const TenantResolvedDefaultsPage = lazy(() => import("@/pages/tenant-resolved-defaults"));
 const ToolApprovalsPage = lazy(() => import("@/pages/tool-approvals"));
+const AgentJobsPage = lazy(() => import("@/pages/agent-jobs"));
 const AgentRunsPage = lazy(() => import("@/pages/agent-runs"));
 const AgentRunDetailPage = lazy(() => import("@/pages/agent-run-detail"));
 const AgentSchedulesPage = lazy(() => import("@/pages/agent-schedules"));
@@ -89,6 +90,7 @@ function App() {
                   element={routeElement(TenantResolvedDefaultsPage)}
                 />
                 <Route path={APP_ROUTES.toolApprovals} element={routeElement(ToolApprovalsPage)} />
+                <Route path={APP_ROUTES.agentJobs} element={routeElement(AgentJobsPage)} />
                 <Route path={APP_ROUTES.agentRuns} element={routeElement(AgentRunsPage)} />
                 <Route path={APP_ROUTES.agentRunDetail} element={routeElement(AgentRunDetailPage)} />
                 <Route path={APP_ROUTES.agentSchedules} element={routeElement(AgentSchedulesPage)} />

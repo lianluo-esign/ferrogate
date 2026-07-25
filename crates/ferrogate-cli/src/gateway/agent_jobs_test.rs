@@ -289,14 +289,16 @@ fn the_event_feed_resumes_deterministically_after_a_cursor() {
             after_event_id: None,
             limit: 2,
         },
-    )
-    .unwrap();
+    );
     assert_eq!(
         first.data.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
         vec!["e1", "e2"]
     );
     assert!(first.has_more);
-    assert_eq!(first.next_after_event_id.as_deref(), Some("e2"));
+    assert!(!first.cursor_reset);
+    // The emitted cursor is the POSITION key, not the bare id, so it stays
+    // resolvable after the event it names is pruned.
+    assert_eq!(first.next_after_event_id.as_deref(), Some("10:e2"));
 
     let second = page_agent_job_events(
         events.clone(),
@@ -304,8 +306,7 @@ fn the_event_feed_resumes_deterministically_after_a_cursor() {
             after_event_id: first.next_after_event_id,
             limit: 2,
         },
-    )
-    .unwrap();
+    );
     assert_eq!(
         second
             .data
@@ -315,16 +316,72 @@ fn the_event_feed_resumes_deterministically_after_a_cursor() {
         vec!["e3"]
     );
     assert!(!second.has_more);
+    assert!(!second.cursor_reset);
 
-    // An unknown cursor is rejected instead of silently replaying the run.
-    assert!(page_agent_job_events(
+    // A bare event id the caller copied out of `data[].id` still resolves.
+    let from_bare_id = page_agent_job_events(
+        events.clone(),
+        &AgentJobEventCursor {
+            after_event_id: Some("e2".to_string()),
+            limit: 2,
+        },
+    );
+    assert_eq!(
+        from_bare_id
+            .data
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["e3"]
+    );
+    assert!(!from_bare_id.cursor_reset);
+}
+
+#[test]
+fn a_pruned_cursor_resets_the_feed_instead_of_breaking_the_poll_loop() {
+    // #474 rework: an `after_event_id` that no longer exists used to be a hard
+    // 400, which made a resumable poll loop die permanently the moment
+    // retention pruned the event its cursor pointed at.
+    let run_id = "job-abc";
+    let events = vec![
+        timeline_event(run_id, "e5", 50),
+        timeline_event(run_id, "e6", 60),
+    ];
+
+    // A composite cursor whose event is GONE still resolves by position: the
+    // loop keeps making forward progress with no replay at all.
+    let resumed = page_agent_job_events(
+        events.clone(),
+        &AgentJobEventCursor {
+            after_event_id: Some("50:e5".to_string()),
+            limit: 10,
+        },
+    );
+    assert_eq!(
+        resumed
+            .data
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["e6"]
+    );
+    assert!(!resumed.cursor_reset);
+
+    // A cursor that cannot be located at all restarts the feed and SAYS SO,
+    // rather than answering 400 forever.
+    let reset = page_agent_job_events(
         events,
         &AgentJobEventCursor {
             after_event_id: Some("nope".to_string()),
-            limit: 2,
+            limit: 10,
         },
-    )
-    .is_err());
+    );
+    assert!(reset.cursor_reset, "the caller is told its cursor was lost");
+    assert_eq!(
+        reset.data.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec!["e5", "e6"],
+        "the loop self-heals from the oldest retained event"
+    );
 }
 
 #[test]
@@ -356,6 +413,254 @@ fn submitted_input_evidence_is_bounded() {
     );
     assert!(evidence.ends_with('…'));
     assert_eq!(truncate_evidence("  fix the bug  "), "fix the bug");
+}
+
+/// A worker telemetry row as the ingest seam stores it, for the
+/// worker->gateway bridge tests.
+fn worker_report(
+    run_id: &str,
+    organization_id: &str,
+    id: &str,
+    kind: &str,
+    event_json: &str,
+    occurred_at_unix: u64,
+) -> ferrogate_storage::StoredSelfHostedWorkerTelemetryEvent {
+    ferrogate_storage::StoredSelfHostedWorkerTelemetryEvent {
+        id: id.to_string(),
+        worker_id: "worker-1".to_string(),
+        tenant: tenant(organization_id),
+        workspace_id: "ws-1".to_string(),
+        session_id: Some(format!("agent-job-session-{run_id}")),
+        run_id: Some(run_id.to_string()),
+        kind: kind.to_string(),
+        trust_level: "reported_by_self_hosted_worker".to_string(),
+        occurred_at_unix: Some(occurred_at_unix),
+        ingested_at_unix: Some(occurred_at_unix),
+        event_json: event_json.to_string(),
+        request_id: Some("fg-submit".to_string()),
+        trace_id: None,
+        agent_run_id: Some(run_id.to_string()),
+        parent_action_fingerprint: None,
+    }
+}
+
+#[test]
+fn a_worker_run_report_terminalizes_the_job_and_carries_its_output() {
+    // The #474 rework's central blocker: before the bridge, NOTHING on the
+    // worker -> gateway path advanced `agent_runs.status`, so a job the runtime
+    // finished reported `queued` forever and `/result` was a permanent 409.
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "fix-issue-474");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+
+    // Progress first: the run leaves `queued` but is NOT collectable yet.
+    let running = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "evt-1",
+        "lifecycle",
+        r#"{"state":"started"}"#,
+        150,
+    ));
+    assert_eq!(running.as_deref(), Some("running"));
+    let stored = state.agent_run_record(&run_id).expect("run record");
+    assert_eq!(stored.status, "running");
+    assert!(!agent_job_status_is_terminal(&stored.status));
+
+    // Then the completion, carrying the work product (#472's diff/PR lands
+    // here) as the terminal output.
+    let completed = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "evt-2",
+        "run.completed",
+        r#"{"state":"completed","turns_executed":7,"output":"opened PR #1234"}"#,
+        200,
+    ));
+    assert_eq!(completed.as_deref(), Some("completed"));
+    let stored = state.agent_run_record(&run_id).expect("run record");
+    assert_eq!(stored.status, "completed");
+    assert!(agent_job_status_is_terminal(&stored.status));
+    assert_eq!(stored.turns_executed, 7);
+    assert!(stored.output_recorded);
+    assert_eq!(stored.completed_at_unix, Some(200));
+
+    // ...and `/result` reads that output off the run's own timeline.
+    let timeline = state
+        .agent_run_timeline(
+            &run_id,
+            AgentRunFilter {
+                organization_id: Some("tenant-a".to_string()),
+                ..AgentRunFilter::default()
+            },
+        )
+        .expect("the job's timeline");
+    assert_eq!(agent_job_status(&timeline), "completed");
+    assert_eq!(
+        agent_job_output(&timeline).as_deref(),
+        Some("opened PR #1234"),
+        "/result must return the runtime's real output, not null"
+    );
+
+    // A late/duplicate report can never rewrite a collected result.
+    assert_eq!(
+        state.apply_worker_reported_run_state(&worker_report(
+            &run_id,
+            "tenant-a",
+            "evt-3",
+            "run.failed",
+            r#"{"state":"failed","output":"rewritten"}"#,
+            300,
+        )),
+        None
+    );
+    assert_eq!(
+        state.agent_run_record(&run_id).expect("run record").status,
+        "completed"
+    );
+}
+
+#[test]
+fn a_worker_cannot_report_state_onto_another_tenants_run() {
+    // The bridge writes the canonical run row, so it is a privileged seam: a
+    // worker registered to tenant B must not be able to terminalize (or attach
+    // output to) tenant A's job by naming its id.
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "fix-issue-474");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+
+    assert_eq!(
+        state.apply_worker_reported_run_state(&worker_report(
+            &run_id,
+            "tenant-b",
+            "evt-x",
+            "run.completed",
+            r#"{"state":"completed","output":"exfiltrated"}"#,
+            200,
+        )),
+        None
+    );
+    let stored = state.agent_run_record(&run_id).expect("run record");
+    assert_eq!(stored.status, "queued");
+    assert!(!stored.output_recorded);
+
+    // A report naming a run the control plane does not own at all is ignored
+    // rather than fabricating a run row.
+    assert_eq!(
+        state.apply_worker_reported_run_state(&worker_report(
+            "job-unknown",
+            "tenant-b",
+            "evt-y",
+            "run.completed",
+            r#"{"state":"completed"}"#,
+            200,
+        )),
+        None
+    );
+    assert!(state.agent_run_record("job-unknown").is_none());
+}
+
+#[test]
+fn a_cancel_on_a_replica_that_never_served_the_submit_still_reaches_the_runtime() {
+    // #474 rework: `self_hosted_dispatch_for_run` used to scan ONLY the
+    // in-process queue, so on a replica that did not serve the submit the
+    // cancel found no start dispatch, enqueued no `cancel_run`, and still
+    // answered 200 while the worker kept running. The durable fallback closes
+    // that: the peer's row IS the dispatch.
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "cancel-across-nodes");
+    let dispatch = start_dispatch(&run_id, "tenant-a");
+    state
+        .enqueue_scheduled_self_hosted_dispatch(dispatch.clone())
+        .expect("the submitting node enqueues + persists the start dispatch");
+
+    // Simulate the OTHER replica: same durable rows, empty in-process queue.
+    let persisted =
+        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches())
+            .into_iter()
+            .find(|record| record.run_id == run_id)
+            .expect("the submit persisted a durable dispatch row");
+    let replica = AppState::new(Config::default());
+    crate::gateway::block_on_sync_bridge(
+        replica
+            .repositories_arc()
+            .upsert_self_hosted_run_dispatch(persisted),
+    )
+    .expect("the replica reads the same durable table");
+    assert!(
+        !replica.self_hosted_dispatch_unacked(&agent_job_start_dispatch_id(&run_id)),
+        "the replica's in-process lease queue genuinely does not hold the dispatch"
+    );
+
+    let resolved = replica
+        .self_hosted_dispatch_for_run(&run_id, SelfHostedRunAction::StartRun)
+        .expect("the replica resolves the start dispatch from durable storage");
+    assert_eq!(resolved.dispatch_id, dispatch.dispatch_id);
+    assert_eq!(resolved.framework_adapter, dispatch.framework_adapter);
+    assert_eq!(resolved.session_id, dispatch.session_id);
+
+    let run = queued_run(&run_id, "tenant-a");
+    replica.record_agent_run(run.clone());
+    assert_eq!(
+        cancel_agent_job_in_runtime(&replica, &run, "fg-cancel", 300),
+        Ok(true),
+        "the cancel must actually reach the runtime transport from any replica"
+    );
+}
+
+#[test]
+fn a_submitted_job_survives_a_restart_of_the_serving_component() {
+    // Acceptance box 5. The durable state a restart must preserve is (a) the
+    // `agent_runs` row the caller polls and (b) the start dispatch the runtime
+    // leases. A fresh AppState over the SAME repositories is exactly what
+    // `try_new_with_repositories` builds on restart: it rebuilds the in-process
+    // lease queue from `self_hosted_run_dispatches` and reads the run row
+    // straight out of storage.
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "survive-a-restart");
+    state
+        .enqueue_scheduled_self_hosted_dispatch(start_dispatch(&run_id, "tenant-a"))
+        .expect("submit enqueues + persists the start dispatch");
+    state.record_agent_run(queued_run(&run_id, "tenant-a"));
+
+    let dispatch_rows =
+        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches());
+    let run_row = state.agent_run_record(&run_id).expect("run row");
+    drop(state);
+
+    // Restart: brand-new process state, nothing carried in memory.
+    let restarted = AppState::new(Config::default());
+    crate::gateway::block_on_sync_bridge(restarted.repositories_arc().upsert_agent_run(run_row))
+        .expect("the run row is durable");
+    for record in dispatch_rows
+        .into_iter()
+        .filter(|record| record.run_id == run_id)
+    {
+        crate::gateway::block_on_sync_bridge(
+            restarted
+                .repositories_arc()
+                .upsert_self_hosted_run_dispatch(record),
+        )
+        .expect("the dispatch row is durable");
+    }
+    restarted
+        .rebuild_self_hosted_worker_dispatch_runtime()
+        .expect("startup rebuilds the lease queue from the durable dispatch table");
+
+    // The caller can still address the job by the id it was handed...
+    let recovered = restarted.agent_run_record(&run_id).expect("run survives");
+    assert_eq!(recovered.status, "queued");
+    assert!(!agent_job_status_is_terminal(&recovered.status));
+    // ...and the runtime can still lease its work.
+    assert!(
+        restarted.self_hosted_dispatch_unacked(&agent_job_start_dispatch_id(&run_id)),
+        "the start dispatch is back in the lease queue after the restart"
+    );
+    let dispatch = restarted
+        .self_hosted_dispatch_for_run(&run_id, SelfHostedRunAction::StartRun)
+        .expect("the restarted node resolves the job's start dispatch");
+    assert_eq!(dispatch.run_id, run_id);
+    assert_eq!(dispatch.framework_adapter, "claude-code");
 }
 
 #[test]

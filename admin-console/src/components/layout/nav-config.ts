@@ -82,6 +82,7 @@ export const NAV_GROUPS: NavGroup[] = [
     titleKey: "nav.group.agentsTools",
     icon: Bot,
     items: [
+      { titleKey: "nav.item.agentJobs", url: APP_ROUTES.agentJobs },
       { titleKey: "nav.item.agentRuns", url: APP_ROUTES.agentRuns },
       { titleKey: "nav.item.agentSchedules", url: APP_ROUTES.agentSchedules },
       { titleKey: "nav.item.assets", url: APP_ROUTES.assets },

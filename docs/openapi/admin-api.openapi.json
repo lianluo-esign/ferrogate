@@ -567,6 +567,9 @@
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
           },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
           }
@@ -631,7 +634,8 @@
             "scope": "agent.runs.read"
           },
           "rbac_action": null
-        }
+        },
+        "description": "Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job."
       }
     },
     "/v1/agent-jobs/{run_id}/events": {
@@ -652,7 +656,7 @@
         "tags": [
           "gateway"
         ],
-        "summary": "Read an agent job's incremental events from the existing agent-run timeline, resumable by event id.",
+        "summary": "Read an agent job's incremental events from the existing agent-run timeline, resumable by a position cursor that survives retention.",
         "parameters": [
           {
             "name": "after_event_id",
@@ -662,7 +666,7 @@
               "type": "string",
               "minLength": 1
             },
-            "description": "Resume after this event id (from a previous page's next_after_event_id)."
+            "description": "Resume after this cursor. Pass a previous page's next_after_event_id (an opaque \"<occurred_at_unix>:<event id>\" position token, which stays resolvable after the event it names is pruned); a bare event id copied from data[].id is also accepted. An unresolvable cursor is NOT an error: the page restarts from the oldest retained event with cursor_reset=true."
           },
           {
             "name": "limit",
@@ -710,7 +714,8 @@
             "scope": "agent.runs.read"
           },
           "rbac_action": null
-        }
+        },
+        "description": "Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job."
       }
     },
     "/v1/agent-jobs/{run_id}/result": {
@@ -731,7 +736,7 @@
         "tags": [
           "gateway"
         ],
-        "summary": "Collect a terminal agent job's result by run_id.",
+        "summary": "Collect a terminal agent job's result: the runtime-reported output carried on the run timeline plus its artifact evidence.",
         "responses": {
           "200": {
             "description": "Terminal job result.",
@@ -766,7 +771,8 @@
             "scope": "agent.runs.read"
           },
           "rbac_action": null
-        }
+        },
+        "description": "Requires agent.runs.read; a key carrying agent.runs.create (the submit scope) is also accepted, so a submitter can always observe its own job."
       }
     },
     "/v1/agent-jobs/{run_id}/cancel": {
@@ -13698,6 +13704,16 @@
             }
           }
         }
+      },
+      "TooManyRequests": {
+        "description": "Too many requests.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -17942,6 +17958,7 @@
           "after_event_id",
           "next_after_event_id",
           "has_more",
+          "cursor_reset",
           "request_id"
         ],
         "properties": {
@@ -17976,6 +17993,10 @@
           },
           "has_more": {
             "type": "boolean"
+          },
+          "cursor_reset": {
+            "type": "boolean",
+            "description": "True when after_event_id could not be located in the run's current event set (retention pruned it, or the caller invented it) and this page therefore restarts from the run's oldest retained event. The caller may re-see events; a poll loop is never left with a permanently unusable cursor."
           },
           "request_id": {
             "type": "string"

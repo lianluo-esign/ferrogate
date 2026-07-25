@@ -114,6 +114,7 @@ export const enBootstrap = {
   "nav.item.promptTemplates": "Prompt Templates",
   "nav.item.plugins": "Plugins",
   "nav.item.mcpServers": "MCP Servers",
+  "nav.item.agentJobs": "Agent Jobs",
   "nav.item.agentRuns": "Agent Runs",
   "nav.item.agentSchedules": "Agent Schedules",
   "nav.item.assets": "Assets",

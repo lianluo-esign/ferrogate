@@ -4,6 +4,7 @@ export const APP_ROUTES = {
   withheldAssets: "/app/withheld-assets",
   tenantResolvedDefaults: "/app/tenant-resolved-defaults",
   toolApprovals: "/app/tool-approvals",
+  agentJobs: "/app/agent-jobs",
   agentRuns: "/app/agent-runs",
   agentRunDetail: "/app/agent-runs/:runId",
   agentSchedules: "/app/agent-schedules",
