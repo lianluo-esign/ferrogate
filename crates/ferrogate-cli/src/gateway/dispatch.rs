@@ -63,7 +63,7 @@ pub(super) async fn dispatch_provider_request(
     let response = build_provider_request(&request, timeout, body)?
         .send()
         .await
-        .context("provider request failed")?;
+        .map_err(|error| provider_transport_error("provider request failed", error))?;
     let status = response.status();
     let content_type = provider_response_content_type(response.headers());
     if let Some(content_length) = response.content_length() {
@@ -117,7 +117,7 @@ pub(super) async fn dispatch_provider_streaming_request(
     let response = build_provider_request(&request, timeout, body)?
         .send()
         .await
-        .context("provider streaming request failed")?;
+        .map_err(|error| provider_transport_error("provider streaming request failed", error))?;
     let status = response.status();
     let content_type = provider_response_content_type(response.headers());
     Ok(ProviderStreamingResponse {
@@ -136,7 +136,9 @@ pub(super) async fn dispatch_provider_catalog_request(
     let response = build_provider_get_request(&request, timeout)?
         .send()
         .await
-        .context("provider model catalog request failed")?;
+        .map_err(|error| {
+            provider_transport_error("provider model catalog request failed", error)
+        })?;
     let status = response.status();
     if let Some(content_length) = response.content_length() {
         if content_length > max_body_bytes as u64 {
@@ -150,6 +152,61 @@ pub(super) async fn dispatch_provider_catalog_request(
     // response.
     let body = read_bounded_response_body(response, max_body_bytes).await?;
     Ok(ProviderCatalogHttpResponse { status, body })
+}
+
+/// Coarse transport-failure class of a failed provider `reqwest` call.
+///
+/// Issue #384: every AI surface renders a dispatch failure as
+/// `format!("provider dispatch failed: {error}")`, and `Display` on an
+/// `anyhow::Error` prints ONLY the outermost context -- so a refused
+/// connection (nothing listening on the configured `base_url`) and an elapsed
+/// `provider_dispatch_timeout_secs` both collapsed to the identical
+/// `"provider request failed"` string, in the response and in every log line.
+/// Naming the class in the context keeps the two apart without ever putting
+/// the (operator-configured, possibly credential-bearing) URL in a
+/// client-visible message; the reqwest error itself stays as the anyhow
+/// source, so `{error:?}` in a gateway log still names the OS-level cause.
+fn provider_transport_failure_class(error: &reqwest::Error) -> &'static str {
+    // `is_connect` is checked before `is_timeout` on purpose: a TCP connect
+    // deadline reports both, and "connect" is the more actionable of the two.
+    if error.is_connect() {
+        "connect"
+    } else if error.is_timeout() {
+        "timeout"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "transport"
+    }
+}
+
+fn provider_transport_error(label: &str, error: reqwest::Error) -> anyhow::Error {
+    let class = provider_transport_failure_class(&error);
+    anyhow::Error::new(error).context(format!("{label} ({class})"))
+}
+
+/// `scheme://host[:port]` of a provider endpoint, with userinfo, path, query
+/// and fragment stripped.
+///
+/// Issue #384: dispatch-failure logs carried no upstream identity at all, so a
+/// live gate run could not tell whether the gateway had even aimed at the
+/// address it was supposed to. The origin answers that ("is the port right?")
+/// while dropping the parts of a `base_url` that can carry a credential.
+pub(super) fn provider_endpoint_origin(endpoint: &str) -> String {
+    match reqwest::Url::parse(endpoint) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+            (Some(host), None) => format!("{}://{host}", url.scheme()),
+            (None, _) => url.scheme().to_string(),
+        },
+        Err(_) => "<unparsable>".to_string(),
+    }
 }
 
 /// Shared reqwest client + crypto-provider setup for outbound HTTPS calls
@@ -298,6 +355,99 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!error.to_string().is_empty());
         handle.join().unwrap();
+    }
+
+    /// #384: an upstream that is not listening and an upstream that never
+    /// answers used to produce byte-identical `provider request failed`
+    /// errors, so a failing live gate run could not tell "the mock is gone"
+    /// from "the mock is slow". Both the summary class and the preserved
+    /// source chain must now separate them.
+    #[tokio::test]
+    async fn provider_dispatch_names_the_connect_failure_class() {
+        // Bind then drop, so the port is known-free and nothing is listening.
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: format!("http://{addr}/v1/chat/completions"),
+            body: json!({"model": "gpt-test", "messages": []}),
+            stream: false,
+            headers: vec![],
+        };
+
+        let error = dispatch_provider_request(request, Duration::from_secs(5), 16 * 1024)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "provider request failed (connect)");
+        // The reqwest error stays as the anyhow source, so the gateway log's
+        // `{error:?}` still reaches the OS-level cause.
+        assert!(error.chain().count() > 1, "source chain was dropped");
+    }
+
+    #[tokio::test]
+    async fn provider_dispatch_names_the_timeout_failure_class() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(500));
+        });
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: format!("http://{addr}/v1/chat/completions"),
+            body: json!({"model": "gpt-test", "messages": []}),
+            stream: false,
+            headers: vec![],
+        };
+
+        let error = dispatch_provider_request(request, Duration::from_millis(50), 16 * 1024)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "provider request failed (timeout)");
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_provider_dispatch_names_the_connect_failure_class() {
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: format!("http://{addr}/v1/chat/completions"),
+            body: json!({"model": "gpt-test", "messages": [], "stream": true}),
+            stream: true,
+            headers: vec![],
+        };
+
+        let error = match dispatch_provider_streaming_request(request, Duration::from_secs(5)).await
+        {
+            Ok(_) => panic!("streaming dispatch to a closed port must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "provider streaming request failed (connect)"
+        );
+    }
+
+    #[test]
+    fn provider_endpoint_origin_drops_credentials_and_path() {
+        assert_eq!(
+            provider_endpoint_origin("http://127.0.0.1:8080/v1/chat/completions"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            provider_endpoint_origin("https://user:secret@api.example.test/v1/messages?key=secret"),
+            "https://api.example.test"
+        );
+        assert_eq!(provider_endpoint_origin("not a url"), "<unparsable>");
     }
 
     #[tokio::test]

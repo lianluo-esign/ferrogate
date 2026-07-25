@@ -43,7 +43,9 @@ use ferrogate_providers::{
 use ferrogate_storage::StoredRequestLog;
 
 use super::{
-    body::read_request_body, dispatch::dispatch_provider_request, FerroGateway, ProxyContext,
+    body::read_request_body,
+    dispatch::{dispatch_provider_request, provider_endpoint_origin},
+    FerroGateway, ProxyContext,
 };
 
 #[cfg(test)]
@@ -788,7 +790,7 @@ impl FerroGateway {
                                     logical_model = %request.model,
                                     provider = %provider.name,
                                     attempt,
-                                    error = %error,
+                                    error = ?error,
                                     "images provider dispatch failed; retrying provider"
                                 );
                                 attempt += 1;
@@ -800,13 +802,28 @@ impl FerroGateway {
                                     logical_model = %request.model,
                                     provider = %provider.name,
                                     candidate_index,
-                                    error = %error,
+                                    error = ?error,
                                     "images provider dispatch failed; trying fallback route"
                                 );
                                 continue 'routes;
                             }
                             ImagesAttemptDecision::ReturnError => {}
                         }
+                        // #384: never return the terminal 502 without a log
+                        // naming the failure class, the full source chain and
+                        // the upstream origin the gateway dialled.
+                        warn!(
+                            request_id = %ctx.request_id,
+                            logical_model = %request.model,
+                            provider = %provider.name,
+                            provider_endpoint = %provider_endpoint_origin(&prepared.endpoint),
+                            candidate_index,
+                            attempt,
+                            max_retries = max_dispatch_retries,
+                            provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                            error = ?error,
+                            "images provider dispatch failed; returning provider_dispatch_error"
+                        );
                         self.record_images_error_log(
                             ctx,
                             auth.tenant_context(),

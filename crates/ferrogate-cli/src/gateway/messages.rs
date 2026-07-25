@@ -72,7 +72,8 @@ use super::{
         StreamingBodyReadError, StreamingCapture, StreamingUsageCapturingReader,
     },
     dispatch::{
-        dispatch_provider_request, dispatch_provider_streaming_request, ProviderStreamingResponse,
+        dispatch_provider_request, dispatch_provider_streaming_request, provider_endpoint_origin,
+        ProviderStreamingResponse,
     },
     messages_stream::{
         chat_sse_to_completion, error_sse, message_to_anthropic_sse, MessagesStreamNormalizer,
@@ -654,7 +655,7 @@ impl FerroGateway {
                                     logical_model = %request.model,
                                     provider = %provider.name,
                                     attempt,
-                                    error = %error,
+                                    error = ?error,
                                     "messages provider dispatch failed; retrying provider"
                                 );
                                 attempt += 1;
@@ -666,13 +667,29 @@ impl FerroGateway {
                                     logical_model = %request.model,
                                     provider = %provider.name,
                                     candidate_index,
-                                    error = %error,
+                                    error = ?error,
                                     "messages provider dispatch failed; trying fallback route"
                                 );
                                 continue 'routes;
                             }
                             MessagesAttemptDecision::ReturnError => {}
                         }
+                        // #384: never return the terminal 502 without a log
+                        // naming the failure class, the full source chain and
+                        // the upstream origin the gateway dialled.
+                        warn!(
+                            request_id = %ctx.request_id,
+                            logical_model = %request.model,
+                            provider = %provider.name,
+                            provider_endpoint = %provider_endpoint_origin(&prepared.endpoint),
+                            candidate_index,
+                            attempt,
+                            max_retries = max_dispatch_retries,
+                            provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                            stream,
+                            error = ?error,
+                            "messages provider dispatch failed; returning provider_dispatch_error"
+                        );
                         self.record_messages_error_log(
                             ctx,
                             auth.tenant_context(),

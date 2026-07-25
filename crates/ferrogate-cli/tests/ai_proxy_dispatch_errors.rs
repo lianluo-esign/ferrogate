@@ -108,6 +108,11 @@ fn chat_maps_streaming_provider_connect_failure_to_502() {
     );
     assert!(response.contains("502 Bad Gateway"));
     assert!(response.contains("provider_dispatch_error"));
+    // #384: same transport-class contract on the streaming leg.
+    assert!(
+        response.contains("provider dispatch failed: provider streaming request failed (connect)"),
+        "streaming connect failure did not name its transport class: {response}"
+    );
     assert!(!response.contains("chat-secret"));
 
     gateway.kill().unwrap();
@@ -170,7 +175,16 @@ fn chat_maps_provider_connect_failure_to_502() {
     let response = chat(&gateway_addr);
     assert!(response.contains("502 Bad Gateway"));
     assert!(response.contains("provider_dispatch_error"));
+    // #384: the class must reach the caller so an unreachable upstream is
+    // distinguishable from one that simply did not answer in time. Both used
+    // to render the identical "provider request failed".
+    assert!(
+        response.contains("provider dispatch failed: provider request failed (connect)"),
+        "connect failure did not name its transport class: {response}"
+    );
     assert!(!response.contains("chat-secret"));
+    // The operator-configured upstream URL must never reach the caller.
+    assert!(!response.contains("127.0.0.1:9"));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

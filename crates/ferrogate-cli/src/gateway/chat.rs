@@ -46,7 +46,9 @@ use ferrogate_storage::StoredRequestLog;
 
 use super::{
     body::read_request_body,
-    dispatch::{dispatch_provider_request, dispatch_provider_streaming_request},
+    dispatch::{
+        dispatch_provider_request, dispatch_provider_streaming_request, provider_endpoint_origin,
+    },
     responses_stream::{ResponsesStreamNormalizer, ResponsesStreamProviderKind},
     FerroGateway, ProxyContext,
 };
@@ -1641,7 +1643,7 @@ impl FerroGateway {
                                         provider_model = %model_route.provider_model,
                                         attempt,
                                         max_retries = max_dispatch_retries,
-                                        error = %error,
+                                        error = ?error,
                                         "streaming provider dispatch failed; retrying provider"
                                     );
                                     attempt += 1;
@@ -1654,13 +1656,32 @@ impl FerroGateway {
                                         provider = %provider.name,
                                         provider_model = %model_route.provider_model,
                                         candidate_index,
-                                        error = %error,
+                                        error = ?error,
                                         "streaming provider dispatch failed; trying fallback route"
                                     );
                                     continue 'routes;
                                 }
                                 ProviderAttemptDecision::ReturnError => {}
                             }
+                            // #384: the terminal branch used to return 502
+                            // without logging anything, so the only surviving
+                            // evidence of an upstream failure was the
+                            // context-only client message. `?error` renders the
+                            // full anyhow chain (down to the OS error) and the
+                            // origin names the address actually dialled.
+                            warn!(
+                                request_id = %ctx.request_id,
+                                logical_model = %request.model,
+                                provider = %provider.name,
+                                provider_model = %model_route.provider_model,
+                                provider_endpoint = %provider_endpoint_origin(&prepared.endpoint),
+                                candidate_index,
+                                attempt,
+                                max_retries = max_dispatch_retries,
+                                provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                                error = ?error,
+                                "streaming provider dispatch failed; returning provider_dispatch_error"
+                            );
                             write_json_error(
                                 session,
                                 StatusCode::BAD_GATEWAY,
@@ -2070,7 +2091,7 @@ impl FerroGateway {
                                     provider_model = %model_route.provider_model,
                                     attempt,
                                     max_retries = max_dispatch_retries,
-                                    error = %error,
+                                    error = ?error,
                                     "provider dispatch failed; retrying provider"
                                 );
                                 attempt += 1;
@@ -2083,13 +2104,30 @@ impl FerroGateway {
                                     provider = %provider.name,
                                     provider_model = %model_route.provider_model,
                                     candidate_index,
-                                    error = %error,
+                                    error = ?error,
                                     "provider dispatch failed; trying fallback route"
                                 );
                                 continue 'routes;
                             }
                             ProviderAttemptDecision::ReturnError => {}
                         }
+                        // #384: see the streaming branch -- a terminal dispatch
+                        // failure now always leaves a log line naming the
+                        // failure class, the full source chain and the upstream
+                        // origin the gateway dialled.
+                        warn!(
+                            request_id = %ctx.request_id,
+                            logical_model = %request.model,
+                            provider = %provider.name,
+                            provider_model = %model_route.provider_model,
+                            provider_endpoint = %provider_endpoint_origin(&prepared.endpoint),
+                            candidate_index,
+                            attempt,
+                            max_retries = max_dispatch_retries,
+                            provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                            error = ?error,
+                            "provider dispatch failed; returning provider_dispatch_error"
+                        );
                         self.record_ai_error_log(
                             endpoint,
                             ctx,
