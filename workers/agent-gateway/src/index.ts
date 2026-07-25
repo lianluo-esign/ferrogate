@@ -31,6 +31,7 @@ import {
 } from "./schedule";
 import type { ScheduleKind } from "./schedule";
 import { handleContainer } from "./container";
+import { handleGitCredential } from "./git-credential";
 
 // Container/sandbox class for the CONTAINER_SANDBOX binding (issue #415).
 // Deploy-time enablement (test gate, live validation): the prebuilt
@@ -110,6 +111,25 @@ export interface Env {
    * never "the agent reaches everything".
    */
   CONTAINER_GOVERNED_EGRESS_HOSTS?: string;
+   * GitHub App id backing the brokered per-operation git credential path
+   * (issue #475). A plain var, not a secret. Absent it, `/git-credential/*`
+   * fails closed with `github_app_unbound` (HTTP 501) — there is deliberately
+   * no fallback to an injected `GITHUB_TOKEN`.
+   */
+  GITHUB_APP_ID?: string;
+  /**
+   * Secrets Store binding for the App private key. `get()` takes NO argument:
+   * the secret NAME is fixed at deploy time in `secrets_store_secrets`, which
+   * is precisely why a per-USER secret cannot be read through a binding.
+   * OPTIONAL, and today usually absent: an RSA App key PEM is ~1.7 KB and the
+   * Secrets Store beta caps a value at 1024 bytes, so the key normally lives in
+   * `GITHUB_APP_PRIVATE_KEY` (Worker secret, 5 KB limit) instead.
+   */
+  GITHUB_APP_PRIVATE_KEY_STORE?: { get(): Promise<string> };
+  /** App private key as a Worker secret (PKCS#8 PEM). Fallback read path. */
+  GITHUB_APP_PRIVATE_KEY?: string;
+  /** GitHub API origin; defaults to `https://api.github.com` (GHES: `/api/v3`). */
+  GITHUB_API_BASE_URL?: string;
 }
 
 /** Lifecycle status vocabulary mirrored by the Rust `CloudflareRunStatus`. */
@@ -539,6 +559,16 @@ export default {
     //     governed allowlist is provided).
     if (url.pathname.startsWith("/container/")) {
       return handleContainer(request, env, url);
+    }
+
+    // 1e. Brokered git credential routes (issue #475): the container's git
+    //     credential helper calls back here PER GIT OPERATION instead of
+    //     holding a secret. The Worker authorizes the operation against the
+    //     run's grant, mints a repo-scoped GitHub App installation token, and
+    //     answers git — so nothing GitHub-shaped ever rests in the container,
+    //     and every use is audited. Fails closed (501) with no App bound.
+    if (url.pathname.startsWith("/git-credential/")) {
+      return handleGitCredential(request, env, url);
     }
 
     // 2. Path-routed agent traffic: /agents/:agent/:name/... — DIY-gated in

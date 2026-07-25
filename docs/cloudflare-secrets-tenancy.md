@@ -39,6 +39,19 @@ Naive per-tenant vaulting ("one CF secret per tenant provider key") therefore
 hits three ceilings at once: the count cap, the static-binding deploy model,
 and the absence of tenant isolation within the store.
 
+> **Re-verified 2026-07-25 (issue #475).** All three caps are unchanged and
+> Secrets Store is still labelled *open beta*
+> ([manage-secrets](https://developers.cloudflare.com/secrets-store/manage-secrets/)).
+> The binding model was re-checked too: a binding names `store_id` **and**
+> `secret_name`, both fixed at deploy time, and the runtime read is
+> `await env.BINDING.get()` with **no argument**
+> ([Workers integration](https://developers.cloudflare.com/secrets-store/integrations/workers/)).
+> There is no store-level binding and no runtime lookup by name, so per-user
+> credentials cannot be *read* from Secrets Store at any cap. See
+> `docs/cloudflare-git-credential-broker.md` for the full verification and for
+> the design that removes the need — brokering turns a per-user credential
+> into one platform credential plus a non-secret installation id.
+
 ## Options evaluated
 
 1. **Per-request BYOK (no storage) for the AI path.** Each tenant's provider

@@ -99,3 +99,32 @@ enabled = true
 # onBeforeRequest / onRequest / the control routes. Seed it out-of-band:
 #   wrangler secret put GATEWAY_CONTROL_TOKEN
 # FerroGate's Rust deploy pipeline seeds it from the #405/#417 secret seam.
+#
+# --- Brokered git credentials (issue #475) ----------------------------------
+# /git-credential/* mints repo-scoped GitHub App installation tokens per git
+# operation, so nothing GitHub-shaped rests inside the container. Two inputs:
+#
+#   GITHUB_APP_ID          — a plain var (not a secret). Uncomment + set below.
+#   GITHUB_APP_PRIVATE_KEY — the App key, PKCS#8 PEM. Seed out-of-band:
+#       openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem
+#       wrangler secret put GITHUB_APP_PRIVATE_KEY < app.pkcs8.pem
+#
+# Why a Worker secret and NOT a Secrets Store binding: an RSA App key PEM is
+# ~1.7 KB and the Secrets Store beta caps a secret VALUE at 1024 bytes, so the
+# key does not fit. Worker secrets are capped at 5 KB, so it does. If a future
+# GA cap lifts that ceiling, add the binding below and the route prefers it:
+#
+# [[secrets_store_secrets]]
+# binding = "GITHUB_APP_PRIVATE_KEY_STORE"
+# store_id = "<STORE_ID>"
+# secret_name = "github-app-private-key"
+#
+# NOTE the shape: `store_id` + `secret_name`, both fixed at DEPLOY time, and
+# the runtime read is `await env.BINDING.get()` with NO name argument. A Worker
+# cannot bind a store and look a secret up by name, which is why per-USER
+# credentials can never be read this way — see
+# docs/cloudflare-git-credential-broker.md.
+#
+# [vars]
+# GITHUB_APP_ID = "<APP_ID>"
+# GITHUB_API_BASE_URL = "https://api.github.com"

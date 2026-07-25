@@ -105,10 +105,14 @@
 //! * **Transport and lifecycle.** How `materialize_repo` actually runs `git` is
 //!   the isolation tier's business (#415's `/container/exec`). This contract
 //!   never touches the network.
-//! * **Credential issuance and resolution.** Minting a repo-scoped installation
-//!   token, resolving the store reference, and running the credential broker
-//!   are #475. This contract fixes only the *shape* — short-lived, single-repo,
-//!   reference-not-material, explicitly revoked.
+//! * **Credential resolution.** Resolving the store reference to a value is the
+//!   secret backend's business ([`ferrogate_secrets`]), and on Cloudflare it
+//!   happens only inside a Worker binding (#423). This contract fixes only the
+//!   *shape* — short-lived, single-repo, reference-not-material, explicitly
+//!   revoked. The [`credential_broker`] module (#475) supplies the mechanism
+//!   behind [`CredentialDelivery::BrokeredPerOperation`]: the credential-helper
+//!   callback, repo-scoped GitHub App installation-token issuance, the
+//!   revocation point, and the pinned host keys.
 //! * **Egress enforcement mechanics.** Whether the platform can actually pin an
 //!   allowlist is #471/#475. This contract makes the posture declarable,
 //!   derivable, and auditable; it cannot make Cloudflare enforce it.
@@ -124,6 +128,7 @@
 
 mod adapter;
 mod bootstrap;
+mod credential_broker;
 mod error;
 mod extract;
 mod materialize;
@@ -134,6 +139,14 @@ pub use adapter::{CodingAgentAdapter, CodingAgentCapabilities, CodingAgentDescri
 pub use bootstrap::{
     AgentBootstrapRequest, BootstrappedAgent, CodingAgentImage, EgressEnforcement, EgressPosture,
     GovernedLlmEgress, TaskBrief, UnenforcedEgressAcknowledgement,
+};
+pub use credential_broker::{
+    broker_deny_codes, git_helper_config_lines, github_known_hosts, validate_ssh_hardening,
+    validate_transport_env, BrokerCallbackBinding, BrokerDecision, BrokeredCredentialLease,
+    GitCredentialAuditEvent, GitCredentialBroker, GitCredentialCallback, GitCredentialQuery,
+    GitOperation, InstallationTokenRequest, DEFAULT_BROKER_OPERATION_BUDGET,
+    FORBIDDEN_TRANSPORT_ENV, GITHUB_INSTALLATION_TOKEN_TTL_SECS, GITHUB_SSH_HOST_KEYS,
+    INSTALLATION_TOKEN_USERNAME,
 };
 pub use error::{CodingAgentError, CodingAgentPhase};
 pub use extract::{
