@@ -17,6 +17,7 @@ mod cloudflare_gateway_control;
 mod cloudflare_gateway_deploy;
 mod cloudflare_worker;
 mod cloudflare_worker_target;
+pub mod coding_agent;
 mod framework_adapter;
 mod function_egress;
 mod function_token;
