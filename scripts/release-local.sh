@@ -99,6 +99,14 @@ else
   else
     echo "   (node/npm absent: admin-console gate skipped — run scripts/check-admin-console.sh on a Node 22+ host)"
   fi
+  # Cloudflare Workers gate (#465): tsc --noEmit for workers/{agent-gateway,
+  # mcp-server,d1-proxy}, which are deployed straight to Cloudflare. Soft-skips
+  # only when Node/npm isn't installed on this host.
+  if command -v node >/dev/null && command -v npm >/dev/null; then
+    "$ROOT/scripts/check-workers.sh"
+  else
+    echo "   (node/npm absent: workers gate skipped — run scripts/check-workers.sh on a Node 22+ host)"
+  fi
 fi
 
 if [ "$ENGINE" = "crane" ]; then
