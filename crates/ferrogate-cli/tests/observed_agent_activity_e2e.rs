@@ -53,7 +53,11 @@ fn unattributed_virtual_key_activity_surfaces_as_tenant_scoped_unknown_running()
 
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    std::fs::write(&config, observed_activity_config(&gateway_addr, &provider_addr)).unwrap();
+    std::fs::write(
+        &config,
+        observed_activity_config(&gateway_addr, &provider_addr),
+    )
+    .unwrap();
     std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
 
     let mut gateway = start_gateway(&config);
@@ -139,7 +143,11 @@ fn unattributed_virtual_key_activity_surfaces_as_tenant_scoped_unknown_running()
     // ================= Tenant isolation / cross-tenant denial. ===============
     let a_scoped = observed_activity(&gateway_addr, "admin-a-secret");
     let a_rows = a_scoped["data"].as_array().unwrap();
-    assert_eq!(a_rows.len(), 1, "tenant-A operator sees only its own row: {a_scoped}");
+    assert_eq!(
+        a_rows.len(),
+        1,
+        "tenant-A operator sees only its own row: {a_scoped}"
+    );
     assert_eq!(a_rows[0]["tenant_id"], "org_a", "{a_scoped}");
     assert!(
         !a_scoped.to_string().contains("org_b"),
@@ -148,7 +156,11 @@ fn unattributed_virtual_key_activity_surfaces_as_tenant_scoped_unknown_running()
 
     let b_scoped = observed_activity(&gateway_addr, "admin-b-secret");
     let b_rows = b_scoped["data"].as_array().unwrap();
-    assert_eq!(b_rows.len(), 1, "tenant-B operator sees only its own row: {b_scoped}");
+    assert_eq!(
+        b_rows.len(),
+        1,
+        "tenant-B operator sees only its own row: {b_scoped}"
+    );
     assert_eq!(b_rows[0]["tenant_id"], "org_b", "{b_scoped}");
     assert!(
         !b_scoped.to_string().contains("org_a"),
@@ -156,7 +168,11 @@ fn unattributed_virtual_key_activity_surfaces_as_tenant_scoped_unknown_running()
     );
 
     let forwarded = provider.join().unwrap();
-    assert_eq!(forwarded.len(), 4, "all four chat exchanges reached upstream");
+    assert_eq!(
+        forwarded.len(),
+        4,
+        "all four chat exchanges reached upstream"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
