@@ -35,7 +35,10 @@ fronting-Worker architecture and the no-first-party-REST constraint),
 (#423, `cf://` resolution is binding-scoped; REST is write/manage-only),
 [`docs/cloudflare-secrets-tenancy.md`](cloudflare-secrets-tenancy.md) (#418,
 beta caps and tenancy split),
-[`docs/cloudflare-agent-memory.md`](cloudflare-agent-memory.md) (#427).
+[`docs/cloudflare-agent-memory.md`](cloudflare-agent-memory.md) (#427),
+[`docs/cloudflare-data-plane-decision.md`](cloudflare-data-plane-decision.md)
+(#470, which process makes the **governed decision** on Cloudflare — it consumes
+this document's topology verdict rather than re-opening it).
 
 All Cloudflare numbers below were verified against the CF developer docs on
 2026-07-24; each carries its source URL in §10. Where a fact is **not**

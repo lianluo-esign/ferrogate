@@ -603,6 +603,10 @@ provider-adapter routing seam (§10.7).
   #422; managed agents #419; deploy topology #424.
 - Deploy topology (running FerroGate ON Cloudflare — Containers vs edge-Worker+origin
   vs status quo, bindings-vs-REST): `docs/cloudflare-deploy-topology.md` (#424).
+- Data-plane execution target (which process makes the governed decision on
+  Cloudflare — Workers-native vs Pingora-in-a-Container vs hybrid, the
+  policy-divergence argument, the conformance-suite design):
+  `docs/cloudflare-data-plane-decision.md` (#470).
 - Related CF decision docs: `docs/cloudflare-agent-gateway.md` (#413),
   `docs/cloudflare-secrets-resolution.md` (#423),
   `docs/cloudflare-secrets-tenancy.md` (#418), `docs/cloudflare-d1-backend.md`,
