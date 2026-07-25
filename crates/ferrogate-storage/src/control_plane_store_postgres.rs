@@ -1678,6 +1678,15 @@ impl PostgresControlPlaneStore {
             scope,
         )
         .await?;
+        // #458: the enabled subset. Disabled is derived (`total - enabled`) so
+        // the two can never contradict.
+        let virtual_keys_enabled = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM api_keys \
+             WHERE enabled AND ($1::text IS NULL OR tenant_id = $1)",
+            scope,
+        )
+        .await?;
 
         let assets_row = transaction
             .query_one(
@@ -1689,6 +1698,20 @@ impl PostgresControlPlaneStore {
             .map_err(postgres_error)?;
         let assets = nonnegative_u64(assets_row.get::<_, i64>(0));
         let asset_storage_bytes = nonnegative_u64(assets_row.get::<_, i64>(1));
+        // #458: "referenced" = a channel pins the exact
+        // (tenant, type, name, version); a bounded COUNT with a correlated
+        // EXISTS, aggregated in the database (no rows streamed to count them).
+        let assets_referenced = Self::overview_scalar_count(
+            &transaction,
+            "SELECT COUNT(*)::bigint FROM stored_assets sa \
+             WHERE ($1::text IS NULL OR sa.tenant_id = $1) \
+               AND EXISTS ( \
+                 SELECT 1 FROM asset_channels c \
+                 WHERE c.tenant_id = sa.tenant_id AND c.asset_type = sa.asset_type \
+                   AND c.name = sa.name AND c.version = sa.version)",
+            scope,
+        )
+        .await?;
 
         let (agent_runs, agent_runs_by_status) = Self::overview_status_histogram(
             &transaction,
@@ -1743,18 +1766,140 @@ impl PostgresControlPlaneStore {
             error_count: nonnegative_u64(usage_row.get::<_, i64>(11)),
         };
 
+        // #458: per-scope applicable asset-storage quota override (tenant-only).
+        // `None` for the global view (no single global number) and for a tenant
+        // without an override; never a fabricated aggregate.
+        let asset_storage_quota_bytes = match scope {
+            Some(tenant) => transaction
+                .query_opt(
+                    "SELECT asset_storage_quota_bytes FROM quota_policies \
+                     WHERE scope_type = 'tenant' AND scope_id = $1",
+                    &[&tenant],
+                )
+                .await
+                .map_err(postgres_error)?
+                .and_then(|row| row.get::<_, Option<i64>>(0))
+                .map(nonnegative_u64),
+            None => None,
+        };
+
+        // #458: tenant-scope quota pressure. The current-month cost and the
+        // stored-asset bytes are aggregated server-side (GROUP BY, not streamed)
+        // and joined to each tenant quota policy that defines a cap. Tenant scope
+        // is a direct `scope_id` match, so no cross-tenant number is built.
+        let pressure_rows = transaction
+            .query(
+                "SELECT qp.scope_id, qp.monthly_budget_usd, qp.asset_storage_quota_bytes, \
+                        COALESCE(c.cost, 0)::double precision, COALESCE(a.bytes, 0)::bigint \
+                 FROM quota_policies qp \
+                 LEFT JOIN ( \
+                     SELECT scope_id, SUM(cost_usd) AS cost FROM usage_monthly_rollups \
+                     WHERE scope_type = 'tenant' AND period_month = $2 GROUP BY scope_id \
+                 ) c ON c.scope_id = qp.scope_id \
+                 LEFT JOIN ( \
+                     SELECT tenant_id, SUM(size_bytes) AS bytes FROM stored_assets GROUP BY tenant_id \
+                 ) a ON a.tenant_id = qp.scope_id \
+                 WHERE qp.scope_type = 'tenant' \
+                   AND (qp.monthly_budget_usd IS NOT NULL OR qp.asset_storage_quota_bytes IS NOT NULL) \
+                   AND ($1::text IS NULL OR qp.scope_id = $1)",
+                &[&scope, &current_period_month],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let mut quota_pressure_candidates = Vec::new();
+        for row in &pressure_rows {
+            let scope_id: String = row.get(0);
+            let budget: Option<f64> = row.get(1);
+            let asset_cap: Option<i64> = row.get(2);
+            let cost: f64 = row.get(3);
+            let bytes = nonnegative_u64(row.get::<_, i64>(4));
+            if let Some(budget) = budget {
+                quota_pressure_candidates.push(quota_pressure_scope(
+                    &scope_id,
+                    "monthly_budget_usd",
+                    "usd",
+                    cost,
+                    budget,
+                ));
+            }
+            if let Some(cap) = asset_cap {
+                quota_pressure_candidates.push(quota_pressure_scope(
+                    &scope_id,
+                    "asset_storage_bytes",
+                    "bytes",
+                    bytes as f64,
+                    cap as f64,
+                ));
+            }
+        }
+        let quota_pressure = build_quota_pressure(quota_pressure_candidates);
+
+        // #458: pending tool approvals, tenant-scoped by the record's
+        // organization_id. Read the bounded tool_approval documents and classify
+        // in-process (their `status` lives inside the JSON payload).
+        let approval_rows = transaction
+            .query(
+                "SELECT document_json::text FROM control_plane_resources \
+                 WHERE resource_kind = 'tool_approval'",
+                &[],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let approval_documents: Vec<String> = approval_rows
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+        let pending_tool_approvals = count_pending_tool_approvals(&approval_documents, scope);
+
+        // #458: policy-governance inventory is global-only (guardrail revisions/
+        // bindings carry no tenant column; quota/policy tables are not per-tenant
+        // attributable without a join). A tenant-scoped caller gets `None`.
+        let policy_governance = if scope.is_none() {
+            Some(PolicyGovernanceCounts {
+                guardrail_policy_revisions: Self::overview_total_count(
+                    &transaction,
+                    "SELECT COUNT(*)::bigint FROM guardrail_policy_revisions",
+                )
+                .await?,
+                guardrail_policy_bindings: Self::overview_total_count(
+                    &transaction,
+                    "SELECT COUNT(*)::bigint FROM guardrail_policy_bindings",
+                )
+                .await?,
+                quota_policies: Self::overview_total_count(
+                    &transaction,
+                    "SELECT COUNT(*)::bigint FROM quota_policies",
+                )
+                .await?,
+                policy_rules: Self::overview_total_count(
+                    &transaction,
+                    "SELECT COUNT(*)::bigint FROM control_plane_resources \
+                     WHERE resource_kind = 'policy'",
+                )
+                .await?,
+            })
+        } else {
+            None
+        };
+
         transaction.commit().await.map_err(postgres_error)?;
         Ok(ControlPlaneOverviewAggregate {
             tenants,
             projects,
             workspaces,
             virtual_keys,
+            virtual_keys_enabled,
             assets,
             asset_storage_bytes,
+            assets_referenced,
+            asset_storage_quota_bytes,
             agent_runs,
             agent_runs_by_status,
             self_hosted_workers,
             self_hosted_workers_by_status,
+            pending_tool_approvals,
+            quota_pressure,
+            policy_governance,
             usage_lifetime,
             usage_current_month,
         })
@@ -1769,6 +1914,19 @@ impl PostgresControlPlaneStore {
     ) -> Result<u64, StorageError> {
         let row = transaction
             .query_one(sql, &[&scope])
+            .await
+            .map_err(postgres_error)?;
+        Ok(nonnegative_u64(row.get::<_, i64>(0)))
+    }
+
+    /// Reads a single-row scalar `COUNT(*)::bigint` aggregate that takes no bound
+    /// parameters (#458), used for the global-only policy-governance counts.
+    async fn overview_total_count(
+        transaction: &deadpool_postgres::Transaction<'_>,
+        sql: &'static str,
+    ) -> Result<u64, StorageError> {
+        let row = transaction
+            .query_one(sql, &[])
             .await
             .map_err(postgres_error)?;
         Ok(nonnegative_u64(row.get::<_, i64>(0)))

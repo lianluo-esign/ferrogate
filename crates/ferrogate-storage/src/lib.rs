@@ -12794,14 +12794,173 @@ pub struct ControlPlaneOverviewAggregate {
     pub projects: u64,
     pub workspaces: u64,
     pub virtual_keys: u64,
+    /// Subset of `virtual_keys` whose `enabled` flag is set (#458). The disabled
+    /// split is `virtual_keys - virtual_keys_enabled`; it is derived, never
+    /// stored, so the two can never contradict. Present as a real breakdown, not
+    /// a fake zero: a scope with only disabled keys reports `enabled = 0` against
+    /// a non-zero `virtual_keys`.
+    pub virtual_keys_enabled: u64,
     pub assets: u64,
     pub asset_storage_bytes: u64,
+    /// Count of in-scope asset rows currently pinned by a channel (#458). A
+    /// version is "referenced" when some channel points at its exact
+    /// `(tenant_id, asset_type, name, version)`; the unreferenced split is
+    /// `assets - assets_referenced`. Reachability is computed from the bounded
+    /// `stored_asset_channels` pins, not from a per-row flag.
+    pub assets_referenced: u64,
+    /// Applicable per-scope asset-storage quota override in bytes (#458).
+    /// `Some` only for a tenant-scoped aggregate whose tenant defines an
+    /// `asset_storage_quota_bytes` override on its tenant quota policy. `None`
+    /// for the platform-operator (global) view -- asset storage quota is a
+    /// per-tenant admission-time value with no single global number -- and for a
+    /// tenant with no explicit override (it then falls back to its plan default,
+    /// which is intentionally not folded in here to avoid a plan-resolution
+    /// dependency). Never a fabricated aggregate.
+    pub asset_storage_quota_bytes: Option<u64>,
     pub agent_runs: u64,
     pub agent_runs_by_status: std::collections::BTreeMap<String, u64>,
     pub self_hosted_workers: u64,
     pub self_hosted_workers_by_status: std::collections::BTreeMap<String, u64>,
+    /// Count of tool-approval records in scope whose status is `pending` (#458).
+    /// Tenant-scoped by the approval record's `tenant.organization_id`, so a
+    /// tenant-scoped caller never sees another tenant's pending approvals.
+    pub pending_tool_approvals: u64,
+    /// Bounded (top-[`MAX_QUOTA_PRESSURE_SCOPES`]), nearest-to-cap-first list of
+    /// tenant scopes whose usage is at/over [`QUOTA_PRESSURE_UTILIZATION_PCT`]
+    /// of an applicable cap (#458). Tenant-scoped by `scope_id`; empty is an
+    /// honest "no scope under pressure", not an unavailable state.
+    pub quota_pressure: Vec<QuotaPressureScope>,
+    /// Global-only policy-governance inventory counts (#458). `Some` only for
+    /// the platform-operator (global) aggregate; `None` for a tenant-scoped
+    /// aggregate, because guardrail revisions/bindings carry no tenant column
+    /// and the mixed-scope quota/policy tables are not per-tenant attributable
+    /// without a join -- surfaced as not-applicable rather than a misleading
+    /// per-tenant number (issue #458, resolution (b): documented global-only).
+    pub policy_governance: Option<PolicyGovernanceCounts>,
     pub usage_lifetime: OverviewUsageTotals,
     pub usage_current_month: OverviewUsageTotals,
+}
+
+/// Upper bound on the number of quota-pressure scopes returned by the overview
+/// aggregate (#458). The pressure list is a triage signal, kept bounded like
+/// the overview alert list regardless of how many scopes are near a cap.
+pub const MAX_QUOTA_PRESSURE_SCOPES: usize = 20;
+
+/// Utilization threshold (percent of an applicable cap) at/over which a scope is
+/// reported as under quota pressure (#458).
+pub const QUOTA_PRESSURE_UTILIZATION_PCT: f64 = 80.0;
+
+/// One tenant scope at/over [`QUOTA_PRESSURE_UTILIZATION_PCT`] of a cap for one
+/// quota dimension (#458). Both the in-process fold and the Postgres pushdown
+/// build these and hand them to [`build_quota_pressure`] so the threshold + the
+/// top-N bound + the ordering are applied identically.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QuotaPressureScope {
+    /// Always `"tenant"` today: budget and asset-storage caps that the overview
+    /// can attribute without a cross-table join are tenant-grained.
+    pub scope_type: String,
+    pub scope_id: String,
+    /// The capped dimension: `"monthly_budget_usd"` or `"asset_storage_bytes"`.
+    pub dimension: &'static str,
+    /// Unit of `used`/`cap`: `"usd"` or `"bytes"`.
+    pub unit: &'static str,
+    pub used: f64,
+    pub cap: f64,
+    /// `used / cap * 100`, rounded to two decimals.
+    pub utilization_pct: f64,
+}
+
+/// Global-only policy-governance inventory counts for the overview (#458). See
+/// [`ControlPlaneOverviewAggregate::policy_governance`] for why these are
+/// global-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PolicyGovernanceCounts {
+    pub guardrail_policy_revisions: u64,
+    pub guardrail_policy_bindings: u64,
+    pub quota_policies: u64,
+    pub policy_rules: u64,
+}
+
+/// Build a bounded, nearest-to-cap-first quota-pressure list (#458). Retains
+/// only entries with a real positive cap that are at/over
+/// [`QUOTA_PRESSURE_UTILIZATION_PCT`], sorts them most-utilized first (ties
+/// broken by scope id then dimension for a deterministic response), and caps the
+/// result at [`MAX_QUOTA_PRESSURE_SCOPES`]. Shared by the fold and the Postgres
+/// pushdown so both backends return the identical bounded list.
+pub(crate) fn build_quota_pressure(
+    mut candidates: Vec<QuotaPressureScope>,
+) -> Vec<QuotaPressureScope> {
+    candidates
+        .retain(|entry| entry.cap > 0.0 && entry.utilization_pct >= QUOTA_PRESSURE_UTILIZATION_PCT);
+    candidates.sort_by(|left, right| {
+        right
+            .utilization_pct
+            .partial_cmp(&left.utilization_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.scope_id.cmp(&right.scope_id))
+            .then_with(|| left.dimension.cmp(right.dimension))
+    });
+    candidates.truncate(MAX_QUOTA_PRESSURE_SCOPES);
+    candidates
+}
+
+/// Construct a [`QuotaPressureScope`] for one tenant/dimension, computing the
+/// utilization percent (0 when the cap is not positive). `used`/`cap` are the
+/// dimension's own units (USD or bytes). Kept next to [`build_quota_pressure`]
+/// so the fold and the pushdown produce byte-identical entries.
+pub(crate) fn quota_pressure_scope(
+    scope_id: &str,
+    dimension: &'static str,
+    unit: &'static str,
+    used: f64,
+    cap: f64,
+) -> QuotaPressureScope {
+    let utilization_pct = if cap > 0.0 {
+        ((used / cap) * 10_000.0).round() / 100.0
+    } else {
+        0.0
+    };
+    QuotaPressureScope {
+        scope_type: "tenant".to_string(),
+        scope_id: scope_id.to_string(),
+        dimension,
+        unit,
+        used,
+        cap,
+        utilization_pct,
+    }
+}
+
+/// Count the `pending` tool-approval records within `tenant_scope` from their
+/// raw config-document JSON (#458). Shared by the fold and the Postgres
+/// pushdown. Only the minimal `status` + `tenant.organization_id` fields are
+/// parsed; malformed rows are skipped (they are surfaced elsewhere), never
+/// counted, so a parse failure can never inflate the pending tally.
+pub(crate) fn count_pending_tool_approvals(
+    documents: &[String],
+    tenant_scope: Option<&str>,
+) -> u64 {
+    #[derive(Deserialize)]
+    struct ApprovalScopeRow {
+        status: String,
+        #[serde(default)]
+        tenant: ApprovalTenantRow,
+    }
+    #[derive(Deserialize, Default)]
+    struct ApprovalTenantRow {
+        #[serde(default)]
+        organization_id: Option<String>,
+    }
+    documents
+        .iter()
+        .filter_map(|document| serde_json::from_str::<ApprovalScopeRow>(document).ok())
+        .filter(|row| row.status == "pending")
+        .filter(|row| {
+            tenant_scope.is_none_or(|tenant| {
+                row.tenant.organization_id.as_deref().unwrap_or_default() == tenant
+            })
+        })
+        .count() as u64
 }
 
 /// Deterministic id for a monthly rollup row, mirroring [`quota_policy_id`].

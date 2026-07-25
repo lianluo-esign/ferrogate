@@ -20,7 +20,7 @@ use http::StatusCode;
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Serialize;
 
-use ferrogate_storage::{ControlPlaneOverviewAggregate, OverviewUsageTotals};
+use ferrogate_storage::{ControlPlaneOverviewAggregate, OverviewUsageTotals, QuotaPressureScope};
 
 use crate::auth::authenticate;
 use crate::responses::{write_json_error, write_json_response};
@@ -144,20 +144,76 @@ pub(crate) struct AdminOverviewControlPlane {
     pub(crate) tenants: u64,
     pub(crate) projects: u64,
     pub(crate) workspaces: u64,
-    pub(crate) virtual_keys: u64,
+    /// Virtual-key inventory split into total vs enabled (#458); the disabled
+    /// count is `total - enabled`. A scope with only disabled keys reports a
+    /// non-zero `total` with `enabled = 0` -- a real breakdown, never a fake
+    /// zero for the whole count.
+    pub(crate) virtual_keys: AdminOverviewEnabledCount,
     pub(crate) assets: AdminOverviewAssets,
     pub(crate) agent_runs: AdminOverviewCountByStatus,
     pub(crate) self_hosted_workers: AdminOverviewCountByStatus,
+    /// Number of tool-approval records in scope awaiting a decision (#458),
+    /// tenant-scoped by the approval's `organization_id`. A matching bounded
+    /// `tool_approvals_pending` alert is raised when this is non-zero.
+    pub(crate) pending_tool_approvals: u64,
+    /// Bounded, nearest-to-cap-first list of tenant scopes at/over the quota
+    /// pressure threshold for a budget or asset-storage cap (#458). Empty means
+    /// "no scope under pressure", not "unknown" (a durable failure instead nulls
+    /// this whole section). A matching `quota_pressure` alert summarizes it.
+    pub(crate) quota_pressure: Vec<AdminOverviewQuotaPressure>,
+    /// Global-only policy-governance inventory counts (#458). Present only for a
+    /// platform-operator (global) key; serialized as `null` for a tenant-scoped
+    /// key because guardrail revisions/bindings carry no tenant column and the
+    /// quota/policy tables are not per-tenant attributable without a join. The
+    /// `null` is an explicit "not applicable at tenant scope", never a fake
+    /// zero, and the field is always returned (never omitted).
+    pub(crate) policy_governance: Option<AdminOverviewPolicyGovernance>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct AdminOverviewAssets {
     pub(crate) count: u64,
-    /// Sum of stored asset `size_bytes` in scope. Storage quota is a
-    /// per-tenant/per-scope override resolved at admission time, not a single
-    /// global number, so a quota field is intentionally omitted here rather
-    /// than faked -- see the endpoint documentation.
+    /// Sum of stored asset `size_bytes` in scope.
     pub(crate) storage_bytes: u64,
+    /// Count of asset versions currently pinned by a channel (#458); the
+    /// unreferenced split is `count - referenced`. "Referenced" means some
+    /// channel points at the exact `(tenant, type, name, version)`.
+    pub(crate) referenced: u64,
+    /// `count - referenced`: asset versions no channel pins (#458).
+    pub(crate) unreferenced: u64,
+    /// Applicable per-scope asset-storage quota in bytes (#458). Asset storage
+    /// quota is a per-tenant admission-time override with NO single global
+    /// number, so this is `null` for the platform-operator (global) view and
+    /// for a tenant with no explicit override (it then falls back to its plan
+    /// default, intentionally not folded in here). It is a per-scope value, never
+    /// a fabricated global aggregate. Always returned (present as `null` when
+    /// not applicable).
+    pub(crate) storage_quota_bytes: Option<u64>,
+}
+
+/// One tenant scope at/over the quota-pressure threshold for one dimension
+/// (#458), mirroring the storage aggregate's `QuotaPressureScope`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct AdminOverviewQuotaPressure {
+    pub(crate) scope_type: String,
+    pub(crate) scope_id: String,
+    /// `monthly_budget_usd` or `asset_storage_bytes`.
+    pub(crate) dimension: String,
+    /// `usd` or `bytes`.
+    pub(crate) unit: String,
+    pub(crate) used: f64,
+    pub(crate) cap: f64,
+    pub(crate) utilization_pct: f64,
+}
+
+/// Global-only policy-governance inventory counts (#458). See
+/// [`AdminOverviewControlPlane::policy_governance`] for the scope rationale.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub(crate) struct AdminOverviewPolicyGovernance {
+    pub(crate) guardrail_policy_revisions: u64,
+    pub(crate) guardrail_policy_bindings: u64,
+    pub(crate) quota_policies: u64,
+    pub(crate) policy_rules: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -423,6 +479,68 @@ fn status_pressure_alert(
     })
 }
 
+/// Derive the bounded quota-pressure alert (#458) from the aggregate's
+/// already-bounded, nearest-to-cap-first quota-pressure list. Each scope/
+/// dimension becomes one evidence entry echoing its utilization and cap so an
+/// operator can pivot to the quota-policy endpoint. An empty list is not an
+/// alert (it is an honest "no scope under pressure"), and the durable aggregate
+/// nulling out instead surfaces as an unavailable source, never a fake zero.
+fn quota_pressure_alert(
+    pressure: &[QuotaPressureScope],
+    now_unix: u64,
+) -> Option<AdminOverviewAlert> {
+    if pressure.is_empty() {
+        return None;
+    }
+    let (evidence, evidence_truncated) =
+        bound_evidence(pressure.iter().map(|scope| AdminOverviewEvidence {
+            id: format!("{}:{}", scope.scope_id, scope.dimension),
+            detail: Some(format!(
+                "{:.2}% of {} cap ({} / {} {})",
+                scope.utilization_pct, scope.dimension, scope.used, scope.cap, scope.unit
+            )),
+            at_unix: None,
+            reference: Some("/admin/v1/quota-policies".to_string()),
+        }));
+    Some(AdminOverviewAlert {
+        kind: "quota_pressure",
+        severity: "warning",
+        summary: format!(
+            "{} scope/quota-dimension(s) at or over the pressure threshold",
+            pressure.len()
+        ),
+        count: Some(pressure.len() as u64),
+        detected_at_unix: now_unix,
+        evidence,
+        evidence_truncated,
+    })
+}
+
+/// Derive the pending-approval alert (#458) from the scoped pending count. The
+/// count is authoritative; the single evidence entry references the list
+/// endpoint (the aggregate carries the tally, not per-approval ids). A zero
+/// count is no alert, and a durable failure instead nulls the section, so a
+/// pending approval is never silently reported as zero.
+fn pending_approvals_alert(pending: u64, now_unix: u64) -> Option<AdminOverviewAlert> {
+    if pending == 0 {
+        return None;
+    }
+    Some(AdminOverviewAlert {
+        kind: "tool_approvals_pending",
+        severity: "warning",
+        summary: format!("{pending} tool approval(s) awaiting a decision"),
+        count: Some(pending),
+        detected_at_unix: now_unix,
+        evidence: vec![AdminOverviewEvidence {
+            id: "pending".to_string(),
+            detail: Some(format!("{pending} pending tool approval(s)")),
+            at_unix: None,
+            reference: Some("/admin/v1/tool-approvals".to_string()),
+        }],
+        evidence_truncated: false,
+    })
+}
+
 /// Pure envelope assembler (issue #339). Kept free of I/O so the
 /// never-fake-a-zero and alert-bounding behavior is unit-testable: a failed
 /// durable aggregate (`Err`) yields `unavailable` control-plane/usage sections
@@ -455,10 +573,16 @@ pub(crate) fn build_overview(
                 tenants: aggregate.tenants,
                 projects: aggregate.projects,
                 workspaces: aggregate.workspaces,
-                virtual_keys: aggregate.virtual_keys,
+                virtual_keys: AdminOverviewEnabledCount {
+                    total: aggregate.virtual_keys as usize,
+                    enabled: aggregate.virtual_keys_enabled as usize,
+                },
                 assets: AdminOverviewAssets {
                     count: aggregate.assets,
                     storage_bytes: aggregate.asset_storage_bytes,
+                    referenced: aggregate.assets_referenced,
+                    unreferenced: aggregate.assets.saturating_sub(aggregate.assets_referenced),
+                    storage_quota_bytes: aggregate.asset_storage_quota_bytes,
                 },
                 agent_runs: AdminOverviewCountByStatus {
                     total: aggregate.agent_runs,
@@ -468,6 +592,28 @@ pub(crate) fn build_overview(
                     total: aggregate.self_hosted_workers,
                     by_status: aggregate.self_hosted_workers_by_status.clone(),
                 },
+                pending_tool_approvals: aggregate.pending_tool_approvals,
+                quota_pressure: aggregate
+                    .quota_pressure
+                    .iter()
+                    .map(|scope| AdminOverviewQuotaPressure {
+                        scope_type: scope.scope_type.clone(),
+                        scope_id: scope.scope_id.clone(),
+                        dimension: scope.dimension.to_string(),
+                        unit: scope.unit.to_string(),
+                        used: scope.used,
+                        cap: scope.cap,
+                        utilization_pct: scope.utilization_pct,
+                    })
+                    .collect(),
+                policy_governance: aggregate.policy_governance.as_ref().map(|counts| {
+                    AdminOverviewPolicyGovernance {
+                        guardrail_policy_revisions: counts.guardrail_policy_revisions,
+                        guardrail_policy_bindings: counts.guardrail_policy_bindings,
+                        quota_policies: counts.quota_policies,
+                        policy_rules: counts.policy_rules,
+                    }
+                }),
             };
             let usage = AdminOverviewUsage {
                 current_period_month: current_period_month.clone(),
@@ -495,6 +641,13 @@ pub(crate) fn build_overview(
                 now_unix,
                 is_worker_pressure_status,
             ) {
+                durable_alerts.push(alert);
+            }
+            if let Some(alert) = quota_pressure_alert(&aggregate.quota_pressure, now_unix) {
+                durable_alerts.push(alert);
+            }
+            if let Some(alert) = pending_approvals_alert(aggregate.pending_tool_approvals, now_unix)
+            {
                 durable_alerts.push(alert);
             }
             (

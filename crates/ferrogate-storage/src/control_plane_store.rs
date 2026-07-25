@@ -874,19 +874,60 @@ where
         .filter(|workspace| in_scope(tenant_scope, &workspace.tenant_id))
         .count() as u64;
 
-    let virtual_keys = store.list_api_key_records().await?;
-    let virtual_keys = virtual_keys
+    let virtual_key_records = store.list_api_key_records().await?;
+    let mut virtual_keys = 0_u64;
+    let mut virtual_keys_enabled = 0_u64;
+    for key in &virtual_key_records {
+        if in_scope(tenant_scope, &key.tenant_id) {
+            virtual_keys += 1;
+            if key.enabled {
+                virtual_keys_enabled += 1;
+            }
+        }
+    }
+
+    // A version is "referenced" when some channel pins its exact
+    // (tenant, type, name, version). Build the pin set once from the bounded
+    // channel rows, then classify each in-scope asset (#458).
+    let channels = store.list_all_asset_channels().await?;
+    let pinned: std::collections::HashSet<(String, String, String, String)> = channels
         .iter()
-        .filter(|key| in_scope(tenant_scope, &key.tenant_id))
-        .count() as u64;
+        .filter(|channel| in_scope(tenant_scope, &channel.tenant_id))
+        .map(|channel| {
+            (
+                channel.tenant_id.clone(),
+                channel.asset_type.clone(),
+                channel.name.clone(),
+                channel.version.clone(),
+            )
+        })
+        .collect();
 
     let assets = store.list_all_assets().await?;
     let mut asset_count = 0_u64;
     let mut asset_storage_bytes = 0_u64;
+    let mut assets_referenced = 0_u64;
+    // Per-tenant stored-asset byte totals feed the asset-storage quota-pressure
+    // dimension below; bounded by the number of tenants.
+    let mut asset_bytes_by_tenant: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
     for asset in &assets {
         if in_scope(tenant_scope, &asset.tenant_id) {
             asset_count += 1;
             asset_storage_bytes = asset_storage_bytes.saturating_add(asset.size_bytes);
+            let entry = asset_bytes_by_tenant
+                .entry(asset.tenant_id.clone())
+                .or_insert(0);
+            *entry = entry.saturating_add(asset.size_bytes);
+            let key = (
+                asset.tenant_id.clone(),
+                asset.asset_type.clone(),
+                asset.name.clone(),
+                asset.version.clone(),
+            );
+            if pinned.contains(&key) {
+                assets_referenced += 1;
+            }
         }
     }
 
@@ -924,6 +965,9 @@ where
 
     let mut usage_lifetime = OverviewUsageTotals::default();
     let mut usage_current_month = OverviewUsageTotals::default();
+    // Per-tenant current-month cost feeds the budget quota-pressure dimension.
+    let mut current_month_cost_by_tenant: std::collections::BTreeMap<String, f64> =
+        std::collections::BTreeMap::new();
     for rollup in store.list_usage_monthly_rollups().await? {
         // Only the `tenant`-scope rollups are summed: every settled request
         // fans out into up to four rows (tenant/project/workspace/key), so
@@ -937,20 +981,99 @@ where
         usage_lifetime.accumulate(&rollup);
         if rollup.period_month == current_period_month {
             usage_current_month.accumulate(&rollup);
+            *current_month_cost_by_tenant
+                .entry(rollup.scope_id.clone())
+                .or_insert(0.0) += rollup.cost_usd;
         }
     }
+
+    // Quota policies drive the per-scope asset-storage quota, the quota-pressure
+    // list, and the global quota-policy inventory count. Read once (#458).
+    let quota_policies = store.list_quota_policies().await?;
+
+    // Per-scope applicable asset-storage quota is a tenant-only override; the
+    // global view has no single number, so it stays `None` there (never faked).
+    let asset_storage_quota_bytes = tenant_scope.and_then(|tenant| {
+        quota_policies
+            .iter()
+            .find(|policy| policy.scope_type == QuotaScopeKind::Tenant && policy.scope_id == tenant)
+            .and_then(|policy| policy.asset_storage_quota_bytes)
+    });
+
+    // Quota pressure: tenant-scope budget and asset-storage caps compared to the
+    // current-month cost / stored-asset bytes for the same tenant. Tenant scope
+    // is a direct `scope_id` match, so no cross-tenant number is ever built.
+    let mut quota_pressure_candidates = Vec::new();
+    for policy in &quota_policies {
+        if policy.scope_type != QuotaScopeKind::Tenant || !in_scope(tenant_scope, &policy.scope_id)
+        {
+            continue;
+        }
+        if let Some(budget) = policy.monthly_budget_usd {
+            let used = current_month_cost_by_tenant
+                .get(&policy.scope_id)
+                .copied()
+                .unwrap_or(0.0);
+            quota_pressure_candidates.push(quota_pressure_scope(
+                &policy.scope_id,
+                "monthly_budget_usd",
+                "usd",
+                used,
+                budget,
+            ));
+        }
+        if let Some(cap) = policy.asset_storage_quota_bytes {
+            let used = asset_bytes_by_tenant
+                .get(&policy.scope_id)
+                .copied()
+                .unwrap_or(0) as f64;
+            quota_pressure_candidates.push(quota_pressure_scope(
+                &policy.scope_id,
+                "asset_storage_bytes",
+                "bytes",
+                used,
+                cap as f64,
+            ));
+        }
+    }
+    let quota_pressure = build_quota_pressure(quota_pressure_candidates);
+
+    // Pending tool approvals (tenant-scoped by the record's organization_id).
+    let pending_tool_approvals =
+        count_pending_tool_approvals(&store.list_config_documents("tool_approval")?, tenant_scope);
+
+    // Policy-governance inventory is global-only: guardrail revisions/bindings
+    // carry no tenant column and the quota/policy tables span scope levels not
+    // per-tenant attributable without a join, so a tenant-scoped caller gets
+    // `None` (not-applicable) rather than a misleading number (#458).
+    let policy_governance = if tenant_scope.is_none() {
+        Some(PolicyGovernanceCounts {
+            guardrail_policy_revisions: store.list_guardrail_policy_revisions(None)?.len() as u64,
+            guardrail_policy_bindings: store.list_guardrail_policy_bindings()?.len() as u64,
+            quota_policies: quota_policies.len() as u64,
+            policy_rules: store.config_documents()?.policies.len() as u64,
+        })
+    } else {
+        None
+    };
 
     Ok(ControlPlaneOverviewAggregate {
         tenants,
         projects,
         workspaces,
         virtual_keys,
+        virtual_keys_enabled,
         assets: asset_count,
         asset_storage_bytes,
+        assets_referenced,
+        asset_storage_quota_bytes,
         agent_runs,
         agent_runs_by_status,
         self_hosted_workers,
         self_hosted_workers_by_status,
+        pending_tool_approvals,
+        quota_pressure,
+        policy_governance,
         usage_lifetime,
         usage_current_month,
     })

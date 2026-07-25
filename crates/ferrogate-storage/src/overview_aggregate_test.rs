@@ -13,9 +13,11 @@ use ferrogate_core::TenantContext;
 
 use crate::schema_routing_test_support::block_on;
 use crate::{
-    period_month_from_unix, AssetVisibility, RuntimeStorageRepositories, StorageProviderKind,
-    StoredAgentRun, StoredApiKey, StoredAsset, StoredProject, StoredSelfHostedWorkerRegistration,
-    StoredTenantAccount, StoredWorkspace,
+    asset_channel_id, guardrail_policy_revision_id, period_month_from_unix, quota_policy_id,
+    AssetVisibility, GuardrailPolicyRepository, QuotaScopeKind, RuntimeStorageRepositories,
+    StorageProviderKind, StoredAgentRun, StoredApiKey, StoredAsset, StoredAssetChannel,
+    StoredGuardrailPolicyRevision, StoredProject, StoredQuotaPolicy,
+    StoredSelfHostedWorkerRegistration, StoredTenantAccount, StoredWorkspace,
 };
 
 /// A month in the "current" window and one clearly in a prior month, so the
@@ -73,7 +75,13 @@ fn workspace(id: &str, project_id: &str, tenant_id: &str) -> StoredWorkspace {
     }
 }
 
-fn api_key(id: &str, tenant_id: &str, project_id: &str, workspace_id: &str) -> StoredApiKey {
+fn api_key(
+    id: &str,
+    tenant_id: &str,
+    project_id: &str,
+    workspace_id: &str,
+    enabled: bool,
+) -> StoredApiKey {
     StoredApiKey {
         id: id.to_string(),
         workspace_id: workspace_id.to_string(),
@@ -83,7 +91,7 @@ fn api_key(id: &str, tenant_id: &str, project_id: &str, workspace_id: &str) -> S
         key_prefix: "fg".into(),
         key_hash: format!("hash-{id}"),
         last4: "abcd".into(),
-        enabled: true,
+        enabled,
         scopes: Vec::new(),
         allowed_models: Vec::new(),
         allowed_providers: Vec::new(),
@@ -152,6 +160,60 @@ fn worker(id: &str, tenant_id: &str, status: &str) -> StoredSelfHostedWorkerRegi
     }
 }
 
+fn tenant_quota_policy(
+    tenant_id: &str,
+    monthly_budget_usd: Option<f64>,
+    asset_storage_quota_bytes: Option<u64>,
+) -> StoredQuotaPolicy {
+    StoredQuotaPolicy {
+        id: quota_policy_id(QuotaScopeKind::Tenant, tenant_id),
+        scope_type: QuotaScopeKind::Tenant,
+        scope_id: tenant_id.to_string(),
+        model_allowlist: Vec::new(),
+        rpm_limit: None,
+        tpm_limit: None,
+        monthly_budget_usd,
+        asset_storage_quota_bytes,
+        asset_max_object_bytes: None,
+        alert_threshold_pcts: Vec::new(),
+        enabled: true,
+        created_at_unix: 0,
+        updated_at_unix: 0,
+        monthly_egress_bytes_budget: None,
+        download_rpm_limit: None,
+    }
+}
+
+fn asset_channel(tenant_id: &str, name: &str, version: &str) -> StoredAssetChannel {
+    StoredAssetChannel {
+        id: asset_channel_id(tenant_id, "binary", name, "stable"),
+        tenant_id: tenant_id.to_string(),
+        asset_type: "binary".into(),
+        name: name.to_string(),
+        channel: "stable".into(),
+        version: version.to_string(),
+        updated_at_unix: 0,
+    }
+}
+
+fn guardrail_revision(policy_id: &str, revision: u32) -> StoredGuardrailPolicyRevision {
+    StoredGuardrailPolicyRevision {
+        id: guardrail_policy_revision_id(policy_id, revision),
+        policy_id: policy_id.to_string(),
+        revision,
+        policy_json: format!("{{\"revision\":{revision}}}"),
+        created_at_unix: u64::from(revision),
+        created_by: "admin".into(),
+    }
+}
+
+/// Minimal tool-approval config-document JSON. Only `status` and
+/// `tenant.organization_id` matter to the overview's pending count; the real
+/// record carries more, but the aggregate reads just these two.
+fn tool_approval_json(tenant_id: &str, status: &str) -> String {
+    format!("{{\"status\":\"{status}\",\"tenant\":{{\"organization_id\":\"{tenant_id}\"}}}}")
+}
+
 fn billing_event(
     request_id: &str,
     tenant_id: &str,
@@ -204,14 +266,24 @@ fn seed(repositories: &RuntimeStorageRepositories) {
     ] {
         block_on(repositories.upsert_workspace(workspace(ws, proj, "tenant-a"))).unwrap();
     }
-    for key in ["a-key-1", "a-key-2"] {
-        block_on(
-            repositories.upsert_api_key_record(api_key(key, "tenant-a", "a-proj-1", "a-ws-1")),
-        )
-        .unwrap();
-    }
+    // a-key-1 enabled, a-key-2 disabled: the enabled/disabled split is provable
+    // (2 total, 1 enabled) without changing the total-key counts (#458).
+    block_on(
+        repositories
+            .upsert_api_key_record(api_key("a-key-1", "tenant-a", "a-proj-1", "a-ws-1", true)),
+    )
+    .unwrap();
+    block_on(
+        repositories
+            .upsert_api_key_record(api_key("a-key-2", "tenant-a", "a-proj-1", "a-ws-1", false)),
+    )
+    .unwrap();
     block_on(repositories.upsert_asset(asset("a-asset-1", "tenant-a", 100))).unwrap();
     block_on(repositories.upsert_asset(asset("a-asset-2", "tenant-a", 200))).unwrap();
+    // Pin a-asset-1 with a channel so it is "referenced"; a-asset-2 stays
+    // unreferenced (#458).
+    block_on(repositories.upsert_asset_channel(asset_channel("tenant-a", "a-asset-1", "1.0.0")))
+        .unwrap();
     for (id, status) in [
         ("a-run-1", "succeeded"),
         ("a-run-2", "failed"),
@@ -247,10 +319,13 @@ fn seed(repositories: &RuntimeStorageRepositories) {
     block_on(repositories.upsert_project(project("b-proj-1", "tenant-b"))).unwrap();
     block_on(repositories.upsert_workspace(workspace("b-ws-1", "b-proj-1", "tenant-b"))).unwrap();
     block_on(
-        repositories.upsert_api_key_record(api_key("b-key-1", "tenant-b", "b-proj-1", "b-ws-1")),
+        repositories
+            .upsert_api_key_record(api_key("b-key-1", "tenant-b", "b-proj-1", "b-ws-1", true)),
     )
     .unwrap();
     block_on(repositories.upsert_asset(asset("b-asset-1", "tenant-b", 500))).unwrap();
+    block_on(repositories.upsert_asset_channel(asset_channel("tenant-b", "b-asset-1", "1.0.0")))
+        .unwrap();
     block_on(repositories.upsert_agent_run(agent_run("b-run-1", "tenant-b", "succeeded"))).unwrap();
     block_on(repositories.upsert_self_hosted_worker_registration(worker(
         "b-worker-1",
@@ -266,6 +341,51 @@ fn seed(repositories: &RuntimeStorageRepositories) {
         0.005,
     )))
     .unwrap();
+
+    // --- #458 breakdown data ---
+    // Quota policies: tenant-a is pushed OVER the pressure threshold on both
+    // dimensions (budget 0.01/0.011 = 90.91%, asset storage 300/320 = 93.75%);
+    // tenant-b's generous 1.0 budget (0.005/1.0 = 0.5%) stays well under, and it
+    // defines no asset-storage cap, so it never appears in the pressure list.
+    block_on(repositories.upsert_quota_policy(tenant_quota_policy(
+        "tenant-a",
+        Some(0.011),
+        Some(320),
+    )))
+    .unwrap();
+    block_on(repositories.upsert_quota_policy(tenant_quota_policy("tenant-b", Some(1.0), None)))
+        .unwrap();
+
+    // Guardrail governance (global-only): 2 revisions + 1 active binding.
+    repositories
+        .insert_guardrail_policy_revision(guardrail_revision("pii", 1))
+        .unwrap();
+    repositories
+        .insert_guardrail_policy_revision(guardrail_revision("pii", 2))
+        .unwrap();
+    repositories
+        .activate_guardrail_policy_revision("pii", 2, "admin", 20, false)
+        .unwrap();
+
+    // One policy-rule config document (global-only inventory).
+    repositories
+        .upsert_control_plane_policy("deny-eu", "{\"id\":\"deny-eu\"}".to_string())
+        .unwrap();
+
+    // Tool approvals: 2 pending (one per tenant) + 1 already approved, so the
+    // pending count is tenant-scopeable and never inflated by terminal records.
+    repositories
+        .upsert_control_plane_tool_approval("approval-a", tool_approval_json("tenant-a", "pending"))
+        .unwrap();
+    repositories
+        .upsert_control_plane_tool_approval(
+            "approval-a2",
+            tool_approval_json("tenant-a", "approved"),
+        )
+        .unwrap();
+    repositories
+        .upsert_control_plane_tool_approval("approval-b", tool_approval_json("tenant-b", "pending"))
+        .unwrap();
 }
 
 fn approx(actual: f64, expected: f64) {
@@ -335,6 +455,42 @@ fn overview_aggregate_global_matches_repositories() {
         Some(&1)
     );
 
+    // #458 breakdowns (global view).
+    // Virtual-key enabled/disabled split: 3 total, 1 disabled (a-key-2).
+    assert_eq!(global.virtual_keys, 3);
+    assert_eq!(global.virtual_keys_enabled, 2);
+    // Asset referenced/unreferenced: a-asset-1 and b-asset-1 are channel-pinned;
+    // a-asset-2 is not.
+    assert_eq!(global.assets_referenced, 2);
+    assert_eq!(global.assets - global.assets_referenced, 1);
+    // Global has no single per-scope asset-storage quota -> None (never faked).
+    assert_eq!(global.asset_storage_quota_bytes, None);
+    // Pending approvals: both tenants' pending records, not the approved one.
+    assert_eq!(global.pending_tool_approvals, 2);
+    // Quota pressure: both of tenant-a's dimensions are over threshold, ordered
+    // most-utilized first (asset 93.75% before budget 90.91%); tenant-b is under
+    // threshold and absent.
+    assert_eq!(global.quota_pressure.len(), 2);
+    assert!(global
+        .quota_pressure
+        .iter()
+        .all(|scope| scope.scope_id == "tenant-a"));
+    assert_eq!(global.quota_pressure[0].dimension, "asset_storage_bytes");
+    assert_eq!(global.quota_pressure[0].unit, "bytes");
+    approx(global.quota_pressure[0].utilization_pct, 93.75);
+    assert_eq!(global.quota_pressure[1].dimension, "monthly_budget_usd");
+    assert_eq!(global.quota_pressure[1].unit, "usd");
+    approx(global.quota_pressure[1].utilization_pct, 90.91);
+    // Global-only policy-governance inventory is populated for the platform view.
+    let governance = global
+        .policy_governance
+        .as_ref()
+        .expect("global scope carries the policy-governance inventory");
+    assert_eq!(governance.guardrail_policy_revisions, 2);
+    assert_eq!(governance.guardrail_policy_bindings, 1);
+    assert_eq!(governance.quota_policies, 2);
+    assert_eq!(governance.policy_rules, 1);
+
     // Lifetime = every month; current month excludes the previous-month rows.
     assert_eq!(global.usage_lifetime.total_tokens, 175);
     assert_eq!(global.usage_lifetime.prompt_tokens, 117);
@@ -375,6 +531,40 @@ fn overview_aggregate_tenant_scope_does_not_leak_other_tenants() {
         Some(&1)
     );
 
+    // #458 breakdowns, tenant-a scope: only tenant-a's numbers.
+    assert_eq!(scoped.virtual_keys, 2);
+    assert_eq!(scoped.virtual_keys_enabled, 1);
+    assert_eq!(scoped.assets_referenced, 1);
+    assert_eq!(scoped.assets - scoped.assets_referenced, 1);
+    // tenant-a defines an asset-storage override; it is surfaced per-scope.
+    assert_eq!(scoped.asset_storage_quota_bytes, Some(320));
+    // Only tenant-a's pending approval, never tenant-b's.
+    assert_eq!(scoped.pending_tool_approvals, 1);
+    // Quota pressure is tenant-a's two dimensions, and RBAC no-leak: every entry
+    // is tenant-a's scope -- tenant-b's rows can never appear here.
+    assert_eq!(scoped.quota_pressure.len(), 2);
+    assert!(scoped
+        .quota_pressure
+        .iter()
+        .all(|scope| scope.scope_id == "tenant-a"));
+    // RBAC no-leak: the global-only policy-governance inventory is withheld from
+    // a tenant-scoped caller (guardrail/quota/policy counts never cross scope).
+    assert_eq!(scoped.policy_governance, None);
+
+    // A second tenant sees only ITS pending approval, no quota pressure (its
+    // budget is far under threshold, no asset cap), no override, and no
+    // governance inventory -- proving no tenant-a numbers leak in either
+    // direction.
+    let scoped_b =
+        block_on(repositories.overview_aggregate(Some("tenant-b"), &current_month)).unwrap();
+    assert_eq!(scoped_b.virtual_keys, 1);
+    assert_eq!(scoped_b.virtual_keys_enabled, 1);
+    assert_eq!(scoped_b.assets_referenced, 1);
+    assert_eq!(scoped_b.pending_tool_approvals, 1);
+    assert!(scoped_b.quota_pressure.is_empty());
+    assert_eq!(scoped_b.asset_storage_quota_bytes, None);
+    assert_eq!(scoped_b.policy_governance, None);
+
     // Usage is tenant-a only: lifetime 150 + 15, current month 150.
     assert_eq!(scoped.usage_lifetime.total_tokens, 165);
     assert_eq!(scoped.usage_lifetime.request_count, 2);
@@ -390,6 +580,14 @@ fn overview_aggregate_tenant_scope_does_not_leak_other_tenants() {
     assert_eq!(empty.assets, 0);
     assert_eq!(empty.usage_lifetime.total_tokens, 0);
     assert!(empty.agent_runs_by_status.is_empty());
+    // #458: an empty scope is an honest all-zero/absent, never another tenant's
+    // numbers.
+    assert_eq!(empty.virtual_keys_enabled, 0);
+    assert_eq!(empty.assets_referenced, 0);
+    assert_eq!(empty.pending_tool_approvals, 0);
+    assert!(empty.quota_pressure.is_empty());
+    assert_eq!(empty.asset_storage_quota_bytes, None);
+    assert_eq!(empty.policy_governance, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +652,28 @@ fn live_overview_aggregate_pushdown_matches_repositories() {
     assert_eq!(global.usage_lifetime.total_tokens, 175);
     assert_eq!(global.usage_current_month.total_tokens, 160);
     approx(global.usage_lifetime.cost_usd, 0.017);
+    // #458 breakdowns: the COUNT/SUM/EXISTS/join pushdown must return the same
+    // numbers the in-memory fold does.
+    assert_eq!(global.virtual_keys_enabled, 2);
+    assert_eq!(global.assets_referenced, 2);
+    assert_eq!(global.asset_storage_quota_bytes, None);
+    assert_eq!(global.pending_tool_approvals, 2);
+    assert_eq!(global.quota_pressure.len(), 2);
+    assert!(global
+        .quota_pressure
+        .iter()
+        .all(|scope| scope.scope_id == "tenant-a"));
+    assert_eq!(global.quota_pressure[0].dimension, "asset_storage_bytes");
+    approx(global.quota_pressure[0].utilization_pct, 93.75);
+    approx(global.quota_pressure[1].utilization_pct, 90.91);
+    let governance = global
+        .policy_governance
+        .as_ref()
+        .expect("global scope carries the policy-governance inventory");
+    assert_eq!(governance.guardrail_policy_revisions, 2);
+    assert_eq!(governance.guardrail_policy_bindings, 1);
+    assert_eq!(governance.quota_policies, 2);
+    assert_eq!(governance.policy_rules, 1);
 
     // Tenant scoping pushes `WHERE tenant = $1` into every count/sum: no leak.
     let scoped =
@@ -464,4 +684,15 @@ fn live_overview_aggregate_pushdown_matches_repositories() {
     assert_eq!(scoped.asset_storage_bytes, 300);
     assert_eq!(scoped.usage_lifetime.total_tokens, 165);
     assert_eq!(scoped.usage_current_month.total_tokens, 150);
+    // #458 tenant-scoped breakdowns + RBAC no-leak under the SQL pushdown.
+    assert_eq!(scoped.virtual_keys_enabled, 1);
+    assert_eq!(scoped.assets_referenced, 1);
+    assert_eq!(scoped.asset_storage_quota_bytes, Some(320));
+    assert_eq!(scoped.pending_tool_approvals, 1);
+    assert_eq!(scoped.quota_pressure.len(), 2);
+    assert!(scoped
+        .quota_pressure
+        .iter()
+        .all(|scope| scope.scope_id == "tenant-a"));
+    assert_eq!(scoped.policy_governance, None);
 }
