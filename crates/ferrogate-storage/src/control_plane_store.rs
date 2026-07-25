@@ -598,6 +598,28 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
     ) -> Result<Vec<StoredSiteDomain>, StorageError>;
     async fn delete_site_domain(&self, hostname: &str) -> Result<bool, StorageError>;
 
+    // Site-domain DNS ownership proofs (#488). Keyed on (tenant_id, hostname)
+    // so a challenge one tenant started can never be read or redeemed by
+    // another.
+    async fn upsert_site_domain_verification(
+        &self,
+        verification: StoredSiteDomainVerification,
+    ) -> Result<(), StorageError>;
+    async fn get_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomainVerification>, StorageError>;
+    async fn list_site_domain_verifications(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomainVerification>, StorageError>;
+    async fn delete_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<bool, StorageError>;
+
     // Per-metadata usage rollups (#171).
     async fn list_usage_metadata_rollups(
         &self,

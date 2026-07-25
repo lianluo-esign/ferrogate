@@ -243,6 +243,14 @@ pub use agent_schedule::{
 mod site_domain;
 pub use site_domain::StoredSiteDomain;
 
+// #488: DNS-TXT ownership proof gating whether a bound custom hostname may
+// actually serve. A `StoredSiteDomain` records intent; this records evidence.
+mod site_domain_verification;
+pub use site_domain_verification::{
+    site_domain_verification_key, SiteDomainVerificationState, StoredSiteDomainVerification,
+    SITE_DOMAIN_CHALLENGE_TTL_SECONDS, SITE_DOMAIN_VERIFICATION_TTL_SECONDS,
+};
+
 // #357: durable, coalesced observed-agent presence backing the observed-agent
 // -activity surface's "recent activity" (running) signal.
 mod observed_agent_presence;
@@ -1332,6 +1340,9 @@ pub struct RuntimeControlPlaneState {
     retention_policies: InMemoryRepository<StoredRetentionPolicy>,
     /// Custom-domain -> static-site bindings keyed by hostname (#265).
     site_domains: InMemoryRepository<StoredSiteDomain>,
+    /// DNS-TXT ownership proofs keyed by
+    /// `site_domain_verification_key(tenant_id, hostname)` (#488).
+    site_domain_verifications: InMemoryRepository<StoredSiteDomainVerification>,
     /// Durable coalesced virtual-key presence keyed by
     /// `observed_agent_presence_key(tenant_id, api_key_id)` (#357).
     observed_agent_presence: InMemoryRepository<StoredObservedAgentPresence>,
@@ -8801,6 +8812,7 @@ where
         "workflow_run_budgets",
         "retention_policies",
         "site_domains",
+        "site_domain_verifications",
         "observed_agent_presence",
         "agent_cost_burn",
     ];
@@ -9988,6 +10000,7 @@ impl RuntimeControlPlaneState {
             workflow_run_budgets: InMemoryRepository::new(),
             retention_policies: InMemoryRepository::new(),
             site_domains: InMemoryRepository::new(),
+            site_domain_verifications: InMemoryRepository::new(),
             observed_agent_presence: InMemoryRepository::new(),
             agent_cost_burn: InMemoryRepository::new(),
         }

@@ -2,15 +2,22 @@
 // Developed by the commercial cloud service company represented by https://token4ai.cloud.
 // Author: jamesduan (X: https://x.com/JamesDuanL)
 // Created: 2026-07-20
-// description: End-to-end coverage for static-site custom domains (#265).
-// Publishes site bundles through a real gateway process, binds a custom
-// hostname via the audited admin API, browses the site by `Host:` header
-// through the same serve/visibility path as `/sites/{tenant}/{site}/...`,
-// then unbinds and confirms the hostname stops resolving. Also proves the
-// tenant-scoping (cross-tenant conflict) and validation rejects, and the
-// bind/unbind audit events.
+// description: End-to-end coverage for static-site custom domains (#265) and
+// the #488 DNS ownership gate in front of them. Publishes site bundles through
+// a real gateway process, binds a custom hostname via the audited admin API,
+// proves the bound-but-UNVERIFIED hostname does not serve, completes the DNS
+// TXT challenge through the zone-file resolver backend, browses the site by
+// `Host:` header through the same serve/visibility path as
+// `/sites/{tenant}/{site}/...`, then unbinds and confirms the hostname stops
+// resolving. Also proves the tenant-scoping (cross-tenant conflict/challenge
+// isolation), the resolver-unavailable-is-not-verified posture, the validation
+// rejects, and the bind/verify/unbind audit events.
 //
 // Opt-in: requires FERROGATE_SUPABASE_DSN, like `static_site_serve.rs`.
+// The gateway child runs with FERROGATE_SITE_DOMAIN_RESOLVER=zone-file so the
+// ownership challenge resolves deterministically from a local file instead of
+// the public DNS -- the seam, not a bypass: the file must carry the EXACT
+// expected value under the EXACT challenge name.
 // TLS/ACME is intentionally NOT exercised here (a real issuance needs a
 // publicly resolvable hostname); the ACME merge + reload marking is covered
 // by unit tests in `src/acme.rs`.
@@ -18,7 +25,7 @@
 mod support;
 
 use support::{
-    free_addr, http_request, http_request_bytes, http_request_with_host, start_gateway,
+    free_addr, http_request, http_request_bytes, http_request_with_host, start_gateway_with_env,
     wait_for_gateway,
 };
 
@@ -37,7 +44,20 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
     let config_path = dir.path().join("ferrogate.toml");
     std::fs::write(&config_path, sites_config(&gateway_addr, &dsn)).unwrap();
 
-    let mut gateway = start_gateway(&config_path);
+    // The #488 challenge resolver reads this file on every lookup; it does not
+    // exist yet, which is exactly the "resolver unavailable" case asserted
+    // below before any record is published.
+    let zone_file = dir.path().join("challenge-zone.txt");
+    let mut gateway = start_gateway_with_env(
+        &config_path,
+        &[
+            ("FERROGATE_SITE_DOMAIN_RESOLVER", "zone-file"),
+            (
+                "FERROGATE_SITE_DOMAIN_RESOLVER_ZONE_FILE",
+                zone_file.to_str().unwrap(),
+            ),
+        ],
+    );
     wait_for_gateway(&gateway_addr);
 
     let register = http_request(
@@ -150,7 +170,8 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         "wildcard hostname must be rejected: {invalid}"
     );
 
-    // 4. Bind the public site (hostname is normalized lowercase).
+    // 4. Bind the public site (hostname is normalized lowercase). Under #488 a
+    //    bind only ISSUES a challenge: 202, pending_verification, not serving.
     let bind = http_request(
         &gateway_addr,
         "POST",
@@ -161,7 +182,10 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         ],
         r#"{"hostname":"MySite.Example.COM","tenant_id":"org_demo","site":"marketing"}"#,
     );
-    assert!(bind.contains("HTTP/1.1 201"), "bind failed: {bind}");
+    assert!(
+        bind.contains("HTTP/1.1 202"),
+        "bind must be accepted-but-pending until DNS ownership is proven: {bind}"
+    );
     assert!(
         bind.contains("\"hostname\":\"mysite.example.com\""),
         "bound hostname must be normalized: {bind}"
@@ -170,8 +194,83 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         bind.contains("\"serve_path\":\"/sites/org_demo/marketing/\""),
         "bind response body: {bind}"
     );
+    assert!(
+        bind.contains("\"state\":\"pending_verification\"") && bind.contains("\"serving\":false"),
+        "bind response must report the pending ownership state: {bind}"
+    );
+    assert!(
+        bind.contains("\"challenge_record_name\":\"_ferrogate-challenge.mysite.example.com\""),
+        "bind response must tell the operator which TXT record to publish: {bind}"
+    );
 
-    // 5. The bound hostname serves the site's index by Host header alone.
+    // 4b. #488 REGRESSION: a bound but UNVERIFIED hostname must not serve.
+    let unverified =
+        http_request_with_host(&gateway_addr, "mysite.example.com", "GET", "/", &[], "");
+    assert!(
+        unverified.contains("HTTP/1.1 404"),
+        "a bound hostname with no DNS ownership proof must not serve: {unverified}"
+    );
+
+    // 4c. The resolver cannot answer yet (no zone file): 503, NOT a pass, and
+    //     the hostname still does not serve. Unavailable is not verified.
+    let unresolvable = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains/mysite.example.com/verify",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        unresolvable.contains("HTTP/1.1 503") && unresolvable.contains("dns_resolver_unavailable"),
+        "an unreachable resolver must fail closed, not verify: {unresolvable}"
+    );
+    let still_unverified =
+        http_request_with_host(&gateway_addr, "mysite.example.com", "GET", "/", &[], "");
+    assert!(
+        still_unverified.contains("HTTP/1.1 404"),
+        "a failed verification attempt must not make the hostname servable: {still_unverified}"
+    );
+
+    // 4d. A challenge is keyed on (tenant, hostname): another tenant cannot
+    //     redeem the one org_demo started, it does not even exist for them.
+    let foreign_verify = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains/mysite.example.com/verify",
+        &["Authorization: Bearer scoped-admin-secret"],
+        "",
+    );
+    assert!(
+        foreign_verify.contains("HTTP/1.1 404")
+            && foreign_verify.contains("site_domain_challenge_not_found"),
+        "tenant B must not be able to redeem tenant A's challenge: {foreign_verify}"
+    );
+
+    // 4e. Publish the challenge TXT record and complete verification.
+    let challenge_value = json_string_field(&bind, "challenge_record_value")
+        .unwrap_or_else(|| panic!("bind response must carry the challenge value: {bind}"));
+    std::fs::write(
+        &zone_file,
+        format!("_ferrogate-challenge.mysite.example.com {challenge_value}\n"),
+    )
+    .unwrap();
+    let verify = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains/mysite.example.com/verify",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        verify.contains("HTTP/1.1 200") && verify.contains("\"state\":\"verified\""),
+        "publishing the exact challenge TXT must verify the domain: {verify}"
+    );
+    assert!(
+        verify.contains("\"serving\":true"),
+        "a verified domain must report as serving: {verify}"
+    );
+
+    // 5. The verified hostname serves the site's index by Host header alone.
     let index = http_request_with_host(&gateway_addr, "mysite.example.com", "GET", "/", &[], "");
     assert!(
         index.contains("HTTP/1.1 200"),
@@ -220,6 +319,10 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         get.contains("HTTP/1.1 200") && get.contains("\"site\":\"marketing\""),
         "site-domain get: {get}"
     );
+    assert!(
+        get.contains("\"verification_state\":\"verified\"") && get.contains("\"serving\":true"),
+        "the ownership state must be visible on the single-domain read: {get}"
+    );
 
     // 7. Visibility still honors the site's public/private setting: bind the
     //    PRIVATE site to another hostname and confirm it fails closed.
@@ -234,8 +337,30 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         r#"{"hostname":"secret.example.com","tenant_id":"org_demo","site":"internal"}"#,
     );
     assert!(
-        bind_private.contains("HTTP/1.1 201"),
+        bind_private.contains("HTTP/1.1 202"),
         "private bind failed: {bind_private}"
+    );
+    let private_challenge = json_string_field(&bind_private, "challenge_record_value")
+        .unwrap_or_else(|| panic!("private bind must carry a challenge: {bind_private}"));
+    std::fs::write(
+        &zone_file,
+        format!(
+            "_ferrogate-challenge.mysite.example.com {challenge_value}\n\
+             _ferrogate-challenge.secret.example.com {private_challenge}\n"
+        ),
+    )
+    .unwrap();
+    let verify_private = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/site-domains/secret.example.com/verify",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        verify_private.contains("HTTP/1.1 200")
+            && verify_private.contains("\"state\":\"verified\""),
+        "private domain verification failed: {verify_private}"
     );
     let anon_private =
         http_request_with_host(&gateway_addr, "secret.example.com", "GET", "/", &[], "");
@@ -325,9 +450,23 @@ fn custom_domain_bind_serve_and_unbind_round_trip() {
         audit.contains("site_domain.unbind"),
         "expected a site_domain.unbind audit event: {audit}"
     );
+    assert!(
+        audit.contains("site_domain.verify"),
+        "expected a site_domain.verify audit event: {audit}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
+}
+
+/// Extracts `"<field>":"<value>"` from a raw HTTP response body. Enough for
+/// the flat admin JSON these assertions read, without a JSON dependency here.
+fn json_string_field(response: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\":\"");
+    let start = response.find(&needle)? + needle.len();
+    let rest = &response[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Builds a minimal ZIP archive with stored (uncompressed) entries -- enough

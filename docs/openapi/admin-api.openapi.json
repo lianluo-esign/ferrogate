@@ -11886,6 +11886,70 @@
         }
       }
     },
+    "/admin/v1/site-domains/{hostname}/verify": {
+      "post": {
+        "operationId": "verifySiteDomain",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Redeem the DNS-TXT ownership challenge for a bound custom hostname (audited).",
+        "description": "Resolves _ferrogate-challenge.<hostname> and, only on an exact match with the value issued for this (tenant, hostname), promotes the binding to servable and adds it to the ACME domain set. A resolver that cannot answer returns 503 and never verifies (#488).",
+        "parameters": [
+          {
+            "name": "hostname",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "required": false,
+            "description": "Whose challenge to redeem. Required for a platform-operator key; a tenant-scoped key is always pinned to its own tenant.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ownership verified; the hostname now serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSiteDomainResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/v1/assets/storage/summary": {
       "get": {
         "operationId": "getAssetStorageSummary",
@@ -25782,6 +25846,21 @@
             "type": "string",
             "description": "Equivalent path-based serve prefix, /sites/{tenant}/{site}/."
           },
+          "verification_state": {
+            "type": "string",
+            "enum": [
+              "no_verification",
+              "pending_verification",
+              "verified",
+              "grandfathered",
+              "expired"
+            ],
+            "description": "DNS ownership state as of now, expiry applied (#488). no_verification means no proof record exists. Only verified and grandfathered serve."
+          },
+          "serving": {
+            "type": "boolean",
+            "description": "Whether a request arriving on this hostname is actually served. False for every state without a live DNS ownership proof (#488)."
+          },
           "created_at_unix": {
             "type": "integer",
             "format": "int64"
@@ -25850,6 +25929,9 @@
           },
           "acme": {
             "$ref": "#/components/schemas/AdminSiteDomainAcme"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/AdminSiteDomainVerification"
           }
         },
         "additionalProperties": false
@@ -27004,6 +27086,96 @@
           },
           "allow_insecure_local_resources": false
         }
+      },
+      "AdminSiteDomainVerification": {
+        "type": "object",
+        "description": "The DNS-TXT ownership proof (or in-flight challenge) for one (tenant, hostname) pair (#488). A bound hostname only serves while this resolves to verified or grandfathered.",
+        "required": [
+          "object",
+          "state",
+          "serves",
+          "tenant_id",
+          "hostname",
+          "site",
+          "challenge_record_name",
+          "challenge_record_type",
+          "challenge_record_value",
+          "issued_at_unix",
+          "token_expires_at_unix",
+          "attempt_count"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "site_domain_verification"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending_verification",
+              "verified",
+              "grandfathered",
+              "expired"
+            ],
+            "description": "State as of now, with token/re-verification expiry applied."
+          },
+          "serves": {
+            "type": "boolean"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "challenge_record_name": {
+            "type": "string",
+            "description": "The DNS name to publish the TXT record at, _ferrogate-challenge.<hostname>."
+          },
+          "challenge_record_type": {
+            "type": "string",
+            "const": "TXT"
+          },
+          "challenge_record_value": {
+            "type": "string",
+            "description": "The exact TXT value to publish: a digest bound to this tenant, hostname, and issued token."
+          },
+          "issued_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "token_expires_at_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "verified_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "verification_expires_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "last_checked_at_unix": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "last_failure_reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "attempt_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

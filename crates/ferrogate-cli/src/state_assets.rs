@@ -235,6 +235,55 @@ impl AppState {
         Ok(self.repositories.delete_site_domain(hostname).await?)
     }
 
+    /// Writes (or refreshes) the DNS ownership proof / challenge for
+    /// `(tenant_id, hostname)` (#488). A `StoredSiteDomain` is intent; this is
+    /// the evidence the serve gate requires.
+    pub(crate) async fn upsert_site_domain_verification(
+        &self,
+        verification: ferrogate_storage::StoredSiteDomainVerification,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .repositories
+            .upsert_site_domain_verification(verification)
+            .await?)
+    }
+
+    /// Reads the proof for exactly `(tenant_id, hostname)`. `Ok(None)` means no
+    /// proof exists at all, which the serve gate treats as NOT servable.
+    pub(crate) async fn get_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> anyhow::Result<Option<ferrogate_storage::StoredSiteDomainVerification>> {
+        Ok(self
+            .repositories
+            .get_site_domain_verification(tenant_id, hostname)
+            .await?)
+    }
+
+    /// Lists proofs; `None` is the platform-operator view used by the #488
+    /// startup migration backfill.
+    pub(crate) async fn list_site_domain_verifications(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ferrogate_storage::StoredSiteDomainVerification>> {
+        Ok(self
+            .repositories
+            .list_site_domain_verifications(tenant_id)
+            .await?)
+    }
+
+    pub(crate) async fn delete_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .repositories
+            .delete_site_domain_verification(tenant_id, hostname)
+            .await?)
+    }
+
     /// Cumulative stored bytes for a tenant across all asset types, used to
     /// enforce `StoredPlan::default_asset_storage_quota_bytes` at push time.
     pub(crate) async fn tenant_asset_storage_bytes_used(

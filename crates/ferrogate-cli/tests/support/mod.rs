@@ -19,12 +19,22 @@ pub fn free_addr() -> String {
 }
 
 pub fn start_gateway(config: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+    start_gateway_with_env(config, &[])
+}
+
+/// Start a gateway with extra environment variables. Used by tests that need to
+/// select an env-configured seam backend in the child process (e.g. the #488
+/// site-domain zone-file DNS resolver).
+pub fn start_gateway_with_env(config: &std::path::Path, env: &[(&str, &str)]) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrogate"));
+    command
         .args(["run", "--config", config.to_str().unwrap()])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.spawn().unwrap()
 }
 
 pub fn wait_for_gateway(addr: &str) {

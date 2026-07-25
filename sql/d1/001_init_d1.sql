@@ -346,6 +346,31 @@ CREATE TABLE IF NOT EXISTS site_domains (
 CREATE INDEX IF NOT EXISTS idx_site_domains_tenant
     ON site_domains(tenant_id);
 
+-- DNS-TXT ownership proof gating whether a bound custom hostname may actually
+-- serve (issue #488; Postgres migration 58). `site_domains` records INTENT;
+-- this records EVIDENCE. Keyed on (tenant_id, hostname), NOT on hostname alone:
+-- a challenge one tenant started can never be redeemed by another, and several
+-- tenants may hold a PENDING challenge for the same hostname so a squatter's
+-- unverified binding cannot block the tenant that actually owns the domain.
+-- Control database, same routing as site_domains (the two are read together on
+-- the serve path).
+CREATE TABLE IF NOT EXISTS site_domain_verifications (
+    tenant_id TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    site TEXT NOT NULL,
+    state TEXT NOT NULL,
+    challenge_token TEXT NOT NULL,
+    issued_at_unix INTEGER NOT NULL,
+    token_expires_at_unix INTEGER NOT NULL,
+    verified_at_unix INTEGER,
+    verification_expires_at_unix INTEGER,
+    last_checked_at_unix INTEGER,
+    last_failure_reason TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    updated_at_unix INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, hostname)
+);
+
 -- Idempotency ledger for proactive budget-threshold alerting (issue #170):
 -- exactly one row per (scope, period, tier). The Postgres CHECK on scope_type
 -- is dropped (QuotaScopeKind is validated in Rust); threshold_pct is a small

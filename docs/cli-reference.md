@@ -4595,6 +4595,7 @@ Subcommands:
 - `list` — List bound site domains
 - `get` — Show a site domain binding
 - `bind` — Bind a custom domain to a site
+- `verify` — Verify DNS ownership of a bound custom domain
 - `unbind` — Unbind a custom domain
 
 ##### `ferrogate ctl site-domains list`
@@ -4650,6 +4651,31 @@ Options:
 ##### `ferrogate ctl site-domains bind`
 
 Bind a custom domain to a site
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl site-domains verify`
+
+Verify DNS ownership of a bound custom domain
 
 Arguments:
 

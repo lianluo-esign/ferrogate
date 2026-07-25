@@ -48,6 +48,7 @@ mod rbac;
 mod responses_stream;
 mod route_groups;
 mod shadow;
+mod site_domain_verification;
 mod site_domains;
 mod sites;
 mod usage_reports;
@@ -198,17 +199,64 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     // initial issuance and the renewal loop below then cover them through the
     // exact same multi-SAN order as the statically configured domains.
     let state = SharedAppState::try_with_source_path(config, source_path)?;
-    if tls.acme.enabled {
-        match block_on_sync_bridge(state.current().list_site_domains(None)) {
-            Ok(domains) => {
-                let added = crate::acme::merge_acme_domains(
-                    &mut tls.acme,
-                    domains.into_iter().map(|domain| domain.hostname),
+    // #488 one-time migration: every binding that predates DNS ownership
+    // verification gets an EXPLICIT verification record (grandfathered by
+    // default so live customer domains do not go dark on upgrade; forced to
+    // pending_verification under FERROGATE_SITE_DOMAIN_GRANDFATHER=false).
+    // Runs before the ACME merge and regardless of TLS, because the data-plane
+    // serve gate -- not just certificate issuance -- depends on it.
+    let site_domain_now = site_domain_verification::now_unix_seconds();
+    match block_on_sync_bridge(
+        site_domain_verification::backfill_site_domain_verifications(
+            &state.current(),
+            site_domain_now,
+        ),
+    ) {
+        Ok(report) => {
+            if !report.grandfathered.is_empty() {
+                tracing::warn!(
+                    domains = report.grandfathered.join(","),
+                    count = report.grandfathered.len(),
+                    "GRANDFATHERED pre-#488 site custom domains: these serve WITHOUT a DNS \
+                     ownership proof. Re-bind + verify each one, or restart with \
+                     FERROGATE_SITE_DOMAIN_GRANDFATHER=false to force them to \
+                     pending_verification"
                 );
+            }
+            if !report.forced_pending.is_empty() {
+                tracing::warn!(
+                    domains = report.forced_pending.join(","),
+                    count = report.forced_pending.len(),
+                    "pre-#488 site custom domains forced to pending_verification and NO LONGER \
+                     SERVING until their DNS TXT challenge is completed"
+                );
+            }
+        }
+        Err(error) => {
+            // Fail-closed by construction: without a record the serve gate
+            // already refuses, so a failed backfill withholds domains rather
+            // than opening them.
+            tracing::warn!(
+                "failed to backfill site custom-domain ownership verifications; \
+                 affected domains stay unverified and will NOT serve: {error}"
+            );
+        }
+    }
+    if tls.acme.enabled {
+        // #488: only hostnames with a LIVE ownership proof enter the order set.
+        // An unproven hostname would fail issuance repeatedly and burn the
+        // account's failed-order rate limit for everyone else on it.
+        match block_on_sync_bridge(site_domain_verification::servable_site_domain_hostnames(
+            &state.current(),
+            site_domain_now,
+        )) {
+            Ok(hostnames) => {
+                let added = crate::acme::merge_acme_domains(&mut tls.acme, hostnames);
                 if !added.is_empty() {
                     info!(
                         domains = added.join(","),
-                        "merged bound site custom domains into the ACME certificate domain set"
+                        "merged DNS-verified bound site custom domains into the ACME \
+                         certificate domain set"
                     );
                 }
             }

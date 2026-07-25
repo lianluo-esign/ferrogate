@@ -293,7 +293,7 @@ pub fn build_asset_channels(verb: &str, input: &ResourceInput) -> CliResult<Requ
     }
 }
 
-/// Static-site custom-domain lifecycle: list/get/bind/unbind.
+/// Static-site custom-domain lifecycle: list/get/bind/verify/unbind.
 pub struct SiteDomainsGroup;
 
 impl CommandGroup for SiteDomainsGroup {
@@ -305,6 +305,11 @@ impl CommandGroup for SiteDomainsGroup {
                 VerbDescriptor::api("list", "List bound site domains", "listSiteDomains"),
                 VerbDescriptor::api("get", "Show a site domain binding", "getSiteDomain"),
                 VerbDescriptor::api("bind", "Bind a custom domain to a site", "bindSiteDomain"),
+                VerbDescriptor::api(
+                    "verify",
+                    "Verify DNS ownership of a bound custom domain",
+                    "verifySiteDomain",
+                ),
                 VerbDescriptor::api("unbind", "Unbind a custom domain", "unbindSiteDomain"),
             ],
         )
@@ -312,13 +317,18 @@ impl CommandGroup for SiteDomainsGroup {
 }
 
 /// Build the request for a `site-domains` verb. `bind` posts a binding document
-/// to the collection; `get`/`unbind` address one hostname; `list` reads the
+/// to the collection; `get`/`unbind` address one hostname; `verify` posts the
+/// `#488` DNS-ownership challenge redemption for one hostname; `list` reads the
 /// collection (a `tenant` filter is supplied via list params).
 pub fn build_site_domains(verb: &str, input: &ResourceInput) -> CliResult<RequestSpec> {
     match verb {
         "list" => SITE_DOMAINS.read(&[], &input.list),
         "get" => SITE_DOMAINS.get(&[first_segment(input, "site-domain")?]),
         "bind" => SITE_DOMAINS.create(input.require_body(verb)?),
+        "verify" => SITE_DOMAINS.action(
+            &[first_segment(input, "site-domain")?, "verify"],
+            input.body.clone(),
+        ),
         "unbind" => SITE_DOMAINS.delete(&[first_segment(input, "site-domain")?]),
         other => Err(CliError::usage(format!(
             "verb '{other}' is not a site-domains verb"

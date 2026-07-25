@@ -1716,6 +1716,59 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .delete_site_domain(hostname))
     }
 
+    // Site-domain DNS ownership proofs (#488). A poisoned lock is an ERROR, not
+    // an empty read: the serve gate must never see "no proof" because the store
+    // was unavailable.
+    async fn upsert_site_domain_verification(
+        &self,
+        verification: StoredSiteDomainVerification,
+    ) -> Result<(), StorageError> {
+        self.lock()
+            .map_err(|_| {
+                StorageError::Runtime("site domain verification repository lock poisoned".into())
+            })?
+            .upsert_site_domain_verification(verification);
+        Ok(())
+    }
+
+    async fn get_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomainVerification>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| {
+                StorageError::Runtime("site domain verification repository lock poisoned".into())
+            })?
+            .get_site_domain_verification(tenant_id, hostname))
+    }
+
+    async fn list_site_domain_verifications(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomainVerification>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| {
+                StorageError::Runtime("site domain verification repository lock poisoned".into())
+            })?
+            .list_site_domain_verifications(tenant_id))
+    }
+
+    async fn delete_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| {
+                StorageError::Runtime("site domain verification repository lock poisoned".into())
+            })?
+            .delete_site_domain_verification(tenant_id, hostname))
+    }
+
     async fn list_usage_metadata_rollups(
         &self,
         metadata_key: &str,

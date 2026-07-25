@@ -1226,6 +1226,38 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
         self.delete_site_domain(hostname).await
     }
 
+    // Site-domain DNS ownership proofs (#488).
+    async fn upsert_site_domain_verification(
+        &self,
+        verification: StoredSiteDomainVerification,
+    ) -> Result<(), StorageError> {
+        self.upsert_site_domain_verification(&verification).await
+    }
+
+    async fn get_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomainVerification>, StorageError> {
+        self.get_site_domain_verification(tenant_id, hostname).await
+    }
+
+    async fn list_site_domain_verifications(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomainVerification>, StorageError> {
+        self.list_site_domain_verifications(tenant_id).await
+    }
+
+    async fn delete_site_domain_verification(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<bool, StorageError> {
+        self.delete_site_domain_verification(tenant_id, hostname)
+            .await
+    }
+
     async fn list_usage_metadata_rollups(
         &self,
         metadata_key: &str,

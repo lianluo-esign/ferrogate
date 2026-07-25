@@ -543,6 +543,50 @@ impl From<SiteDomainRow> for StoredSiteDomain {
 }
 
 #[derive(Deserialize)]
+pub(super) struct SiteDomainVerificationRow {
+    pub(super) tenant_id: String,
+    pub(super) hostname: String,
+    pub(super) site: String,
+    pub(super) state: String,
+    pub(super) challenge_token: String,
+    pub(super) issued_at_unix: i64,
+    pub(super) token_expires_at_unix: i64,
+    pub(super) verified_at_unix: Option<i64>,
+    pub(super) verification_expires_at_unix: Option<i64>,
+    pub(super) last_checked_at_unix: Option<i64>,
+    pub(super) last_failure_reason: Option<String>,
+    pub(super) attempt_count: i64,
+    pub(super) updated_at_unix: i64,
+}
+
+impl SiteDomainVerificationRow {
+    /// An unrecognized `state` is an ERROR, never a servable default (#488).
+    pub(super) fn into_stored(self) -> Result<StoredSiteDomainVerification, StorageError> {
+        let state = SiteDomainVerificationState::from_str_opt(&self.state).ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "cloudflare d1: unknown site_domain_verifications.state {}",
+                self.state
+            ))
+        })?;
+        Ok(StoredSiteDomainVerification {
+            tenant_id: self.tenant_id,
+            hostname: self.hostname,
+            site: self.site,
+            state,
+            challenge_token: self.challenge_token,
+            issued_at_unix: self.issued_at_unix,
+            token_expires_at_unix: self.token_expires_at_unix,
+            verified_at_unix: self.verified_at_unix,
+            verification_expires_at_unix: self.verification_expires_at_unix,
+            last_checked_at_unix: self.last_checked_at_unix,
+            last_failure_reason: self.last_failure_reason,
+            attempt_count: self.attempt_count,
+            updated_at_unix: self.updated_at_unix,
+        })
+    }
+}
+
+#[derive(Deserialize)]
 pub(super) struct BudgetAlertNotificationRow {
     pub(super) id: String,
     pub(super) scope_type: String,
@@ -586,6 +630,12 @@ pub(super) const SELECT_TENANT_ROLE_BINDING_COLUMNS: &str =
 pub(super) const SELECT_SITE_DOMAIN_COLUMNS: &str =
     "SELECT hostname, tenant_id, site, created_at_unix, \
      updated_at_unix FROM site_domains";
+
+pub(super) const SELECT_SITE_DOMAIN_VERIFICATION_COLUMNS: &str =
+    "SELECT tenant_id, hostname, site, state, challenge_token, issued_at_unix, \
+     token_expires_at_unix, verified_at_unix, verification_expires_at_unix, \
+     last_checked_at_unix, last_failure_reason, attempt_count, updated_at_unix \
+     FROM site_domain_verifications";
 
 pub(super) const SELECT_BUDGET_ALERT_NOTIFICATION_COLUMNS: &str =
     "SELECT id, scope_type, scope_id, \

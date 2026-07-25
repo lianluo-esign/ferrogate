@@ -2572,3 +2572,43 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 58 (#488): DNS-TXT ownership proof for custom site domains. A
+-- `site_domains` row records INTENT ("this tenant asked for this hostname");
+-- before this migration nothing recorded EVIDENCE that the tenant controls the
+-- hostname, so any tenant could land-grab an unbound FQDN it did not own and
+-- push it into the ACME order set. One row per (tenant_id, hostname) carries
+-- the explicit state machine (pending_verification -> verified -> expired, plus
+-- the one-time `grandfathered` migration state) and the per-(tenant, hostname)
+-- challenge token whose digest the operator publishes as TXT at
+-- `_ferrogate-challenge.<hostname>`. Keyed on (tenant_id, hostname) and NOT on
+-- hostname alone so (a) a challenge one tenant started can never be redeemed by
+-- another, and (b) several tenants may hold a PENDING challenge for one
+-- hostname, which is what stops a squatter's unverified binding from blocking
+-- the tenant that actually owns the domain. Added via the insert-first/IF FOUND
+-- gate so only the startup that records the migration runs the DDL.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (58, '058_site_domain_verifications')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE TABLE IF NOT EXISTS site_domain_verifications (
+            tenant_id TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            site TEXT NOT NULL,
+            state TEXT NOT NULL,
+            challenge_token TEXT NOT NULL,
+            issued_at_unix BIGINT NOT NULL,
+            token_expires_at_unix BIGINT NOT NULL,
+            verified_at_unix BIGINT,
+            verification_expires_at_unix BIGINT,
+            last_checked_at_unix BIGINT,
+            last_failure_reason TEXT,
+            attempt_count BIGINT NOT NULL DEFAULT 0,
+            updated_at_unix BIGINT NOT NULL,
+            PRIMARY KEY (tenant_id, hostname)
+        );
+    END IF;
+END
+$$;

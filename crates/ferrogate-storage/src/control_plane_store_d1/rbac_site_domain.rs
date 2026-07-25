@@ -86,6 +86,116 @@ impl D1ControlPlaneStore {
         Ok(result.changes() > 0)
     }
 
+    // --- Site-domain DNS ownership proofs (#488, control database) ---
+    //
+    // Same control-DB routing as `site_domains` (the binding and its proof are
+    // read together on the serve path). Nullable columns ride the crate's
+    // `NULLIF(?, '')` idiom because the D1 HTTP binding is all-text.
+
+    pub(super) async fn upsert_site_domain_verification_async(
+        &self,
+        verification: StoredSiteDomainVerification,
+    ) -> Result<(), StorageError> {
+        self.execute_control(
+            "INSERT INTO site_domain_verifications \
+             (tenant_id, hostname, site, state, challenge_token, issued_at_unix, \
+              token_expires_at_unix, verified_at_unix, verification_expires_at_unix, \
+              last_checked_at_unix, last_failure_reason, attempt_count, updated_at_unix) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), \
+              NULLIF(?, ''), ?, ?) \
+             ON CONFLICT (tenant_id, hostname) DO UPDATE SET \
+             site = excluded.site, state = excluded.state, \
+             challenge_token = excluded.challenge_token, \
+             issued_at_unix = excluded.issued_at_unix, \
+             token_expires_at_unix = excluded.token_expires_at_unix, \
+             verified_at_unix = excluded.verified_at_unix, \
+             verification_expires_at_unix = excluded.verification_expires_at_unix, \
+             last_checked_at_unix = excluded.last_checked_at_unix, \
+             last_failure_reason = excluded.last_failure_reason, \
+             attempt_count = excluded.attempt_count, \
+             updated_at_unix = excluded.updated_at_unix",
+            vec![
+                verification.tenant_id,
+                verification.hostname,
+                verification.site,
+                verification.state.as_str().to_string(),
+                verification.challenge_token,
+                verification.issued_at_unix.to_string(),
+                verification.token_expires_at_unix.to_string(),
+                optional_number_param(verification.verified_at_unix),
+                optional_number_param(verification.verification_expires_at_unix),
+                optional_number_param(verification.last_checked_at_unix),
+                verification.last_failure_reason.unwrap_or_default(),
+                verification.attempt_count.to_string(),
+                verification.updated_at_unix.to_string(),
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub(super) async fn get_site_domain_verification_async(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<Option<StoredSiteDomainVerification>, StorageError> {
+        let row: Option<SiteDomainVerificationRow> = self
+            .fetch_control_optional(
+                &format!(
+                    "{SELECT_SITE_DOMAIN_VERIFICATION_COLUMNS} \
+                     WHERE tenant_id = ? AND hostname = ?"
+                ),
+                vec![tenant_id.to_string(), hostname.to_string()],
+            )
+            .await?;
+        row.map(SiteDomainVerificationRow::into_stored).transpose()
+    }
+
+    pub(super) async fn list_site_domain_verifications_async(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredSiteDomainVerification>, StorageError> {
+        let rows: Vec<SiteDomainVerificationRow> = match tenant_id {
+            Some(tenant_id) => {
+                self.fetch_control_rows(
+                    &format!(
+                        "{SELECT_SITE_DOMAIN_VERIFICATION_COLUMNS} \
+                         WHERE tenant_id = ? ORDER BY hostname ASC"
+                    ),
+                    vec![tenant_id.to_string()],
+                )
+                .await?
+            }
+            None => {
+                self.fetch_control_rows(
+                    &format!(
+                        "{SELECT_SITE_DOMAIN_VERIFICATION_COLUMNS} \
+                         ORDER BY tenant_id ASC, hostname ASC"
+                    ),
+                    Vec::new(),
+                )
+                .await?
+            }
+        };
+        rows.into_iter()
+            .map(SiteDomainVerificationRow::into_stored)
+            .collect()
+    }
+
+    pub(super) async fn delete_site_domain_verification_async(
+        &self,
+        tenant_id: &str,
+        hostname: &str,
+    ) -> Result<bool, StorageError> {
+        let result = self
+            .execute_control(
+                "DELETE FROM site_domain_verifications WHERE tenant_id = ? AND hostname = ?",
+                vec![tenant_id.to_string(), hostname.to_string()],
+            )
+            .await?;
+        Ok(result.changes() > 0)
+    }
+
     pub(super) async fn record_budget_alert_notification_async(
         &self,
         notification: StoredBudgetAlertNotification,

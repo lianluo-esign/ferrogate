@@ -2585,6 +2585,17 @@
       "rbac_action": null
     },
     {
+      "path": "/admin/v1/site-domains/{hostname}/verify",
+      "method": "post",
+      "operation_id": "verifySiteDomain",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/admin/v1/plans",
       "method": "get",
       "operation_id": "listPlans",

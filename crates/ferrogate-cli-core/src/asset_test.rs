@@ -151,12 +151,13 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "listSiteDomains",
         "getSiteDomain",
         "bindSiteDomain",
+        "verifySiteDomain",
         "unbindSiteDomain",
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 10 (assets) + 3 (transfer) + 3 (channels) + 4 (site-domains) = 20 ids.
-    assert_eq!(manifest.len(), 20);
+    // 10 (assets) + 3 (transfer) + 3 (channels) + 5 (site-domains) = 21 ids.
+    assert_eq!(manifest.len(), 21);
 }
 
 #[test]
@@ -411,6 +412,15 @@ fn site_domain_verbs_map_to_the_admin_collection() {
     .unwrap();
     assert_eq!(get.method, Method::GET);
     assert_eq!(get.path, "/admin/v1/site-domains/app.example.com");
+
+    // #488: redeeming the DNS ownership challenge is a POST action sub-path.
+    let verify = build_site_domains(
+        "verify",
+        &ResourceInput::new().with_segments(["app.example.com"]),
+    )
+    .unwrap();
+    assert_eq!(verify.method, Method::POST);
+    assert_eq!(verify.path, "/admin/v1/site-domains/app.example.com/verify");
 
     let unbind = build_site_domains(
         "unbind",
