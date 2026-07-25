@@ -65,12 +65,12 @@ Every constraint in this doc follows from what the runtime concretely does.
 Citations are against the current tree.
 
 **Pingora data plane, native listeners.** The gateway is a Pingora HTTP proxy
-service: `serve()` at `crates/ferrogate-cli/src/gateway/mod.rs:186` builds a
-`Server::new_with_opt_and_conf` (`mod.rs:244`), wraps the `FerroGateway`
-proxy in `http_proxy_service_with_name` (`mod.rs:248`), binds either a TLS
-listener via `service.add_tls_with_settings(&listen, ...)` (`mod.rs:255`) or a
-plain TCP listener via `service.add_tcp(&listen)` (`mod.rs:265`), and blocks in
-`server.run_forever()` (`mod.rs:276`). This is native tokio + raw socket
+service: `serve()` at `crates/ferrogate-cli/src/gateway/mod.rs:191` builds a
+`Server::new_with_opt_and_conf` (`mod.rs:296`), wraps the `FerroGateway`
+proxy in `http_proxy_service_with_name` (`mod.rs:300`), binds either a TLS
+listener via `service.add_tls_with_settings(&listen, ...)` (`mod.rs:307`) or a
+plain TCP listener via `service.add_tcp(&listen)` (`mod.rs:317`), and blocks in
+`server.run_forever()` (`mod.rs:328`). This is native tokio + raw socket
 territory — a process, not a request handler.
 
 **Config model.** The listen address is a plain `String` in the config root —
@@ -78,8 +78,8 @@ territory — a process, not a request handler.
 to `127.0.0.1:8080` in `config/ferrogate.example.toml:9`; the shipped container
 Caddyfile binds `0.0.0.0:8080` (`Ferrogate/Caddyfile:12`). The config path
 comes from `--config` or the `FERROGATE_CONFIG` env var
-(`crates/ferrogate-cli/src/cli.rs:38`), dispatched by `Commands::Run` at
-`crates/ferrogate-cli/src/main.rs:58`.
+(`crates/ferrogate-cli/src/cli.rs:39`), dispatched by `Commands::Run` at
+`crates/ferrogate-cli/src/main.rs:83`.
 
 **Postgres control plane over deadpool/tokio-postgres.** The async pool is
 constructed in `AsyncPostgresPool::new` at
@@ -94,12 +94,12 @@ antithesis of an isolate-friendly database client.
 binding: OTLP + analytics senders, ACME renewal, MCP health scheduler, external
 action authorizer, billing outbox sweeper, agent schedule sweeper, asset
 lifecycle sweeper, x402 TTL sweeper and settlement reconciler
-(`crates/ferrogate-cli/src/gateway/mod.rs:223-237`). These assume the process
+(`crates/ferrogate-cli/src/gateway/mod.rs:275-289`). These assume the process
 is **continuously running**; any scale-to-zero topology silently pauses them.
 
 **Own TLS/ACME stack.** The runtime can terminate TLS itself and run an ACME
 issuance/renewal loop, merging bound site custom domains into the certificate
-SAN set (`mod.rs:197-226`, `crates/ferrogate-cli/src/acme.rs`). Behind
+SAN set (`mod.rs:245-274`, `crates/ferrogate-cli/src/acme.rs`). Behind
 Cloudflare (which terminates TLS at the edge) this whole subsystem is
 redundant — an on-CF profile runs plain `add_tcp` on 8080.
 
@@ -112,9 +112,9 @@ compiling `ferrogate-cli` + `ferrogate-auth` with `--locked` (`Dockerfile:7-20`)
 entrypoint `CMD ["ferrogate", "run"]` (`Dockerfile:34-36`).
 
 **Health/readiness routes exist.** `/healthz` maps to `RouteGroup::Health`
-(asserted in `crates/ferrogate-cli/src/gateway/route_groups_test.rs:134`), is
+(asserted in `crates/ferrogate-cli/src/gateway/route_groups_test.rs:135`), is
 short-circuited early in request handling
-(`crates/ferrogate-cli/src/gateway/handlers.rs:132-135`) into `handle_healthz`
+(`crates/ferrogate-cli/src/gateway/handlers.rs:145-148`) into `handle_healthz`
 at `crates/ferrogate-cli/src/gateway/local.rs:256` (returns
 `{"status":"ok","service":...,"version":...,"runtime":"pingora"}`); `handle_readyz`
 (`local.rs:270`) additionally exercises control-plane state — i.e. proves the
@@ -211,8 +211,8 @@ For FerroGate this means:
   blocked: Postgres-over-WebSocket drivers, a TCP-over-HTTPS tunnel, or
   pgbouncer on 443.
 - **D1**: only after #419/#420 add a D1 `RuntimeControlPlaneBackend` variant
-  (seam: `crates/ferrogate-storage/src/lib.rs:10357`, repository traits
-  `:723`) — a real porting effort (SQLite semantics, no `tokio-postgres`), and
+  (seam: `crates/ferrogate-storage/src/lib.rs:9939`, repository traits
+  from `:756`) — a real porting effort (SQLite semantics, no `tokio-postgres`), and
   per [`cloudflare-integration.md` §6](cloudflare-integration.md#6-d1) hot-path
   access must go through a binding, not the rate-limited REST query API. From a
   container, that binding is reached via the shim (§6).
@@ -236,15 +236,16 @@ integrated via #422/#430), coarse routing — then forwards to a FerroGate origi
 - **Cheap at the edge.** Workers Standard: $5/mo base, 10 M requests included,
   +$0.30/M, 30 M CPU-ms included +$0.02/M CPU-ms, and — decisive for LLM
   streaming — "no charge or limit for **duration**". A streaming pass-through
-  proxy burns near-zero CPU-ms, so 100 M req/mo ≈ **$27 + small CPU** with
-  **no DO in the request path** (contrast §7's DO duration line for Containers).
+  proxy burns near-zero CPU-ms, so 100 M req/mo ≈ **$32/mo** ($5 base + $27
+  request overage) + small CPU, with **no DO in the request path** (contrast
+  §7's DO duration line for Containers).
 - **Bindings at the edge, where they belong.** The Worker layer natively holds
   D1/KV/R2/Workers AI/Secrets Store bindings — consistent with the
   already-decided pattern that binding reads live in Workers (#423) and agent
   lifecycle goes through the fronting Worker (#413). The origin keeps using
   the `crates/ferrogate-cloudflare` REST client only for write/manage paths.
 - **TLS/custom-domain story:** CF terminates TLS on the Worker route; the
-  origin can keep its own ACME/TLS (`mod.rs:197-226`) for direct access or run
+  origin can keep its own ACME/TLS (`mod.rs:245-274`) for direct access or run
   behind CF-only ingress (authenticated origin pulls) — no change forced.
 - Cost/risk: the origin still costs what it costs today (§5); the Worker adds
   a small increment and one extra hop for cache misses.
@@ -255,7 +256,7 @@ Today's shape: `deploy/kubernetes/` (2-replica Deployment) and
 `charts/ferrogate`; FerroGate reaches CF products from **outside** via the
 `ferrogate-cloudflare` REST client, whose retry/backoff explicitly models the
 global API limit (comment at `crates/ferrogate-cloudflare/src/client.rs:11`,
-policy `:98-105`, 429 short-circuit `:286`), plus FerroGate-deployed fronting
+policy `:132-144`, 429 short-circuit `:405`), plus FerroGate-deployed fronting
 Workers (`workers/agent-gateway/`, `workers/mcp-server/`) for everything with
 no first-party REST. Verified platform numbers that bound this option:
 
@@ -267,7 +268,7 @@ no first-party REST. Verified platform numbers that bound this option:
 So off-CF, REST is viable **only** for low-frequency control-plane operations
 (exactly how #423 scoped it), and every hot-path CF interaction must go through
 a fronting Worker over public HTTPS with a managed bearer token
-(`GATEWAY_CONTROL_TOKEN`, `workers/agent-gateway/wrangler.toml:60-64`). This
+(`GATEWAY_CONTROL_TOKEN`, `workers/agent-gateway/wrangler.toml:97-101`). This
 works — it is what ships today — but pays public-internet RTT per call and
 carries token lifecycle burden.
 
@@ -288,9 +289,20 @@ container." HTTPS interception is opt-in (`interceptHttps` + trusting an
 ephemeral CA at `/etc/cloudflare/certs/cloudflare-containers-ca.crt`); handlers
 only ever see ports 80/443. Zero-trust credential injection is supported: "no
 token is ever passed into the sandbox" — the handler attaches credentials
-Worker-side and secret rotation applies immediately without restart. Requires
-`@cloudflare/containers` ≥ 0.2.0. Inbound direction: the fronting Worker/DO
-reaches the container via `fetch()`/`containerFetch()` on `defaultPort`.
+Worker-side and secret rotation applies immediately without restart. Inbound
+direction: the fronting Worker/DO reaches the container via
+`fetch()`/`containerFetch()` on `defaultPort`.
+
+**Version gates — two of them, do not conflate.** The *base* outbound-Worker
+feature (`outbound`/`outboundByHost` over plain HTTP, handler running in the
+Workers runtime with `env`) needs `@cloudflare/containers` ≥ **0.2.0**
+(2026-03-26 changelog). `interceptHttps`, the ephemeral CA and **credential
+injection** need ≥ **0.3.0** (or `@cloudflare/sandbox` ≥ 0.8.9; 2026-04-13
+changelog). Pinning 0.2.0 therefore yields outbound interception with *no*
+HTTPS interception and *no* credential injection — i.e. none of the zero-trust
+property this section's decision leans on. Pin **0.3.0** unless you only need
+plain-HTTP interception. (Neither version number appears on the outbound-traffic
+reference page itself; both come from the changelogs cited in §10.)
 
 **Quantified comparison.**
 
@@ -327,12 +339,15 @@ free. A month = 2,628,000 s.
 
 | Instance | Memory | Disk | vCPU @100% active | vCPU @~25% | Total (25–100% active) |
 |---|---|---|---|---|---|
-| standard-1 (½ vCPU, 4 GiB, 8 GB) | ~$26.1 | ~$1.4 | ~$25.8 | ~$6.4 | **~$34–53** |
-| standard-4 (4 vCPU, 12 GiB, 20 GB) | ~$78.6 | ~$3.6 | ~$209.8 | ~$52.4 | **~$135–292** |
+| standard-1 (½ vCPU, 4 GiB, 8 GB) | ~$26.1 | ~$1.4 | ~$25.8 | ~$6.12 | **~$34–53** |
+| standard-4 (4 vCPU, 12 GiB, 20 GB) | ~$78.6 | ~$3.6 | ~$209.8 | ~$52.11 | **~$135–292** |
 
 (Memory/disk are provisioned-while-running; CPU is active-usage. Arithmetic:
 e.g. standard-4 memory = 12 GiB × 2,628,000 s − 90,000 GiB-s included ≈
-31.45 M GiB-s × $0.0000025 ≈ $78.6.)
+31.45 M GiB-s × $0.0000025 ≈ $78.6; standard-4 vCPU @25% =
+4 × 2,628,000 × 0.25 = 2,628,000 vCPU-s − 22,500 included = 2,605,500 ×
+$0.000020 = $52.11.) These totals exclude the $5/mo Workers Paid base, which is
+charged once per account, not per instance.
 
 **The hidden line item: DO duration on streaming.** Every request to a
 container transits its DO. If DO active-duration accrues for the life of each
@@ -343,8 +358,9 @@ compute cost** at scale and is the sharpest cost argument against topology (a)
 for the high-throughput data plane. PoC step P8 should observe actual DO
 duration billing on streamed responses.
 
-**Hybrid edge layer:** 100 M req/mo ≈ $27 + negligible CPU-ms (streaming
-duration is free on Workers), no DO. **Status quo origin:** a comparable
+**Hybrid edge layer:** 100 M req/mo ≈ **$32/mo** — the $5 Workers Paid base
+plus $27 request overage — + negligible CPU-ms (streaming duration is free on
+Workers), no DO. **Status quo origin:** a comparable
 4 vCPU/16 GiB VM runs ~$25–60/mo (budget providers) to ~$100–150/mo
 (hyperscaler on-demand) — unverified market prices, order-of-magnitude only.
 Egress: §3 (~$25/mo at 2 TB NA/EU).
@@ -370,7 +386,8 @@ existing Dockerfile deploys as-is.
 
 1. **Hybrid edge Worker (now).** Thin Worker on the custom domain: auth
    pre-check, cache, guardrail pre-check, forward to the existing k8s origin.
-   Additive, per-route rollout, ~\$27/100 M req.
+   Additive, per-route rollout, ~\$32/mo at 100 M req (\$5 Workers Paid base +
+   \$27 request overage; see §7).
 2. **Containers PoC (next).** Execute §9 on a live account: confirm image
    boots, `/healthz`, `/readyz` against external Postgres (the 5432-egress
    question), one proxied `/v1/chat/completions`, cold-start and DO-duration
@@ -382,7 +399,10 @@ existing Dockerfile deploys as-is.
    deeper binding integration — only if phase 3 demonstrates demand.
 
 **Follow-up implementation issues to file (list only — deliberately not
-created here):**
+created here).** **Status as of 2026-07-25 (#484): none of the six has been
+filed.** Item 2 in particular — executing this document's §9 runbook — is the
+work every "pending verification" note below depends on, and it has no tracked
+owner.
 
 1. *Edge Worker for hybrid topology* — thin auth/cache/guardrail pre-check
    Worker forwarding to the FerroGate origin; per-route rollout config.
@@ -421,14 +441,19 @@ comfortably under the 8 GB `standard-1` disk/image cap.
 **P2 — PoC config layer.** The stock image defaults to the Caddyfile config;
 the PoC overlays a minimal TOML (CF terminates TLS, so no `tls` section; bind
 all interfaces; one upstream provider; Postgres control plane pointing at an
-external DSN, e.g. Neon):
+external DSN, e.g. Neon). Write both files into the **P3 directory**
+(`workers/ferrogate-poc/`) — P3's `wrangler.toml` resolves the image build
+context to the directory holding `Dockerfile.poc`:
 
 ```dockerfile
-# Dockerfile.poc
+# workers/ferrogate-poc/Dockerfile.poc
 FROM ferrogate:poc
 COPY poc.toml /etc/ferrogate/poc.toml
 ENV FERROGATE_CONFIG=/etc/ferrogate/poc.toml
 ```
+
+`FROM ferrogate:poc` resolves against the **local** Docker daemon, so P1 must
+have run on the same machine that later runs `wrangler deploy`.
 
 `poc.toml` (derive from `config/ferrogate.example.toml`; key lines):
 
@@ -438,13 +463,39 @@ listen = "0.0.0.0:8080"
 # one [providers.*] entry with an env-sourced API key
 ```
 
-Local smoke test: `docker run --rm -p 8080:8080 ferrogate:poc-cfg` then
-`curl -s localhost:8080/healthz` → expect
-`{"status":"ok","service":"...","version":"...","runtime":"pingora"}`
-(shape grounded at `crates/ferrogate-cli/src/gateway/local.rs:256-266`).
+Secrets are **not** baked into `poc.toml` — reference env vars the P3
+`envVars` block supplies (`FERROGATE_POC_PG_DSN`, `FERROGATE_POC_PROVIDER_KEY`);
+otherwise the DSN and provider key ship inside the image.
+
+Build the config image, then smoke-test it:
+
+```sh
+docker build --platform linux/amd64 -f workers/ferrogate-poc/Dockerfile.poc \
+  -t ferrogate:poc-cfg workers/ferrogate-poc
+docker run --rm -p 8080:8080 \
+  -e FERROGATE_POC_PG_DSN="..." -e FERROGATE_POC_PROVIDER_KEY="..." \
+  ferrogate:poc-cfg
+curl -s localhost:8080/healthz
+```
+
+→ expect `{"status":"ok","service":"...","version":"...","runtime":"pingora"}`
+(shape grounded at `crates/ferrogate-cli/src/gateway/local.rs:256-266`). Keep
+this container running: it is the **direct-origin baseline** P8 compares the
+Worker-fronted path against — CF states end-users cannot reach a deployed
+instance except through the Worker, so no baseline exists after P4.
 
 **P3 — Containers app.** New directory (suggested `workers/ferrogate-poc/`,
-created by the executing agent, not this spike):
+created by the executing agent, not this spike). `Dockerfile.poc` and `poc.toml`
+from P2 live **in this directory**: CF resolves the image build context to "the
+directory of `image`" unless `image_build_context` overrides it, so a
+`Dockerfile.poc` at the repo root with `wrangler.toml` here would fail its
+`COPY poc.toml` at deploy time.
+
+First create the namespace P7 reads, and keep the id it prints:
+
+```sh
+npx wrangler kv namespace create POC_KV
+```
 
 `wrangler.toml`:
 
@@ -463,26 +514,78 @@ instance_type = "standard-1"
 name = "FERROGATE"
 class_name = "FerroGateContainer"
 
+# REQUIRED BY P7. The outbound handler resolves `env.POC_KV`; with no
+# [[kv_namespaces]] block the binding is undefined and P7 reports a failure
+# that has nothing to do with the shim — the same false-negative class as a
+# missing `export { ContainerProxy }`.
+[[kv_namespaces]]
+binding = "POC_KV"
+id = "<id printed by `wrangler kv namespace create POC_KV`>"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["FerroGateContainer"]
 ```
 
-`src/index.ts` (pin `@cloudflare/containers` ≥ 0.2.0; verify helper names
-against the pinned version, same caveat discipline as
-`workers/agent-gateway/wrangler.toml:26-32`):
+`src/index.ts` (pin `@cloudflare/containers` ≥ 0.3.0 — see the version-gate note
+in §6: 0.2.0 carries the base outbound-Worker feature only, without
+`interceptHttps` or credential injection. Verify helper names against the
+pinned version, same caveat discipline as
+`workers/agent-gateway/wrangler.toml:26-32`. Run `npx wrangler types` to
+generate the `Env` interface referenced below. This block type-checks clean
+under `tsc --strict` against `@cloudflare/containers@0.3.7`, verified
+2026-07-25):
 
 ```ts
-import { Container, getContainer } from "@cloudflare/containers";
+import { Container, ContainerProxy, getContainer } from "@cloudflare/containers";
+
+// REQUIRED — not optional, and not covered by any other line in this file.
+// CF: "Export `ContainerProxy` from your Worker entrypoint for outbound
+// interception to work." Mechanism: `ContainerProxy extends WorkerEntrypoint`
+// (`@cloudflare/containers@0.3.7` typings), and the runtime can only dispatch
+// to a WorkerEntrypoint that is a named export of the entry module. Omit this
+// line and `outboundByHost` below is dead code: the container's request to
+// cf-kv.internal is never seen by a handler, and P7 fails for a reason that
+// has nothing to do with bindings. Note this is a *runtime* requirement —
+// `tsc` will not catch its absence.
+// <https://developers.cloudflare.com/containers/platform-details/outbound-traffic/>
+export { ContainerProxy };
 
 export class FerroGateContainer extends Container {
   defaultPort = 8080;
   sleepAfter = "10m";
-  // P7 shim probe: virtual-host binding access from inside the container.
+  // Nothing else injects environment into the container: the image carries
+  // poc.toml (P2) but not its secrets. Without this block P5 has no provider
+  // key and P6 has no DSN, so both fail before they test what they claim to.
+  // `envVars` is the documented mechanism (container-package reference, §10).
+  envVars = {
+    FERROGATE_CONFIG: "/etc/ferrogate/poc.toml",
+    FERROGATE_POC_PG_DSN: "<external Postgres DSN, tls_mode=require>",
+    FERROGATE_POC_PROVIDER_KEY: "<upstream provider API key>",
+  };
+
   static outboundByHost = {
+    // P7a — bindingless liveness probe. Touches no binding, so it can only
+    // ever answer one question: "is outbound interception installed?".
+    "cf-selftest.internal": async () =>
+      new Response("outbound-intercept-ok", { status: 200 }),
+    // P7b — the real binding probe. Every failure path returns a distinct
+    // status so a red P7 names its own cause instead of implying "the shim
+    // is broken".
     "cf-kv.internal": async (request: Request, env: Env) => {
+      if (!env.POC_KV) {
+        // [[kv_namespaces]] missing from wrangler.toml — config gap, NOT a
+        // platform gap. Reaching this line already proves the shim works.
+        return new Response("POC_KV binding not declared", { status: 501 });
+      }
       const key = new URL(request.url).pathname.slice(1);
-      return new Response(await env.POC_KV.get(key));
+      const value = await env.POC_KV.get(key);
+      // Do not `new Response(value)` directly: KV returns null on a miss and
+      // `new Response(null)` is a 200 with an empty body, so a miss would be
+      // indistinguishable from a successful read of an empty value.
+      return value === null
+        ? new Response(`kv miss for key: ${key}`, { status: 404 })
+        : new Response(value, { status: 200 });
     },
   };
 }
@@ -494,41 +597,114 @@ export default {
 };
 ```
 
+**Pre-deploy assertion** (cheap, and it is the whole content of #484):
+
+```sh
+grep -q 'export { ContainerProxy }' src/index.ts \
+  || { echo "P3 is missing the ContainerProxy re-export; P7 would false-negative"; exit 1; }
+```
+
 **P4 — deploy.** `npx wrangler deploy` (Workers Paid). Expected: image pushed
 to the CF registry, Worker + DO class deployed, a `*.workers.dev` URL printed.
 
-**P5 — health + proxy checks.**
+**P5 — health + proxy checks.** The `<virtual-key>` below must already exist in
+the external Postgres control plane — no earlier step creates one, and an
+unseeded key returns 401 regardless of whether the proxy path works. Seed a
+tenant + virtual key against the same DSN P3's `envVars` supplies **before**
+running the second call.
 
 ```sh
 curl -s https://ferrogate-container-poc.<subdomain>.workers.dev/healthz
 # expect {"status":"ok",...,"runtime":"pingora"} — first call measures cold start (expect 1-3 s + app boot)
-curl -s https://.../v1/chat/completions \
+curl -s -w ' [%{http_code}]\n' https://.../v1/chat/completions \
   -H "Authorization: Bearer <virtual-key>" -H "Content-Type: application/json" \
   -d '{"model":"<configured-model>","messages":[{"role":"user","content":"ping"}]}'
-# expect an OpenAI-shaped chat completion proxied through Pingora
+# expect an OpenAI-shaped chat completion proxied through Pingora.
+# 401 -> virtual key not seeded (above). 502/upstream auth error ->
+# FERROGATE_POC_PROVIDER_KEY missing from P3 `envVars`. Neither is a verdict
+# on the topology.
 ```
 
 **P6 — external-Postgres egress (the open platform question, §3).**
 `curl -s https://.../readyz` — readiness exercises control-plane state
 (`local.rs:270`), so a 200 with the Postgres backend configured proves
-outbound 5432 works from a container with default internet access. If it
-fails with connect timeouts, record that Containers block non-80/443 egress
-and fall back to a 443-fronted Postgres proxy; this changes the DB
-recommendation in §3.
+outbound 5432 works from a container with default internet access. Requires
+`enableInternet` left at its default (CF: "By default, a Container will allow
+internet access") and `FERROGATE_POC_PG_DSN` supplied via P3's `envVars`.
 
-**P7 — shim probe.** From inside the container
-(`wrangler containers exec`, or a temporary debug route):
-`curl -s http://cf-kv.internal/hello` after `wrangler kv key put hello world`
-→ expect `world`, proving binding access with no token in the container.
+Disambiguate the red before recording a platform verdict — a bad DSN and a
+blocked port look identical from `/readyz`:
+
+- **connect timeout** to the DSN host on 5432 → consistent with Containers
+  blocking non-80/443 egress. Confirm by `wrangler containers ssh` +
+  `curl -sS https://<dsn-host>` (443 to the same host): if 443 succeeds and
+  5432 times out, the port is the variable, and that is the finding.
+- **auth/TLS/`no such host` error** → the DSN is wrong or unset; this says
+  nothing about egress. Fix P3's `envVars` and re-run.
+
+Only the first outcome justifies falling back to a 443-fronted Postgres proxy
+and changing the DB recommendation in §3.
+
+**P7 — shim probe (two-tier, self-diagnosing).** This is the **only** step that
+empirically backs the §6 "bindings beat REST" decision, so it is built to
+distinguish *"the shim does not work"* from *"P3 was misconfigured"*. Get a
+shell on the running instance — note there is no `wrangler containers exec`
+subcommand; the documented pair is:
+
+```sh
+npx wrangler containers list                        # -> application id
+npx wrangler containers instances <application-id>  # -> instance id
+npx wrangler containers ssh <instance-id>
+```
+
+**P7a — is outbound interception installed at all?** Touches no binding, so it
+cannot fail for a binding reason. Probe over plain `http://` deliberately:
+that keeps `interceptHttps` and the ephemeral-CA trust-store setup (§6) out of
+the result.
+
+```sh
+curl -sS -w ' [%{http_code}]\n' http://cf-selftest.internal/ping
+# expect: outbound-intercept-ok [200]
+```
+
+**P7b — does the container actually reach a binding?** Seed the **remote**
+namespace first; a local-only write leaves the deployed Worker reading an empty
+namespace and P7b returns 404 for the wrong reason:
+
+```sh
+npx wrangler kv key put hello world --binding POC_KV --remote
+curl -sS -w ' [%{http_code}]\n' http://cf-kv.internal/hello
+# expect: world [200]
+```
+
+**Reading the result** — do not report P7 without mapping it through this table:
+
+| P7a | P7b | Diagnosis |
+|---|---|---|
+| no response from the handler (curl error, hang, or DNS failure) | — | **Interception is not installed. This is not evidence against the shim.** Check, in order: (1) `export { ContainerProxy };` present in `src/index.ts`; (2) `@cloudflare/containers` ≥ 0.3.0 actually installed; (3) the class carrying `outboundByHost` is the one named by `class_name` in `wrangler.toml`; (4) the deploy actually shipped (`wrangler deployments list`). |
+| `outbound-intercept-ok [200]` | `POC_KV binding not declared [501]` | Shim works. `[[kv_namespaces]]` is missing from `wrangler.toml` — P3 config gap, not a platform gap. |
+| `outbound-intercept-ok [200]` | `kv miss for key: hello [404]` | Shim **and** binding work. The key was never written to the namespace the deployed Worker reads: re-run `kv key put` with `--remote` and the matching `--binding`. |
+| `outbound-intercept-ok [200]` | `world [200]` | **Pass.** Binding access from inside the container, no token in the sandbox — §6's recommendation is empirically backed. |
+
+Only the last row is a pass; only the first row is evidence about the platform,
+and only after all four of its checks are ruled out. CF does **not** document
+what a container observes when a virtual hostname is *not* intercepted (DNS
+failure vs. refused connection vs. egress denial), which is precisely why P7a is
+specified as "reaches the handler / does not" rather than by error string —
+**unverified**, and the reason the positive self-test exists at all.
 
 **P8 — measurements to record.** Cold-start (P5 first-call), warm p50/p99 via
-the Worker vs direct-origin baseline, shim round-trip latency (P7 repeated),
+the Worker vs the **P2 local `docker run` direct-origin baseline** (the only
+non-Worker-fronted path that exists — CF blocks direct end-user access to a
+deployed instance, so this comparison is unavailable unless P2's container is
+still up), shim round-trip latency (P7b repeated),
 and the DO duration line on the next billing/usage report after streaming
 ~1k requests (validates or refutes the §7 estimate).
 
 ## 10. Verified sources
 
-All fetched 2026-07-24:
+All fetched 2026-07-24; the outbound/Wrangler entries re-verified 2026-07-25
+while fixing #484:
 
 - Containers pricing (tiers, unit rates, includes, egress): <https://developers.cloudflare.com/containers/pricing/>
 - Containers platform details (amd64, ephemeral disk, cold start 1–3 s, SIGTERM/SIGKILL, Worker→DO fronting, no non-HTTP ingress): <https://developers.cloudflare.com/containers/platform-details/>
@@ -538,11 +714,17 @@ All fetched 2026-07-24:
 - Outbound traffic (handlers see only 80/443; internet-off = 80/443/DNS only; `interceptHttps` + ephemeral CA; `allowedHosts`/`deniedHosts`): <https://developers.cloudflare.com/containers/platform-details/outbound-traffic>
 - Workers connections / bindings-from-containers (virtual hostname pattern, "every binding declared", no SDK required): <https://developers.cloudflare.com/containers/platform-details/workers-connections/>
 - Outbound Workers changelog (handlers run in the Workers runtime outside the sandbox; `env` binding access; `@cloudflare/containers` ≥ 0.2.0): <https://developers.cloudflare.com/changelog/post/2026-03-26-outbound-workers>
-- Credential injection / TLS interception changelog ("no token is ever passed into the sandbox"; live secret rotation): <https://developers.cloudflare.com/changelog/post/2026-04-13-sandbox-outbound-workers-tls-auth/>
+- Credential injection / TLS interception changelog ("no token is ever passed into the sandbox"; live secret rotation; **"Upgrade to `@cloudflare/containers@0.3.0` or `@cloudflare/sandbox@0.8.9` to use these features"**): <https://developers.cloudflare.com/changelog/post/2026-04-13-sandbox-outbound-workers-tls-auth/>
+- Container class reference (`export { ContainerProxy };` in the outbound sample; `envVars`; `defaultPort`; `sleepAfter` default `"10m"`; `getContainer(...).fetch()`): <https://developers.cloudflare.com/containers/container-package/>
+- Wrangler `[[containers]]` keys (`image`/`class_name` required; `image_build_context` "by default it is the directory of `image`"; `instance_type` default `"lite"`; `max_instances` default 20): <https://developers.cloudflare.com/workers/wrangler/configuration/>
+- Wrangler containers commands (**no `exec` subcommand**; `containers list`/`instances <APPLICATION_ID>`/`ssh <INSTANCE_ID>`): <https://developers.cloudflare.com/workers/wrangler/commands/containers/>
+- Wrangler KV commands (`wrangler kv key put [KEY] [VALUE]` space-separated since 3.60.0; `--binding`/`--namespace-id`; `--local`/`--remote`): <https://developers.cloudflare.com/workers/wrangler/commands/kv/>
 - Workers + DO pricing ($5 base; 10 M req; $0.30/M; 30 M CPU-ms; duration free; DO $0.15/M req, $12.50/M GB-s beyond 400k): <https://developers.cloudflare.com/workers/platform/pricing/>
 - CF API rate limits (1,200 req/5 min/user cumulative; 5-min 429 lockout; 50/500 token caps; GraphQL 320/5 min): <https://developers.cloudflare.com/fundamentals/api/reference/limits/>
 
 Not documented by CF (stated as unverified above): arbitrary non-80/443
 outbound TCP with default internet access (P6); container↔handler shim latency
-(P7/P8); whether DO duration accrues for full stream lifetimes on container
-requests (P8). Market VM prices in §7 are order-of-magnitude, unverified.
+(P7/P8); **what a container observes when a virtual hostname is not intercepted
+— DNS failure vs. refused connection vs. egress denial (P7a)**; whether DO
+duration accrues for full stream lifetimes on container requests (P8). Market VM
+prices in §7 are order-of-magnitude, unverified.
