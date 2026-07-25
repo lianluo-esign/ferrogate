@@ -557,6 +557,31 @@ fn documents_to_snapshot(documents: &ControlPlaneDocuments) -> ControlPlaneSnaps
 
 #[async_trait::async_trait]
 impl ControlPlaneStore for D1ControlPlaneStore {
+    // --- Agent cost-burn (#428): NOT YET IMPLEMENTED on D1 ---
+    // The durable per-agent burn ledger lands on the Postgres control-plane
+    // store first (#428 slice B-storage); routing the atomic accumulate onto the
+    // per-tenant D1 proxy binding is a follow-up. Returns the typed
+    // unimplemented-backend-surface error so callers can detect it via
+    // `is_unimplemented_backend_surface` rather than mistaking it for a zero burn.
+    async fn add_agent_burn(
+        &self,
+        _tenant_id: &str,
+        _agent_key: &str,
+        _period: &str,
+        _delta_usd: f64,
+    ) -> Result<f64, StorageError> {
+        Err(unimplemented_surface("add_agent_burn"))
+    }
+
+    async fn get_agent_burn(
+        &self,
+        _tenant_id: &str,
+        _agent_key: &str,
+        _period: &str,
+    ) -> Result<Option<f64>, StorageError> {
+        Err(unimplemented_surface("get_agent_burn"))
+    }
+
     // --- API keys (IMPLEMENTED) ---
 
     async fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {

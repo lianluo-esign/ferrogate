@@ -1251,6 +1251,26 @@ impl ControlPlaneStore for PostgresControlPlaneStore {
             .await
     }
 
+    async fn add_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+        delta_usd: f64,
+    ) -> Result<f64, StorageError> {
+        self.add_agent_burn(tenant_id, agent_key, period, delta_usd)
+            .await
+    }
+
+    async fn get_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+    ) -> Result<Option<f64>, StorageError> {
+        self.get_agent_burn(tenant_id, agent_key, period).await
+    }
+
     async fn record_budget_alert_notification(
         &self,
         notification: StoredBudgetAlertNotification,

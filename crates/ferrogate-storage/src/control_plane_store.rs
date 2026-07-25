@@ -616,6 +616,25 @@ pub(crate) trait ControlPlaneStore: Send + Sync {
         since_unix: i64,
     ) -> Result<Vec<StoredObservedAgentPresence>, StorageError>;
 
+    // Durable per-agent cost-burn accumulation (#428). Atomic accumulate +
+    // return-new-total backing the slice-A in-memory `AgentBurnLedger` so a
+    // per-agent budget survives a restart. Postgres does the add inside one
+    // `ON CONFLICT ... DO UPDATE ... RETURNING` upsert; Memory folds under the
+    // control-plane lock; D1 routes the same upsert onto the tenant binding.
+    async fn add_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+        delta_usd: f64,
+    ) -> Result<f64, StorageError>;
+    async fn get_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+    ) -> Result<Option<f64>, StorageError>;
+
     // Budget-alert idempotency ledger (#170).
     async fn record_budget_alert_notification(
         &self,

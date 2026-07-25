@@ -250,6 +250,11 @@ pub use observed_agent_presence::{
     observed_agent_presence_key, ObservedAgentPresenceTouch, StoredObservedAgentPresence,
 };
 
+// #428: durable, atomically-accumulating per-agent cost-burn ledger backing the
+// slice-A in-memory `AgentBurnLedger` so per-agent budgets survive restarts.
+mod agent_cost_burn;
+pub use agent_cost_burn::{agent_cost_burn_key, StoredAgentCostBurn};
+
 mod metadata_rollups;
 use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
@@ -1330,6 +1335,9 @@ pub struct RuntimeControlPlaneState {
     /// Durable coalesced virtual-key presence keyed by
     /// `observed_agent_presence_key(tenant_id, api_key_id)` (#357).
     observed_agent_presence: InMemoryRepository<StoredObservedAgentPresence>,
+    /// Durable per-agent cost-burn totals keyed by
+    /// `agent_cost_burn_key(tenant_id, agent_key, period)` (#428).
+    agent_cost_burn: InMemoryRepository<StoredAgentCostBurn>,
 }
 
 struct PostgresControlPlaneStore {
@@ -8784,6 +8792,7 @@ where
         "retention_policies",
         "site_domains",
         "observed_agent_presence",
+        "agent_cost_burn",
     ];
     for table in TABLES {
         let exists = client
@@ -9970,6 +9979,7 @@ impl RuntimeControlPlaneState {
             retention_policies: InMemoryRepository::new(),
             site_domains: InMemoryRepository::new(),
             observed_agent_presence: InMemoryRepository::new(),
+            agent_cost_burn: InMemoryRepository::new(),
         }
     }
 

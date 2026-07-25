@@ -2523,3 +2523,29 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Migration 56 (#428): durable per-agent cost-burn accumulation. One row per
+-- (tenant_id, agent_key, period) whose accumulated_usd total is bumped by the
+-- single atomic `INSERT ... ON CONFLICT (tenant_id, agent_key, period) DO UPDATE
+-- SET accumulated_usd = agent_cost_burn.accumulated_usd + EXCLUDED.accumulated_usd
+-- ... RETURNING accumulated_usd` upsert, so a per-agent budget survives a restart
+-- and concurrent adds for one key can never lose an increment. accumulated_usd
+-- reuses the crate DOUBLE PRECISION monetary type (cost_usd/monthly_budget_usd).
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (56, '056_agent_cost_burn')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE TABLE IF NOT EXISTS agent_cost_burn (
+            tenant_id TEXT NOT NULL,
+            agent_key TEXT NOT NULL,
+            period TEXT NOT NULL,
+            accumulated_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+            first_seen_unix BIGINT NOT NULL,
+            updated_at_unix BIGINT NOT NULL,
+            PRIMARY KEY (tenant_id, agent_key, period)
+        );
+    END IF;
+END
+$$;

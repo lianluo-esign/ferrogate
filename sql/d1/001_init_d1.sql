@@ -1054,6 +1054,23 @@ CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_tenant_last_seen
 CREATE INDEX IF NOT EXISTS idx_observed_agent_presence_last_seen
     ON observed_agent_presence(last_seen_at_unix DESC);
 
+-- Durable per-agent cost-burn accumulation (#428). One row per (tenant_id,
+-- agent_key, period); accumulated_usd is bumped by an atomic upsert so a
+-- per-agent budget survives a restart. accumulated_usd is REAL (SQLite's float),
+-- unix times INTEGER, mirroring the crate's D1 type convention. NOTE: the D1
+-- ControlPlaneStore backend does not yet route the accumulate onto the tenant
+-- proxy binding (returns the typed unimplemented-backend-surface error); the
+-- table is defined here so a follow-up slice can wire it without a schema change.
+CREATE TABLE IF NOT EXISTS agent_cost_burn (
+    tenant_id TEXT NOT NULL,
+    agent_key TEXT NOT NULL,
+    period TEXT NOT NULL,
+    accumulated_usd REAL NOT NULL DEFAULT 0,
+    first_seen_unix INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, agent_key, period)
+);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

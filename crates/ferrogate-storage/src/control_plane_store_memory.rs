@@ -1754,6 +1754,31 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .list_observed_agent_presence_since(tenant_scope, since_unix))
     }
 
+    async fn add_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+        delta_usd: f64,
+    ) -> Result<f64, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent cost burn repository lock poisoned".into()))?
+            .add_agent_burn(tenant_id, agent_key, period, delta_usd))
+    }
+
+    async fn get_agent_burn(
+        &self,
+        tenant_id: &str,
+        agent_key: &str,
+        period: &str,
+    ) -> Result<Option<f64>, StorageError> {
+        Ok(self
+            .lock()
+            .map_err(|_| StorageError::Runtime("agent cost burn repository lock poisoned".into()))?
+            .get_agent_burn(tenant_id, agent_key, period))
+    }
+
     async fn record_budget_alert_notification(
         &self,
         notification: StoredBudgetAlertNotification,
