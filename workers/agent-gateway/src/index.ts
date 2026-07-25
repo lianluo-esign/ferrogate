@@ -111,6 +111,7 @@ export interface Env {
    * never "the agent reaches everything".
    */
   CONTAINER_GOVERNED_EGRESS_HOSTS?: string;
+  /**
    * GitHub App id backing the brokered per-operation git credential path
    * (issue #475). A plain var, not a secret. Absent it, `/git-credential/*`
    * fails closed with `github_app_unbound` (HTTP 501) — there is deliberately
