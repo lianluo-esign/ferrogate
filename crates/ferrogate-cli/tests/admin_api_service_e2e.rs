@@ -62,6 +62,54 @@ fn start_admin_api(config: &std::path::Path) -> Child {
         .unwrap()
 }
 
+/// Same key roster as `write_config`, but wired through the CANONICAL
+/// `[control_api]` section (#359) instead of the deprecated `[admin_api]`
+/// alias -- so the full-parity CRUD flow can be exercised end to end
+/// through the promoted Control Plane API.
+fn write_control_api_config(path: &std::path::Path, gateway_addr: &str, control_api_addr: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[control_api]
+listen = "{control_api_addr}"
+gateway_url = "http://{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "chat-only"
+name = "Data-plane only key"
+key = "chat-secret"
+scopes = ["chat.completions"]
+
+[[api_keys]]
+id = "tenant-a-console"
+name = "Tenant A admin-console session key"
+key = "tenant-a-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "adminapi-tenant-a"
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn start_control_api(config: &std::path::Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args(["control-api", "serve", "--config", config.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
 const ADMIN: [&str; 2] = [
     "Authorization: Bearer admin-secret",
     "Content-Type: application/json",
@@ -518,6 +566,152 @@ scopes = ["admin.read", "admin.write"]
 
     let _ = control_api.kill();
     let _ = control_api.wait();
+}
+
+/// #359 acceptance box 4, canonical: the full console-shaped CRUD flow --
+/// create a resource, list it back through BOTH the Control Plane API
+/// service and the gateway directly, assert byte-identical control-plane
+/// parity, wrong-scope 403 parity, tenant isolation (#185), and that the
+/// AI data plane is NOT served -- all END TO END through the promoted
+/// `control-api serve` command and `[control_api]` section rather than the
+/// deprecated `admin-api` alias. This is the canonical twin of
+/// `admin_api_service_serves_the_admin_surface_with_gateway_parity`.
+#[test]
+fn control_api_service_serves_the_admin_surface_with_gateway_parity() {
+    let gateway_addr = free_addr();
+    let control_api_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_control_api_config(&config_path, &gateway_addr, &control_api_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+    let mut control_api = start_control_api(&config_path);
+    wait_for_gateway(&control_api_addr);
+
+    // Create through the canonical Control Plane API listener.
+    let created = http_request(
+        &control_api_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        r#"{"id":"controlapi-tenant-a","name":"Tenant A","slug":"controlapi-tenant-a"}"#,
+    );
+    assert!(
+        created.contains("HTTP/1.1 200") || created.contains("HTTP/1.1 201"),
+        "create through control-api failed: {created}"
+    );
+
+    // Read back through both listeners: byte-identical resource payloads.
+    let via_control_api = http_request(
+        &control_api_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        "",
+    );
+    let via_gateway = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &ADMIN,
+        "",
+    );
+    assert!(
+        via_control_api.contains("HTTP/1.1 200"),
+        "list through control-api failed: {via_control_api}"
+    );
+    assert_eq!(
+        status_line(&via_control_api),
+        status_line(&via_gateway),
+        "status parity broke"
+    );
+    let listed_control_api = response_json(&via_control_api);
+    let listed_gateway = response_json(&via_gateway);
+    assert_eq!(
+        listed_control_api["data"], listed_gateway["data"],
+        "the Control Plane API and gateway must expose the same control plane"
+    );
+    assert!(
+        listed_control_api["data"]
+            .as_array()
+            .expect("tenant list")
+            .iter()
+            .any(|tenant| tenant["id"] == "controlapi-tenant-a"),
+        "created tenant missing from the control-api listing: {listed_control_api}"
+    );
+
+    // Error-status parity for an authenticated wrong-scope caller.
+    let scoped_control_api = http_request(
+        &control_api_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &CHAT_ONLY,
+        "",
+    );
+    let scoped_gateway = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenant-accounts",
+        &CHAT_ONLY,
+        "",
+    );
+    assert!(
+        scoped_control_api.contains("HTTP/1.1 403"),
+        "wrong-scope caller must get 403 via control-api: {scoped_control_api}"
+    );
+    assert_eq!(
+        status_line(&scoped_control_api),
+        status_line(&scoped_gateway)
+    );
+    assert_eq!(
+        response_json(&scoped_control_api)["error"]["code"],
+        response_json(&scoped_gateway)["error"]["code"]
+    );
+
+    // Tenant isolation (#185) holds identically through the canonical proxy.
+    let foreign_wallet = http_request(
+        &control_api_addr,
+        "GET",
+        "/admin/v1/wallets/some-other-tenant",
+        &TENANT_A,
+        "",
+    );
+    assert!(
+        foreign_wallet.contains("HTTP/1.1 403"),
+        "cross-tenant wallet read must be denied through control-api: {foreign_wallet}"
+    );
+    assert_eq!(
+        response_json(&foreign_wallet)["error"]["code"],
+        "tenant_scope_denied",
+        "unexpected denial shape: {foreign_wallet}"
+    );
+
+    // The AI data plane is NOT served by the Control Plane API listener.
+    let data_plane = http_request(
+        &control_api_addr,
+        "POST",
+        "/v1/chat/completions",
+        &ADMIN,
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hi"}]}"#,
+    );
+    assert!(
+        data_plane.contains("HTTP/1.1 404"),
+        "data-plane path must 404 on the control-api listener: {data_plane}"
+    );
+    assert_eq!(response_json(&data_plane)["error"]["code"], "not_found");
+
+    // Canonical health identity.
+    let health = http_request(&control_api_addr, "GET", "/healthz", &[], "");
+    assert!(
+        health.contains("HTTP/1.1 200") && health.contains("ferrogate-control-plane-api"),
+        "unexpected health response: {health}"
+    );
+
+    let _ = control_api.kill();
+    let _ = gateway.kill();
+    let _ = control_api.wait();
+    let _ = gateway.wait();
 }
 
 /// #359 conflict guard: a config that sets BOTH the canonical `[control_api]`
