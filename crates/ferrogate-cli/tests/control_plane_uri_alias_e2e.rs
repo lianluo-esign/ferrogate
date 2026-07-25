@@ -9,8 +9,9 @@
 // process and assert byte-identical behavior across the two prefixes for
 // missing auth, invalid keys, admin.read/admin.write scope enforcement,
 // authorized reads, request IDs, error codes, pagination/query pass-through,
-// CSRF, and not-found routing -- plus that the alias is transparent (an alias
-// request echoes the canonical /admin/v1 path, never /control/v1).
+// CSRF, tenant isolation (cross-tenant wallet read denied identically), and
+// not-found routing -- plus that the alias is transparent (an alias request
+// echoes the canonical /admin/v1 path, never /control/v1).
 
 mod support;
 
@@ -43,6 +44,13 @@ id = "chat"
 name = "Chat only"
 key = "chat-secret"
 scopes = ["chat.completions"]
+
+[[api_keys]]
+id = "tenant-a-console"
+name = "Tenant A console session key"
+key = "tenant-a-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "alias-tenant-a"
 "#
     )
 }
@@ -293,6 +301,29 @@ fn control_v1_alias_has_full_behavioral_parity_with_admin_v1() {
     assert!(
         !not_found.contains("/control/v1/no-such-endpoint-xyz"),
         "alias path must not leak into the normalized response: {not_found}"
+    );
+
+    // 10. Tenant-isolation parity (acceptance dimension, #185): a tenant-scoped
+    // console key cannot read another tenant's wallet, and the denial is
+    // byte-identical under both prefixes. This proves the tenant-scope guard --
+    // like every other downstream consumer -- reads the normalized path for a
+    // /control/v1 request too (a security-critical parity property that the
+    // single-source normalization must not bypass).
+    let cross_tenant = assert_parity(
+        &gateway_addr,
+        "GET",
+        "/wallets/some-other-tenant",
+        &["Authorization: Bearer tenant-a-secret"],
+        "",
+        "cross-tenant wallet read",
+    );
+    assert!(
+        status_line(&cross_tenant).contains("403"),
+        "cross-tenant read is 403: {cross_tenant}"
+    );
+    assert!(
+        cross_tenant.contains("tenant_scope_denied"),
+        "cross-tenant denial code: {cross_tenant}"
     );
 
     gateway.kill().unwrap();
