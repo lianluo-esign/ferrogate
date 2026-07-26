@@ -32,7 +32,64 @@ export { default } from "../../src/index";
 // rather than from the SDK also means deleting the production re-export breaks this build.
 export { ContainerProxy } from "../../src/index";
 
-import { AgentSandbox } from "../../src/index";
+import { AgentGateway, AgentSandbox } from "../../src/index";
+import type { InvokeRequest } from "../../src/index";
+
+/**
+ * `AgentGateway` with a workload that can actually be caught mid-flight
+ * (issue #414). The production class inherits everything that matters —
+ * `start` / `cancel` / `destroyRun` / `status` / the `#inFlight` abort handle
+ * are the real ones, and this subclass overrides only `dispatchWorkload`, the
+ * documented seam a framework harness overrides in production.
+ *
+ * WHY IT IS NEEDED. "A cancelled run stops doing work" is unprovable against a
+ * workload that finishes in the same tick: the minimal deployable Worker records
+ * the invocation and returns, so there is no window in which to cancel it. This
+ * probe supplies the window — `workloadRef: "probe:sleep"` awaits a timer,
+ * observes the abort signal, and records whether it ever reached the far side.
+ * `sideEffects()` is the observation that matters: if a cancelled run really
+ * stopped, the post-await effect is NOT there.
+ *
+ * A plain `workloadRef` falls through to `super.dispatchWorkload`, so every
+ * other control test still exercises the production dispatch verbatim.
+ * `control.test.ts` asserts wrangler.toml binds the PRODUCTION `AgentGateway`.
+ */
+export class ProbeAgentGateway extends AgentGateway {
+  /** Work that ran to completion despite (or before) a cancel. */
+  #completedWork: string[] = [];
+
+  /** RPC: the post-await side effects the workload actually performed. */
+  async sideEffects(): Promise<string[]> {
+    return this.#completedWork;
+  }
+
+  protected override async dispatchWorkload(
+    request: InvokeRequest,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (request.workloadRef !== "probe:sleep") {
+      return super.dispatchWorkload(request, signal);
+    }
+    const delayMs = Number(request.args[0] ?? "50");
+    // A signal-observing await: exactly the shape `dispatchWorkload`'s contract
+    // requires of a real harness. Rejecting on abort is what makes the work stop.
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("aborted"));
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    // Reached ONLY when the workload was never cancelled.
+    this.#completedWork.push(request.workloadRef);
+    return `probe slept ${delayMs}ms`;
+  }
+}
 
 /** One outbound-interception registration the SDK made against the container API. */
 interface Interception {

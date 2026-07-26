@@ -36,28 +36,56 @@ See `docs/cloudflare-agent-gateway.md` for the full architecture and how #412 /
 
 | Verb | Route | Body / query | Returns |
 |------|-------|--------------|---------|
-| start (lazy create + `onStart(props)`) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }` |
+| start (lazy create; props resolved into state) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }`; 409 `run_conflict` on a re-bind, 422 on a refused placement dial |
 | invoke  | `POST /control/invoke`  | `{ runRef, workloadRef, args[] }` | `{ runRef, status, exitCode, message }` |
-| cancel (fiber-cancel) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
+| cancel (**cooperative** abort — NOT fibers) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status, aborted, detail }` |
 | destroy (`this.destroy()`) | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
-| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message, resolvedModel }` |
+| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message, resolvedModel, resolvedLocationHint, recordedRoutingRetry, cancelRequested }` |
+
+Every verb except `start` returns **404 `not_found`** when no run is bound to the
+addressed instance: naming an instance always yields a Durable Object stub, so
+without this a typo'd `runRef` answered 200 and FerroGate recorded lifecycle
+evidence for a run that never existed.
 
 `runRef` is the agent instance name (the `runId` supplied to `start`). All
 routes require `Authorization: Bearer <GATEWAY_CONTROL_TOKEN>`. `GET /healthz`
 is the only unauthenticated route.
 
 `props` (`RunProps`) is the transient per-run init — `model`, `tools`,
-`systemPrompt`, `locationHint`, `jurisdiction`, `routingRetry` — that the agent's
-`onStart(props)` reads to pick its runtime-selectable model/tools/prompt in code
-(Cloudflare has no deploy-time model field). Props are distinct from the agent's
-persistent state.
+`systemPrompt`, `locationHint`, `jurisdiction`, `routingRetry`. `start()` reads
+them to pick the run's model/tools/prompt in code (Cloudflare has no deploy-time
+model field) and writes the resolved selections into persistent state. Props are
+distinct from that state.
+
+They are resolved in `start()`, **not** by calling `onStart(props)`: the pinned
+`agents@0.0.109` rebinds `this.onStart` to a zero-argument wrapper, so props
+handed to it are silently dropped.
+
+Placement dials are each honored, refused or recorded — never silently inert:
+
+| dial | disposition |
+|---|---|
+| `locationHint` | **honored** — passed to `getAgentByName(ns, name, { locationHint })` at start (identity-neutral, so start is the complete place to apply it). An unknown value is refused 422. |
+| `jurisdiction` | **refused** (422 `jurisdiction_unsupported`) — it changes the Durable Object's *identity*, so a run started with one would be unreachable from every FerroGate caller that does not also carry it, including the #428 over-budget kill switch. It belongs on the deployment, not on a run. |
+| `routingRetry` | **recorded only** — reported by `status`; retrying a control call is FerroGate's transport concern. |
 
 There is deliberately **no** stop / pause / resume / restart / getStatus route:
 Cloudflare has no such primitive. An idle agent **hibernates** automatically
 (zero compute, state retained) and wakes on the next request, so FerroGate models
-"stop" as hibernate + re-address entirely client-side. `cancel` is the *fiber*
-cancellation primitive (distinct from a terminal stop); `status` is a custom RPC,
-not a platform `getStatus`. See
+"stop" as hibernate + re-address entirely client-side. `status` is a custom RPC,
+not a platform `getStatus`.
+
+**`cancel` is COOPERATIVE, not a fiber cancel.** Cloudflare documents fibers
+(`startFiber().cancel` / `abortSubAgent`) as the cancellation primitive, but the
+pinned SDK ships none (`grep -ri fiber node_modules/agents/` finds nothing).
+`POST /control/cancel` therefore aborts an `AbortSignal` that the agent's
+`dispatchWorkload` observes — in-flight work rejects at its next observation
+point — and sets a durable latch that refuses any later `invoke`. The response's
+`aborted` field says whether in-flight work was actually signalled (`true`) or
+only the latch was set (`false`). It **cannot** stop a workload that ignores the
+signal or one running outside the Durable Object, so a caller that needs a
+guarantee must verify and escalate to `destroy`; #428's `KillMode::Cancel` does
+exactly that. See
 [`../../docs/cloudflare-agent-gateway.md`](../../docs/cloudflare-agent-gateway.md)
 §3a for the full verb→primitive→route mapping.
 

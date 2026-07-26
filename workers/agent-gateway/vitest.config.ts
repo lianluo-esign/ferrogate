@@ -61,7 +61,14 @@ export default defineConfig({
         // so the DO class MUST use SQLite storage (mirrors the deploy metadata's
         // `new_sqlite_classes` migration).
         durableObjects: {
-          AGENT_GATEWAY: { className: "AgentGateway", useSQLite: true },
+          // #414: `ProbeAgentGateway` IS `AgentGateway` — it inherits the whole
+          // lifecycle surface and overrides only `dispatchWorkload`, the seam a
+          // real framework harness overrides, and only for the `probe:sleep`
+          // workload. It exists because "a cancelled run stops doing work"
+          // cannot be observed against a workload that finishes in one tick.
+          // Production binds `AgentGateway`; control.test.ts asserts wrangler.toml
+          // says so. See test/harness/worker.ts.
+          AGENT_GATEWAY: { className: "ProbeAgentGateway", useSQLite: true },
           // #471: the container tier is bound so the egress posture the Worker applies
           // is observable. `ProbeSandbox` IS `AgentSandbox` (see the harness).
           CONTAINER_SANDBOX: { className: "ProbeSandbox", useSQLite: true },

@@ -81,7 +81,9 @@ use ferrogate_storage::RuntimeStorageRepositories;
 use serde::{Deserialize, Serialize};
 
 use crate::cloudflare_agent_memory::{AgentInstanceIdentity, AgentMemoryError};
-use crate::cloudflare_worker::{CloudflareControlSurface, CloudflareControlSurfaceError};
+use crate::cloudflare_worker::{
+    CloudflareControlSurface, CloudflareControlSurfaceError, CloudflareRunStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Pricing constants
@@ -1186,9 +1188,35 @@ pub enum KillMode {
     /// `this.destroy()` — the hard kill ([`CloudflareControlSurface::cleanup_run`]).
     #[default]
     Destroy,
-    /// Fiber-cancel — a softer stop that aborts in-flight work
-    /// ([`CloudflareControlSurface::cancel_run`]) but leaves the instance.
+    /// Cancel first, **verify, and escalate to destroy if the run is still
+    /// alive** — a softer stop that tries to preserve the instance.
+    ///
+    /// [`CloudflareControlSurface::cancel_run`] is COOPERATIVE (the gateway
+    /// Worker aborts a signal the workload observes; the pinned Agents SDK has
+    /// no fiber primitive). Cooperative is fine for an operator's "please
+    /// stop"; it is NOT fine for an over-budget kill, where a workload that
+    /// ignores the signal keeps running and keeps spending while the receipt
+    /// says the run was killed. So this mode does not trust the cancel: it
+    /// re-reads [`CloudflareControlSurface::run_status`] and, unless the run has
+    /// actually reached a stopped/terminal state, falls through to
+    /// `cleanup_run`. The soft path is an optimization, never the guarantee.
     Cancel,
+}
+
+/// Whether an observed post-cancel status means the run has genuinely stopped
+/// burning, so [`KillMode::Cancel`] need not escalate to a destroy.
+///
+/// `Queued`/`Running` mean the cooperative cancel did not take — the workload
+/// ignored the signal, or the run is executing somewhere the signal does not
+/// reach. Anything terminal means it is settled.
+fn kill_is_settled(status: CloudflareRunStatus) -> bool {
+    matches!(
+        status,
+        CloudflareRunStatus::Stopped
+            | CloudflareRunStatus::Completed
+            | CloudflareRunStatus::Failed
+            | CloudflareRunStatus::CleanedUp
+    )
 }
 
 /// Failure surfaced by the cost-governance engine.
@@ -1273,8 +1301,9 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
         }
     }
 
-    /// Choose whether a kill destroys (`this.destroy()`) or cancels (fiber
-    /// cancel) the over-budget run.
+    /// Choose whether a kill destroys (`this.destroy()`) outright, or tries the
+    /// cooperative cancel first and escalates to a destroy when the run
+    /// survives it. See [`KillMode`].
     pub fn with_kill_mode(mut self, kill_mode: KillMode) -> Self {
         self.kill_mode = kill_mode;
         self
@@ -1354,7 +1383,17 @@ impl<C: CloudflareControlSurface, L: AgentBurnLedger> AgentCostGovernor<C, L> {
                     self.control.cleanup_run(&instance_name)?;
                 }
                 KillMode::Cancel => {
+                    // Cancel is cooperative and therefore best-effort (see
+                    // `KillMode::Cancel`). A budget kill may not be best-effort,
+                    // so ask the run what actually happened and destroy it if it
+                    // is still alive. `run_status` failing is NOT treated as
+                    // "probably fine": it propagates, and the caller fails
+                    // closed rather than recording a kill it cannot substantiate.
                     self.control.cancel_run(&instance_name, reason)?;
+                    let observed = self.control.run_status(&instance_name)?;
+                    if !kill_is_settled(observed) {
+                        self.control.cleanup_run(&instance_name)?;
+                    }
                 }
             }
         }

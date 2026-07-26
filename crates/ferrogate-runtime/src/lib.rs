@@ -181,7 +181,7 @@ pub use managed_worker::{
     ManagedWorkerExecution, ManagedWorkerFailedExecution, ManagedWorkerFailure,
     ManagedWorkerLifecycleAction, ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest,
     ManagedWorkerScheduler, ManagedWorkerSchedulerConfig, ManagedWorkerSession,
-    ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
+    ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, ManagedWorkerStopKind, WorkerTemplate,
     AGENT_WORKER_CLOCK_SKEW_MILLIS, AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES,
     AGENT_WORKER_PROTOCOL_VERSION, AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM,
 };

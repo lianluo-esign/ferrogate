@@ -26,7 +26,9 @@ use super::{
     DEFAULT_WARN_FRACTION, SECONDS_PER_BILLING_MONTH, WEBSOCKET_MESSAGES_PER_BILLED_REQUEST,
 };
 use crate::cloudflare_agent_memory::AgentInstanceIdentity;
-use crate::cloudflare_worker::{MockCloudflareCall, MockCloudflareControlSurface};
+use crate::cloudflare_worker::{
+    CloudflareRunStatus, MockCloudflareCall, MockCloudflareControlSurface,
+};
 
 /// tokio's `macros`/test features are not enabled for this crate, so drive async
 /// entry points on a bare current-thread runtime (no IO/timer needed).
@@ -843,11 +845,20 @@ fn allow_receipt_has_no_threshold_crossed() {
 fn governor(
     ceiling: f64,
 ) -> AgentCostGovernor<MockCloudflareControlSurface, InMemoryAgentBurnLedger> {
+    governor_with_surface(ceiling, MockCloudflareControlSurface::new())
+}
+
+/// A governor over a specific control-surface double — used to script what the
+/// run reports AFTER a cooperative cancel.
+fn governor_with_surface(
+    ceiling: f64,
+    surface: MockCloudflareControlSurface,
+) -> AgentCostGovernor<MockCloudflareControlSurface, InMemoryAgentBurnLedger> {
     AgentCostGovernor::new(
         CfRuntimeCostModel::new(),
         AgentBudgetPolicy::new(ceiling, "v1"),
         InMemoryAgentBurnLedger::new(),
-        MockCloudflareControlSurface::new(),
+        surface,
     )
 }
 
@@ -877,23 +888,68 @@ fn kill_invokes_destroy_with_identity_derived_instance_name() {
 }
 
 #[test]
-fn kill_in_cancel_mode_invokes_fiber_cancel() {
+fn kill_in_cancel_mode_cancels_then_verifies_and_escalates_when_the_run_survives() {
+    // ISSUE #414 ITEM 1, THE MONEY PATH. `cancel_run` is COOPERATIVE — the
+    // gateway Worker aborts a signal the workload observes; there is no fiber
+    // primitive in the pinned SDK. A workload that IGNORES the signal keeps
+    // running and keeps spending, so a budget kill that stopped at "cancel
+    // returned Stopped" reported a kill it had not performed. `KillMode::Cancel`
+    // therefore re-reads the run and destroys it when it is still alive.
     let id = identity("run-1");
     let sample = AgentRuntimeUsageSample {
         metered_egress_usd: 5.0,
         ..AgentRuntimeUsageSample::zero()
     };
-    let mut gov = governor(1.0).with_kill_mode(KillMode::Cancel);
+    // The surface keeps reporting Running after the cancel: the workload
+    // ignored the signal.
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Running),
+    )
+    .with_kill_mode(KillMode::Cancel);
     let receipt = block_on(gov.enforce(&id, sample)).expect("enforce");
     assert!(matches!(receipt.decision, BudgetDecision::Kill { .. }));
 
     match gov.control().calls() {
-        [MockCloudflareCall::CancelRun { run_ref, reason }] => {
+        [MockCloudflareCall::CancelRun { run_ref, reason }, MockCloudflareCall::RunStatus { run_ref: checked }, MockCloudflareCall::CleanupRun { run_ref: killed }] =>
+        {
             assert_eq!(run_ref, "fg.tenant-a.sess-1.run-1");
             assert!(!reason.is_empty(), "cancel carries the kill reason");
+            assert_eq!(checked, run_ref, "the SAME instance must be verified");
+            assert_eq!(killed, run_ref, "and the SAME instance destroyed");
         }
-        other => panic!("expected a single CancelRun, got {other:?}"),
+        other => panic!("expected cancel -> status -> cleanup, got {other:?}"),
     }
+}
+
+#[test]
+fn kill_in_cancel_mode_does_not_destroy_a_run_the_cancel_actually_stopped() {
+    // The other half: when the workload DID honor the abort signal, the soft
+    // path is enough and the instance is left alone. Without this, the
+    // escalation above would just be "always destroy" wearing a cancel costume.
+    let id = identity("run-1");
+    let sample = AgentRuntimeUsageSample {
+        metered_egress_usd: 5.0,
+        ..AgentRuntimeUsageSample::zero()
+    };
+    let mut gov = governor_with_surface(
+        1.0,
+        MockCloudflareControlSurface::new().reporting_status(CloudflareRunStatus::Stopped),
+    )
+    .with_kill_mode(KillMode::Cancel);
+    block_on(gov.enforce(&id, sample)).expect("enforce");
+
+    let calls = gov.control().calls();
+    assert!(
+        matches!(
+            calls,
+            [
+                MockCloudflareCall::CancelRun { .. },
+                MockCloudflareCall::RunStatus { .. }
+            ]
+        ),
+        "expected cancel -> status and NO cleanup, got {calls:?}"
+    );
 }
 
 #[test]

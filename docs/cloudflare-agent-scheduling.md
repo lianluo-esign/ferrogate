@@ -87,14 +87,15 @@ consumers.
 | **SQLite scheduler** (default) | `this.schedule` rows + single DO alarm | Survives hibernation/restart; at-most-once per firing (no retry if the callback throws — the SDK logs and moves on) | Per-agent timed work: one-shots, minute-cron, self-re-arming intervals; anything that must wake THIS agent | Minute precision for cron; 2 MB payload; all firings serialize through one DO (single-writer); callback errors are swallowed by the SDK | **Implemented** (#426, `/schedule/*`) |
 | **Queues** | Cloudflare Queues producer/consumer bindings | At-least-once delivery, batching, retries + DLQ | Cross-agent fan-out, high-volume async dispatch, work that must not be lost if one DO is busy/slow | Consumers are Worker-level (not per-agent) — a consumer must re-address the target agent by name; no timed delivery (pair with the scheduler for "at time T, enqueue") | **Future** (follow-up A below) |
 | **Workflows** | Cloudflare Workflows (durable execution) | Durable multi-step runs: each step checkpointed, retried, resumable over days | Long multi-step jobs spanning agents/services, human-in-the-loop pauses, compensation logic | Separate deploy artifact + billing; step granularity is coarse; overkill for a simple timer | **Future** (follow-up B) |
-| **Fibers** | Agent fiber handles (`startFiber` / cancel — the #414 cancel primitive) | In-memory, in-run concurrency; NOT durable — dies with the run/eviction | Parallel sub-work *inside* one live invocation, and cancellation of in-flight work | Never for future/cross-agent work; anything that must survive hibernation belongs in a tier above | **Cancel path wired** (#414 `/control/cancel`); fiber-parallel dispatch is the harness's concern |
+| **Fibers** | Agent fiber handles (`startFiber` / cancel) — documented by Cloudflare, but **absent from the pinned `agents@0.0.109`** | In-memory, in-run concurrency; NOT durable — dies with the run/eviction | Parallel sub-work *inside* one live invocation, and cancellation of in-flight work | Never for future/cross-agent work; anything that must survive hibernation belongs in a tier above | **Not available.** #414's `/control/cancel` is a **cooperative** cancel instead: an `AbortSignal` the workload observes plus a durable refuse-further-work latch. It stops work that observes the signal, not work that ignores it — see `docs/cloudflare-agent-gateway.md` §3a. Fiber-parallel dispatch remains the harness's concern |
 | *(intra-agent queue)* | SDK `queue()` (`cf_agents_queues`) | Persisted FIFO, drained immediately by the same DO | "Run this next, in order" within one agent | No timing control; same single-writer bound | Not exposed; revisit if a consumer appears |
 
 Chosen defaults: **scheduler for time, Queues for volume, Workflows for
-sagas, fibers for in-run parallelism.** Concretely: if the work targets one
+sagas, fibers (when available) for in-run parallelism.** Concretely: if the work targets one
 agent at a known time → SQLite scheduler. If it fans out or must survive a
 busy/broken consumer → Queues. If it is a multi-step process with retries and
-waits → Workflows. If it is concurrency inside a live run → fibers.
+waits → Workflows. If it is concurrency inside a live run → fibers (once the
+SDK ships them; today that tier is unavailable, see the row above).
 
 ## Proposed follow-up issues (not implemented here)
 

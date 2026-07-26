@@ -14,7 +14,7 @@ use crate::{
     FrameworkAdapterCapabilities, IsolationBackendKind, IsolationPolicy,
     ManagedWorkerLifecycleAction, ManagedWorkerRunRequest, ManagedWorkerScheduler,
     ManagedWorkerSchedulerConfig, ManagedWorkerSessionRequest, ManagedWorkerSessionStatus,
-    WorkerTemplate,
+    ManagedWorkerStopKind, WorkerTemplate,
 };
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{StoredAgentRun, StoredManagedWorkerSession};
@@ -367,11 +367,15 @@ fn default_props_resolver_yields_empty_props() {
 
 #[test]
 fn terminal_stop_is_modeled_as_hibernation_not_a_cancel() {
-    // The scheduler's terminal reasons (`completed`/`failed`) map to hibernation:
-    // `stop_run` (a no-op that reports Stopped), NOT the fiber-cancel route.
+    // A terminal stop maps to hibernation: `stop_run` (a no-op that reports
+    // Stopped), NOT the cancel route.
     let mut client = client(MockCloudflareControlSurface::new());
-    client.stop_managed_worker("cf-run-x", "completed").unwrap();
-    client.stop_managed_worker("cf-run-x", "failed").unwrap();
+    client
+        .stop_managed_worker("cf-run-x", ManagedWorkerStopKind::Terminal, "completed")
+        .unwrap();
+    client
+        .stop_managed_worker("cf-run-x", ManagedWorkerStopKind::Terminal, "failed")
+        .unwrap();
 
     let calls = client.surface().calls();
     assert!(matches!(
@@ -388,12 +392,15 @@ fn terminal_stop_is_modeled_as_hibernation_not_a_cancel() {
 }
 
 #[test]
-fn operator_cancel_routes_to_the_fiber_cancel_primitive() {
-    // A non-terminal (operator) reason is an active cancel → fiber-cancel route,
-    // not hibernation.
+fn operator_cancel_routes_to_the_cancel_primitive() {
+    // An operator stop is an active cancel → the cancel route, not hibernation.
     let mut client = client(MockCloudflareControlSurface::new());
     client
-        .stop_managed_worker("cf-run-x", "operator_cancelled")
+        .stop_managed_worker(
+            "cf-run-x",
+            ManagedWorkerStopKind::OperatorCancel,
+            "operator_cancelled",
+        )
         .unwrap();
 
     let calls = client.surface().calls();
@@ -405,6 +412,56 @@ fn operator_cancel_routes_to_the_fiber_cancel_primitive() {
     assert!(!calls
         .iter()
         .any(|c| matches!(c, MockCloudflareCall::StopRun { .. })));
+}
+
+#[test]
+fn operator_cancel_whose_reason_reads_terminal_still_cancels() {
+    // ISSUE #414 ITEM 6. `cancel_session` takes an ARBITRARY caller-supplied
+    // reason, and the routing used to match on `reason ∈ {"completed","failed"}`.
+    // So an operator cancel with reason "completed" sent NO control call at all
+    // and still reported Stopped — a cancel that cancelled nothing. The typed
+    // `ManagedWorkerStopKind` is what decides now; the reason is only evidence
+    // text.
+    for reason in ["completed", "failed"] {
+        let mut client = client(MockCloudflareControlSurface::new());
+        client
+            .stop_managed_worker("cf-run-x", ManagedWorkerStopKind::OperatorCancel, reason)
+            .unwrap();
+        let calls = client.surface().calls();
+        assert!(
+            matches!(
+                calls.last().unwrap(),
+                MockCloudflareCall::CancelRun { run_ref, reason: r }
+                    if run_ref == "cf-run-x" && r == reason
+            ),
+            "operator cancel with reason {reason:?} must still reach the cancel route, got {calls:?}"
+        );
+        assert!(!calls
+            .iter()
+            .any(|c| matches!(c, MockCloudflareCall::StopRun { .. })));
+    }
+}
+
+#[test]
+fn a_terminal_stop_whose_reason_reads_like_an_operator_cancel_still_hibernates() {
+    // The mirror of the case above: the reason text must not be able to force a
+    // control call on the scheduler's own completion path either.
+    let mut client = client(MockCloudflareControlSurface::new());
+    client
+        .stop_managed_worker(
+            "cf-run-x",
+            ManagedWorkerStopKind::Terminal,
+            "operator_cancelled",
+        )
+        .unwrap();
+    let calls = client.surface().calls();
+    assert!(matches!(
+        calls.last().unwrap(),
+        MockCloudflareCall::StopRun { .. }
+    ));
+    assert!(!calls
+        .iter()
+        .any(|c| matches!(c, MockCloudflareCall::CancelRun { .. })));
 }
 
 #[test]

@@ -122,7 +122,7 @@ const NULLABLE_STRING_KEYS = [
   "resolvedModel",
   "resolvedSystemPrompt",
   "resolvedLocationHint",
-  "resolvedJurisdiction",
+  "cancelReason",
   "lastMessage",
 ] as const;
 
@@ -157,6 +157,15 @@ export function validateStateChange(candidate: unknown): string | null {
   }
   if (record.exitCode !== null && typeof record.exitCode !== "number") {
     return "state.exitCode must be a number or null";
+  }
+  if (record.recordedRoutingRetry !== null && typeof record.recordedRoutingRetry !== "number") {
+    return "state.recordedRoutingRetry must be a number or null";
+  }
+  // The DURABLE half of the #414 cancel latch. A memory write that dropped or
+  // mistyped it would let a cancelled run be re-invoked, so it is validated like
+  // every other lifecycle field rather than trusted.
+  if (typeof record.cancelRequested !== "boolean") {
+    return "state.cancelRequested must be a boolean";
   }
   if (typeof record.updatedAt !== "number") {
     return "state.updatedAt must be a number";

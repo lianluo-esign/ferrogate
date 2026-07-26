@@ -1369,6 +1369,23 @@ pub struct AgentWorkerFrameworkHandler {
     pub readiness_reason: Option<String>,
 }
 
+/// Why a session is being stopped.
+///
+/// The scheduler knows this at every call site; the free-text `reason` does not
+/// carry it. Backends that behave differently for the two cases — the
+/// Cloudflare client routes a terminal stop to hibernation and an operator
+/// cancel to the cancel route — MUST discriminate on this, not on the reason
+/// string. Matching on `reason ∈ {"completed","failed"}` meant an operator
+/// cancel whose caller-supplied reason happened to be `"completed"` silently
+/// took the hibernation path and issued no cancel at all (issue #414).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedWorkerStopKind {
+    /// The run reached a terminal state on its own (completed or failed).
+    Terminal,
+    /// An operator (or a governor acting for one) is stopping a live run.
+    OperatorCancel,
+}
+
 pub trait AgentWorkerControlClient {
     fn framework_handlers(&mut self) -> &[AgentWorkerFrameworkHandler];
     fn backends(&mut self) -> &[IsolationBackendDescriptor];
@@ -1380,9 +1397,13 @@ pub trait AgentWorkerControlClient {
         &mut self,
         request: IsolationExecRequest,
     ) -> Result<IsolationExecOutcome, ManagedWorkerError>;
+    /// Stop `instance_id`. `kind` is the authoritative classification; `reason`
+    /// is operator-facing text for the evidence record and must never be parsed
+    /// to recover `kind`.
     fn stop_managed_worker(
         &mut self,
         instance_id: &str,
+        kind: ManagedWorkerStopKind,
         reason: &str,
     ) -> Result<IsolationStopOutcome, ManagedWorkerError>;
     fn cleanup_managed_worker(
@@ -1531,7 +1552,11 @@ impl ManagedWorkerScheduler {
             workload_ref: run.workload_ref,
             args: run.args,
         })?;
-        let stop = agent_worker.stop_managed_worker(&session.instance_id, "completed")?;
+        let stop = agent_worker.stop_managed_worker(
+            &session.instance_id,
+            ManagedWorkerStopKind::Terminal,
+            "completed",
+        )?;
         let cleanup = agent_worker.cleanup_managed_worker(&session.instance_id)?;
         session.status = ManagedWorkerSessionStatus::CleanedUp;
         Ok(ManagedWorkerExecution {
@@ -1573,7 +1598,11 @@ impl ManagedWorkerScheduler {
                 return Err(self.cleanup_failed_session(session, error, agent_worker));
             }
         };
-        let stop = match agent_worker.stop_managed_worker(&session.instance_id, "completed") {
+        let stop = match agent_worker.stop_managed_worker(
+            &session.instance_id,
+            ManagedWorkerStopKind::Terminal,
+            "completed",
+        ) {
             Ok(stop) => stop,
             Err(error) => {
                 session.status = ManagedWorkerSessionStatus::Failed;
@@ -1620,7 +1649,11 @@ impl ManagedWorkerScheduler {
                 cleanup: IsolationCleanupOutcome::not_started(),
             }));
         }
-        let stop = match agent_worker.stop_managed_worker(&session.instance_id, reason) {
+        let stop = match agent_worker.stop_managed_worker(
+            &session.instance_id,
+            ManagedWorkerStopKind::OperatorCancel,
+            reason,
+        ) {
             Ok(stop) => stop,
             Err(error) => {
                 session.status = ManagedWorkerSessionStatus::Failed;
@@ -1657,7 +1690,11 @@ impl ManagedWorkerScheduler {
         C: AgentWorkerControlClient,
     {
         let stop = agent_worker
-            .stop_managed_worker(&session.instance_id, "failed")
+            .stop_managed_worker(
+                &session.instance_id,
+                ManagedWorkerStopKind::Terminal,
+                "failed",
+            )
             .ok();
         let cleanup = match agent_worker.cleanup_managed_worker(&session.instance_id) {
             Ok(cleanup) => {
@@ -3541,6 +3578,7 @@ mod tests {
         fn stop_managed_worker(
             &mut self,
             instance_id: &str,
+            _kind: ManagedWorkerStopKind,
             reason: &str,
         ) -> Result<IsolationStopOutcome, ManagedWorkerError> {
             self.calls.push("stop_managed_worker");

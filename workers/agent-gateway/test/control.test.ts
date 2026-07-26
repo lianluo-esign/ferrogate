@@ -146,15 +146,22 @@ describe("agent-gateway control routes (Worker-side E2E)", () => {
   });
 
   it("distinct names resolve to DISTINCT, isolated DO instances", async () => {
-    // A name that was never started reports INITIAL_STATE ("queued"), proving
-    // getAgentByName isolates instances by name rather than sharing one object.
-    const res = await SELF.fetch(`${BASE}/control/status?runRef=run-never-started-xyz`, authedInit());
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({
-      runRef: "run-never-started-xyz",
-      status: "queued",
-      resolvedModel: null,
-    });
+    // Two names started with different models must report their OWN resolved
+    // model, proving getAgentByName isolates instances by name rather than
+    // sharing one object. (A name that was never started is covered by
+    // lifecycle.test.ts's not_found guard, #414 item 4.)
+    await SELF.fetch(
+      `${BASE}/control/start`,
+      authedInit({ method: "POST", body: startBody("run-isolated-a", "model-a") }),
+    );
+    await SELF.fetch(
+      `${BASE}/control/start`,
+      authedInit({ method: "POST", body: startBody("run-isolated-b", "model-b") }),
+    );
+    const a = await SELF.fetch(`${BASE}/control/status?runRef=run-isolated-a`, authedInit());
+    const b = await SELF.fetch(`${BASE}/control/status?runRef=run-isolated-b`, authedInit());
+    expect(await a.json()).toMatchObject({ runRef: "run-isolated-a", resolvedModel: "model-a" });
+    expect(await b.json()).toMatchObject({ runRef: "run-isolated-b", resolvedModel: "model-b" });
   });
 
   it("unknown control verb returns 404 JSON", async () => {
@@ -189,24 +196,21 @@ describe("agent-gateway control routes (Worker-side E2E)", () => {
 
   // ---- Characterization of KNOWN DEFECTS (kept green + pinned) ------------
 
-  it("KNOWN DEFECT (#414 props-drop): props.model does NOT round-trip into onStart", async () => {
-    // The Worker's start() calls `this.onStart(request.props)` to deliver per-run
-    // props, but the pinned Agents SDK (agents@0.0.109) reassigns `this.onStart`
-    // in its constructor to a ZERO-ARGUMENT async wrapper
+  it("props.model round-trips into the run's resolved configuration (#414 props-drop FIXED)", async () => {
+    // WAS a pinned known defect: start() delivered props by calling
+    // `this.onStart(request.props)`, but the pinned Agents SDK (agents@0.0.109)
+    // reassigns `this.onStart` in its constructor to a ZERO-ARGUMENT async wrapper
     // (node_modules/agents/dist/chunk-3IQQY2UH.js:316-317) that invokes the user
-    // onStart() with NO arguments. So `props` is silently discarded and EVERY
-    // resolved* field falls back to its INITIAL_STATE default. status.resolvedModel
-    // therefore returns null even though a non-empty model was sent. Proven fixable
-    // by resolving props directly inside start()'s setState (bypassing onStart).
-    // This defect belongs to #414 (props parameterization, commit 8f28b8d), not to
-    // #413's three acceptance criteria. When #414 is fixed, flip this expectation.
+    // hook with NO arguments — so props were silently discarded and every
+    // resolved* field fell back to its INITIAL_STATE default. #414 resolves the
+    // props directly inside start()'s setState, bypassing the hijacked hook.
     await SELF.fetch(
       `${BASE}/control/start`,
       authedInit({ method: "POST", body: startBody("run-propsdefect-1", "claude-opus-4-8") }),
     );
     const res = await SELF.fetch(`${BASE}/control/status?runRef=run-propsdefect-1`, authedInit());
     const body = (await res.json()) as { resolvedModel: string | null };
-    expect(body.resolvedModel).toBeNull(); // documents the bug: SHOULD be the sent model
+    expect(body.resolvedModel).toBe("claude-opus-4-8");
   });
 
   it("path-routed /agents traffic is auth-gated (DO never reached without a bearer)", async () => {

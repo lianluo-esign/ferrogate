@@ -150,7 +150,8 @@ fn stop_run_is_a_local_hibernation_no_op() {
 
 #[test]
 fn cancel_run_posts_to_control_cancel_with_reason() {
-    // Active cancellation IS a route: the fiber-cancel primitive.
+    // Active cancellation IS a route (unlike a terminal stop, which sends
+    // nothing). It is the Worker's COOPERATIVE cancel, not a fiber cancel.
     let mut s = surface(vec![ok(r#"{ "status": "stopped" }"#)]);
     let status = s.cancel_run("cf-run-r1", "operator-cancel").unwrap();
     assert_eq!(status, CloudflareRunStatus::Stopped);
@@ -254,6 +255,86 @@ fn non_2xx_maps_to_verb_specific_error() {
         }
         other => panic!("expected StartFailed, got {other:?}"),
     }
+}
+
+// ---- #414: refusals are errors, and the query is encoded -------------------
+
+/// A 404 `not_found` envelope from the gateway Worker.
+fn not_found(run_ref: &str) -> HttpResponse {
+    HttpResponse {
+        status: 404,
+        retry_after: None,
+        body: format!(r#"{{ "error": "not_found", "runRef": "{run_ref}" }}"#).into_bytes(),
+    }
+}
+
+#[test]
+fn cleanup_of_an_unknown_run_is_run_not_found_not_cleaned_up() {
+    // ISSUE #414 ITEM 4, the half that matters to the control plane: addressing
+    // a Durable Object by name always yields a stub, so `destroy` on an unknown
+    // runRef used to answer 200 `cleaned_up` and FerroGate recorded
+    // IsolationLifecycleEvidence{outcome:"cleaned_up"} for a run that never
+    // existed. `CleanedUp` here would mean that regression is back.
+    let mut s = surface(vec![not_found("cf-run-ghost")]);
+    let err = s.cleanup_run("cf-run-ghost").unwrap_err();
+    match err {
+        CloudflareControlSurfaceError::RunNotFound(m) => assert!(m.contains("not_found"), "{m}"),
+        other => panic!("expected RunNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_and_status_of_an_unknown_run_are_run_not_found() {
+    let mut s = surface(vec![not_found("cf-run-ghost")]);
+    assert!(matches!(
+        s.cancel_run("cf-run-ghost", "operator").unwrap_err(),
+        CloudflareControlSurfaceError::RunNotFound(_)
+    ));
+
+    let mut s = surface(vec![not_found("cf-run-ghost")]);
+    assert!(matches!(
+        s.run_status("cf-run-ghost").unwrap_err(),
+        CloudflareControlSurfaceError::RunNotFound(_)
+    ));
+}
+
+#[test]
+fn a_conflicting_restart_surfaces_as_start_failed() {
+    // The Worker refuses a start that would re-bind a live instance to a
+    // different run (409 `run_conflict`); it must not look like a success.
+    let mut s = surface(vec![HttpResponse {
+        status: 409,
+        retry_after: None,
+        body: br#"{ "error": "run_conflict", "runRef": "cf-run-r1" }"#.to_vec(),
+    }]);
+    let err = s
+        .start_run(CloudflareRunStartRequest {
+            session_id: "s".into(),
+            run_id: "r".into(),
+            worker_template_id: "t".into(),
+            framework_adapter: "native".into(),
+            capability_envelope_id: "e".into(),
+            props: CloudflareRunProps::default(),
+        })
+        .unwrap_err();
+    match err {
+        CloudflareControlSurfaceError::StartFailed(m) => assert!(m.contains("run_conflict"), "{m}"),
+        other => panic!("expected StartFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_status_percent_encodes_the_run_ref_in_the_query() {
+    // ISSUE #414 ITEM 7. An unescaped `&` or `#` in a run ref truncates or
+    // corrupts the query, so the Worker would answer about a DIFFERENT instance
+    // (or none) while the caller believed it asked about this one.
+    let mut s = surface(vec![ok(r#"{ "status": "running" }"#)]);
+    s.run_status("fg.tenant&evil.sess#1.run 2").unwrap();
+    assert_eq!(
+        s.transport().last().url,
+        "https://ferrogate-agent-gateway.example.workers.dev/control/status\
+?runRef=fg.tenant%26evil.sess%231.run%202"
+    );
 }
 
 #[test]

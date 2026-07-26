@@ -19,10 +19,10 @@
 //!
 //! | verb ([`CloudflareControlSurface`]) | CF primitive | Worker route |
 //! |---|---|---|
-//! | `start_run`   | LAZY create + `onStart(props)` | `POST /control/start` (`getAgentByName` + `agent.start(props)`) |
+//! | `start_run`   | LAZY create; props resolved into state at start | `POST /control/start` (`getAgentByName` + `agent.start(props)`) |
 //! | `exec_run`    | agent RPC method | `POST /control/invoke` |
 //! | `stop_run`    | **hibernation** (automatic; no primitive) | *(none — local no-op; see below)* |
-//! | `cancel_run`  | **fibers** (`startFiber().cancel` / `abortSubAgent`) | `POST /control/cancel` |
+//! | `cancel_run`  | **cooperative** `AbortSignal` + durable latch (NOT fibers — see below) | `POST /control/cancel` |
 //! | `cleanup_run` | `this.destroy()` | `POST /control/destroy` |
 //! | `run_status`  | **custom** `onRequest`/RPC (no `getStatus`) | `GET  /control/status?runRef=…` |
 //!
@@ -34,8 +34,31 @@
 //! call — `stop_run` returns [`CloudflareRunStatus::Stopped`] **without any HTTP
 //! request** and the agent hibernates on its own, staying re-addressable by name.
 //! Active cancellation of in-flight work is a *different* operation
-//! (`cancel_run`, the fiber-cancel route). `run_status` is a **custom** status
-//! method we expose, not a built-in `getStatus`.
+//! (`cancel_run`). `run_status` is a **custom** status method we expose, not a
+//! built-in `getStatus`. A terminal stop vs. an operator cancel is decided by the
+//! scheduler's typed `ManagedWorkerStopKind`, never by parsing the stop reason.
+//!
+//! ## What `cancel_run` actually is (and is not)
+//!
+//! Cloudflare's docs name **fibers** (`startFiber().cancel` / `abortSubAgent`)
+//! as the in-run cancellation primitive, but the pinned Agents SDK
+//! (`agents@0.0.109`) ships **no fiber API at all**. The gateway Worker
+//! therefore implements cancel with what the runtime does give it: it aborts an
+//! `AbortSignal` the workload observes, and sets a **durable** latch that makes
+//! every later `invoke` on that run refuse. A workload that observes the signal
+//! stops; one that ignores it, or that executes outside the agent's Durable
+//! Object, does not — so a caller that needs "stopped" to be a guarantee must
+//! verify with `run_status` and escalate to `cleanup_run`
+//! ([`crate::KillMode::Cancel`] does exactly that for the #428 budget kill).
+//!
+//! ## Refusals are errors, not statuses
+//!
+//! Addressing an agent by name ALWAYS yields a Durable Object stub, so a verb
+//! against an unknown `run_ref` used to return 200 and a fabricated status. The
+//! Worker now refuses with 404 `not_found` (and 409 `run_conflict` for a
+//! contradictory re-start), which this surface maps onto
+//! [`CloudflareControlSurfaceError::RunNotFound`] / `StartFailed` so the caller
+//! never records lifecycle evidence for a run that does not exist.
 //!
 //! HTTP goes through a small synchronous [`GatewayControlTransport`] seam so the
 //! verb→route→status mapping is unit-tested with a scripted mock and **no
@@ -135,10 +158,20 @@ impl<T: GatewayControlTransport> WorkerGatewayControlSurface<T> {
 
 /// Decode a control-route JSON body into `T`, treating a non-2xx status as
 /// `map_err(status, body)`.
+///
+/// HTTP 404 is intercepted first and always becomes
+/// [`CloudflareControlSurfaceError::RunNotFound`], whatever the verb: "there is
+/// no such run" must never be reported as that verb's success value (a
+/// `cleanup_run` against a typo'd `run_ref` returning `CleanedUp` is how
+/// FerroGate came to record cleanup evidence for runs that never existed).
 fn decode_ok<T: for<'de> Deserialize<'de>>(
     response: HttpResponse,
     map_err: impl FnOnce(u16, String) -> CloudflareControlSurfaceError,
 ) -> Result<T, CloudflareControlSurfaceError> {
+    if response.status == 404 {
+        let body = String::from_utf8_lossy(&response.body).into_owned();
+        return Err(CloudflareControlSurfaceError::RunNotFound(body));
+    }
     if !(200..300).contains(&response.status) {
         let body = String::from_utf8_lossy(&response.body).into_owned();
         return Err(map_err(response.status, body));
@@ -146,6 +179,25 @@ fn decode_ok<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&response.body).map_err(|e| {
         CloudflareControlSurfaceError::Transport(format!("failed to decode control response: {e}"))
     })
+}
+
+/// Percent-encode `value` for use as a URL query-string value.
+///
+/// Hand-rolled rather than adding a dependency for one call site: the run-ref
+/// alphabet is `fg.{tenant}.{session}.{run}` today, but an unescaped `&`, `#` or
+/// `?` in a name would silently truncate or corrupt the `runRef` the Worker
+/// reads, and status would then answer about a *different* instance.
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
 }
 
 /// Parse the Worker's `status` string into a [`CloudflareRunStatus`].
@@ -257,8 +309,10 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         run_ref: &str,
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
-        // Fiber-cancel: the only Cloudflare cancellation primitive. Routes to the
-        // Worker's `cancel` control route (`startFiber().cancel`/`abortSubAgent`).
+        // Cooperative cancel: the Worker aborts the signal the workload observes
+        // and sets the durable latch that refuses further work. NOT a fiber
+        // cancel — `agents@0.0.109` ships no fiber API (see the module doc), and
+        // it cannot stop a workload that ignores the signal.
         let response = self.post(
             "control/cancel",
             json!({ "runRef": run_ref, "reason": reason }),
@@ -284,7 +338,10 @@ impl<T: GatewayControlTransport> CloudflareControlSurface for WorkerGatewayContr
         &mut self,
         run_ref: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
-        let response = self.get(&format!("control/status?runRef={run_ref}"))?;
+        let response = self.get(&format!(
+            "control/status?runRef={}",
+            encode_query_value(run_ref)
+        ))?;
         let decoded: StatusResponse = decode_ok(response, |status, body| {
             CloudflareControlSurfaceError::Transport(format!("status HTTP {status}: {body}"))
         })?;

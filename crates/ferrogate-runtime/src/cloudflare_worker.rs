@@ -27,10 +27,10 @@
 //! - **#413** — a fronting deploy-Worker that exposes the `/control/*` routes,
 //!   implemented by [`crate::WorkerGatewayControlSurface`].
 //! - **#414** — refines the verb→primitive mapping onto the *actual* Cloudflare
-//!   agent primitives (lazy create, `onStart(props)`, hibernation-as-stop,
-//!   fiber-cancel, `this.destroy()`, custom status) and threads per-run `props`
-//!   (model/tools/prompt + placement) into `onStart`. See
-//!   [`CloudflareRunProps`] and the module docs of
+//!   agent primitives (lazy create, props resolved at start, hibernation-as-stop,
+//!   **cooperative** cancel, `this.destroy()`, custom status) and threads per-run
+//!   `props` (model/tools/prompt + placement) into the run's resolved
+//!   configuration. See [`CloudflareRunProps`] and the module docs of
 //!   [`crate::WorkerGatewayControlSurface`].
 //!
 //! Both bridge onto `ferrogate_cloudflare::CloudflareClient` (issue #405). The
@@ -51,7 +51,7 @@ use crate::{
     IsolationExecOutcome, IsolationExecRequest, IsolationFilesystemPolicy,
     IsolationLifecycleEvidence, IsolationNetworkPolicy, IsolationPrepareRequest,
     IsolationResourceLimits, IsolationStarted, IsolationStopOutcome, ManagedWorkerError,
-    ManagedWorkerSessionStatus,
+    ManagedWorkerSessionStatus, ManagedWorkerStopKind,
 };
 
 /// Advertised `backend_name` for the Cloudflare-hosted runtime.
@@ -177,12 +177,39 @@ pub struct CloudflareRunProps {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     /// Placement hint for the agent's Durable Object (`wnam`/`enam`/`weur`/…).
+    ///
+    /// **HONORED**: the gateway Worker passes it to
+    /// `getAgentByName(ns, name, { locationHint })` on `POST /control/start`,
+    /// which is where Cloudflare places the instance. It is identity-neutral
+    /// (`idFromName` never sees it), so later calls resolve the same object
+    /// without repeating it. An unrecognized value is **refused** (HTTP 422)
+    /// rather than dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location_hint: Option<String>,
     /// Data-jurisdiction constraint (`eu`/`fedramp`).
+    ///
+    /// **REFUSED** by the gateway Worker (HTTP 422 `jurisdiction_unsupported`),
+    /// which surfaces here as [`CloudflareControlSurfaceError::StartFailed`].
+    ///
+    /// A jurisdiction is applied as `namespace.jurisdiction(j).idFromName(name)`
+    /// — it changes the Durable Object's **identity**, not just its placement.
+    /// FerroGate addresses a run by name from call sites that do not share
+    /// per-run state (this scheduler client, the #428 cost governor's kill
+    /// switch, the #426/#427 schedule and memory clients), so honoring it on
+    /// `start` alone would leave the instance reachable from the starter and
+    /// invisible to everyone else — including the over-budget kill path. It
+    /// belongs on the deployment (one gateway Worker per jurisdiction). The
+    /// field is kept so the refusal is explicit and testable instead of the
+    /// value being silently ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jurisdiction: Option<String>,
     /// Dispatch routing-retry budget for reaching the agent instance.
+    ///
+    /// **RECORDED ONLY**: the Worker persists it and reports it back on
+    /// `status`, but performs no retry of its own — retrying a control call is
+    /// this side's concern (it owns the timeout, the backoff and the
+    /// idempotency), and a second retry loop inside the Worker would multiply
+    /// rather than bound the attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_retry: Option<u32>,
 }
@@ -239,6 +266,15 @@ pub enum CloudflareControlSurfaceError {
     ExecFailed(String),
     StopFailed(String),
     CleanupFailed(String),
+    /// The CF side has no run bound to this `run_ref` (the gateway Worker's
+    /// `not_found` refusal, HTTP 404).
+    ///
+    /// Distinct from every other failure because it is the one that must NOT be
+    /// reported as success: addressing a Durable Object by name always yields a
+    /// stub, so before this refusal existed a `cleanup_run` against a typo'd or
+    /// already-destroyed `run_ref` returned `CleanedUp` and FerroGate recorded
+    /// [`IsolationLifecycleEvidence`] for a run that never existed (issue #414).
+    RunNotFound(String),
     /// Transport/decoding failure talking to the CF control API.
     Transport(String),
 }
@@ -251,6 +287,7 @@ impl fmt::Display for CloudflareControlSurfaceError {
             Self::ExecFailed(m) => write!(f, "cloudflare run exec/attach failed: {m}"),
             Self::StopFailed(m) => write!(f, "cloudflare run stop failed: {m}"),
             Self::CleanupFailed(m) => write!(f, "cloudflare run cleanup failed: {m}"),
+            Self::RunNotFound(m) => write!(f, "cloudflare run not found: {m}"),
             Self::Transport(m) => write!(f, "cloudflare control transport failed: {m}"),
         }
     }
@@ -266,7 +303,7 @@ impl From<CloudflareControlSurfaceError> for ManagedWorkerError {
 
 /// The Cloudflare-side control surface the [`CloudflareAgentControlClient`] maps
 /// the scheduler lifecycle onto. Real implementations are sibling sub-issues
-/// (#413 fronting Worker, #414 Workflows REST) built on
+/// (#413 fronting Worker; #414 refines the verb→primitive mapping) built on
 /// `ferrogate_cloudflare::CloudflareClient`. Synchronous to match
 /// [`AgentWorkerControlClient`].
 pub trait CloudflareControlSurface {
@@ -289,7 +326,7 @@ pub trait CloudflareControlSurface {
     /// simply by re-addressing it by name. So a normal terminal stop is a
     /// **hibernate / no-op**: implementations should NOT invoke a "stop" control
     /// route (there is none). Real in-flight cancellation goes through
-    /// [`Self::cancel_run`] (fibers), not here.
+    /// [`Self::cancel_run`], not here.
     fn stop_run(
         &mut self,
         run_ref: &str,
@@ -298,10 +335,23 @@ pub trait CloudflareControlSurface {
 
     /// Actively **cancel** in-flight work for the hosted run.
     ///
-    /// Cloudflare's only cancellation primitive is **fibers**
-    /// (`startFiber().cancel` / `abortSubAgent`), exposed as a dedicated control
-    /// route on the gateway Worker. Distinct from [`Self::stop_run`] (hibernation)
-    /// and [`Self::cleanup_run`] (`this.destroy()`).
+    /// **COOPERATIVE, AND BEST-EFFORT.** Cloudflare documents fibers
+    /// (`startFiber().cancel` / `abortSubAgent`) as the in-run cancellation
+    /// primitive, but the pinned Agents SDK (`agents@0.0.109`) ships **no fiber
+    /// API at all**. The gateway Worker therefore implements cancel with the
+    /// mechanism the runtime does provide: it aborts an `AbortSignal` the
+    /// workload observes, and sets a durable latch that refuses any later
+    /// `invoke` on the run. See `workers/agent-gateway/src/index.ts`.
+    ///
+    /// What that means for a caller: work that **observes** the signal stops;
+    /// work that ignores it, or that runs outside the agent's Durable Object,
+    /// does not. A caller for whom "stopped" must be a guarantee — notably the
+    /// #428 cost governor's over-budget kill — must VERIFY with
+    /// [`Self::run_status`] and escalate to [`Self::cleanup_run`], which is what
+    /// [`crate::KillMode::Cancel`] does.
+    ///
+    /// Distinct from [`Self::stop_run`] (hibernation) and [`Self::cleanup_run`]
+    /// (`this.destroy()`).
     fn cancel_run(
         &mut self,
         run_ref: &str,
@@ -362,17 +412,17 @@ pub struct CloudflareAgentControlClient<S: CloudflareControlSurface> {
 pub type CloudflareRunPropsResolver =
     Arc<dyn Fn(&IsolationPrepareRequest) -> CloudflareRunProps + Send + Sync>;
 
-/// Terminal stop reasons the scheduler uses for a run that reached a terminal
-/// state on its own. On Cloudflare these are modeled as **hibernation** (no stop
-/// RPC — the idle agent goes to zero compute and stays re-addressable by name).
-/// Any *other* reason is treated as an operator **cancel** and routed to the
-/// fiber-cancel primitive ([`CloudflareControlSurface::cancel_run`]).
-const HIBERNATE_STOP_REASONS: [&str; 2] = ["completed", "failed"];
-
-/// Whether a scheduler stop `reason` is a natural terminal transition (→
-/// hibernation) rather than an active operator cancel (→ fiber-cancel).
-fn stop_is_hibernation(reason: &str) -> bool {
-    HIBERNATE_STOP_REASONS.contains(&reason)
+/// Whether a scheduler stop is a natural terminal transition (→ hibernation)
+/// rather than an active operator cancel (→ the cancel route).
+///
+/// Discriminated on the scheduler's typed [`ManagedWorkerStopKind`], NOT on the
+/// stop `reason`. The reason is caller-supplied free text
+/// ([`crate::ManagedWorkerScheduler::cancel_session`] takes it verbatim), so the
+/// previous `reason ∈ {"completed","failed"}` match let an operator cancel with
+/// reason `"completed"` take the hibernation path and send no control call at
+/// all while still reporting `Stopped` (issue #414).
+fn stop_is_hibernation(kind: ManagedWorkerStopKind) -> bool {
+    matches!(kind, ManagedWorkerStopKind::Terminal)
 }
 
 impl<S: CloudflareControlSurface> CloudflareAgentControlClient<S> {
@@ -565,14 +615,15 @@ impl<S: CloudflareControlSurface> AgentWorkerControlClient for CloudflareAgentCo
     fn stop_managed_worker(
         &mut self,
         instance_id: &str,
+        kind: ManagedWorkerStopKind,
         reason: &str,
     ) -> Result<IsolationStopOutcome, ManagedWorkerError> {
-        // CF reality: no "stop" primitive. A natural terminal transition
-        // (`completed`/`failed`) is modeled as HIBERNATION (`stop_run`, a no-op —
-        // the idle agent goes to zero compute, re-addressable by name). An
-        // operator cancel actively aborts in-flight work via the fiber-cancel
-        // route (`cancel_run`).
-        let status = if stop_is_hibernation(reason) {
+        // CF reality: no "stop" primitive. A natural terminal transition is
+        // modeled as HIBERNATION (`stop_run`, a no-op — the idle agent goes to
+        // zero compute, re-addressable by name). An operator cancel goes to the
+        // cancel route (`cancel_run`), which signals in-flight work and latches
+        // the run against further work.
+        let status = if stop_is_hibernation(kind) {
             self.surface.stop_run(instance_id, reason)?
         } else {
             self.surface.cancel_run(instance_id, reason)?
@@ -632,6 +683,8 @@ pub struct MockCloudflareControlSurface {
     fail_start: bool,
     fail_exec: bool,
     exec_exit_code: Option<i32>,
+    /// What [`CloudflareControlSurface::run_status`] reports. `None` = `Running`.
+    reported_status: Option<CloudflareRunStatus>,
 }
 
 impl MockCloudflareControlSurface {
@@ -641,6 +694,7 @@ impl MockCloudflareControlSurface {
             fail_start: false,
             fail_exec: false,
             exec_exit_code: Some(0),
+            reported_status: None,
         }
     }
 
@@ -658,6 +712,17 @@ impl MockCloudflareControlSurface {
             fail_exec: true,
             ..Self::new()
         }
+    }
+
+    /// Report `status` from `run_status` instead of the default `Running`.
+    ///
+    /// Exists so a test can distinguish the two outcomes of a COOPERATIVE
+    /// cancel: a workload that honored the abort signal (`Stopped`) from one
+    /// that ignored it and is still burning (`Running`). [`crate::KillMode`]
+    /// `Cancel` behaves differently in each case.
+    pub fn reporting_status(mut self, status: CloudflareRunStatus) -> Self {
+        self.reported_status = Some(status);
+        self
     }
 
     /// The recorded calls, in order.
@@ -726,7 +791,8 @@ impl CloudflareControlSurface for MockCloudflareControlSurface {
         run_ref: &str,
         reason: &str,
     ) -> Result<CloudflareRunStatus, CloudflareControlSurfaceError> {
-        // Models the fiber-cancel primitive.
+        // Models the cooperative cancel route (see `cancel_run`'s contract:
+        // signal in-flight work + latch the run; NOT a fiber cancel).
         self.calls.push(MockCloudflareCall::CancelRun {
             run_ref: run_ref.to_string(),
             reason: reason.to_string(),
@@ -751,7 +817,7 @@ impl CloudflareControlSurface for MockCloudflareControlSurface {
         self.calls.push(MockCloudflareCall::RunStatus {
             run_ref: run_ref.to_string(),
         });
-        Ok(CloudflareRunStatus::Running)
+        Ok(self.reported_status.unwrap_or(CloudflareRunStatus::Running))
     }
 }
 

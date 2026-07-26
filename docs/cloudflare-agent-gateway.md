@@ -29,9 +29,12 @@ create / start / stop / invoke / inspect / destroy an **individual** agent
   granularity** (list namespaces/objects, inspect) — it cannot drive lifecycle.
 - The only CF agent-adjacent product with a public lifecycle REST API is
   **Workflows** (`/accounts/{id}/workflows/{name}/instances` — create / status /
-  pause / resume / terminate). That is the province of the sibling issue **#414**,
-  and it is a *different* execution model (durable multi-step), not a general
-  agent-instance controller.
+  pause / resume / terminate). It is a *different* execution model (durable
+  multi-step), not a general agent-instance controller, so it does not remove
+  this constraint. (An earlier revision of this note called Workflows "the
+  province of #414". It is not: **#414 is the verb→primitive mapping and the
+  per-run `props` parameterization on top of THIS Worker** — see §3a. No
+  Workflows-backed control surface exists or is planned here.)
 
 **Therefore:** every agent operation FerroGate performs — address an instance by
 name, invoke a method, read status, cancel, destroy — must be fronted by a
@@ -106,11 +109,12 @@ All routes require `Authorization: Bearer <GATEWAY_CONTROL_TOKEN>`.
 
 | Verb | Route | Body / query | Returns |
 |------|-------|--------------|---------|
-| start (lazy create + `onStart(props)`) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }` |
+| start (lazy create; props resolved into state) | `POST /control/start`   | `{ sessionId, runId, workerTemplateId, frameworkAdapter, capabilityEnvelopeId, props }` | `{ runRef, status }` — or 409 `run_conflict` / 422 on a refused placement dial |
 | invoke  | `POST /control/invoke`  | `{ runRef, workloadRef, args[] }` | `{ runRef, status, exitCode, message }` |
-| cancel (fiber-cancel) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status }` |
+|         |                         |                                   | *(every verb below `start` returns 404 `not_found` for a `runRef` with no bound run)* |
+| cancel (**cooperative** abort — NOT fibers, see §3a) | `POST /control/cancel`  | `{ runRef, reason }` | `{ runRef, status, aborted, detail }` |
 | destroy (`this.destroy()`) | `POST /control/destroy` | `{ runRef }` | `{ runRef, status }` |
-| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` | `{ runRef, status, message, resolvedModel }` |
+| status (custom RPC) | `GET  /control/status`  | `?runRef=NAME` (percent-encoded) | `{ runRef, status, message, resolvedModel, resolvedLocationHint, recordedRoutingRetry, cancelRequested }` |
 
 `status` ∈ `queued | running | completed | failed | stopped | cleaned_up`,
 mirroring the Rust `CloudflareRunStatus`. `props` carries the per-run
@@ -128,12 +132,12 @@ stops assuming verbs that do not exist.
 | FerroGate verb (scheduler / surface) | Cloudflare primitive (reality) | Gateway route / mechanism |
 |---|---|---|
 | **create / instantiate** | **LAZY** — the first `getAgentByName(ns, name)` (or `routeAgentRequest`) for a name *creates* the instance; the same name always resolves to the same instance. There is no explicit "create". | `POST /control/start` (`getAgentByName` addresses the run by name — first addressing instantiates it) |
-| **start** | `onStart(props)` runs **automatically** on every cold start / wake — it is not caller-invoked. | delivered as the `props` field of `POST /control/start`; the Worker's `onStart(props)` reads model/tools/prompt |
+| **start** | `onStart()` runs **automatically** on every cold start / wake — it is not caller-invoked, and the pinned SDK calls it with **no arguments**, so it cannot carry per-run props. | `POST /control/start` carries `props`; `start()` resolves model/tools/prompt into persistent state itself (see below). `onStart()` stays the argument-less wake hook. |
 | **exec / invoke** | agent RPC method | `POST /control/invoke` |
 | **stop / pause / resume / restart** | **do NOT exist.** Hibernation is automatic (~70–140s idle → zero compute, state retained; wakes on the next HTTP/WS/alarm/email). | *no route.* Modeled entirely client-side as **hibernate + re-address**: `stop_run` is a local no-op returning `Stopped`; "resume/restart" is just re-addressing the agent by name (which wakes it). |
 | **getStatus** | **does NOT exist** as a primitive. | `GET /control/status` — a **custom** `status()` RPC we expose on the agent, not a built-in `getStatus`. |
-| **cancel** | only via **fibers** (`startFiber().cancel`, `abortSubAgent`). | `POST /control/cancel` — the fiber-cancel route (distinct from "stop") |
-| **destroy / delete** | `this.destroy()` — drops the DO's tables, deletes alarms, clears storage. | `POST /control/destroy` |
+| **cancel** | Cloudflare documents **fibers** (`startFiber().cancel`, `abortSubAgent`) — but the pinned `agents@0.0.109` **ships no fiber API at all** (`grep -ri fiber node_modules/agents/` finds nothing). | `POST /control/cancel` — a **cooperative** cancel: abort an `AbortSignal` the workload observes + set a durable latch that refuses later `invoke`s. Distinct from "stop". See the caveat below. |
+| **destroy / delete** | `this.destroy()` — drops the DO's tables, deletes the alarm, clears storage, then aborts the object. | `POST /control/destroy` — calls `this.destroy()`. Because the abort also tears down the RPC channel the call arrived on, a completed destroy surfaces as a rejected RPC with reason `"destroyed"`, which the route maps back to the `cleaned_up` envelope. |
 
 ### RPC vs. path routing (per verb)
 
@@ -159,11 +163,31 @@ Cloudflare. Concretely:
   re-delivered).
 - **Status is custom.** `run_status` calls our own `status()` RPC; do not expect a
   platform `getStatus`.
-- **Cancel is fibers, not stop.** Actively aborting in-flight work is a *separate*
-  operation from a terminal stop. The Rust client routes a natural terminal
-  reason (`completed`/`failed`) to the hibernation no-op, and any operator cancel
-  reason to the `cancel_run` fiber-cancel route — all through the unchanged #412
-  `AgentWorkerControlClient` seam, so `ManagedWorkerScheduler` drives it as-is.
+- **Cancel is cooperative, and it is not a stop.** Actively aborting in-flight
+  work is a *separate* operation from a terminal stop. The Rust client routes a
+  **terminal** stop to the hibernation no-op and an **operator cancel** to
+  `cancel_run` — decided by the scheduler's typed `ManagedWorkerStopKind`, never
+  by parsing the reason string (an operator cancel whose reason happened to read
+  `"completed"` previously sent no control call at all). Both go through the
+  unchanged #412 `AgentWorkerControlClient` seam, so `ManagedWorkerScheduler`
+  drives it as-is.
+
+  **What cancel can and cannot do.** The pinned Agents SDK has no fiber API, so
+  `POST /control/cancel` does two things: it aborts an `AbortSignal` that the
+  agent's `dispatchWorkload` observes (in-flight work rejects at its next
+  observation point), and it sets a **durable** `cancelRequested` latch so a
+  later `invoke` — including one after hibernation dropped the in-memory abort
+  handle — is refused. The response's `aborted` field says which happened:
+  `true` = in-flight work on that instance was signalled, `false` = nothing was
+  running there and only the latch was set.
+
+  It therefore **cannot** stop a workload that ignores the signal, or one
+  executing outside the agent's Durable Object (a container, a sub-request
+  already in flight). Any caller for whom "stopped" must be a *guarantee* has to
+  verify and escalate. The #428 cost governor's `KillMode::Cancel` does exactly
+  that: cancel → re-read `run_status` → `cleanup_run` (`this.destroy()`) unless
+  the run actually reached a terminal state. A cooperative cancel is an
+  optimization on the way to a destroy, never a substitute for one.
 
 ### Run parameterization: `props` (transient) vs. state (persistent)
 
@@ -171,11 +195,12 @@ Per-run initialization is delivered as **`props`**, not persistent state:
 
 - **`props`** (`CloudflareRunProps` in Rust → `RunProps` in the Worker): the
   run's runtime-selectable dials — **model**, **tools**, **system prompt**, plus
-  `locationHint` (`wnam`/`enam`/`weur`/…), `jurisdiction` (`eu`/`fedramp`), and
-  `routingRetry`. Cloudflare has **no deploy-time `model` field**: the agent
+  the placement dials `locationHint`, `jurisdiction` and `routingRetry` (each
+  honored, refused or recorded-only per the table below — none is silently
+  inert). Cloudflare has **no deploy-time `model` field**: the agent
   chooses its model/tools/prompt *in code* inside `onStart(props)`, so those
   become selectable per run without redeploying the Worker.
-- **State**: the agent's persistent DO SQLite rows. `onStart` reads the transient
+- **State**: the agent's persistent DO SQLite rows. `start` reads the transient
   props and writes the *resolved* selections into state, so they survive
   hibernation and are available to every later invoke without props being re-sent.
 
@@ -183,7 +208,42 @@ FerroGate injects per-run props through a **`CloudflareRunPropsResolver`** on th
 `CloudflareAgentControlClient`, which maps the scheduler's `IsolationPrepareRequest`
 (e.g. its `worker_template_id`) onto the props. The scheduler seam itself is left
 unchanged — the resolver is the only new injection point — and the props ride the
-`props` field of `POST /control/start` into `onStart(props)`.
+`props` field of `POST /control/start`.
+
+**The props are resolved in `start()`, NOT by calling `onStart(props)`.** The
+pinned `agents@0.0.109` rebinds `this.onStart` in its constructor to a
+zero-argument wrapper (`agents/dist/chunk-3IQQY2UH.js:316-317`) that invokes the
+user hook with no arguments, so anything handed to it is silently discarded —
+which is exactly what happened: every `resolved*` field fell back to its initial
+value while the control plane reported the run as parameterized. `onStart()`
+remains the (argument-less) wake hook; a woken agent reads its already-resolved
+configuration from state.
+
+### Placement dials: honored, refused, recorded — never silently inert
+
+| dial | disposition | why |
+|---|---|---|
+| `locationHint` (`wnam`/`enam`/`weur`/…) | **HONORED** — passed to `getAgentByName(ns, name, { locationHint })` on `POST /control/start`. An unrecognized value is refused (422 `unsupported_location_hint`). | It is consumed by `namespace.get(id, options)` when the instance is first created and is identity-neutral (`idFromName` never sees it), so applying it at start is complete: later calls resolve the same object without repeating it. |
+| `jurisdiction` (`eu`/`fedramp`) | **REFUSED** — a start carrying it fails closed with 422 `jurisdiction_unsupported`. | It is applied as `namespace.jurisdiction(j).idFromName(name)` — it changes the Durable Object's **identity**. FerroGate addresses a run by name from call sites that share no per-run state (the scheduler client, #428's kill switch, the #426/#427 schedule and memory clients), so honoring it on `start` alone would leave the run reachable from the starter and invisible to everyone else — including the over-budget kill path. A jurisdiction belongs on the **deployment** (one gateway Worker per jurisdiction). Recording it and reporting it back as if honored is the #188 "endpoint returns 200 while the runtime ignores the value" failure mode applied to a compliance control. |
+| `routingRetry` | **RECORDED ONLY** — persisted as `recordedRoutingRetry` and returned by `GET /control/status`; the Worker performs no retry. | Retrying a control call is FerroGate's transport concern (it owns the timeout, backoff and idempotency). A second retry loop inside the Worker would multiply rather than bound the attempts. |
+
+### Lifecycle guards
+
+- **An unknown `runRef` is refused, not created.** Addressing a name always
+  yields a Durable Object stub and Cloudflare has no existence check, so every
+  verb but `start` returns **404 `not_found`** when no run is bound to the
+  instance. Before this, `POST /control/destroy {"runRef":"typo"}` answered 200
+  `cleaned_up`, FerroGate recorded `IsolationLifecycleEvidence` for a run that
+  never existed, and a token holder could mint unbounded instances. The refusal
+  happens before the first `setState`, so nothing is persisted for the addressed
+  name. On the Rust side it is `CloudflareControlSurfaceError::RunNotFound`.
+- **The run identity is bound once.** A `start` that disagrees with the bound
+  `runId`/`sessionId`/`capabilityEnvelopeId`, or targets a terminal or cancelled
+  run, is refused with **409 `run_conflict`**; an identical re-start is
+  idempotent (a safe transport retry) and does not re-resolve props.
+- **Terminal states are not rewritten.** `cancel` on a `completed`/`failed`/
+  `cleaned_up` run reports that status with `aborted: false` instead of flipping
+  it to `stopped`.
 
 ## 4. Deploy / teardown (Rust)
 
@@ -217,11 +277,12 @@ round-trip need a real CF account/token and are the **test agent's** to prove.
   mapping start/exec/stop/cleanup/status onto the control routes above. The seam
   is sync; the production transport bridges to the async #405 client via a
   `block_on` bridge (`BlockingHttpControlTransport`).
-- **#414 — Workflows REST.** The *other* `CloudflareControlSurface` impl, using
-  the public Workflows lifecycle REST API. It coexists with #413: operators pick
-  the hosting model per worker template. #414 does **not** remove the need for
-  #413 — Workflows is a different execution model and does not expose arbitrary
-  agent-instance control.
+- **#414 — lifecycle mapping + run parameterization.** Not a second control
+  surface: it pins each FerroGate run verb to the *actual* Cloudflare primitive
+  on the #413 Worker (§3a), threads the per-run `props` (model/tools/prompt +
+  placement) into the run's resolved configuration, and supplies the lifecycle
+  guards — cooperative cancel, `this.destroy()`, `not_found` on an unknown
+  `runRef`, and the start state machine.
 - **#426–428 (agent lifecycle / memory / schedule verbs).** These extend the
   control-route contract (§3) with additional DO RPC methods on `AgentGateway`
   (e.g. memory read/write, schedule set/cancel) and the matching Rust mappings.
