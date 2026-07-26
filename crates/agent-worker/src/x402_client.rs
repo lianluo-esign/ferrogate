@@ -54,7 +54,8 @@
 
 use ferrogate_payments::{
     parse_payment_required, select_requirement, validate_solana_address, PaymentError,
-    RequirementFilter, SelectedPayment, SvmTransferIntent, SvmTransferSigner,
+    PaymentIntent, PaymentIntentDraft, PaymentIntentIdentity, RequestBodyHash, RequirementFilter,
+    SelectedPayment, SvmTransferIntent, SvmTransferSigner, SCHEME_EXACT, X402_VERSION,
 };
 use ferrogate_policy::{PaymentAuthorization, PaymentAuthorizationRequest, PaymentDecision};
 use serde::Serialize;
@@ -354,16 +355,68 @@ impl ParsedChallenge {
         }
     }
 
+    /// Build the immutable #351 [`PaymentIntent`] for this challenge: the
+    /// already-authorized egress request (method, canonical URL, request-body
+    /// hash) bound to the merchant's payment terms at this principal's identity.
+    ///
+    /// When the principal carries no `request_id` the deterministic challenge
+    /// hash stands in as the request identity: it is stable, unique per payment,
+    /// and never blank, which an intent requires. It is never invented from
+    /// nothing.
+    pub(crate) fn payment_intent(
+        &self,
+        principal: &SpendPrincipal,
+    ) -> Result<PaymentIntent, X402ClientError> {
+        let body_hash = match self.request.body_sha256_hex.as_deref() {
+            Some(hex) => {
+                RequestBodyHash::from_hex(hex).map_err(|error| X402ClientError::InvalidSigner {
+                    reason: format!("request body hash is unusable: {error}"),
+                })?
+            }
+            None => RequestBodyHash::empty(),
+        };
+        let request_id = principal
+            .request_id
+            .clone()
+            .unwrap_or_else(|| self.selected.challenge_hash_hex());
+        PaymentIntent::new(PaymentIntentDraft {
+            x402_version: X402_VERSION,
+            scheme: SCHEME_EXACT.to_string(),
+            network_caip2: self.selected.network.caip2().to_string(),
+            mint: self.selected.mint.clone(),
+            atomic_amount: self.selected.atomic_amount,
+            recipient: self.selected.recipient.clone(),
+            authorized_resource_url: self.request.canonical_url.clone(),
+            http_method: self.request.method.clone(),
+            request_body_hash: body_hash,
+            challenge_hash_hex: self.selected.challenge_hash_hex(),
+            max_timeout_seconds: self.selected.max_timeout_seconds,
+            identity: PaymentIntentIdentity {
+                tenant_id: principal.tenant_id.clone(),
+                project_id: None,
+                workspace_id: principal.workspace_id.clone(),
+                key_id: None,
+                run_id: principal.run_id.clone(),
+                worker_id: principal.worker_id.clone(),
+                request_id,
+            },
+        })
+        .map_err(|error| X402ClientError::InvalidSigner {
+            reason: format!("payment intent is not valid: {error}"),
+        })
+    }
+
     /// Build the pure #351 policy input for this challenge, pinning the
-    /// authorized egress URL so the gateway's resource-redirect check binds to
-    /// exactly what the worker authorized.
+    /// immutable intent so the gateway's resource-redirect check binds to
+    /// exactly the method, body, and URL the worker authorized.
     pub(crate) fn policy_request<'a>(
         &'a self,
+        intent: &'a PaymentIntent,
         scope: ferrogate_policy::SpendScope<'a>,
     ) -> PaymentAuthorizationRequest<'a> {
         PaymentAuthorizationRequest {
             selected: &self.selected,
-            authorized_resource_url: &self.request.canonical_url,
+            intent,
             scope,
         }
     }

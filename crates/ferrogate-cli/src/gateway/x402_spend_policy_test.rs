@@ -56,6 +56,7 @@ fn policy(revision: u64) -> X402SpendPolicy {
             denominator: 1_000,
             rounding: Rounding::Up,
             version: "usdc-devnet-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy {
             threshold_credits: Some(500),
@@ -127,7 +128,9 @@ fn evaluation_request(
         scope,
         payment_required: challenge(atomic, recipient, challenge_resource),
         authorized_resource_url: authorized.to_string(),
-        spent: X402SpentRequest::default(),
+        authorized_method: "GET".to_string(),
+        authorized_request_body_sha256_hex: None,
+        spent: Some(X402SpentRequest::default()),
     }
 }
 
@@ -377,7 +380,9 @@ fn an_unparseable_challenge_is_a_client_error_not_a_decision() {
         scope: scope(None),
         payment_required: "not-base64!!".to_string(),
         authorized_resource_url: RESOURCE.to_string(),
-        spent: X402SpentRequest::default(),
+        authorized_method: "GET".to_string(),
+        authorized_request_body_sha256_hex: None,
+        spent: Some(X402SpentRequest::default()),
     };
 
     let error = evaluate_x402_payment_request(&declarations(), &request)
@@ -406,7 +411,9 @@ fn a_challenge_with_an_unsupported_scheme_is_rejected_rather_than_evaluated() {
         scope: scope(None),
         payment_required: base64::engine::general_purpose::STANDARD.encode(body.to_string()),
         authorized_resource_url: RESOURCE.to_string(),
-        spent: X402SpentRequest::default(),
+        authorized_method: "GET".to_string(),
+        authorized_request_body_sha256_hex: None,
+        spent: Some(X402SpentRequest::default()),
     };
 
     let error = evaluate_x402_payment_request(&declarations(), &request)
@@ -428,10 +435,11 @@ fn a_blank_authorized_resource_is_refused_so_a_challenge_cannot_bind_to_nothing(
 #[test]
 fn already_spent_credits_are_accounted_against_the_run_cap() {
     let mut request = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
-    request.spent = X402SpentRequest {
+    request.spent = Some(X402SpentRequest {
         run_spent_credits: 4_999,
         window_spent_credits: 0,
-    };
+        now_unix: None,
+    });
 
     let view = evaluate_x402_payment_request(&declarations(), &request).expect("evaluation");
 
@@ -465,18 +473,9 @@ fn no_diagnostics_response_exposes_a_secret_or_signer_shaped_field() {
     assert!(!keys.is_empty());
     for key in &keys {
         let lowered = key.to_ascii_lowercase();
-        for forbidden in [
-            "secret",
-            "signer",
-            "signature",
-            "private",
-            "keypair",
-            "mnemonic",
-            "seed",
-            "credential",
-            "password",
-            "token",
-        ] {
+        // The SHARED list (issue #351 review): this guard and the harness's
+        // must not be able to drift apart again.
+        for forbidden in ferrogate_core::SECRET_SHAPED_KEY_FRAGMENTS {
             assert!(
                 !lowered.contains(forbidden),
                 "diagnostics response exposes a {forbidden}-shaped field: {key}"
@@ -593,4 +592,449 @@ fn only_the_documented_methods_are_contract_operations() {
         assert_eq!(operation.auth.kind, "bearer");
         assert_eq!(operation.auth.scope.as_deref(), Some("admin.read"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scope-id normalization (blocker 3)
+// ---------------------------------------------------------------------------
+
+/// The bug this closes: `GET …/effective` read its ids through `query_value`
+/// (which trims) while `POST …/evaluate` resolved the JSON body verbatim, so
+/// the same padded id read back one policy and decided under another -- on the
+/// one surface whose whole promise is "what you read back is what the runtime
+/// decides".
+#[test]
+fn a_padded_scope_id_resolves_identically_through_effective_and_evaluate() {
+    let padded = X402ScopeRequest {
+        tenant_id: "  tenant-1 ".to_string(),
+        project_id: Some("\tproject-1\n".to_string()),
+        ..X402ScopeRequest::default()
+    };
+    let exact = scope(Some("project-1"));
+
+    let padded_view = build_effective_policy_view(&declarations(), &padded);
+    let exact_view = build_effective_policy_view(&declarations(), &exact);
+    assert_eq!(padded_view, exact_view);
+    assert!(padded_view.declared);
+    assert_eq!(padded_view.policy_revision, 11);
+
+    // ...and the decision side answers the same, rather than falling through to
+    // the disabled deny-all default at revision 0.
+    let padded_decision = evaluate(&evaluation_request(
+        padded, 2_500, MERCHANT, RESOURCE, RESOURCE,
+    ));
+    let exact_decision = evaluate(&evaluation_request(
+        exact, 2_500, MERCHANT, RESOURCE, RESOURCE,
+    ));
+    assert_eq!(
+        padded_decision.policy_revision,
+        exact_decision.policy_revision
+    );
+    assert_eq!(
+        padded_decision.decision.reason_code,
+        exact_decision.decision.reason_code
+    );
+    assert_eq!(padded_decision.policy_revision, 11);
+    // The echoed scope reports the id a caller must actually send.
+    assert_eq!(padded_decision.scope.tenant_id, "tenant-1");
+    assert_eq!(
+        padded_decision.scope.project_id.as_deref(),
+        Some("project-1")
+    );
+}
+
+/// A declaration written with a padded `scope_id` used to load clean, list on
+/// the admin surface, and be unreachable by every request -- a money policy the
+/// operator had every reason to believe was in force.
+#[test]
+fn a_declaration_written_with_a_padded_scope_id_is_still_reachable() {
+    let declared = vec![declaration(
+        X402PolicyScopeKind::Tenant,
+        "  acme  ",
+        policy(21),
+    )];
+
+    let view = build_effective_policy_view(
+        &declared,
+        &X402ScopeRequest {
+            tenant_id: "acme".to_string(),
+            ..X402ScopeRequest::default()
+        },
+    );
+
+    assert!(view.declared, "a padded declaration must not be inert");
+    assert_eq!(view.policy_revision, 21);
+    // And the list surface advertises the id that actually resolves.
+    assert_eq!(declared_policy_view(&declared[0]).scope_id, "acme");
+}
+
+/// A narrower level whose id is only whitespace is absent, not an empty-id
+/// scope -- matching what `query_value` already did for the query string.
+#[test]
+fn a_blank_narrower_scope_level_is_absent_rather_than_an_empty_id() {
+    let view = build_effective_policy_view(
+        &declarations(),
+        &X402ScopeRequest {
+            tenant_id: "tenant-1".to_string(),
+            project_id: Some("   ".to_string()),
+            ..X402ScopeRequest::default()
+        },
+    );
+
+    assert_eq!(view.inheritance.len(), 1);
+    assert_eq!(view.inheritance[0].scope_type, X402PolicyScopeKind::Tenant);
+    assert_eq!(view.policy_revision, 7);
+    assert!(view.scope.project_id.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Intent binding + wire-level money invariants
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_decision_names_the_method_and_body_it_authorized() {
+    let mut post = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
+    post.authorized_method = "post".to_string();
+    post.authorized_request_body_sha256_hex =
+        Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string());
+
+    let read = evaluate(&evaluation_request(
+        scope(None),
+        2_500,
+        MERCHANT,
+        RESOURCE,
+        RESOURCE,
+    ));
+    let write = evaluate(&post);
+
+    assert_eq!(read.decision.http_method, "GET");
+    assert_eq!(write.decision.http_method, "POST");
+    assert_ne!(
+        read.decision.request_body_sha256_hex,
+        write.decision.request_body_sha256_hex
+    );
+    assert_ne!(
+        read.decision.intent_hash_hex,
+        write.decision.intent_hash_hex
+    );
+    assert_ne!(
+        read.decision.decision_hash_hex,
+        write.decision.decision_hash_hex
+    );
+    assert_eq!(read.decision.intent_hash_hex.len(), 64);
+    assert_eq!(read.decision.decision_hash_hex.len(), 64);
+}
+
+#[test]
+fn an_unusable_request_body_hash_is_refused_rather_than_bound_loosely() {
+    let mut request = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
+    request.authorized_request_body_sha256_hex = Some("not-a-hash".to_string());
+
+    let error = evaluate_x402_payment_request(&declarations(), &request)
+        .expect_err("an unusable body hash must not silently become the bodyless hash");
+    assert!(matches!(error, X402EvaluationError::InvalidIntent(_)));
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A missing credit figure must cross the wire as `null`, never as `0`: on a
+/// spend surface a rendered `0` reads as "free".
+#[test]
+fn a_conversion_overflow_crosses_the_wire_as_null_credits_never_zero() {
+    // A ratio that makes any real amount overflow u64 credits.
+    let mut overflowing = policy(31);
+    overflowing.conversion.numerator = u64::MAX;
+    overflowing.conversion.denominator = 1;
+    overflowing.caps = X402SpendCaps::default();
+    overflowing.approval = ApprovalPolicy::default();
+    let declared = vec![declaration(
+        X402PolicyScopeKind::Tenant,
+        "overflow-tenant",
+        overflowing,
+    )];
+    let request = evaluation_request(
+        X402ScopeRequest {
+            tenant_id: "overflow-tenant".to_string(),
+            ..X402ScopeRequest::default()
+        },
+        2_500,
+        MERCHANT,
+        RESOURCE,
+        RESOURCE,
+    );
+
+    let view = evaluate_x402_payment_request(&declared, &request).expect("evaluation");
+    assert_eq!(view.decision.decision, "deny");
+    assert_eq!(view.decision.reason_code, "x402_conversion_unavailable");
+    assert_eq!(view.decision.computed_credits, None);
+
+    // The wire boundary is what matters: `null`, not `0`.
+    let body = serde_json::to_value(&view).expect("serializes");
+    assert_eq!(body["decision"]["computed_credits"], Value::Null);
+    assert_eq!(
+        body["decision"]["conversion"]["computed_credits"],
+        Value::Null
+    );
+    // The original atomic units still survive losslessly.
+    assert_eq!(body["decision"]["atomic_amount"], json!(2_500));
+}
+
+/// An omitted `spent` object makes a dry run answer for a FRESH run; the
+/// response has to say so, or an operator reads an `allow` that the real run
+/// would deny.
+#[test]
+fn the_response_states_whether_the_ledger_figures_were_supplied() {
+    let mut omitted = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
+    omitted.spent = None;
+    let view = evaluate_x402_payment_request(&declarations(), &omitted).expect("evaluation");
+
+    assert!(!view.spent.supplied);
+    assert_eq!(view.spent.run_spent_credits, 0);
+    assert_eq!(view.decision.decision, "allow");
+
+    let mut supplied = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
+    supplied.spent = Some(X402SpentRequest {
+        run_spent_credits: 4_999,
+        window_spent_credits: 0,
+        now_unix: None,
+    });
+    let view = evaluate_x402_payment_request(&declarations(), &supplied).expect("evaluation");
+    assert!(view.spent.supplied);
+    assert_eq!(view.spent.run_spent_credits, 4_999);
+    assert_eq!(view.decision.decision, "deny");
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy enforcement (blocker 4)
+// ---------------------------------------------------------------------------
+//
+// Until these existed, `authorize_scope_chain` could be replaced wholesale by
+// `Ok(())` -- or its two call sites deleted -- and the entire repo suite stayed
+// green (verified by mutation: 1211/1215 before and after, the 4 deltas being
+// the pre-existing `ctl::resource_cmd` failures). Another tenant's spend caps,
+// payee allowlist and policy revision are a competitor-visible spend profile;
+// an access control nobody tests is an access control nobody has.
+
+use crate::config::ApiKey;
+use crate::state::AppState;
+use ferrogate_storage::{StoredProject, StoredWorkspace};
+
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+fn admin_key(id: &str, secret: &str, tenant: Option<&str>) -> ApiKey {
+    ApiKey {
+        region_allowlist: Vec::new(),
+        id: id.into(),
+        name: id.into(),
+        key_env: None,
+        key: Some(secret.into()),
+        key_hash: None,
+        enabled: true,
+        scopes: vec!["admin.read".into()],
+        allowed_models: vec![],
+        denied_models: vec![],
+        allowed_providers: vec![],
+        denied_providers: vec![],
+        organization_id: tenant.map(ToOwned::to_owned),
+        team_id: None,
+        project_id: None,
+        workspace_id: None,
+        user_id: None,
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        expires_at_unix: None,
+        log_bodies: None,
+        cache_enabled: None,
+    }
+}
+
+/// Two tenants, each owning one project and one workspace, plus a tenant-scoped
+/// `admin.read` key for tenant-1 and an unscoped platform-operator key.
+fn tenancy_state() -> AppState {
+    let state = AppState::new(crate::config::Config {
+        api_keys: vec![
+            admin_key("tenant-reader", "tenant-secret", Some("tenant-1")),
+            admin_key("operator", "operator-secret", None),
+        ],
+        ..crate::config::Config::default()
+    });
+    for (project, workspace, tenant) in [
+        ("project-1", "workspace-1", "tenant-1"),
+        ("project-2", "workspace-2", "tenant-2"),
+    ] {
+        block_on(state.upsert_project(StoredProject {
+            id: project.into(),
+            tenant_id: tenant.into(),
+            name: project.into(),
+            slug: project.into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .expect("seed project");
+        block_on(state.upsert_workspace(StoredWorkspace {
+            id: workspace.into(),
+            project_id: project.into(),
+            tenant_id: tenant.into(),
+            name: workspace.into(),
+            slug: workspace.into(),
+            environment: "prod".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }))
+        .expect("seed workspace");
+    }
+    state
+}
+
+fn auth_for(state: &AppState, secret: &str) -> AuthContext {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {secret}").parse().expect("header"),
+    );
+    block_on(crate::auth::authenticate(
+        state,
+        &headers,
+        "admin.read",
+        "req",
+    ))
+    .expect("the fixture key holds admin.read")
+}
+
+fn chain(tenant: &str, project: Option<&str>, run: Option<&str>) -> X402ScopeRequest {
+    X402ScopeRequest {
+        tenant_id: tenant.to_string(),
+        project_id: project.map(str::to_string),
+        run_id: run.map(str::to_string),
+        ..X402ScopeRequest::default()
+    }
+}
+
+#[test]
+fn a_tenant_scoped_caller_cannot_read_another_tenants_project_policy() {
+    let state = tenancy_state();
+    let auth = auth_for(&state, "tenant-secret");
+
+    // Its own chain passes.
+    block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("tenant-1", Some("project-1"), None),
+    ))
+    .expect("a caller may read its own tenant's project");
+
+    // Another tenant's project is a 403, not a silent read of someone else's
+    // spend caps -- even though the tenant level of the chain is its own.
+    let error = block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("tenant-1", Some("project-2"), None),
+    ))
+    .expect_err("naming another tenant's project must be refused");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "tenant_scope_denied");
+
+    // And naming the other tenant outright is refused at the tenant level.
+    let error = block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("tenant-2", None, None),
+    ))
+    .expect_err("naming another tenant must be refused");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn a_tenant_scoped_caller_cannot_name_a_run_scope() {
+    let state = tenancy_state();
+    let auth = auth_for(&state, "tenant-secret");
+
+    // A run id has no run->tenant mapping at this surface, so resolving it
+    // would mean guessing; refusing is the fail-closed choice.
+    let error = block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("tenant-1", Some("project-1"), Some("run-9")),
+    ))
+    .expect_err("a run-scoped lookup must be refused for a tenant-scoped caller");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "run_scope_requires_platform_operator");
+
+    // The platform operator is unaffected.
+    block_on(authorize_scope_chain(
+        &state,
+        &auth_for(&state, "operator-secret"),
+        &chain("tenant-2", Some("project-2"), Some("run-9")),
+    ))
+    .expect("a platform operator may read every scope");
+}
+
+/// A padded id must not be authorizable at one spelling and resolvable at
+/// another: the tenancy check runs on the SAME normalized chain resolution does.
+#[test]
+fn the_tenancy_check_runs_on_the_normalized_scope_chain() {
+    let state = tenancy_state();
+    let auth = auth_for(&state, "tenant-secret");
+
+    block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("  tenant-1  ", Some(" project-1 "), None),
+    ))
+    .expect("a padded id the caller owns still authorizes");
+
+    let error = block_on(authorize_scope_chain(
+        &state,
+        &auth,
+        &chain("tenant-1", Some(" project-2 "), None),
+    ))
+    .expect_err("padding must not smuggle another tenant's project past the check");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn a_tenant_scoped_listing_omits_declarations_it_does_not_own() {
+    let state = tenancy_state();
+    let declared = vec![
+        declaration(X402PolicyScopeKind::Tenant, "tenant-1", policy(7)),
+        declaration(X402PolicyScopeKind::Tenant, "tenant-2", policy(8)),
+        declaration(X402PolicyScopeKind::Project, "project-1", policy(9)),
+        declaration(X402PolicyScopeKind::Project, "project-2", policy(10)),
+        declaration(X402PolicyScopeKind::Workspace, "workspace-2", policy(11)),
+        declaration(X402PolicyScopeKind::Run, "run-9", policy(12)),
+    ];
+
+    let visible = block_on(visible_declared_policies(
+        &state,
+        &auth_for(&state, "tenant-secret"),
+        &declared,
+    ));
+    let scopes: Vec<(X402PolicyScopeKind, String)> = visible
+        .iter()
+        .map(|entry| (entry.scope_type, entry.scope_id.clone()))
+        .collect();
+    assert_eq!(
+        scopes,
+        vec![
+            (X402PolicyScopeKind::Tenant, "tenant-1".to_string()),
+            (X402PolicyScopeKind::Project, "project-1".to_string()),
+        ],
+        "a tenant-scoped caller must not see another tenant's spend caps, \
+         payee allowlist, or policy revision -- nor any run-scoped declaration"
+    );
+
+    // The platform operator still sees every declaration.
+    let all = block_on(visible_declared_policies(
+        &state,
+        &auth_for(&state, "operator-secret"),
+        &declared,
+    ));
+    assert_eq!(all.len(), declared.len());
 }

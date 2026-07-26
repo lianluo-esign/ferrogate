@@ -312,7 +312,8 @@ default_timezone = "UTC"
 #
 # [[x402_spend_policies]]
 # scope_type = "tenant"          # tenant | project | workspace | key | run
-# scope_id = "acme"
+# scope_id = "acme"             # surrounding whitespace is trimmed; a padded id
+#                                # is the SAME scope, never a second one
 #
 # [x402_spend_policies.policy]
 # enabled = true                 # x402 spending is OFF unless explicitly true
@@ -357,6 +358,12 @@ default_timezone = "UTC"
 # denominator = 1000
 # rounding = "up"                # "up" never under-counts a spend
 # version = "usdc-devnet-v1"
+# # Optional freshness bound. An opaque `version` string alone cannot detect
+# # staleness -- a rate frozen months ago looks identical to one set today. With
+# # a deadline set, a decision made at or after it denies (x402_conversion_expired),
+# # and so does one whose caller supplied no clock: an unprovable freshness claim
+# # must not authorize a spend. Omit to let the rate never expire on its own.
+# expires_at_unix = 1800000000
 #
 # # Payments above this many credits return ApprovalRequired instead of Allow.
 # # Omit for auto-allow up to the hard caps.

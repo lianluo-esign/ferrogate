@@ -7,7 +7,7 @@
 // per AGENTS.md testing architecture (no inline `mod tests {}`).
 
 use super::*;
-use ferrogate_payments::{SelectedPayment, SolanaNetwork};
+use ferrogate_payments::{PaymentIntentIdentity, SelectedPayment, SolanaNetwork};
 use proptest::prelude::*;
 
 // Canonical, wire-validated base58 addresses used across the tests.
@@ -85,6 +85,7 @@ fn base_policy() -> X402SpendPolicy {
             denominator: 1_000,
             rounding: Rounding::Up,
             version: "usdc-devnet-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy {
             threshold_credits: Some(500),
@@ -97,13 +98,45 @@ fn validated(policy: X402SpendPolicy) -> ValidatedX402SpendPolicy {
     policy.validate().expect("policy should validate")
 }
 
+/// The immutable intent for `selected`, bound to `authorized` as an
+/// already-authorized bodyless `GET`. Every decision test drives this so the
+/// method/body binding is exercised on the default path, not only where it is
+/// the subject.
+fn intent_for(selected: &SelectedPayment, authorized: &str) -> PaymentIntent {
+    intent_for_request(selected, authorized, "GET", &[])
+}
+
+fn intent_for_request(
+    selected: &SelectedPayment,
+    authorized: &str,
+    method: &str,
+    body: &[u8],
+) -> PaymentIntent {
+    PaymentIntent::from_selected(
+        selected,
+        method,
+        authorized,
+        body,
+        PaymentIntentIdentity {
+            tenant_id: "tenant-1".into(),
+            project_id: Some("proj-1".into()),
+            workspace_id: None,
+            key_id: Some("key-1".into()),
+            run_id: Some("run-1".into()),
+            worker_id: Some("worker-1".into()),
+            request_id: "req-1".into(),
+        },
+    )
+    .expect("fixture intent is valid")
+}
+
 fn request<'a>(
     selected: &'a SelectedPayment,
-    authorized: &'a str,
+    intent: &'a PaymentIntent,
 ) -> PaymentAuthorizationRequest<'a> {
     PaymentAuthorizationRequest {
         selected,
-        authorized_resource_url: authorized,
+        intent,
         scope: SpendScope {
             tenant_id: "tenant-1",
             project_id: Some("proj-1"),
@@ -120,7 +153,8 @@ fn decide(
     authorized: &str,
     spent: SpendSnapshot,
 ) -> PaymentAuthorization {
-    authorize_x402_payment(policy, &request(payment, authorized), &spent)
+    let intent = intent_for(payment, authorized);
+    authorize_x402_payment(policy, &request(payment, &intent), &spent)
 }
 
 fn no_spend() -> SpendSnapshot {
@@ -319,6 +353,7 @@ fn per_run_cap_counts_already_spent_credits() {
         SpendSnapshot {
             run_spent_credits: 4_900,
             window_spent_credits: 0,
+            ..SpendSnapshot::default()
         },
     );
     assert_eq!(at_cap.decision, PaymentDecision::Allow);
@@ -331,6 +366,7 @@ fn per_run_cap_counts_already_spent_credits() {
         SpendSnapshot {
             run_spent_credits: 4_901,
             window_spent_credits: 0,
+            ..SpendSnapshot::default()
         },
     );
     assert_eq!(over.decision, PaymentDecision::Deny);
@@ -347,6 +383,7 @@ fn per_window_cap_counts_already_spent_credits() {
         SpendSnapshot {
             run_spent_credits: 0,
             window_spent_credits: 9_950, // + 100 = 10_050 > 10_000
+            ..SpendSnapshot::default()
         },
     );
     assert_eq!(over.decision, PaymentDecision::Deny);
@@ -365,6 +402,7 @@ fn a_checked_add_overflow_on_a_cap_denies() {
         SpendSnapshot {
             run_spent_credits: u64::MAX,
             window_spent_credits: 0,
+            ..SpendSnapshot::default()
         },
     );
     assert_eq!(auth.decision, PaymentDecision::Deny);
@@ -384,6 +422,7 @@ fn a_conversion_overflow_denies_rather_than_coercing_to_zero() {
         denominator: 1,
         rounding: Rounding::Up,
         version: "overflow-v1".to_string(),
+        expires_at_unix: None,
     };
     let policy = validated(policy);
     // u64::MAX * 1000 overflows u64 credits.
@@ -718,6 +757,7 @@ proptest! {
             denominator: 7,
             rounding: Rounding::Up,
             version: "p".to_string(),
+            expires_at_unix: None,
         };
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
         let cl = rule.convert(AtomicAmount(lo)).unwrap();
@@ -728,8 +768,8 @@ proptest! {
     /// Round-up credits are always >= round-down credits for the same input.
     #[test]
     fn round_up_is_never_less_than_round_down(atomic in 0u64..10_000_000, num in 1u64..1000, den in 1u64..1000) {
-        let up = ConversionRule { numerator: num, denominator: den, rounding: Rounding::Up, version: "u".into() };
-        let down = ConversionRule { numerator: num, denominator: den, rounding: Rounding::Down, version: "d".into() };
+        let up = ConversionRule { numerator: num, denominator: den, rounding: Rounding::Up, version: "u".into(), expires_at_unix: None };
+        let down = ConversionRule { numerator: num, denominator: den, rounding: Rounding::Down, version: "d".into(), expires_at_unix: None };
         let cu = up.convert(AtomicAmount(atomic)).unwrap();
         let cd = down.convert(AtomicAmount(atomic)).unwrap();
         prop_assert!(cu >= cd);
@@ -743,5 +783,226 @@ proptest! {
         let json = serde_json::to_string(&AtomicAmount(value)).unwrap();
         let back: AtomicAmount = serde_json::from_str(&json).unwrap();
         prop_assert_eq!(back, AtomicAmount(value));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Payment-intent binding (issue #351 blocker 2)
+// ---------------------------------------------------------------------------
+
+/// The invariant the intent exists for: *"a challenge cannot redirect payment
+/// to another URL, **body**, recipient, or network"*. Before the intent, method
+/// and body were not bound at all, so an authorized `GET` and a `POST` of an
+/// entirely different body to the same URL produced byte-identical decisions.
+#[test]
+fn a_decision_names_the_method_and_body_it_authorized() {
+    let policy = validated(base_policy());
+    let payment = devnet_payment(100_000);
+
+    let read_intent = intent_for_request(&payment, RESOURCE_URL, "GET", &[]);
+    let write_intent = intent_for_request(&payment, RESOURCE_URL, "POST", br#"{"drain":true}"#);
+    let read = authorize_x402_payment(&policy, &request(&payment, &read_intent), &no_spend());
+    let write = authorize_x402_payment(&policy, &request(&payment, &write_intent), &no_spend());
+
+    assert_eq!(read.decision, PaymentDecision::Allow);
+    assert_eq!(write.decision, PaymentDecision::Allow);
+    // Both are allowed -- but they are no longer indistinguishable.
+    assert_eq!(read.http_method, "GET");
+    assert_eq!(write.http_method, "POST");
+    assert_ne!(read.request_body_hash_hex, write.request_body_hash_hex);
+    assert_ne!(read.intent_hash_hex, write.intent_hash_hex);
+    assert_ne!(
+        read.decision_hash_hex(),
+        write.decision_hash_hex(),
+        "two different requests paying the same challenge must not seal to one decision"
+    );
+    assert_eq!(read.authorized_resource_url, RESOURCE_URL);
+}
+
+/// A decision must be attributable to the run that caused it, or a spend ledger
+/// cannot answer "who spent this?".
+#[test]
+fn a_decision_carries_the_scope_it_was_evaluated_at() {
+    let policy = validated(base_policy());
+    let auth = decide(&policy, &devnet_payment(100_000), RESOURCE_URL, no_spend());
+
+    assert_eq!(auth.scope.tenant_id, "tenant-1");
+    assert_eq!(auth.scope.project_id.as_deref(), Some("proj-1"));
+    assert_eq!(auth.scope.key_id.as_deref(), Some("key-1"));
+    assert_eq!(auth.scope.run_id.as_deref(), Some("run-1"));
+    assert_eq!(auth.scope.workspace_id, None);
+}
+
+/// An intent built for one payment can never authorize another, even when the
+/// policy would happily allow the payment on its own terms.
+#[test]
+fn an_intent_built_for_another_payment_denies() {
+    let policy = validated(base_policy());
+    let allowed = devnet_payment(100_000);
+    let other = devnet_payment(200_000);
+    let mismatched = intent_for(&other, RESOURCE_URL);
+
+    let auth = authorize_x402_payment(&policy, &request(&allowed, &mismatched), &no_spend());
+
+    assert_eq!(auth.decision, PaymentDecision::Deny);
+    assert_eq!(auth.reason_code, REASON_INTENT_MISMATCH);
+    // Fails before the policy's own allowlists are even consulted.
+    assert!(auth.matched_resource.is_none());
+}
+
+#[test]
+fn the_decision_seal_is_deterministic_and_ignores_only_the_message() {
+    let policy = validated(base_policy());
+    let payment = devnet_payment(100_000);
+    let intent = intent_for(&payment, RESOURCE_URL);
+
+    let first = authorize_x402_payment(&policy, &request(&payment, &intent), &no_spend());
+    let second = authorize_x402_payment(&policy, &request(&payment, &intent), &no_spend());
+    assert_eq!(first.decision_hash_hex(), second.decision_hash_hex());
+    assert_eq!(first.decision_hash_hex().len(), 64);
+
+    // The non-load-bearing message is outside the seal...
+    let mut reworded = first.clone();
+    reworded.message = "an entirely different explanation".to_string();
+    assert_eq!(reworded.decision_hash_hex(), first.decision_hash_hex());
+    // ...but the outcome and the priced credits are not.
+    let mut tampered = first.clone();
+    tampered.decision = PaymentDecision::Deny;
+    assert_ne!(tampered.decision_hash_hex(), first.decision_hash_hex());
+    let mut repriced = first.clone();
+    repriced.conversion.computed_credits = Some(Credits(1));
+    assert_ne!(repriced.decision_hash_hex(), first.decision_hash_hex());
+}
+
+// ---------------------------------------------------------------------------
+// Conversion staleness
+// ---------------------------------------------------------------------------
+
+/// "Overflow or missing/**expired** conversion data denies." A rate past its
+/// declared validity window must not price a payment.
+#[test]
+fn an_expired_conversion_rule_denies() {
+    let mut policy = base_policy();
+    policy.conversion.expires_at_unix = Some(1_800_000_000);
+    let policy = validated(policy);
+    let payment = devnet_payment(100_000);
+
+    let fresh = decide(
+        &policy,
+        &payment,
+        RESOURCE_URL,
+        SpendSnapshot {
+            now_unix: Some(1_799_999_999),
+            ..SpendSnapshot::default()
+        },
+    );
+    assert_eq!(fresh.decision, PaymentDecision::Allow);
+
+    for now in [1_800_000_000, 1_900_000_000] {
+        let stale = decide(
+            &policy,
+            &payment,
+            RESOURCE_URL,
+            SpendSnapshot {
+                now_unix: Some(now),
+                ..SpendSnapshot::default()
+            },
+        );
+        assert_eq!(stale.decision, PaymentDecision::Deny, "at {now}");
+        assert_eq!(stale.reason_code, REASON_CONVERSION_EXPIRED);
+    }
+}
+
+/// An unprovable freshness claim is not a reason to spend money: a rule that
+/// declares a window and a caller that supplies no clock is a deny, not an
+/// allow-by-omission.
+#[test]
+fn a_conversion_window_without_a_clock_denies_rather_than_assuming_freshness() {
+    let mut policy = base_policy();
+    policy.conversion.expires_at_unix = Some(1_800_000_000);
+    let policy = validated(policy);
+
+    let auth = decide(&policy, &devnet_payment(100_000), RESOURCE_URL, no_spend());
+
+    assert_eq!(auth.decision, PaymentDecision::Deny);
+    assert_eq!(auth.reason_code, REASON_CONVERSION_EXPIRED);
+    // A policy with NO declared window is unaffected by a missing clock.
+    let unbounded = validated(base_policy());
+    assert_eq!(
+        decide(
+            &unbounded,
+            &devnet_payment(100_000),
+            RESOURCE_URL,
+            no_spend()
+        )
+        .decision,
+        PaymentDecision::Allow
+    );
+}
+
+#[test]
+fn a_non_positive_conversion_deadline_is_a_config_error_not_a_permanent_expiry() {
+    for deadline in [0, -1] {
+        let mut policy = base_policy();
+        policy.conversion.expires_at_unix = Some(deadline);
+        assert!(matches!(
+            policy.validate(),
+            Err(X402PolicyConfigError::ImpossibleConversion { .. })
+        ));
+    }
+}
+
+/// The snapshot must record the freshness bound the decision was made under, so
+/// an auditor sees more than an opaque version label.
+#[test]
+fn the_conversion_snapshot_records_the_validity_window() {
+    let mut policy = base_policy();
+    policy.conversion.expires_at_unix = Some(1_800_000_000);
+    let policy = validated(policy);
+    let auth = decide(
+        &policy,
+        &devnet_payment(100_000),
+        RESOURCE_URL,
+        SpendSnapshot {
+            now_unix: Some(1_700_000_000),
+            ..SpendSnapshot::default()
+        },
+    );
+    assert_eq!(auth.conversion.expires_at_unix, Some(1_800_000_000));
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate resource rules
+// ---------------------------------------------------------------------------
+
+/// Duplicate detection must use the canonical form matching uses, or two rules
+/// that are ONE rule at match time pass validation as distinct.
+#[test]
+fn resource_rules_that_are_identical_after_canonicalisation_are_duplicates() {
+    for (first, second) in [
+        ("https://api.example.com", "https://API.example.com"),
+        ("https://api.example.com", "https://api.example.com:443"),
+    ] {
+        let mut policy = base_policy();
+        policy.allowed_resources = vec![
+            ResourceRule {
+                origin: first.to_string(),
+                path_prefix: "/paid".to_string(),
+            },
+            ResourceRule {
+                origin: second.to_string(),
+                path_prefix: "/paid/".to_string(),
+            },
+        ];
+        assert!(
+            matches!(
+                policy.validate(),
+                Err(X402PolicyConfigError::DuplicateRule {
+                    kind: "resource",
+                    ..
+                })
+            ),
+            "{first} and {second} canonicalise to one rule and must be rejected as duplicates"
+        );
     }
 }

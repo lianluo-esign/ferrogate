@@ -58,8 +58,8 @@ use std::fmt;
 
 use ferrogate_payments::{
     build_payment_signature, parse_payment_required, parse_payment_response, select_requirement,
-    PaymentError, RequirementFilter, SelectedPayment, SvmTransferSigner, SCHEME_EXACT,
-    X402_VERSION,
+    PaymentError, PaymentIntent, PaymentIntentDraft, PaymentIntentIdentity, RequestBodyHash,
+    RequirementFilter, SelectedPayment, SvmTransferSigner, SCHEME_EXACT, X402_VERSION,
 };
 use ferrogate_policy::{
     authorize_x402_payment, PaymentAuthorization, PaymentAuthorizationRequest, PaymentDecision,
@@ -173,6 +173,52 @@ pub(crate) struct X402NegotiationContext<'a> {
     pub idempotency_key: &'a str,
 }
 
+/// Build the immutable #351 payment intent for this negotiation.
+///
+/// The negotiation context already carries everything the intent needs -- the
+/// HTTP method, the authorized egress URL, the optional request-body hash, and
+/// the tenant/workspace/run/worker/request identity -- so the binding costs
+/// nothing but is now enforced instead of assumed. A context that cannot form a
+/// valid intent stops the negotiation before any wallet hold or signer call.
+fn build_payment_intent(
+    ctx: &X402NegotiationContext<'_>,
+    selected: &SelectedPayment,
+) -> Result<PaymentIntent, X402NegotiationError> {
+    let unbindable = |reason: String| X402NegotiationError::IntentUnbindable { reason };
+    let request_body_hash = match ctx.request_body_hash {
+        Some(hex) => {
+            RequestBodyHash::from_hex(hex.trim()).map_err(|error| unbindable(error.to_string()))?
+        }
+        None => RequestBodyHash::empty(),
+    };
+    PaymentIntent::new(PaymentIntentDraft {
+        x402_version: X402_VERSION,
+        scheme: SCHEME_EXACT.to_string(),
+        network_caip2: selected.network.caip2().to_string(),
+        mint: selected.mint.clone(),
+        atomic_amount: selected.atomic_amount,
+        recipient: selected.recipient.clone(),
+        authorized_resource_url: ctx.authorized_resource_url.to_string(),
+        http_method: ctx.method.to_string(),
+        request_body_hash,
+        challenge_hash_hex: selected.challenge_hash_hex(),
+        max_timeout_seconds: selected.max_timeout_seconds,
+        identity: PaymentIntentIdentity {
+            tenant_id: ctx.tenant_id.to_string(),
+            project_id: ctx.project_id.map(str::to_string),
+            workspace_id: ctx.workspace_id.map(str::to_string),
+            key_id: ctx.key_id.map(str::to_string),
+            run_id: ctx.run_id.map(str::to_string),
+            worker_id: ctx.worker_id.map(str::to_string),
+            // The idempotency key IS this request's stable identity on the
+            // settlement loop; reusing it keeps the intent, the attempt id and
+            // the request log joined by one value.
+            request_id: ctx.request_id.unwrap_or(ctx.idempotency_key).to_string(),
+        },
+    })
+    .map_err(|error| unbindable(error.to_string()))
+}
+
 /// Terminal result of a successful (non-error) negotiation.
 #[derive(Debug)]
 pub(crate) enum X402Negotiation {
@@ -213,6 +259,10 @@ pub(crate) enum X402NegotiationError {
     /// The challenge parsed but no requirement was acceptable to the wire
     /// contract (unsupported scheme/network/mint, bad amount/recipient/timeout).
     ChallengeUnacceptable { source: PaymentError },
+    /// The already-authorized request could not be expressed as an immutable
+    /// payment intent (#351): an unusable body hash, method, resource URL, or a
+    /// missing tenant/request identity. Nothing is paid without a binding.
+    IntentUnbindable { reason: String },
     /// The #351 spend policy refused the payment (`Deny`) or requires explicit
     /// out-of-band approval (`ApprovalRequired`). No hold, signer, or replay.
     PolicyRejected {
@@ -271,6 +321,9 @@ impl fmt::Display for X402NegotiationError {
             }
             Self::ChallengeUnacceptable { source } => {
                 write!(f, "x402 challenge has no acceptable requirement: {source}")
+            }
+            Self::IntentUnbindable { reason } => {
+                write!(f, "x402 payment intent could not be bound: {reason}")
             }
             Self::PolicyRejected { authorization } => write!(
                 f,
@@ -371,9 +424,15 @@ pub(crate) async fn negotiate_paid_egress<T: PaidEgressTransport>(
         key_id: ctx.key_id,
         run_id: ctx.run_id,
     };
+    // The immutable intent (#351): the challenge bound to the method, body hash
+    // and URL of the request the gateway already authorized, at this caller's
+    // identity. A challenge cannot redirect payment to another URL, body,
+    // recipient or network, and the resulting decision names which request it
+    // authorized.
+    let intent = build_payment_intent(ctx, &selected)?;
     let request = PaymentAuthorizationRequest {
         selected: &selected,
-        authorized_resource_url: ctx.authorized_resource_url,
+        intent: &intent,
         scope,
     };
     let authorization = authorize_x402_payment(policy, &request, spent);

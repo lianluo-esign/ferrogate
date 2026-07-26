@@ -20,6 +20,7 @@ ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-payments = { path = "../ferrogate-payments" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 serde.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

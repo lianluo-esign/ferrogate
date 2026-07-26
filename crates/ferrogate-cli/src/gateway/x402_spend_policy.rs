@@ -44,10 +44,13 @@ use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 
 use ferrogate_config::{
-    resolve_effective_x402_spend_policy, X402PolicyScopeKind, X402PolicyScopeRef, X402ScopeChain,
-    X402ScopedSpendPolicy,
+    normalize_x402_scope_id, resolve_effective_x402_spend_policy, X402PolicyScopeKind,
+    X402PolicyScopeRef, X402ScopeChain, X402ScopedSpendPolicy,
 };
-use ferrogate_payments::{parse_payment_required, select_requirement, RequirementFilter};
+use ferrogate_payments::{
+    parse_payment_required, select_requirement, PaymentIntent, PaymentIntentDraft,
+    PaymentIntentIdentity, RequestBodyHash, RequirementFilter, SCHEME_EXACT, X402_VERSION,
+};
 use ferrogate_policy::{
     authorize_x402_payment, ConversionSnapshot, PaymentAuthorization, PaymentAuthorizationRequest,
     PaymentDecision, ResourceRule, Rounding, SpendScope, SpendSnapshot, X402SpendPolicy,
@@ -103,6 +106,32 @@ impl X402ScopeRequest {
         })
     }
 
+    /// This request's scope chain with every id put through the config crate's
+    /// single [`normalize_x402_scope_id`] definition, and blank narrower levels
+    /// dropped.
+    ///
+    /// `GET …/effective` reads its ids through `query_value`, which trims;
+    /// `POST …/evaluate` reads them out of a JSON body verbatim. Normalizing
+    /// here — the one constructor both handlers, the tenancy check, the
+    /// inheritance evidence and the echoed `scope` view go through — is what
+    /// makes the two surfaces answer identically for the same input, which is
+    /// the whole promise of an effective-policy diagnostic.
+    fn normalized(&self) -> Self {
+        let level = |id: &Option<String>| {
+            id.as_deref()
+                .map(normalize_x402_scope_id)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            tenant_id: normalize_x402_scope_id(&self.tenant_id).to_string(),
+            project_id: level(&self.project_id),
+            workspace_id: level(&self.workspace_id),
+            key_id: level(&self.key_id),
+            run_id: level(&self.run_id),
+        }
+    }
+
     fn chain(&self) -> X402ScopeChain<'_> {
         X402ScopeChain {
             tenant_id: self.tenant_id.as_str(),
@@ -132,6 +161,11 @@ pub(crate) struct X402SpentRequest {
     pub(crate) run_spent_credits: u64,
     #[serde(default)]
     pub(crate) window_spent_credits: u64,
+    /// The caller's clock, used ONLY to test the conversion rule's validity
+    /// window. Absent ⇒ a policy whose conversion declares an expiry denies,
+    /// because unprovable freshness must not authorize a spend.
+    #[serde(default)]
+    pub(crate) now_unix: Option<i64>,
 }
 
 /// A dry-run payment-authorization request: the untrusted merchant challenge
@@ -145,8 +179,24 @@ pub(crate) struct X402EvaluationRequest {
     /// The resource URL the gateway already authorized egress to. A challenge
     /// whose own resource differs is a payment-redirect attempt and denies.
     pub(crate) authorized_resource_url: String,
+    /// HTTP method of the already-authorized request. Defaults to `GET`, the
+    /// only method that is bodyless by definition, so an omitted method can
+    /// never be silently read as "any method".
+    #[serde(default = "default_authorized_method")]
+    pub(crate) authorized_method: String,
+    /// Lowercase-hex SHA-256 of the already-authorized request body. Absent ⇒
+    /// the bodyless hash, which is a concrete value, not a wildcard.
     #[serde(default)]
-    pub(crate) spent: X402SpentRequest,
+    pub(crate) authorized_request_body_sha256_hex: Option<String>,
+    /// Already-committed spend to account for. ABSENT is materially different
+    /// from zero -- a real run with committed spend would deny where a fresh
+    /// one allows -- so the response reports which of the two it assumed.
+    #[serde(default)]
+    pub(crate) spent: Option<X402SpentRequest>,
+}
+
+fn default_authorized_method() -> String {
+    "GET".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +256,8 @@ pub(crate) struct X402ConversionView {
     pub(crate) denominator: u64,
     pub(crate) rounding: Rounding,
     pub(crate) version: String,
+    /// The validity deadline the rate declared, if any. `None` = never expires.
+    pub(crate) expires_at_unix: Option<i64>,
     /// `None` iff the conversion overflowed or the ratio was impossible — which
     /// denies. Never coerced to zero.
     pub(crate) computed_credits: Option<u64>,
@@ -218,6 +270,7 @@ impl X402ConversionView {
             denominator: snapshot.denominator,
             rounding: snapshot.rounding,
             version: snapshot.version.clone(),
+            expires_at_unix: snapshot.expires_at_unix,
             computed_credits: snapshot.computed_credits.map(|credits| credits.0),
         }
     }
@@ -243,6 +296,15 @@ pub(crate) struct X402DecisionView {
     pub(crate) resource_url: String,
     /// The egress URL FerroGate already authorized, echoed for binding evidence.
     pub(crate) authorized_resource_url: String,
+    /// HTTP method of the authorized request this decision is bound to.
+    pub(crate) http_method: String,
+    /// SHA-256 (hex) of the authorized request body.
+    pub(crate) request_body_sha256_hex: String,
+    /// Deterministic hash of the whole payment intent this decision authorized.
+    pub(crate) intent_hash_hex: String,
+    /// Deterministic seal over the decision's load-bearing content, so an audit
+    /// sink can prove the decision it stored is the one policy made.
+    pub(crate) decision_hash_hex: String,
     /// Deterministic challenge hash (hex) — the audit/idempotency key.
     pub(crate) challenge_hash_hex: String,
     /// The ORIGINAL on-chain atomic amount, losslessly (integer, never a float).
@@ -255,10 +317,7 @@ pub(crate) struct X402DecisionView {
 }
 
 impl X402DecisionView {
-    fn from_authorization(
-        authorization: &PaymentAuthorization,
-        authorized_resource_url: &str,
-    ) -> Self {
+    fn from_authorization(authorization: &PaymentAuthorization) -> Self {
         let (decision, approval_threshold_credits) = match authorization.decision {
             PaymentDecision::Allow => ("allow", None),
             PaymentDecision::ApprovalRequired { threshold_credits } => {
@@ -276,7 +335,11 @@ impl X402DecisionView {
             mint: authorization.mint.clone(),
             recipient: authorization.recipient.clone(),
             resource_url: authorization.resource_url.clone(),
-            authorized_resource_url: authorized_resource_url.to_string(),
+            authorized_resource_url: authorization.authorized_resource_url.clone(),
+            http_method: authorization.http_method.clone(),
+            request_body_sha256_hex: authorization.request_body_hash_hex.clone(),
+            intent_hash_hex: authorization.intent_hash_hex.clone(),
+            decision_hash_hex: authorization.decision_hash_hex(),
             challenge_hash_hex: authorization.challenge_hash_hex.clone(),
             atomic_amount: authorization.conversion.atomic_amount.0,
             computed_credits: authorization.conversion.computed_credits.map(|c| c.0),
@@ -284,6 +347,20 @@ impl X402DecisionView {
             matched_resource: authorization.matched_resource.clone(),
         }
     }
+}
+
+/// The ledger figures the dry run actually used, and whether the caller
+/// supplied them. Echoed back because an omitted ledger makes a dry run answer
+/// `allow` where the real run would `deny x402_over_run_cap`; the operator
+/// reading this response must be able to see which assumption produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct X402SpentView {
+    pub(crate) run_spent_credits: u64,
+    pub(crate) window_spent_credits: u64,
+    pub(crate) now_unix: Option<i64>,
+    /// False ⇒ the caller sent no `spent` object and these are assumed zeroes,
+    /// i.e. this decision describes a FRESH run/window, not the current one.
+    pub(crate) supplied: bool,
 }
 
 /// A dry-run evaluation result: which policy was in force, and what it decided.
@@ -294,6 +371,7 @@ pub(crate) struct X402EvaluationView {
     pub(crate) declared: bool,
     pub(crate) resolved_scope: Option<X402PolicyScopeRef>,
     pub(crate) policy_revision: u64,
+    pub(crate) spent: X402SpentView,
     pub(crate) decision: X402DecisionView,
 }
 
@@ -307,6 +385,7 @@ pub(crate) fn build_effective_policy_view(
     declared: &[X402ScopedSpendPolicy],
     scope: &X402ScopeRequest,
 ) -> X402EffectivePolicyView {
+    let scope = &scope.normalized();
     let chain = scope.chain();
     let effective = resolve_effective_x402_spend_policy(declared, &chain);
     let inheritance = chain
@@ -315,7 +394,7 @@ pub(crate) fn build_effective_policy_view(
         .map(|(scope_type, scope_id)| {
             let is_declared = declared
                 .iter()
-                .any(|entry| entry.scope_type == scope_type && entry.scope_id == scope_id);
+                .any(|entry| entry.matches_scope(scope_type, scope_id));
             let effective_level = effective.source.as_ref().is_some_and(|source| {
                 source.scope_type == scope_type && source.scope_id == scope_id
             });
@@ -350,6 +429,10 @@ pub(crate) enum X402EvaluationError {
     /// `authorized_resource_url` was blank — the binding target a challenge must
     /// match cannot be empty, or a challenge could unlock anything.
     MissingAuthorizedResource,
+    /// The already-authorized request could not be expressed as a payment
+    /// intent (unusable body hash, method, or URL). Refused rather than
+    /// evaluated against a weaker binding.
+    InvalidIntent(String),
     /// The declared policy that resolved for this scope failed structural
     /// validation. Config load rejects such a policy, so reaching this means the
     /// running config and the validator disagree: report it, never evaluate.
@@ -359,7 +442,9 @@ pub(crate) enum X402EvaluationError {
 impl X402EvaluationError {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Self::InvalidChallenge(_) | Self::MissingAuthorizedResource => StatusCode::BAD_REQUEST,
+            Self::InvalidChallenge(_)
+            | Self::MissingAuthorizedResource
+            | Self::InvalidIntent(_) => StatusCode::BAD_REQUEST,
             Self::InvalidPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -367,7 +452,9 @@ impl X402EvaluationError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::InvalidChallenge(_) => "invalid_x402_challenge",
-            Self::MissingAuthorizedResource => "invalid_x402_evaluation_request",
+            Self::MissingAuthorizedResource | Self::InvalidIntent(_) => {
+                "invalid_x402_evaluation_request"
+            }
             Self::InvalidPolicy(_) => "invalid_x402_spend_policy",
         }
     }
@@ -379,6 +466,9 @@ impl X402EvaluationError {
             }
             Self::MissingAuthorizedResource => {
                 "authorized_resource_url must be a non-empty URL".to_string()
+            }
+            Self::InvalidIntent(reason) => {
+                format!("the authorized request is not a valid payment intent: {reason}")
             }
             Self::InvalidPolicy(reason) => {
                 format!("the effective x402 spend policy is invalid: {reason}")
@@ -404,46 +494,92 @@ pub(crate) fn evaluate_x402_payment_request(
     if request.authorized_resource_url.trim().is_empty() {
         return Err(X402EvaluationError::MissingAuthorizedResource);
     }
+    // The same normalization `GET …/effective` applies, so an id that resolves
+    // to a policy on the read side resolves to the SAME policy on the decision
+    // side. Applied here rather than in the handler so the pure entry point --
+    // which is what the unit tests and any future caller drive -- cannot be
+    // reached with un-normalized ids.
+    let scope = request.scope.normalized();
 
     let required = parse_payment_required(&request.payment_required)
         .map_err(|error| X402EvaluationError::InvalidChallenge(error.to_string()))?;
     let selected = select_requirement(&required, &RequirementFilter::default())
         .map_err(|error| X402EvaluationError::InvalidChallenge(error.to_string()))?;
 
-    let effective = resolve_effective_x402_spend_policy(declared, &request.scope.chain());
+    let effective = resolve_effective_x402_spend_policy(declared, &scope.chain());
     let validated = effective
         .validate()
         .map_err(|error| X402EvaluationError::InvalidPolicy(error.to_string()))?;
 
+    // The immutable intent: the challenge bound to the method + body + URL the
+    // gateway would have authorized. Built here from the SAME `selected` the
+    // decision sees, so the dry run exercises the real binding rather than a
+    // looser stand-in.
+    let body_hash = match request.authorized_request_body_sha256_hex.as_deref() {
+        Some(hex) => RequestBodyHash::from_hex(hex.trim())
+            .map_err(|error| X402EvaluationError::InvalidIntent(error.to_string()))?,
+        None => RequestBodyHash::empty(),
+    };
+    let intent = PaymentIntent::new(PaymentIntentDraft {
+        x402_version: X402_VERSION,
+        scheme: SCHEME_EXACT.to_string(),
+        network_caip2: selected.network.caip2().to_string(),
+        mint: selected.mint.clone(),
+        atomic_amount: selected.atomic_amount,
+        recipient: selected.recipient.clone(),
+        authorized_resource_url: request.authorized_resource_url.clone(),
+        http_method: request.authorized_method.clone(),
+        request_body_hash: body_hash,
+        challenge_hash_hex: selected.challenge_hash_hex(),
+        max_timeout_seconds: selected.max_timeout_seconds,
+        identity: PaymentIntentIdentity {
+            tenant_id: scope.tenant_id.clone(),
+            project_id: scope.project_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            key_id: scope.key_id.clone(),
+            run_id: scope.run_id.clone(),
+            worker_id: None,
+            // A dry run has no gateway request of its own to attribute to; the
+            // deterministic challenge hash is the stable per-payment identity.
+            request_id: selected.challenge_hash_hex(),
+        },
+    })
+    .map_err(|error| X402EvaluationError::InvalidIntent(error.to_string()))?;
+
+    let spent = request.spent.unwrap_or_default();
     let authorization = authorize_x402_payment(
         &validated,
         &PaymentAuthorizationRequest {
             selected: &selected,
-            authorized_resource_url: &request.authorized_resource_url,
+            intent: &intent,
             scope: SpendScope {
-                tenant_id: request.scope.tenant_id.as_str(),
-                project_id: request.scope.project_id.as_deref(),
-                workspace_id: request.scope.workspace_id.as_deref(),
-                key_id: request.scope.key_id.as_deref(),
-                run_id: request.scope.run_id.as_deref(),
+                tenant_id: scope.tenant_id.as_str(),
+                project_id: scope.project_id.as_deref(),
+                workspace_id: scope.workspace_id.as_deref(),
+                key_id: scope.key_id.as_deref(),
+                run_id: scope.run_id.as_deref(),
             },
         },
         &SpendSnapshot {
-            run_spent_credits: request.spent.run_spent_credits,
-            window_spent_credits: request.spent.window_spent_credits,
+            run_spent_credits: spent.run_spent_credits,
+            window_spent_credits: spent.window_spent_credits,
+            now_unix: spent.now_unix,
         },
     );
 
     Ok(X402EvaluationView {
         object: "x402_spend_policy_evaluation",
-        scope: request.scope.view(),
+        scope: scope.view(),
         declared: effective.is_declared(),
         resolved_scope: effective.source.clone(),
         policy_revision: effective.revision(),
-        decision: X402DecisionView::from_authorization(
-            &authorization,
-            &request.authorized_resource_url,
-        ),
+        spent: X402SpentView {
+            run_spent_credits: spent.run_spent_credits,
+            window_spent_credits: spent.window_spent_credits,
+            now_unix: spent.now_unix,
+            supplied: request.spent.is_some(),
+        },
+        decision: X402DecisionView::from_authorization(&authorization),
     })
 }
 
@@ -453,7 +589,10 @@ pub(crate) fn declared_policy_view(entry: &X402ScopedSpendPolicy) -> X402Declare
     X402DeclaredPolicyView {
         object: "x402_spend_policy",
         scope_type: entry.scope_type,
-        scope_id: entry.scope_id.clone(),
+        // The normalized id, i.e. the id a request must name to resolve this
+        // declaration -- never the raw padded text, which would tell an operator
+        // to send a scope id that then resolves to something else.
+        scope_id: entry.normalized_scope_id().to_string(),
         enabled: policy.enabled,
         revision: policy.revision,
         policy: policy.clone(),
@@ -482,7 +621,7 @@ fn tenancy_scope_kind(kind: X402PolicyScopeKind) -> Option<QuotaScopeKind> {
 /// policy. A run-scoped lookup is refused for a tenant-scoped caller because the
 /// run→tenant mapping does not exist at this surface yet; refusing is the
 /// fail-closed choice (the alternative would leak another tenant's run policy).
-async fn authorize_scope_chain(
+pub(crate) async fn authorize_scope_chain(
     state: &AppState,
     auth: &AuthContext,
     scope: &X402ScopeRequest,
@@ -490,6 +629,9 @@ async fn authorize_scope_chain(
     if auth.organization_id.is_none() {
         return Ok(());
     }
+    // Normalized, so a padded id cannot be authorized at one spelling and then
+    // resolved at another.
+    let scope = scope.normalized();
     for (kind, id) in scope.chain().levels() {
         match tenancy_scope_kind(kind) {
             Some(tenancy) => authorize_scoped_resource(state, auth, tenancy, id).await?,
@@ -505,6 +647,42 @@ async fn authorize_scope_chain(
         }
     }
     Ok(())
+}
+
+/// The declarations `auth` is allowed to see, projected for the list surface.
+///
+/// A platform operator (no `organization_id`) sees every declaration. A
+/// tenant-scoped caller sees only the scopes that resolve to its own tenant:
+/// another tenant's spend caps, payee allowlist and policy revision are a
+/// competitor-visible spend profile, not public config. `Run`-scoped
+/// declarations have no run→tenant mapping at this surface yet
+/// (see [`tenancy_scope_kind`]), so they are omitted for tenant-scoped callers
+/// rather than guessed at.
+///
+/// Split out of the handler so the filter is reachable without a live
+/// `Session`: an access control nobody can call in a test is an access control
+/// nobody can prove.
+pub(crate) async fn visible_declared_policies(
+    state: &AppState,
+    auth: &AuthContext,
+    declared: &[X402ScopedSpendPolicy],
+) -> Vec<X402DeclaredPolicyView> {
+    let mut data = Vec::new();
+    for entry in declared {
+        if auth.organization_id.is_some() {
+            let Some(tenancy) = tenancy_scope_kind(entry.scope_type) else {
+                continue;
+            };
+            if authorize_scoped_resource(state, auth, tenancy, entry.normalized_scope_id())
+                .await
+                .is_err()
+            {
+                continue;
+            }
+        }
+        data.push(declared_policy_view(entry));
+    }
+    data
 }
 
 impl FerroGateway {
@@ -580,21 +758,8 @@ impl FerroGateway {
             }
         };
 
-        let mut data = Vec::new();
-        for entry in &state.config.x402_spend_policies {
-            if auth.organization_id.is_some() {
-                let Some(tenancy) = tenancy_scope_kind(entry.scope_type) else {
-                    continue;
-                };
-                if authorize_scoped_resource(&state, &auth, tenancy, &entry.scope_id)
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-            }
-            data.push(declared_policy_view(entry));
-        }
+        let data =
+            visible_declared_policies(&state, &auth, &state.config.x402_spend_policies).await;
         write_json_response(
             session,
             StatusCode::OK,

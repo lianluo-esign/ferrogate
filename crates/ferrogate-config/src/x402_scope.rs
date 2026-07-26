@@ -31,11 +31,38 @@
 //! an [`EffectiveX402SpendPolicy`], falling back to
 //! [`X402SpendPolicy::disabled`] rather than an `Option`, so a caller can never
 //! forget to handle "unconfigured" and accidentally treat it as "allowed".
+//!
+//! # Scope-id normalization
+//!
+//! Every scope id — declared and requested — passes through
+//! [`normalize_x402_scope_id`], which is the ONE definition of "the same scope".
+//! Before this existed, declaration validation trimmed while resolution matched
+//! raw, so `scope_id = " acme "` loaded clean, listed on the admin surface, and
+//! could never be resolved by any request: a money policy that is permanently
+//! inert while looking live. Normalizing in a single place also makes the
+//! read-side (`GET …/effective`, whose query parser trims) and the decision-side
+//! (`POST …/evaluate`, which read the body verbatim) agree by construction,
+//! which is the entire point of a "what you read back is what the runtime
+//! decides" surface.
 
 use serde::{Deserialize, Serialize};
 
 use crate::x402::X402SpendPolicyConfig;
 use ferrogate_policy::{ValidatedX402SpendPolicy, X402PolicyConfigError, X402SpendPolicy};
+
+/// The single normalization applied to every x402 scope id, on both the
+/// declaration side and the request side.
+///
+/// Surrounding whitespace is the only difference that is folded away: scope ids
+/// are opaque tenant/project/workspace/key/run identifiers, so case folding or
+/// unicode normalization would risk collapsing two genuinely distinct ids into
+/// one, which on a money surface is strictly worse than rejecting the odd one.
+///
+/// A normalized id that is empty is not a scope at all; declaration validation
+/// rejects it and [`X402ScopeChain::levels`] omits it.
+pub fn normalize_x402_scope_id(scope_id: &str) -> &str {
+    scope_id.trim()
+}
 
 /// One level of the tenancy chain an x402 spend policy may be declared at.
 ///
@@ -108,6 +135,22 @@ pub struct X402ScopedSpendPolicy {
     pub policy: X402SpendPolicyConfig,
 }
 
+impl X402ScopedSpendPolicy {
+    /// This declaration's scope id under [`normalize_x402_scope_id`]. Every
+    /// comparison, projection, and tenancy check must use this rather than the
+    /// raw field, or a padded declaration becomes unreachable.
+    pub fn normalized_scope_id(&self) -> &str {
+        normalize_x402_scope_id(&self.scope_id)
+    }
+
+    /// Does this declaration apply to `(kind, scope_id)`? `scope_id` is
+    /// normalized here too, so callers cannot accidentally compare a raw
+    /// request id against a normalized declaration id.
+    pub fn matches_scope(&self, kind: X402PolicyScopeKind, scope_id: &str) -> bool {
+        self.scope_type == kind && self.normalized_scope_id() == normalize_x402_scope_id(scope_id)
+    }
+}
+
 /// The scope chain a payment is evaluated at. `tenant_id` is mandatory; the
 /// narrower levels are optional and simply absent from resolution when `None`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,16 +172,25 @@ impl<'a> X402ScopeChain<'a> {
     }
 
     /// The chain as `(kind, id)` pairs, broadest first, skipping absent levels.
+    ///
+    /// Every id is normalized here — this is the request-side entry point that
+    /// resolution, inheritance evidence, and the admin tenancy check all funnel
+    /// through, so `" acme "` and `"acme"` are one scope everywhere downstream.
+    /// A narrower level whose id normalizes to empty is treated as absent
+    /// rather than as an empty-id scope that can match nothing.
     pub fn levels(&self) -> Vec<(X402PolicyScopeKind, &'a str)> {
         let mut levels = Vec::with_capacity(X402PolicyScopeKind::ALL.len());
-        levels.push((X402PolicyScopeKind::Tenant, self.tenant_id));
+        levels.push((
+            X402PolicyScopeKind::Tenant,
+            normalize_x402_scope_id(self.tenant_id),
+        ));
         for (kind, id) in [
             (X402PolicyScopeKind::Project, self.project_id),
             (X402PolicyScopeKind::Workspace, self.workspace_id),
             (X402PolicyScopeKind::Key, self.key_id),
             (X402PolicyScopeKind::Run, self.run_id),
         ] {
-            if let Some(id) = id {
+            if let Some(id) = id.map(normalize_x402_scope_id).filter(|id| !id.is_empty()) {
                 levels.push((kind, id));
             }
         }
@@ -199,10 +251,7 @@ pub fn resolve_effective_x402_spend_policy(
     chain: &X402ScopeChain<'_>,
 ) -> EffectiveX402SpendPolicy {
     for (kind, id) in chain.levels().into_iter().rev() {
-        if let Some(entry) = declared
-            .iter()
-            .find(|entry| entry.scope_type == kind && entry.scope_id == id)
-        {
+        if let Some(entry) = declared.iter().find(|entry| entry.matches_scope(kind, id)) {
             return EffectiveX402SpendPolicy {
                 source: Some(X402PolicyScopeRef {
                     scope_type: kind,
@@ -288,7 +337,9 @@ pub fn validate_scoped_x402_spend_policies(
 ) -> Result<(), X402ScopedPolicyError> {
     let mut seen: Vec<(X402PolicyScopeKind, &str)> = Vec::with_capacity(declared.len());
     for entry in declared {
-        let scope_id = entry.scope_id.trim();
+        // The SAME normalization resolution uses, so a declaration that loads
+        // clean is by construction a declaration a request can reach.
+        let scope_id = entry.normalized_scope_id();
         if scope_id.is_empty() {
             return Err(X402ScopedPolicyError::EmptyScopeId {
                 scope_type: entry.scope_type,

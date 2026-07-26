@@ -30,7 +30,7 @@ pub use x402::{
     X402ConfigError, X402PolicyConfigError, X402SpendCaps, X402SpendPolicy, X402SpendPolicyConfig,
 };
 pub use x402_scope::{
-    resolve_effective_x402_spend_policy, validate_scoped_x402_spend_policies,
-    EffectiveX402SpendPolicy, X402PolicyScopeKind, X402PolicyScopeRef, X402ScopeChain,
-    X402ScopedPolicyError, X402ScopedSpendPolicy,
+    normalize_x402_scope_id, resolve_effective_x402_spend_policy,
+    validate_scoped_x402_spend_policies, EffectiveX402SpendPolicy, X402PolicyScopeKind,
+    X402PolicyScopeRef, X402ScopeChain, X402ScopedPolicyError, X402ScopedSpendPolicy,
 };

@@ -6565,6 +6565,11 @@ export interface components {
             rounding: components["schemas"]["X402Rounding"];
             /** @description Opaque operator-set version tag for this ratio, persisted into every conversion snapshot. */
             version: string;
+            /**
+             * Format: int64
+             * @description Unix second at which this ratio stops being usable. Absent means the rate never expires on its own. A decision made at or after it -- or one whose caller supplied no clock -- denies with x402_conversion_expired: stale money data is not a smaller cap, it is no cap.
+             */
+            expires_at_unix?: number | null;
         };
         /** @description One explicitly allowlisted (network, mint) pair. The mint is a canonical base58 SPL mint address, never a token symbol. */
         X402AllowedAsset: {
@@ -6806,6 +6811,11 @@ export interface components {
             denominator: number;
             rounding: components["schemas"]["X402Rounding"];
             version: string;
+            /**
+             * Format: int64
+             * @description Unix second at which this ratio stops being usable. Absent means the rate never expires on its own. A decision made at or after it -- or one whose caller supplied no clock -- denies with x402_conversion_expired: stale money data is not a smaller cap, it is no cap.
+             */
+            expires_at_unix: number | null;
             /** Format: int64 */
             computed_credits: number | null;
         };
@@ -6813,7 +6823,7 @@ export interface components {
         X402PaymentDecision: {
             /** @enum {string} */
             decision: "allow" | "approval_required" | "deny";
-            /** @description Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required). */
+            /** @description Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required, x402_intent_mismatch, x402_conversion_expired). */
             reason_code: string;
             message: string;
             /** Format: int64 */
@@ -6825,6 +6835,14 @@ export interface components {
             recipient: string;
             resource_url: string;
             authorized_resource_url: string;
+            /** @description HTTP method of the already-authorized request this decision is bound to. Together with request_body_sha256_hex this is what stops an authorization for a GET being reused for a POST of a different body to the same URL. */
+            http_method: string;
+            /** @description SHA-256 of the already-authorized request body, lowercase hex. A bodyless request hashes the empty byte string, which is a concrete value rather than a wildcard. */
+            request_body_sha256_hex: string;
+            /** @description Deterministic hash of the immutable payment intent this decision authorized. */
+            intent_hash_hex: string;
+            /** @description Deterministic seal over the decision's load-bearing content (outcome, reason code, revision, payment terms, intent, priced credits). Recomputable at an audit sink to prove the decision stored is the decision policy made. The human-readable message is deliberately outside the seal. */
+            decision_hash_hex: string;
             challenge_hash_hex: string;
             /**
              * Format: int64
@@ -6836,17 +6854,29 @@ export interface components {
             conversion: components["schemas"]["X402ConversionSnapshot"];
             matched_resource: components["schemas"]["X402ResourceRule"] | null;
         };
-        /** @description A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies. */
+        /** @description A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies. The decision is bound to a whole payment intent -- method, request-body hash and canonical URL -- not just a URL, so an authorized GET and a POST of a different body to the same URL are two different authorizations. */
         X402SpendPolicyEvaluationRequest: {
             scope: components["schemas"]["X402ScopeChain"];
             payment_required: string;
             authorized_resource_url: string;
+            /**
+             * @description HTTP method of the already-authorized request. Defaults to GET, the only method that is bodyless by definition, so an omitted method is never read as "any method".
+             * @default GET
+             */
+            authorized_method: string;
+            /** @description Lowercase-hex SHA-256 of the already-authorized request body. Absent means the bodyless hash. An unparseable value is a 400, never a silent fallback. */
+            authorized_request_body_sha256_hex?: string | null;
             /** @description Already-committed spend read from the durable ledger, so per-run/per-window caps can be dry-run realistically. Defaults to a fresh run/window. */
             spent?: {
                 /** Format: int64 */
                 run_spent_credits?: number;
                 /** Format: int64 */
                 window_spent_credits?: number;
+                /**
+                 * Format: int64
+                 * @description The caller's clock, used only to test the conversion rule's validity window. Absent means a policy whose conversion declares an expiry denies.
+                 */
+                now_unix?: number | null;
             };
         };
         /** @description The result of a dry-run evaluation: which declaration was in force, at which revision, and the decision it produced. */
@@ -6858,6 +6888,17 @@ export interface components {
             resolved_scope: components["schemas"]["X402PolicyScopeRef"] | null;
             /** Format: int64 */
             policy_revision: number;
+            /** @description The ledger figures the dry run actually used, and whether the caller supplied them. An omitted `spent` makes a dry run answer for a FRESH run/window, where the real run could deny x402_over_run_cap, so the assumption is reported rather than left implicit. */
+            spent: {
+                /** Format: int64 */
+                run_spent_credits: number;
+                /** Format: int64 */
+                window_spent_credits: number;
+                /** Format: int64 */
+                now_unix: number | null;
+                /** @description False means the caller sent no spent object and these are assumed zeroes. */
+                supplied: boolean;
+            };
             decision: components["schemas"]["X402PaymentDecision"];
         };
     };

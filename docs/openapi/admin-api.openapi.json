@@ -27275,6 +27275,15 @@
           "version": {
             "description": "Opaque operator-set version tag for this ratio, persisted into every conversion snapshot.",
             "type": "string"
+          },
+          "expires_at_unix": {
+            "description": "Unix second at which this ratio stops being usable. Absent means the rate never expires on its own. A decision made at or after it -- or one whose caller supplied no clock -- denies with x402_conversion_expired: stale money data is not a smaller cap, it is no cap.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1
           }
         },
         "additionalProperties": false,
@@ -27973,6 +27982,15 @@
           "version": {
             "type": "string"
           },
+          "expires_at_unix": {
+            "description": "Unix second at which this ratio stops being usable. Absent means the rate never expires on its own. A decision made at or after it -- or one whose caller supplied no clock -- denies with x402_conversion_expired: stale money data is not a smaller cap, it is no cap.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1
+          },
           "computed_credits": {
             "type": [
               "integer",
@@ -27988,6 +28006,7 @@
           "denominator",
           "rounding",
           "version",
+          "expires_at_unix",
           "computed_credits"
         ]
       },
@@ -28004,7 +28023,7 @@
             ]
           },
           "reason_code": {
-            "description": "Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required).",
+            "description": "Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required, x402_intent_mismatch, x402_conversion_expired).",
             "type": "string"
           },
           "message": {
@@ -28037,6 +28056,25 @@
           },
           "authorized_resource_url": {
             "type": "string"
+          },
+          "http_method": {
+            "description": "HTTP method of the already-authorized request this decision is bound to. Together with request_body_sha256_hex this is what stops an authorization for a GET being reused for a POST of a different body to the same URL.",
+            "type": "string"
+          },
+          "request_body_sha256_hex": {
+            "description": "SHA-256 of the already-authorized request body, lowercase hex. A bodyless request hashes the empty byte string, which is a concrete value rather than a wildcard.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "intent_hash_hex": {
+            "description": "Deterministic hash of the immutable payment intent this decision authorized.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "decision_hash_hex": {
+            "description": "Deterministic seal over the decision's load-bearing content (outcome, reason code, revision, payment terms, intent, priced credits). Recomputable at an audit sink to prove the decision stored is the decision policy made. The human-readable message is deliberately outside the seal.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           },
           "challenge_hash_hex": {
             "type": "string",
@@ -28082,6 +28120,10 @@
           "recipient",
           "resource_url",
           "authorized_resource_url",
+          "http_method",
+          "request_body_sha256_hex",
+          "intent_hash_hex",
+          "decision_hash_hex",
           "challenge_hash_hex",
           "atomic_amount",
           "computed_credits",
@@ -28090,7 +28132,7 @@
         ]
       },
       "X402SpendPolicyEvaluationRequest": {
-        "description": "A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies.",
+        "description": "A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies. The decision is bound to a whole payment intent -- method, request-body hash and canonical URL -- not just a URL, so an authorized GET and a POST of a different body to the same URL are two different authorizations.",
         "type": "object",
         "properties": {
           "scope": {
@@ -28101,6 +28143,19 @@
           },
           "authorized_resource_url": {
             "type": "string"
+          },
+          "authorized_method": {
+            "description": "HTTP method of the already-authorized request. Defaults to GET, the only method that is bodyless by definition, so an omitted method is never read as \"any method\".",
+            "type": "string",
+            "default": "GET"
+          },
+          "authorized_request_body_sha256_hex": {
+            "description": "Lowercase-hex SHA-256 of the already-authorized request body. Absent means the bodyless hash. An unparseable value is a 400, never a silent fallback.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
           },
           "spent": {
             "description": "Already-committed spend read from the durable ledger, so per-run/per-window caps can be dry-run realistically. Defaults to a fresh run/window.",
@@ -28115,6 +28170,14 @@
                 "type": "integer",
                 "format": "int64",
                 "minimum": 0
+              },
+              "now_unix": {
+                "description": "The caller's clock, used only to test the conversion rule's validity window. Absent means a policy whose conversion declares an expiry denies.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
               }
             },
             "additionalProperties": false
@@ -28156,6 +28219,40 @@
             "format": "int64",
             "minimum": 0
           },
+          "spent": {
+            "description": "The ledger figures the dry run actually used, and whether the caller supplied them. An omitted `spent` makes a dry run answer for a FRESH run/window, where the real run could deny x402_over_run_cap, so the assumption is reported rather than left implicit.",
+            "type": "object",
+            "properties": {
+              "run_spent_credits": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "window_spent_credits": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "now_unix": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "supplied": {
+                "description": "False means the caller sent no spent object and these are assumed zeroes.",
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_spent_credits",
+              "window_spent_credits",
+              "now_unix",
+              "supplied"
+            ]
+          },
           "decision": {
             "$ref": "#/components/schemas/X402PaymentDecision"
           }
@@ -28167,6 +28264,7 @@
           "declared",
           "resolved_scope",
           "policy_revision",
+          "spent",
           "decision"
         ]
       }

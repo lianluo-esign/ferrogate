@@ -36,8 +36,9 @@
 
 use std::fmt;
 
-use ferrogate_payments::{validate_solana_address, SelectedPayment, SolanaNetwork};
+use ferrogate_payments::{validate_solana_address, PaymentIntent, SelectedPayment, SolanaNetwork};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Money domains
@@ -155,6 +156,18 @@ pub struct ConversionRule {
     /// every [`ConversionSnapshot`] so an auditor can tie a decision back to the
     /// exact rate that produced it.
     pub version: String,
+    /// Unix second at which this ratio stops being usable, if the operator
+    /// pinned one. `None` means the rate never expires on its own.
+    ///
+    /// The issue's invariant is "overflow or missing/**expired** conversion data
+    /// denies", and an opaque `version` string alone can never detect staleness:
+    /// a rate frozen months ago looks identical to one set this morning. When a
+    /// window IS declared, a decision made at or after it denies with
+    /// [`REASON_CONVERSION_EXPIRED`] -- and so does a decision whose caller
+    /// supplied no clock at all, because "I cannot tell whether this rate is
+    /// stale" is not a reason to spend money.
+    #[serde(default)]
+    pub expires_at_unix: Option<i64>,
 }
 
 impl ConversionRule {
@@ -183,6 +196,7 @@ impl ConversionRule {
             denominator: self.denominator,
             rounding: self.rounding,
             version: self.version.clone(),
+            expires_at_unix: self.expires_at_unix,
         }
     }
 }
@@ -204,6 +218,11 @@ pub struct ConversionSnapshot {
     pub rounding: Rounding,
     /// The conversion-rule version tag in effect at decision time.
     pub version: String,
+    /// The validity deadline in effect at decision time, if the rate declared
+    /// one. Recorded so an auditor can see the freshness bound the decision was
+    /// made under, not merely the version label.
+    #[serde(default)]
+    pub expires_at_unix: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +340,7 @@ impl X402SpendPolicy {
                 denominator: 1,
                 rounding: Rounding::Up,
                 version: "disabled".to_string(),
+                expires_at_unix: None,
             },
             approval: ApprovalPolicy::default(),
             allow_insecure_local_resources: false,
@@ -346,6 +366,17 @@ impl X402SpendPolicy {
             return Err(X402PolicyConfigError::ImpossibleConversion {
                 reason: "conversion denominator is zero".to_string(),
             });
+        }
+        // A non-positive deadline is a typo, not "already expired": accepting it
+        // would silently brick every payment under this policy.
+        if let Some(expires_at) = self.conversion.expires_at_unix {
+            if expires_at <= 0 {
+                return Err(X402PolicyConfigError::ImpossibleConversion {
+                    reason: format!(
+                        "conversion expires_at_unix {expires_at} is not a positive unix second"
+                    ),
+                });
+            }
         }
 
         if self.enabled {
@@ -433,10 +464,17 @@ impl X402SpendPolicy {
                 });
             }
         }
+        // Duplicate detection uses the SAME canonical form matching uses, or
+        // `https://a.com` and `https://A.com:443` would be one rule at match
+        // time yet two distinct rules at validation time -- a duplicate the
+        // operator was promised would be rejected.
         reject_duplicates(
-            self.allowed_resources
-                .iter()
-                .map(|r| format!("{}|{}", r.origin, r.path_prefix)),
+            self.allowed_resources.iter().map(|r| {
+                let origin = canonical_origin(&r.origin)
+                    .map(|origin| origin.as_string())
+                    .unwrap_or_else(|| r.origin.clone());
+                format!("{origin}|{}", normalise_path(&r.path_prefix))
+            }),
             "resource",
         )?;
 
@@ -606,21 +644,64 @@ pub struct SpendSnapshot {
     pub run_spent_credits: u64,
     /// Credits already committed within the current rolling window.
     pub window_spent_credits: u64,
+    /// The caller's wall clock, as a unix second, used ONLY to test the
+    /// conversion rule's validity window. Kept on the snapshot rather than read
+    /// from the system clock so the decision function stays pure and
+    /// deterministic.
+    ///
+    /// `None` means the caller offered no clock. A policy whose conversion rule
+    /// declares no expiry is unaffected; one that DOES declare an expiry denies,
+    /// because an unprovable freshness claim must not authorize a spend.
+    pub now_unix: Option<i64>,
 }
 
 /// A payment-authorization request: the untrusted challenge (already parsed +
 /// validated by the wire contract) bound to the egress request the gateway
 /// already authorized, at a scope.
+///
+/// The binding target is a whole [`PaymentIntent`], not just a URL. That is
+/// what makes the issue's invariant — *"a challenge cannot redirect payment to
+/// another URL, **body**, recipient, or network"* — enforceable rather than
+/// aspirational: an authorized `GET https://pay.example.com/weather` and a
+/// `POST` of a different body to the same URL are two different intents, and
+/// the resulting decision names which one it authorized.
 #[derive(Debug, Clone, Copy)]
 pub struct PaymentAuthorizationRequest<'a> {
     /// The selected, wire-validated payment requirement from the x402 challenge.
     pub selected: &'a SelectedPayment,
-    /// The resource URL FerroGate already authorized egress to. The challenge's
-    /// own `resource` must canonically match this — a challenge cannot redirect
-    /// payment to a different URL.
-    pub authorized_resource_url: &'a str,
+    /// The immutable intent: the already-authorized egress request (method,
+    /// canonical URL, request-body hash) plus the payment terms and the caller
+    /// identity it is being made for.
+    pub intent: &'a PaymentIntent,
     /// The scope this payment is evaluated at.
     pub scope: SpendScope<'a>,
+}
+
+/// The scope a decision was actually evaluated at, owned so it can be persisted
+/// alongside the decision.
+///
+/// [`SpendScope`] borrows and therefore cannot be stored; without this, a
+/// persisted `Allow` could not be attributed to the run that caused it, which
+/// makes a spend ledger unauditable exactly when it matters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizedScope {
+    pub tenant_id: String,
+    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub key_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+impl From<&SpendScope<'_>> for AuthorizedScope {
+    fn from(scope: &SpendScope<'_>) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.to_string(),
+            project_id: scope.project_id.map(str::to_string),
+            workspace_id: scope.workspace_id.map(str::to_string),
+            key_id: scope.key_id.map(str::to_string),
+            run_id: scope.run_id.map(str::to_string),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +753,13 @@ pub const REASON_OVER_RUN_CAP: &str = "x402_over_run_cap";
 pub const REASON_OVER_WINDOW_CAP: &str = "x402_over_window_cap";
 /// ApprovalRequired: within caps but above the approval threshold.
 pub const REASON_APPROVAL_REQUIRED: &str = "x402_approval_required";
+/// Denied: the payment intent does not describe the challenge it was presented
+/// with (amount, payee, mint, network, timeout, or challenge hash disagree).
+/// An intent built for one payment can never authorize another.
+pub const REASON_INTENT_MISMATCH: &str = "x402_intent_mismatch";
+/// Denied: the conversion rule's validity window has passed, or the caller
+/// supplied no clock to prove it has not. Stale money data denies.
+pub const REASON_CONVERSION_EXPIRED: &str = "x402_conversion_expired";
 
 /// The immutable, fully self-describing result of evaluating one payment
 /// authorization request. Carries enough evidence to explain the decision after
@@ -683,7 +771,14 @@ pub const REASON_APPROVAL_REQUIRED: &str = "x402_approval_required";
 /// not `Deserialize`: `reason_code` is a stable `&'static str` from the
 /// `REASON_*` set, which keeps the code path typed for callers at the cost of
 /// not being reconstructable from arbitrary text.
+///
+/// It is `#[non_exhaustive]`, so [`authorize_x402_payment`] is the only way to
+/// obtain one: no other crate can assemble a struct literal that *looks* like a
+/// policy decision. [`PaymentAuthorization::decision_hash_hex`] seals the
+/// content — an audit sink can recompute it and detect a decision that was
+/// edited between the policy call and the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct PaymentAuthorization {
     /// The three-valued decision.
     pub decision: PaymentDecision,
@@ -701,6 +796,21 @@ pub struct PaymentAuthorization {
     pub recipient: String,
     /// The resource URL the payment claims to unlock.
     pub resource_url: String,
+    /// The egress URL FerroGate had already authorized — the binding target the
+    /// challenge's own resource had to match.
+    pub authorized_resource_url: String,
+    /// HTTP method of the authorized request this decision is bound to.
+    /// Together with [`Self::request_body_hash_hex`] this is what stops an
+    /// authorization for a `GET` being reused for a `POST` of another body.
+    pub http_method: String,
+    /// SHA-256 (hex) of the authorized request body.
+    pub request_body_hash_hex: String,
+    /// Deterministic hash (hex) of the whole [`PaymentIntent`] this decision
+    /// authorized.
+    pub intent_hash_hex: String,
+    /// The scope the decision was evaluated at, so a persisted decision can be
+    /// attributed to the run that caused it.
+    pub scope: AuthorizedScope,
     /// Deterministic challenge hash (hex) from the wire contract — a stable
     /// idempotency / audit key.
     pub challenge_hash_hex: String,
@@ -710,6 +820,9 @@ pub struct PaymentAuthorization {
     /// the resource-match stage successfully.
     pub matched_resource: Option<ResourceRule>,
 }
+
+/// Domain-separation tag for [`PaymentAuthorization::decision_hash_hex`].
+pub const PAYMENT_DECISION_HASH_DOMAIN: &str = "ferrogate.x402.payment-decision.v1";
 
 impl PaymentAuthorization {
     /// True iff the decision is [`PaymentDecision::Allow`].
@@ -721,6 +834,63 @@ impl PaymentAuthorization {
     /// succeeded.
     pub fn computed_credits(&self) -> Option<Credits> {
         self.conversion.computed_credits
+    }
+
+    /// Deterministic SHA-256 (hex) over the load-bearing content of this
+    /// decision: the outcome, the reason code, the policy revision, the payment
+    /// terms, the intent it authorized, and the credits it priced.
+    ///
+    /// The human-readable `message` is deliberately excluded — it is explicitly
+    /// not load-bearing, and including it would make the seal churn whenever
+    /// wording changed. Recompute this at the audit sink to prove the decision
+    /// stored is the decision policy made.
+    pub fn decision_hash_hex(&self) -> String {
+        let mut hasher = Sha256::new();
+        let decision = match self.decision {
+            PaymentDecision::Allow => "allow".to_string(),
+            PaymentDecision::ApprovalRequired { threshold_credits } => {
+                format!("approval_required:{threshold_credits}")
+            }
+            PaymentDecision::Deny => "deny".to_string(),
+        };
+        let revision = self.policy_revision.to_string();
+        let atomic = self.conversion.atomic_amount.0.to_string();
+        let credits = match self.conversion.computed_credits {
+            Some(credits) => format!("credits:{}", credits.0),
+            None => "credits:none".to_string(),
+        };
+        let matched = match &self.matched_resource {
+            Some(rule) => format!("{}|{}", rule.origin, rule.path_prefix),
+            None => String::new(),
+        };
+        for part in [
+            PAYMENT_DECISION_HASH_DOMAIN,
+            decision.as_str(),
+            self.reason_code,
+            revision.as_str(),
+            self.network_caip2.as_str(),
+            self.mint.as_str(),
+            self.recipient.as_str(),
+            self.resource_url.as_str(),
+            self.authorized_resource_url.as_str(),
+            self.http_method.as_str(),
+            self.request_body_hash_hex.as_str(),
+            self.intent_hash_hex.as_str(),
+            self.challenge_hash_hex.as_str(),
+            atomic.as_str(),
+            credits.as_str(),
+            self.conversion.version.as_str(),
+            matched.as_str(),
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update([0u8]);
+        }
+        let mut out = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            use fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
     }
 }
 
@@ -746,8 +916,12 @@ pub fn authorize_x402_payment(
 ) -> PaymentAuthorization {
     let p = policy.policy();
     let selected = request.selected;
+    let intent = request.intent;
     let atomic = AtomicAmount(selected.atomic_amount);
     let conversion = p.conversion.snapshot(atomic);
+    let scope = AuthorizedScope::from(&request.scope);
+    let intent_hash_hex = intent.intent_hash_hex();
+    let request_body_hash_hex = intent.request_body_hash().as_hex();
 
     // Evidence common to every branch.
     let build = |decision: PaymentDecision,
@@ -762,6 +936,11 @@ pub fn authorize_x402_payment(
         mint: selected.mint.clone(),
         recipient: selected.recipient.clone(),
         resource_url: selected.resource_url.clone(),
+        authorized_resource_url: intent.authorized_resource_url().to_string(),
+        http_method: intent.http_method().to_string(),
+        request_body_hash_hex: request_body_hash_hex.clone(),
+        intent_hash_hex: intent_hash_hex.clone(),
+        scope: scope.clone(),
         challenge_hash_hex: selected.challenge_hash_hex(),
         conversion: conversion.clone(),
         matched_resource,
@@ -769,6 +948,18 @@ pub fn authorize_x402_payment(
     let deny = |reason_code: &'static str, message: String| {
         build(PaymentDecision::Deny, reason_code, message, None)
     };
+
+    // 0. Intent binding. The intent is the authority on what is being paid for;
+    //    if it does not describe THIS challenge, the two were not produced by
+    //    the same request and nothing further is worth evaluating. Checked
+    //    before the master switch because an incoherent input is a refusal
+    //    regardless of whether the scope has payments enabled.
+    if let Some(field) = intent.binding_mismatch(selected) {
+        return deny(
+            REASON_INTENT_MISMATCH,
+            format!("payment intent does not match the challenge ({field} differs)"),
+        );
+    }
 
     // 1. Master switch.
     if !p.enabled {
@@ -820,7 +1011,7 @@ pub fn authorize_x402_payment(
     //    covered by a resource rule.
     match (
         canonical_url(&selected.resource_url),
-        canonical_url(request.authorized_resource_url),
+        canonical_url(intent.authorized_resource_url()),
     ) {
         (Some(challenge), Some(authorized)) if challenge == authorized => {
             let matched = p
@@ -836,7 +1027,7 @@ pub fn authorize_x402_payment(
                     REASON_RESOURCE_NOT_ALLOWED,
                     format!(
                         "authorized resource {} is not covered by any resource rule",
-                        request.authorized_resource_url
+                        intent.authorized_resource_url()
                     ),
                 ),
             }
@@ -845,7 +1036,8 @@ pub fn authorize_x402_payment(
             REASON_RESOURCE_MISMATCH,
             format!(
                 "challenge resource {:?} does not match authorized egress {:?}",
-                selected.resource_url, request.authorized_resource_url
+                selected.resource_url,
+                intent.authorized_resource_url()
             ),
         ),
     }
@@ -887,7 +1079,35 @@ fn evaluate_amount(
         }
     }
 
-    // 7. Conversion to credits. Overflow / impossible ratio denies.
+    // 7. Conversion freshness. A rate past its declared validity window -- or
+    //    one whose freshness the caller cannot demonstrate -- denies before any
+    //    cap is consulted. Stale money data is not a smaller cap, it is no cap.
+    if let Some(expires_at) = conversion.expires_at_unix {
+        match spent.now_unix {
+            Some(now) if now < expires_at => {}
+            Some(now) => {
+                return deny(
+                    REASON_CONVERSION_EXPIRED,
+                    format!(
+                        "conversion rule version {:?} expired at {expires_at} (now {now})",
+                        conversion.version
+                    ),
+                )
+            }
+            None => {
+                return deny(
+                    REASON_CONVERSION_EXPIRED,
+                    format!(
+                        "conversion rule version {:?} declares a validity window \
+                         but the caller supplied no clock to check it against",
+                        conversion.version
+                    ),
+                )
+            }
+        }
+    }
+
+    // 8. Conversion to credits. Overflow / impossible ratio denies.
     let Some(credits) = conversion.computed_credits else {
         return deny(
             REASON_CONVERSION_UNAVAILABLE,
@@ -899,7 +1119,7 @@ fn evaluate_amount(
         );
     };
 
-    // 8. Per-payment credit cap.
+    // 9. Per-payment credit cap.
     if let Some(cap) = caps.max_credits_per_payment {
         if credits.0 > cap {
             return deny(
@@ -909,7 +1129,7 @@ fn evaluate_amount(
         }
     }
 
-    // 9. Per-run cap: already-spent + proposed, with checked add (overflow
+    // 10. Per-run cap: already-spent + proposed, with checked add (overflow
     //    denies rather than wrapping into a spuriously-small total).
     if let Some(cap) = caps.max_credits_per_run {
         match spent.run_spent_credits.checked_add(credits.0) {
@@ -932,7 +1152,7 @@ fn evaluate_amount(
         }
     }
 
-    // 10. Per-window cap: same checked-add discipline.
+    // 11. Per-window cap: same checked-add discipline.
     if let Some(cap) = caps.max_credits_per_window {
         match spent.window_spent_credits.checked_add(credits.0) {
             Some(total) if total <= cap => {}
@@ -955,7 +1175,7 @@ fn evaluate_amount(
         }
     }
 
-    // 11. Approval threshold: within the hard caps but above the threshold.
+    // 12. Approval threshold: within the hard caps but above the threshold.
     if let Some(threshold) = p.approval.threshold_credits {
         if credits.0 > threshold {
             return build(
@@ -971,7 +1191,7 @@ fn evaluate_amount(
         }
     }
 
-    // 12. Auto-allow.
+    // 13. Auto-allow.
     build(
         PaymentDecision::Allow,
         REASON_ALLOWED,

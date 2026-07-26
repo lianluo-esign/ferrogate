@@ -9,6 +9,30 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Key-name fragments that must never appear anywhere in an admin/diagnostics
+/// response, at any nesting depth.
+///
+/// Shared so a guard and the surface it guards cannot drift: the x402
+/// spend-policy slice (issue #351) shipped two independent copies of this list,
+/// one of which had already lost `seed` and `token`, which silently made the
+/// weaker copy the effective bar. A single definition means adding a fragment
+/// tightens every guard at once.
+///
+/// Matching is substring, case-insensitive: callers lowercase the key and test
+/// `contains`.
+pub const SECRET_SHAPED_KEY_FRAGMENTS: &[&str] = &[
+    "secret",
+    "signer",
+    "signature",
+    "private",
+    "keypair",
+    "mnemonic",
+    "seed",
+    "credential",
+    "password",
+    "token",
+];
+
 /// Approval policy attached to a tool or MCP binding.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -283,6 +283,7 @@ fn allowing_policy() -> ValidatedX402SpendPolicy {
             denominator: 1,
             rounding: Rounding::Up,
             version: "conv-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy::default(),
         allow_insecure_local_resources: false,
@@ -311,6 +312,7 @@ fn approval_policy() -> ValidatedX402SpendPolicy {
             denominator: 1,
             rounding: Rounding::Up,
             version: "conv-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy {
             threshold_credits: Some(10),
@@ -337,6 +339,9 @@ fn seed_state(balance_credits: i64) -> AppState {
     state
 }
 
+/// SHA-256 of the fixture's POST body, lowercase hex.
+const BODY_SHA256_HEX: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
 fn context() -> X402NegotiationContext<'static> {
     X402NegotiationContext {
         tenant_id: TENANT,
@@ -349,7 +354,9 @@ fn context() -> X402NegotiationContext<'static> {
         trace_id: Some("trace-1"),
         method: "POST",
         authorized_resource_url: RESOURCE_URL,
-        request_body_hash: Some("body-hash-1"),
+        // A real lowercase-hex SHA-256: the #351 payment intent binds the
+        // request body, so a placeholder string is no longer a usable stand-in.
+        request_body_hash: Some(BODY_SHA256_HEX),
         hold_ttl_secs: 3_600,
         idempotency_key: "req-1",
     }

@@ -47,6 +47,7 @@ fn policy(revision: u64) -> X402SpendPolicy {
             denominator: 1_000,
             rounding: Rounding::Up,
             version: "usdc-devnet-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy {
             threshold_credits: Some(500),
@@ -368,4 +369,106 @@ fn scope_kind_names_round_trip_and_reject_unknown_values() {
     }
     assert_eq!(X402PolicyScopeKind::from_str_exact("organization"), None);
     assert_eq!(X402PolicyScopeKind::from_str_exact(""), None);
+}
+
+/// Declaration validation trimmed `scope_id` while resolution matched the raw
+/// string, so `scope_id = " acme "` loaded clean, listed on the admin surface,
+/// and could never be resolved by any request -- a permanently inert money
+/// policy the operator had every reason to believe was in force.
+#[test]
+fn a_padded_declaration_resolves_for_the_unpadded_request() {
+    let declared = vec![X402ScopedSpendPolicy {
+        scope_type: X402PolicyScopeKind::Tenant,
+        scope_id: "  acme  ".to_string(),
+        policy: X402SpendPolicyConfig::from(policy(21)),
+    }];
+    validate_scoped_x402_spend_policies(&declared).expect("a padded declaration loads");
+
+    let effective = resolve_effective_x402_spend_policy(&declared, &X402ScopeChain::tenant("acme"));
+
+    assert!(effective.is_declared());
+    assert_eq!(effective.revision(), 21);
+    assert_eq!(
+        effective
+            .source
+            .as_ref()
+            .map(|source| source.scope_id.as_str()),
+        Some("acme"),
+        "the resolution evidence must name the id a request can actually send"
+    );
+}
+
+/// The request side is normalized too, so a padded request id reaches an
+/// unpadded declaration.
+#[test]
+fn a_padded_request_resolves_the_unpadded_declaration() {
+    let declared = vec![X402ScopedSpendPolicy {
+        scope_type: X402PolicyScopeKind::Project,
+        scope_id: "proj-1".to_string(),
+        policy: X402SpendPolicyConfig::from(policy(31)),
+    }];
+
+    let padded = resolve_effective_x402_spend_policy(
+        &declared,
+        &X402ScopeChain {
+            tenant_id: " tenant-1 ",
+            project_id: Some("\tproj-1 "),
+            ..X402ScopeChain::default()
+        },
+    );
+    let exact = resolve_effective_x402_spend_policy(
+        &declared,
+        &X402ScopeChain {
+            tenant_id: "tenant-1",
+            project_id: Some("proj-1"),
+            ..X402ScopeChain::default()
+        },
+    );
+
+    assert_eq!(padded, exact);
+    assert_eq!(padded.revision(), 31);
+}
+
+/// A narrower level whose id is blank is absent, not an empty-id scope: an
+/// empty id can never match a declaration (validation rejects those), so
+/// carrying it would only pollute the inheritance evidence.
+#[test]
+fn a_blank_narrower_level_is_omitted_from_the_chain() {
+    let chain = X402ScopeChain {
+        tenant_id: " tenant-1 ",
+        project_id: Some("   "),
+        workspace_id: Some("ws-1"),
+        ..X402ScopeChain::default()
+    };
+
+    assert_eq!(
+        chain.levels(),
+        vec![
+            (X402PolicyScopeKind::Tenant, "tenant-1"),
+            (X402PolicyScopeKind::Workspace, "ws-1"),
+        ]
+    );
+}
+
+/// Two declarations that differ only by padding are ONE scope, and a config
+/// that declares both is ambiguous rather than "the first one wins".
+#[test]
+fn declarations_differing_only_by_padding_are_a_duplicate_scope() {
+    let declared = vec![
+        X402ScopedSpendPolicy {
+            scope_type: X402PolicyScopeKind::Tenant,
+            scope_id: "acme".to_string(),
+            policy: X402SpendPolicyConfig::from(policy(1)),
+        },
+        X402ScopedSpendPolicy {
+            scope_type: X402PolicyScopeKind::Tenant,
+            scope_id: " acme ".to_string(),
+            policy: X402SpendPolicyConfig::from(policy(2)),
+        },
+    ];
+
+    assert!(matches!(
+        validate_scoped_x402_spend_policies(&declared),
+        Err(X402ScopedPolicyError::DuplicateScope { .. })
+    ));
 }

@@ -88,6 +88,7 @@ fn base_policy(enabled: bool, approval_threshold: Option<u64>) -> X402SpendPolic
             denominator: 1,
             rounding: Rounding::Up,
             version: "test-v1".to_string(),
+            expires_at_unix: None,
         },
         approval: ApprovalPolicy {
             threshold_credits: approval_threshold,
@@ -110,9 +111,16 @@ fn decision_for(
         tenant_id: "tenant-a",
         ..SpendScope::default()
     };
+    let principal = SpendPrincipal {
+        tenant_id: "tenant-a".to_string(),
+        ..SpendPrincipal::default()
+    };
+    let intent = challenge
+        .payment_intent(&principal)
+        .expect("the authorized request forms a valid payment intent");
     authorize_x402_payment(
         policy,
-        &challenge.policy_request(scope),
+        &challenge.policy_request(&intent, scope),
         &SpendSnapshot::default(),
     )
 }

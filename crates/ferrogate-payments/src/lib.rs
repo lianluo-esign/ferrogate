@@ -42,6 +42,7 @@
 //! This crate performs no network I/O, opens no wallet, and loads no keys.
 
 mod error;
+mod intent;
 mod proof;
 mod wire;
 
@@ -49,6 +50,10 @@ mod wire;
 pub mod sdk;
 
 pub use error::PaymentError;
+pub use intent::{
+    PaymentIntent, PaymentIntentDraft, PaymentIntentError, PaymentIntentIdentity, RequestBodyHash,
+    PAYMENT_INTENT_HASH_DOMAIN,
+};
 pub use proof::{build_payment_signature, SecretBytes, SvmTransferIntent, SvmTransferSigner};
 pub use wire::{
     base58_decode, parse_atomic_amount, parse_payment_required, parse_payment_response,

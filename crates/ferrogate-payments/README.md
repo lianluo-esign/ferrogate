@@ -112,12 +112,17 @@ These are already implemented against this contract (#351 in
 `agent-worker::x402_client`, #356 in `ferrogate-billing::x402_inbound`), so
 changes here must stay additive:
 
-- **#351** builds its immutable `PaymentIntent` from `SelectedPayment`
-  (`network`, `mint`, `atomic_amount`, `recipient`, `resource_url`,
-  `max_timeout_seconds`, `challenge_hash`) plus the egress-request binding
-  it owns (method, body hash, tenant/workspace/run identity). Every money
-  field is already an integer `u64` — there is no `f64` anywhere in this
-  crate.
+- **#351**'s immutable `PaymentIntent` now lives HERE (`src/intent.rs`), built
+  from `SelectedPayment` (`network`, `mint`, `atomic_amount`, `recipient`,
+  `resource_url`, `max_timeout_seconds`, `challenge_hash`) plus the
+  egress-request binding (HTTP method, `RequestBodyHash`,
+  tenant/project/workspace/key/run/worker/request identity). Sealed: private
+  fields, validating constructor, `#[serde(try_from = …)]` deserialization, and
+  a deterministic `intent_hash_hex()`. `ferrogate-policy` consumes it as the
+  binding target of a spend decision, which is what makes "a challenge cannot
+  redirect payment to another URL, **body**, recipient, or network"
+  enforceable. Every money field is an integer `u64` — there is no `f64`
+  anywhere in this crate.
 - **#352** persists `challenge_hash` as the attempt/idempotency key and
   `SettlementEvidence` (`success`, `transaction_signature`, `payer`,
   `settled_amount`, `error_reason`) as the settlement leg. Note the

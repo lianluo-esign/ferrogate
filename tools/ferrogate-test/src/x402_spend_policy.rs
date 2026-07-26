@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::{
     compliance::ComponentContract,
-    constants::{ADMIN_AUTH, JSON_CONTENT},
+    constants::{ADMIN_AUTH, CLIENT_AUTH, JSON_CONTENT},
     http::http_request_addr,
 };
 
@@ -40,6 +40,9 @@ pub(crate) const RESOURCE_URL: &str = "https://pay.example.com/weather";
 
 const TENANT_ID: &str = "compliance-tenant";
 const PROJECT_ID: &str = "compliance-project";
+const WORKSPACE_ID: &str = "compliance-workspace";
+const KEY_ID: &str = "compliance-key";
+const RUN_ID: &str = "compliance-run";
 
 /// Tenant-scope declaration: 1 credit per 1000 atomic units (round up), 1000
 /// credits per payment, approval above 500 credits.
@@ -51,6 +54,42 @@ const APPROVAL_THRESHOLD_CREDITS: u64 = 500;
 /// what proves precedence is real and not cosmetic.
 const PROJECT_REVISION: u64 = 11;
 const PROJECT_MAX_CREDITS_PER_PAYMENT: u64 = 2;
+/// Narrower still. Each level gets its own revision and its own per-payment cap
+/// so that naming one more level of the chain visibly changes BOTH which
+/// declaration is in force and what it decides -- through the surface an
+/// operator actually uses, not only in-process.
+const WORKSPACE_REVISION: u64 = 13;
+const WORKSPACE_MAX_CREDITS_PER_PAYMENT: u64 = 900;
+const KEY_REVISION: u64 = 17;
+const KEY_MAX_CREDITS_PER_PAYMENT: u64 = 800;
+const RUN_REVISION: u64 = 19;
+const RUN_MAX_CREDITS_PER_PAYMENT: u64 = 1;
+
+/// The full declared chain, broadest first: `(scope_type, scope_id, revision,
+/// max_credits_per_payment)`. One source of truth for the TOML fixture, the
+/// YAML fixture, and the expected write-side projection.
+const DECLARED_SCOPES: [(&str, &str, u64, u64); 5] = [
+    (
+        "tenant",
+        TENANT_ID,
+        TENANT_REVISION,
+        TENANT_MAX_CREDITS_PER_PAYMENT,
+    ),
+    (
+        "project",
+        PROJECT_ID,
+        PROJECT_REVISION,
+        PROJECT_MAX_CREDITS_PER_PAYMENT,
+    ),
+    (
+        "workspace",
+        WORKSPACE_ID,
+        WORKSPACE_REVISION,
+        WORKSPACE_MAX_CREDITS_PER_PAYMENT,
+    ),
+    ("key", KEY_ID, KEY_REVISION, KEY_MAX_CREDITS_PER_PAYMENT),
+    ("run", RUN_ID, RUN_REVISION, RUN_MAX_CREDITS_PER_PAYMENT),
+];
 
 const CONVERSION_NUMERATOR: u64 = 1;
 const CONVERSION_DENOMINATOR: u64 = 1_000;
@@ -63,6 +102,29 @@ const WINDOW_SECONDS: u64 = 3_600;
 const MAX_ATOMIC_PER_PAYMENT: u64 = 2_000_000;
 const MIN_ATOMIC_PER_PAYMENT: u64 = 10;
 
+/// The body of the POST-bound case, and its SHA-256. Pins that an authorized
+/// POST is a materially different intent from the authorized GET carrying the
+/// same challenge. The hash is computed from the body so the two cannot drift.
+const POST_BODY: &[u8] = br#"{"query":"weather"}"#;
+
+fn empty_body_sha256_hex() -> String {
+    sha256_hex(&[])
+}
+
+fn post_body_sha256_hex() -> String {
+    sha256_hex(POST_BODY)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut out = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// The `[[x402_spend_policies]]` section for a TOML gateway config.
 ///
 /// Emitted from the same constants as [`x402_spend_policies_yaml`] and as the
@@ -72,15 +134,18 @@ const MIN_ATOMIC_PER_PAYMENT: u64 = 10;
 /// Must be appended at the END of a TOML document: an array-of-tables section
 /// swallows every following top-level key.
 pub(crate) fn x402_spend_policies_toml() -> String {
-    format!(
-        r#"
+    DECLARED_SCOPES
+        .iter()
+        .map(|(scope_type, scope_id, revision, max_credits)| {
+            format!(
+                r#"
 [[x402_spend_policies]]
-scope_type = "tenant"
-scope_id = "{TENANT_ID}"
+scope_type = "{scope_type}"
+scope_id = "{scope_id}"
 
 [x402_spend_policies.policy]
 enabled = true
-revision = {TENANT_REVISION}
+revision = {revision}
 allowed_networks = ["{CAIP2_DEVNET}"]
 allowed_recipients = ["{MERCHANT}"]
 allow_insecure_local_resources = false
@@ -94,43 +159,7 @@ origin = "{RESOURCE_ORIGIN}"
 path_prefix = "{RESOURCE_PATH_PREFIX}"
 
 [x402_spend_policies.policy.caps]
-max_credits_per_payment = {TENANT_MAX_CREDITS_PER_PAYMENT}
-max_credits_per_run = {MAX_CREDITS_PER_RUN}
-max_credits_per_window = {MAX_CREDITS_PER_WINDOW}
-window_seconds = {WINDOW_SECONDS}
-max_atomic_per_payment = {MAX_ATOMIC_PER_PAYMENT}
-min_atomic_per_payment = {MIN_ATOMIC_PER_PAYMENT}
-
-[x402_spend_policies.policy.conversion]
-numerator = {CONVERSION_NUMERATOR}
-denominator = {CONVERSION_DENOMINATOR}
-rounding = "{CONVERSION_ROUNDING}"
-version = "{CONVERSION_VERSION}"
-
-[x402_spend_policies.policy.approval]
-threshold_credits = {APPROVAL_THRESHOLD_CREDITS}
-
-[[x402_spend_policies]]
-scope_type = "project"
-scope_id = "{PROJECT_ID}"
-
-[x402_spend_policies.policy]
-enabled = true
-revision = {PROJECT_REVISION}
-allowed_networks = ["{CAIP2_DEVNET}"]
-allowed_recipients = ["{MERCHANT}"]
-allow_insecure_local_resources = false
-
-[[x402_spend_policies.policy.allowed_assets]]
-network = "{CAIP2_DEVNET}"
-mint = "{USDC_DEVNET_MINT}"
-
-[[x402_spend_policies.policy.allowed_resources]]
-origin = "{RESOURCE_ORIGIN}"
-path_prefix = "{RESOURCE_PATH_PREFIX}"
-
-[x402_spend_policies.policy.caps]
-max_credits_per_payment = {PROJECT_MAX_CREDITS_PER_PAYMENT}
+max_credits_per_payment = {max_credits}
 max_credits_per_run = {MAX_CREDITS_PER_RUN}
 max_credits_per_window = {MAX_CREDITS_PER_WINDOW}
 window_seconds = {WINDOW_SECONDS}
@@ -146,20 +175,24 @@ version = "{CONVERSION_VERSION}"
 [x402_spend_policies.policy.approval]
 threshold_credits = {APPROVAL_THRESHOLD_CREDITS}
 "#
-    )
+            )
+        })
+        .collect()
 }
 
 /// The same declarations for a YAML gateway config (the Supabase-live
 /// compliance run authors YAML, the local run authors TOML; both must produce
 /// the identical effective policy).
 pub(crate) fn x402_spend_policies_yaml() -> String {
-    format!(
-        r#"x402_spend_policies:
-  - scope_type: "tenant"
-    scope_id: "{TENANT_ID}"
+    let entries: String = DECLARED_SCOPES
+        .iter()
+        .map(|(scope_type, scope_id, revision, max_credits)| {
+            format!(
+                r#"  - scope_type: "{scope_type}"
+    scope_id: "{scope_id}"
     policy:
       enabled: true
-      revision: {TENANT_REVISION}
+      revision: {revision}
       allowed_networks: ["{CAIP2_DEVNET}"]
       allowed_recipients: ["{MERCHANT}"]
       allow_insecure_local_resources: false
@@ -170,35 +203,7 @@ pub(crate) fn x402_spend_policies_yaml() -> String {
         - origin: "{RESOURCE_ORIGIN}"
           path_prefix: "{RESOURCE_PATH_PREFIX}"
       caps:
-        max_credits_per_payment: {TENANT_MAX_CREDITS_PER_PAYMENT}
-        max_credits_per_run: {MAX_CREDITS_PER_RUN}
-        max_credits_per_window: {MAX_CREDITS_PER_WINDOW}
-        window_seconds: {WINDOW_SECONDS}
-        max_atomic_per_payment: {MAX_ATOMIC_PER_PAYMENT}
-        min_atomic_per_payment: {MIN_ATOMIC_PER_PAYMENT}
-      conversion:
-        numerator: {CONVERSION_NUMERATOR}
-        denominator: {CONVERSION_DENOMINATOR}
-        rounding: "{CONVERSION_ROUNDING}"
-        version: "{CONVERSION_VERSION}"
-      approval:
-        threshold_credits: {APPROVAL_THRESHOLD_CREDITS}
-  - scope_type: "project"
-    scope_id: "{PROJECT_ID}"
-    policy:
-      enabled: true
-      revision: {PROJECT_REVISION}
-      allowed_networks: ["{CAIP2_DEVNET}"]
-      allowed_recipients: ["{MERCHANT}"]
-      allow_insecure_local_resources: false
-      allowed_assets:
-        - network: "{CAIP2_DEVNET}"
-          mint: "{USDC_DEVNET_MINT}"
-      allowed_resources:
-        - origin: "{RESOURCE_ORIGIN}"
-          path_prefix: "{RESOURCE_PATH_PREFIX}"
-      caps:
-        max_credits_per_payment: {PROJECT_MAX_CREDITS_PER_PAYMENT}
+        max_credits_per_payment: {max_credits}
         max_credits_per_run: {MAX_CREDITS_PER_RUN}
         max_credits_per_window: {MAX_CREDITS_PER_WINDOW}
         window_seconds: {WINDOW_SECONDS}
@@ -212,7 +217,10 @@ pub(crate) fn x402_spend_policies_yaml() -> String {
       approval:
         threshold_credits: {APPROVAL_THRESHOLD_CREDITS}
 "#
-    )
+            )
+        })
+        .collect();
+    format!("x402_spend_policies:\n{entries}")
 }
 
 // ---------------------------------------------------------------------------
@@ -224,9 +232,9 @@ pub(crate) fn x402_spend_policies_yaml() -> String {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct X402Case {
     name: &'static str,
-    /// `None` = tenant scope only; `Some` = name the project too, which must
-    /// pull in the tighter project declaration.
-    project: Option<&'static str>,
+    /// How much of the tenancy chain the case names. Each additional level must
+    /// pull in that level's declaration and its own per-payment cap.
+    chain: X402ChainDepth,
     atomic_amount: u64,
     recipient: &'static str,
     /// The resource the merchant challenge claims to unlock. Differs from
@@ -234,12 +242,66 @@ pub(crate) struct X402Case {
     challenge_resource: &'static str,
     authorized_resource: &'static str,
     run_spent_credits: u64,
+    /// The already-authorized request the payment is bound to.
+    authorized_method: &'static str,
+    /// True when the case's authorized request carries [`POST_BODY`]; its hash
+    /// is computed rather than transcribed.
+    authorized_has_body: bool,
     expected_decision: &'static str,
     expected_reason_code: &'static str,
     /// Expected internal credits for the challenge amount, computed by the
     /// gateway's own conversion rule. `None` for cases denied before pricing.
     expected_credits: Option<u64>,
     expected_revision: u64,
+}
+
+/// How much of the `tenant -> project -> workspace -> key -> run` chain a case
+/// names. The narrowest named level's declaration must win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum X402ChainDepth {
+    Tenant,
+    Project,
+    Workspace,
+    Key,
+    Run,
+}
+
+impl X402ChainDepth {
+    /// The declared entry this depth must resolve to.
+    fn declared(self) -> (&'static str, &'static str, u64, u64) {
+        DECLARED_SCOPES[self as usize]
+    }
+
+    /// The `?tenant_id=…&project_id=…` suffix for the effective-policy read.
+    fn query(self) -> String {
+        let mut query = format!("tenant_id={TENANT_ID}");
+        for (name, value) in self.narrower_levels() {
+            query.push_str(&format!("&{name}={value}"));
+        }
+        query
+    }
+
+    /// The `scope` object for the evaluate call. Must name exactly the same
+    /// levels as [`Self::query`] or the read and the decision are not comparable.
+    fn scope_body(self) -> Value {
+        let mut scope = json!({ "tenant_id": TENANT_ID });
+        for (name, value) in self.narrower_levels() {
+            scope[name] = json!(value);
+        }
+        scope
+    }
+
+    fn narrower_levels(self) -> Vec<(&'static str, &'static str)> {
+        [
+            ("project_id", PROJECT_ID),
+            ("workspace_id", WORKSPACE_ID),
+            ("key_id", KEY_ID),
+            ("run_id", RUN_ID),
+        ]
+        .into_iter()
+        .take(self as usize)
+        .collect()
+    }
 }
 
 /// The projection compared between "what the operator declared" and "what the
@@ -260,8 +322,17 @@ pub(crate) struct EffectivePolicyProjection {
     max_credits_per_window: Option<u64>,
     max_atomic_per_payment: Option<u64>,
     min_atomic_per_payment: Option<u64>,
+    /// Informational, but part of what the operator wrote: if the loader
+    /// dropped it, the caps an operator reads back would describe a different
+    /// window than the one they configured.
+    window_seconds: Option<u64>,
     approval_threshold_credits: Option<u64>,
     conversion: (u64, u64, String, String),
+    /// The ONE security-relevant boolean in the policy: the http-resource
+    /// escape hatch. Outside the write/read closure it could be flipped or
+    /// dropped between what the operator wrote and what the gateway holds and
+    /// this contract would never see it.
+    allow_insecure_local_resources: bool,
 }
 
 /// The runtime decision, as read off the diagnostics surface.
@@ -276,6 +347,14 @@ pub(crate) struct X402RuntimeDecision {
     matched_resource: Option<(String, String)>,
     conversion_version: String,
     approval_threshold_credits: Option<u64>,
+    /// The already-authorized request the decision is bound to.
+    http_method: String,
+    request_body_sha256_hex: String,
+    intent_hash_hex: String,
+    decision_hash_hex: String,
+    /// Whether the caller's ledger figures were used, echoed back so an omitted
+    /// `spent` cannot be mistaken for "the run has spent nothing".
+    spent_supplied: bool,
 }
 
 pub(crate) struct X402SpendPolicyContract;
@@ -301,12 +380,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // the approval threshold.
             X402Case {
                 name: "allow",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 2_500,
                 recipient: MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "allow",
                 expected_reason_code: "x402_allowed",
                 expected_credits: Some(3),
@@ -316,12 +397,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // threshold, still under the 1000-credit hard cap.
             X402Case {
                 name: "approval_required",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 600_000,
                 recipient: MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "approval_required",
                 expected_reason_code: "x402_approval_required",
                 expected_credits: Some(600),
@@ -330,12 +413,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // 1_500_000 atomic = 1500 credits: over the per-payment cap.
             X402Case {
                 name: "deny_over_cap",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 1_500_000,
                 recipient: MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "deny",
                 expected_reason_code: "x402_over_per_payment_cap",
                 expected_credits: Some(1_500),
@@ -346,12 +431,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // what the runtime actually reads, not just what the list shows.
             X402Case {
                 name: "project_override_denies",
-                project: Some(PROJECT_ID),
+                chain: X402ChainDepth::Project,
                 atomic_amount: 2_500,
                 recipient: MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "deny",
                 expected_reason_code: "x402_over_per_payment_cap",
                 expected_credits: Some(3),
@@ -361,12 +448,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // never authorized egress to.
             X402Case {
                 name: "deny_payment_redirect",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 2_500,
                 recipient: MERCHANT,
                 challenge_resource: "https://evil.example.com/drain",
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "deny",
                 expected_reason_code: "x402_resource_mismatch",
                 expected_credits: Some(3),
@@ -375,12 +464,14 @@ impl ComponentContract for X402SpendPolicyContract {
             // A payee outside the allowlist denies, whatever the amount.
             X402Case {
                 name: "deny_unknown_payee",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 2_500,
                 recipient: OTHER_MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "deny",
                 expected_reason_code: "x402_recipient_not_allowed",
                 expected_credits: Some(3),
@@ -390,14 +481,82 @@ impl ComponentContract for X402SpendPolicyContract {
             // exceeds 5000.
             X402Case {
                 name: "deny_over_run_cap",
-                project: None,
+                chain: X402ChainDepth::Tenant,
                 atomic_amount: 2_500,
                 recipient: MERCHANT,
                 challenge_resource: RESOURCE_URL,
                 authorized_resource: RESOURCE_URL,
                 run_spent_credits: 4_999,
+                authorized_method: "GET",
+                authorized_has_body: false,
                 expected_decision: "deny",
                 expected_reason_code: "x402_over_run_cap",
+                expected_credits: Some(3),
+                expected_revision: TENANT_REVISION,
+            },
+            // Each narrower level in turn: naming it must swap in that level's
+            // declaration (revision) AND its cap, through the surface.
+            X402Case {
+                name: "workspace_override_is_in_force",
+                chain: X402ChainDepth::Workspace,
+                atomic_amount: 2_500,
+                recipient: MERCHANT,
+                challenge_resource: RESOURCE_URL,
+                authorized_resource: RESOURCE_URL,
+                run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
+                expected_decision: "allow",
+                expected_reason_code: "x402_allowed",
+                expected_credits: Some(3),
+                expected_revision: WORKSPACE_REVISION,
+            },
+            X402Case {
+                name: "key_override_is_in_force",
+                chain: X402ChainDepth::Key,
+                atomic_amount: 2_500,
+                recipient: MERCHANT,
+                challenge_resource: RESOURCE_URL,
+                authorized_resource: RESOURCE_URL,
+                run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
+                expected_decision: "allow",
+                expected_reason_code: "x402_allowed",
+                expected_credits: Some(3),
+                expected_revision: KEY_REVISION,
+            },
+            // The narrowest scope wins outright: the same 3-credit payment that
+            // every broader level allows is denied by the run's 1-credit cap.
+            X402Case {
+                name: "run_override_denies_what_every_broader_scope_allows",
+                chain: X402ChainDepth::Run,
+                atomic_amount: 2_500,
+                recipient: MERCHANT,
+                challenge_resource: RESOURCE_URL,
+                authorized_resource: RESOURCE_URL,
+                run_spent_credits: 0,
+                authorized_method: "GET",
+                authorized_has_body: false,
+                expected_decision: "deny",
+                expected_reason_code: "x402_over_per_payment_cap",
+                expected_credits: Some(3),
+                expected_revision: RUN_REVISION,
+            },
+            // A POST with a body is a DIFFERENT authorized request than the GET
+            // above, and the decision must say so rather than being byte-identical.
+            X402Case {
+                name: "allow_bound_to_a_post_body",
+                chain: X402ChainDepth::Tenant,
+                atomic_amount: 2_500,
+                recipient: MERCHANT,
+                challenge_resource: RESOURCE_URL,
+                authorized_resource: RESOURCE_URL,
+                run_spent_credits: 0,
+                authorized_method: "POST",
+                authorized_has_body: true,
+                expected_decision: "allow",
+                expected_reason_code: "x402_allowed",
                 expected_credits: Some(3),
                 expected_revision: TENANT_REVISION,
             },
@@ -409,20 +568,7 @@ impl ComponentContract for X402SpendPolicyContract {
     /// so this is literally what was written, expressed from the same constants
     /// that generated the config text.
     fn write(&self, _gateway_addr: &str, case: &Self::Case) -> Result<Self::Written> {
-        let (scope_type, scope_id, revision, max_credits_per_payment) = match case.project {
-            Some(project) => (
-                "project",
-                project,
-                PROJECT_REVISION,
-                PROJECT_MAX_CREDITS_PER_PAYMENT,
-            ),
-            None => (
-                "tenant",
-                TENANT_ID,
-                TENANT_REVISION,
-                TENANT_MAX_CREDITS_PER_PAYMENT,
-            ),
-        };
+        let (scope_type, scope_id, revision, max_credits_per_payment) = case.chain.declared();
         Ok(EffectivePolicyProjection {
             resolved_scope_type: scope_type.to_string(),
             resolved_scope_id: scope_id.to_string(),
@@ -440,6 +586,7 @@ impl ComponentContract for X402SpendPolicyContract {
             max_credits_per_window: Some(MAX_CREDITS_PER_WINDOW),
             max_atomic_per_payment: Some(MAX_ATOMIC_PER_PAYMENT),
             min_atomic_per_payment: Some(MIN_ATOMIC_PER_PAYMENT),
+            window_seconds: Some(WINDOW_SECONDS),
             approval_threshold_credits: Some(APPROVAL_THRESHOLD_CREDITS),
             conversion: (
                 CONVERSION_NUMERATOR,
@@ -447,6 +594,7 @@ impl ComponentContract for X402SpendPolicyContract {
                 CONVERSION_ROUNDING.to_string(),
                 CONVERSION_VERSION.to_string(),
             ),
+            allow_insecure_local_resources: false,
         })
     }
 
@@ -486,6 +634,7 @@ impl ComponentContract for X402SpendPolicyContract {
             max_credits_per_window: optional_u64(&caps["max_credits_per_window"])?,
             max_atomic_per_payment: optional_u64(&caps["max_atomic_per_payment"])?,
             min_atomic_per_payment: optional_u64(&caps["min_atomic_per_payment"])?,
+            window_seconds: optional_u64(&caps["window_seconds"])?,
             approval_threshold_credits: optional_u64(&policy["approval"]["threshold_credits"])?,
             conversion: (
                 u64_field(&conversion["numerator"], "conversion.numerator")?,
@@ -493,6 +642,9 @@ impl ComponentContract for X402SpendPolicyContract {
                 string_field(conversion, "rounding")?,
                 string_field(conversion, "version")?,
             ),
+            allow_insecure_local_resources: policy["allow_insecure_local_resources"]
+                .as_bool()
+                .context("policy.allow_insecure_local_resources must be a boolean")?,
         })
     }
 
@@ -507,6 +659,10 @@ impl ComponentContract for X402SpendPolicyContract {
                 case.challenge_resource,
             ),
             "authorized_resource_url": case.authorized_resource,
+            "authorized_method": case.authorized_method,
+            "authorized_request_body_sha256_hex": case
+                .authorized_has_body
+                .then(post_body_sha256_hex),
             "spent": {
                 "run_spent_credits": case.run_spent_credits,
                 "window_spent_credits": 0
@@ -540,6 +696,13 @@ impl ComponentContract for X402SpendPolicyContract {
             },
             conversion_version: string_field(&decision["conversion"], "version")?,
             approval_threshold_credits: optional_u64(&decision["approval_threshold_credits"])?,
+            http_method: string_field(decision, "http_method")?,
+            request_body_sha256_hex: string_field(decision, "request_body_sha256_hex")?,
+            intent_hash_hex: string_field(decision, "intent_hash_hex")?,
+            decision_hash_hex: string_field(decision, "decision_hash_hex")?,
+            spent_supplied: body["spent"]["supplied"]
+                .as_bool()
+                .context("spent.supplied must be a boolean")?,
         })
     }
 
@@ -643,6 +806,49 @@ impl ComponentContract for X402SpendPolicyContract {
                 }
             }
         }
+        // The decision must name the exact request it authorized: method, body
+        // hash, and a 32-byte seal over both. Without this, an authorization for
+        // a GET and one for a POST of a different body to the same URL are
+        // indistinguishable evidence.
+        if runtime.http_method != case.authorized_method {
+            bail!(
+                "case {}: decision is bound to method {}, the authorized request was {}",
+                case.name,
+                runtime.http_method,
+                case.authorized_method
+            );
+        }
+        let expected_body_hash = if case.authorized_has_body {
+            post_body_sha256_hex()
+        } else {
+            empty_body_sha256_hex()
+        };
+        if runtime.request_body_sha256_hex != expected_body_hash {
+            bail!(
+                "case {}: decision is bound to body hash {}, the authorized request hashed to {}",
+                case.name,
+                runtime.request_body_sha256_hex,
+                expected_body_hash
+            );
+        }
+        for (what, value) in [
+            ("intent_hash_hex", &runtime.intent_hash_hex),
+            ("decision_hash_hex", &runtime.decision_hash_hex),
+        ] {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                bail!(
+                    "case {}: {what} {value:?} is not 32 bytes of hex",
+                    case.name
+                );
+            }
+        }
+        // Every case supplies `spent` explicitly, so the surface must say so.
+        if !runtime.spent_supplied {
+            bail!(
+                "case {}: the response must report that the ledger figures were supplied",
+                case.name
+            );
+        }
         if case.expected_decision == "approval_required"
             && runtime.approval_threshold_credits != written.approval_threshold_credits
         {
@@ -688,12 +894,54 @@ pub(crate) fn assert_x402_spend_policy_surface(gateway_addr: &str) -> Result<()>
             ))
         })
         .collect::<Result<_>>()?;
-    for expected in [
-        ("tenant".to_string(), TENANT_ID.to_string()),
-        ("project".to_string(), PROJECT_ID.to_string()),
-    ] {
+    for (scope_type, scope_id, _, _) in DECLARED_SCOPES {
+        let expected = (scope_type.to_string(), scope_id.to_string());
         if !scopes.contains(&expected) {
             bail!("declared x402 policy {expected:?} is missing from the admin list: {listed}");
+        }
+    }
+
+    // Tenancy: a tenant-scoped `admin.read` caller (org_demo) must not be able
+    // to read another tenant's spend caps, payee allowlist or policy revision
+    // through this surface, and must not be able to name a run scope at all.
+    // Every declaration above belongs to `compliance-tenant`, so org_demo sees
+    // none of them.
+    let scoped_list = expect_json(
+        gateway_addr,
+        "GET",
+        "/admin/v1/x402-spend-policies",
+        &[CLIENT_AUTH],
+        "",
+        200,
+    )?;
+    let scoped_scopes: Vec<String> = scoped_list["data"]
+        .as_array()
+        .context("x402 spend policy list must carry a data array")?
+        .iter()
+        .map(|entry| string_field(entry, "scope_id"))
+        .collect::<Result<_>>()?;
+    for (_, scope_id, _, _) in DECLARED_SCOPES {
+        if scoped_scopes.iter().any(|seen| seen == scope_id) {
+            bail!(
+                "a tenant-scoped caller must not see another tenant's x402 declaration \
+                 {scope_id}: {scoped_list}"
+            );
+        }
+    }
+    for (path, expected_code) in [
+        (
+            format!("/admin/v1/x402-spend-policies/effective?tenant_id={TENANT_ID}"),
+            "tenant_scope_denied",
+        ),
+        (
+            "/admin/v1/x402-spend-policies/effective?tenant_id=org_demo&run_id=some-run"
+                .to_string(),
+            "run_scope_requires_platform_operator",
+        ),
+    ] {
+        let refused = expect_json(gateway_addr, "GET", &path, &[CLIENT_AUTH], "", 403)?;
+        if refused["error"]["code"] != expected_code {
+            bail!("GET {path} must be refused as {expected_code}: {refused}");
         }
     }
 
@@ -792,19 +1040,14 @@ pub(crate) fn assert_x402_spend_policy_surface(gateway_addr: &str) -> Result<()>
 // ---------------------------------------------------------------------------
 
 fn effective_policy_path(case: &X402Case) -> String {
-    match case.project {
-        Some(project) => format!(
-            "/admin/v1/x402-spend-policies/effective?tenant_id={TENANT_ID}&project_id={project}"
-        ),
-        None => format!("/admin/v1/x402-spend-policies/effective?tenant_id={TENANT_ID}"),
-    }
+    format!(
+        "/admin/v1/x402-spend-policies/effective?{}",
+        case.chain.query()
+    )
 }
 
 fn scope_body(case: &X402Case) -> Value {
-    match case.project {
-        Some(project) => json!({"tenant_id": TENANT_ID, "project_id": project}),
-        None => json!({"tenant_id": TENANT_ID}),
-    }
+    case.chain.scope_body()
 }
 
 /// A base64 `PAYMENT-REQUIRED` header exactly as an x402 merchant would send it.
@@ -832,16 +1075,7 @@ fn assert_no_secret_fields(value: &Value, what: &str) -> Result<()> {
     collect_keys(value, &mut keys);
     for key in keys {
         let lowered = key.to_ascii_lowercase();
-        for forbidden in [
-            "secret",
-            "signer",
-            "signature",
-            "private",
-            "keypair",
-            "mnemonic",
-            "credential",
-            "password",
-        ] {
+        for forbidden in ferrogate_core::SECRET_SHAPED_KEY_FRAGMENTS {
             if lowered.contains(forbidden) {
                 bail!("{what} response exposes a {forbidden}-shaped field: {key}");
             }
