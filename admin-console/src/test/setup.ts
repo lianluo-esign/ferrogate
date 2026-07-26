@@ -74,6 +74,25 @@ if (typeof Blob !== "undefined" && !Blob.prototype.arrayBuffer) {
   };
 }
 
+// jsdom (v26) also ships Blob/File without the standard `stream()`. MSW's
+// undici-based interceptor calls it to serialize a request body, so ANY test
+// that uploads a Blob/File (the static-site ZIP publish, the presigned
+// large-object upload) died with `object.stream is not a function` before the
+// request ever left the page — masking the publish, republish-failure and
+// error-state coverage entirely (#510). Same jsdom gap, same fix shape as
+// `arrayBuffer` above: back it with the bytes jsdom can already produce.
+if (typeof Blob !== "undefined" && !Blob.prototype.stream) {
+  Blob.prototype.stream = function stream(this: Blob): ReadableStream<Uint8Array> {
+    const bytes = this.arrayBuffer();
+    return new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(await bytes));
+        controller.close();
+      },
+    });
+  } as Blob["stream"];
+}
+
 if (!window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,

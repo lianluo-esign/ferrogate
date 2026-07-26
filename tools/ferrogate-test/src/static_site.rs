@@ -36,6 +36,9 @@ use std::{
 
 const ADMIN_AUTH: &str = "Authorization: Bearer site-e2e-admin-secret";
 const CLIENT_AUTH: &str = "Authorization: Bearer site-e2e-client-secret";
+/// Admin key scoped to a DIFFERENT tenant, for the #345 box-4 cross-tenant
+/// binding refusal (the security half, which must hold at the API).
+const OTHER_TENANT_AUTH: &str = "Authorization: Bearer site-e2e-other-secret";
 const TENANT: &str = "org_site_e2e";
 const SITE: &str = "docs-site";
 const LEGACY_SITE: &str = "legacy-blob-site";
@@ -215,7 +218,454 @@ pub(crate) fn run_static_site_api(args: &LocalArgs) -> Result<()> {
         );
     }
 
+    verify_console_agreement(&gateway_addr)?;
+
     println!("static-site-api scenario passed");
+    Ok(())
+}
+
+/// #345 gate coverage: prove the ADMIN CONSOLE's static-site surfaces agree with
+/// what the gateway actually serves, over a real gateway process.
+///
+/// `114d925` / `550cb27` were corrections admitting the console had been
+/// displaying, purging and binding against something other than the served
+/// bundle, and both landed with "no live gateway ... read off sites.rs, not
+/// observed". Everything below is the observation those commits could not make:
+/// each console read is issued at the exact URL `static-sites.tsx` issues it,
+/// and its answer is compared against the bytes/headers `/sites/{t}/{s}/`
+/// returns.
+fn verify_console_agreement(gateway_addr: &str) -> Result<()> {
+    const SITE: &str = "console-site";
+    let v1 = build_stored_zip(&[("index.html", b"<h1>V1</h1>" as &[u8]), ("app.css", b"a{}")]);
+    let v2 = build_stored_zip(&[("index.html", b"<h1>V2</h1>" as &[u8]), ("app.css", b"b{}")]);
+
+    // --- Box 1: publish, then open the canonical serve URL. ------------------
+    let published = crate::http::http_request_addr_bytes(
+        gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/1.0.0"),
+        &[
+            CLIENT_AUTH,
+            "Content-Type: application/zip",
+            "x-site-public: true",
+            "x-site-spa-fallback: true",
+            "x-site-cache-control: public, max-age=600",
+        ],
+        &v1,
+    )?;
+    if published.status != 200 && published.status != 201 {
+        bail!("console-site publish failed: {}", published.raw);
+    }
+    // The publish answered with the BUNDLE envelope, not the opaque-blob one.
+    let publish_body: Value = serde_json::from_str(&published.body)
+        .with_context(|| format!("publish response is not JSON: {}", published.raw))?;
+    if publish_body["object"] != "static_site" {
+        bail!(
+            "a committed bundle must answer with the static_site envelope: {}",
+            published.raw
+        );
+    }
+    let serve = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/sites/{TENANT}/{SITE}/"),
+        &[],
+        "",
+    )?;
+    if serve.status != 200 || serve.body != "<h1>V1</h1>" {
+        bail!(
+            "canonical serve URL did not return the published bytes: {}",
+            serve.raw
+        );
+    }
+
+    // --- Box 2: every displayed field matches the SERVED bundle. -------------
+    let (serving_version, manifest) = console_active_bundle(gateway_addr, SITE)?;
+    if serving_version.as_deref() != Some("1.0.0") {
+        bail!("serving channel should resolve 1.0.0, got {serving_version:?}");
+    }
+    assert_console_matches_serve(gateway_addr, SITE, &manifest, &serve, "1.0.0")?;
+
+    // --- The 114d925 core: after a ROLLBACK the console must follow the
+    // channel, not the mutable marker. ---------------------------------------
+    let republished = crate::http::http_request_addr_bytes(
+        gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/2.0.0"),
+        &[
+            CLIENT_AUTH,
+            "Content-Type: application/zip",
+            "x-site-public: true",
+            "x-site-cache-control: no-store",
+        ],
+        &v2,
+    )?;
+    if republished.status != 200 && republished.status != 201 {
+        bail!("console-site republish failed: {}", republished.raw);
+    }
+    let rollback = http_request_addr(
+        gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/channels/serving?version=1.0.0"),
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    if rollback.status != 200 {
+        bail!("serving-channel rollback failed: {}", rollback.raw);
+    }
+
+    let served_after = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/sites/{TENANT}/{SITE}/"),
+        &[],
+        "",
+    )?;
+    if served_after.body != "<h1>V1</h1>" {
+        bail!(
+            "a channel rollback must re-point what /sites serves: {}",
+            served_after.raw
+        );
+    }
+    let (rolled_version, rolled_manifest) = console_active_bundle(gateway_addr, SITE)?;
+    if rolled_version.as_deref() != Some("1.0.0") {
+        bail!("post-rollback serving channel should be 1.0.0, got {rolled_version:?}");
+    }
+    assert_console_matches_serve(gateway_addr, SITE, &rolled_manifest, &served_after, "1.0.0")?;
+
+    // …and pin WHY that resolution is load-bearing: the mutable marker (what the
+    // console read before 114d925) still describes the last-PUBLISHED bundle, so
+    // reading it would contradict the gateway on every policy field. If this
+    // ever stops diverging the regression guard above has gone vacuous.
+    let marker = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/v1/assets/static_site/{SITE}/__site_manifest__"),
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    let marker_json: Value = serde_json::from_str(&marker.body)
+        .with_context(|| format!("marker is not JSON: {}", marker.raw))?;
+    if marker_json["bundle_version"] != "2.0.0" || marker_json["cache_control"] != "no-store" {
+        bail!(
+            "expected the marker to still describe the last-published bundle (the \
+             pre-114d925 lie this guard exists to catch): {}",
+            marker.raw
+        );
+    }
+
+    // --- Box 3: a republish the gateway does NOT commit as a bundle. ---------
+    // The console's own `looksLikeZip` gate is name/MIME only, so a corrupt file
+    // named `site.zip` reaches the gateway; `assets.rs` only takes the bundle
+    // path for a real ZIP that screens clean, and otherwise stores an opaque
+    // blob. The previously committed site must keep serving.
+    let corrupt = crate::http::http_request_addr_bytes(
+        gateway_addr,
+        "PUT",
+        &format!("/v1/assets/static_site/{SITE}/3.0.0"),
+        &[
+            CLIENT_AUTH,
+            "Content-Type: application/zip",
+            "x-site-public: true",
+        ],
+        b"not a zip at all, just bytes that came from a truncated upload",
+    )?;
+    let corrupt_body: Value = serde_json::from_str(&corrupt.body)
+        .with_context(|| format!("corrupt-publish response is not JSON: {}", corrupt.raw))?;
+    // Pin the ACTUAL outcome: a 2xx carrying the OPAQUE-BLOB envelope. Nothing
+    // was published, so a console that reports this as a successful publish is
+    // claiming a deployment the gateway never made (#345 box 3).
+    if !(corrupt.status == 200 || corrupt.status == 201) || corrupt_body["object"] != "asset" {
+        bail!(
+            "expected a non-zip static_site push to fall through to the opaque blob \
+             store with a 2xx `asset` envelope: {}",
+            corrupt.raw
+        );
+    }
+    if corrupt_body["site"] != Value::Null || corrupt_body["file_count"] != Value::Null {
+        bail!(
+            "the fallthrough envelope must NOT carry publish fields: {}",
+            corrupt.raw
+        );
+    }
+    let after_failure = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/sites/{TENANT}/{SITE}/"),
+        &[],
+        "",
+    )?;
+    if after_failure.status != 200 || after_failure.body != "<h1>V1</h1>" {
+        bail!(
+            "an uncommitted republish must leave the previous bundle serving: {}",
+            after_failure.raw
+        );
+    }
+    let (after_version, _) = console_active_bundle(gateway_addr, SITE)?;
+    if after_version.as_deref() != Some("1.0.0") {
+        bail!("an uncommitted republish must not move the serving channel: {after_version:?}");
+    }
+
+    // --- Box 4: domain binding is refused SERVER-SIDE. ----------------------
+    // Cross-tenant: a tenant-scoped admin key aimed at another tenant's site.
+    let cross_tenant = http_request_addr(
+        gateway_addr,
+        "POST",
+        "/admin/v1/site-domains",
+        &[OTHER_TENANT_AUTH, JSON_CONTENT],
+        &format!(r#"{{"hostname":"stolen.example.com","tenant_id":"{TENANT}","site":"{SITE}"}}"#),
+    )?;
+    if cross_tenant.status != 403 || !cross_tenant.body.contains("tenant_scope_denied") {
+        bail!(
+            "a cross-tenant site-domain bind must be refused by the API, not just the \
+             picker: {}",
+            cross_tenant.raw
+        );
+    }
+    // Nonexistent site, caller's own tenant.
+    let ghost = http_request_addr(
+        gateway_addr,
+        "POST",
+        "/admin/v1/site-domains",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(r#"{{"hostname":"ghost.example.com","tenant_id":"{TENANT}","site":"no-such"}}"#),
+    )?;
+    if ghost.status != 404 || !ghost.body.contains("site_not_found") {
+        bail!(
+            "binding a nonexistent site must 404 site_not_found: {}",
+            ghost.raw
+        );
+    }
+
+    // --- Box 5: bound-domain liveness is the gateway's, not an optimistic
+    // label, and unbind is confirmed. ----------------------------------------
+    let bind = http_request_addr(
+        gateway_addr,
+        "POST",
+        "/admin/v1/site-domains",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(r#"{{"hostname":"live.example.com","tenant_id":"{TENANT}","site":"{SITE}"}}"#),
+    )?;
+    if bind.status != 202 {
+        bail!(
+            "a fresh bind should be accepted-but-pending (202): {}",
+            bind.raw
+        );
+    }
+    let detail = http_request_addr(
+        gateway_addr,
+        "GET",
+        "/admin/v1/site-domains/live.example.com",
+        &[ADMIN_AUTH],
+        "",
+    )?;
+    let detail_json: Value = serde_json::from_str(&detail.body)
+        .with_context(|| format!("site-domain detail is not JSON: {}", detail.raw))?;
+    let domain = &detail_json["site_domain"];
+    // The two fields 550cb27 wired into the console must both be present, and a
+    // freshly bound hostname must report itself NOT live (#488) -- the exact
+    // "server-reported unhealthy state shown as implicitly healthy" that commit
+    // set out to fix.
+    if domain["serving"] != Value::Bool(false) {
+        bail!(
+            "a freshly bound hostname must report serving=false, not an optimistic \
+             label: {}",
+            detail.raw
+        );
+    }
+    if domain["verification_state"] != "pending_verification" {
+        bail!(
+            "the detail read must carry the verification state the console renders: {}",
+            detail.raw
+        );
+    }
+    if !detail
+        .body
+        .contains("_ferrogate-challenge.live.example.com")
+    {
+        bail!(
+            "a pending binding must tell the operator which TXT record to publish: {}",
+            detail.raw
+        );
+    }
+    let unbind = http_request_addr(
+        gateway_addr,
+        "DELETE",
+        "/admin/v1/site-domains/live.example.com",
+        &[ADMIN_AUTH],
+        "",
+    )?;
+    if unbind.status != 200 || !unbind.body.contains("\"deleted\":true") {
+        bail!("unbind was not confirmed: {}", unbind.raw);
+    }
+    let gone = http_request_addr(
+        gateway_addr,
+        "GET",
+        "/admin/v1/site-domains/live.example.com",
+        &[ADMIN_AUTH],
+        "",
+    )?;
+    if gone.status != 404 {
+        bail!("an unbound hostname must stop resolving: {}", gone.raw);
+    }
+
+    println!("static-site console-agreement coverage passed");
+    Ok(())
+}
+
+/// Issues the two reads `static-sites.tsx`'s `fetchActiveSiteBundle` issues, in
+/// the same order and at the same URLs: the asset REGISTRY manifest, then the
+/// manifest row of whatever version the `serving` channel points at.
+fn console_active_bundle(gateway_addr: &str, site: &str) -> Result<(Option<String>, Value)> {
+    let registry = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/v1/assets/static_site/{site}/manifest"),
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    if registry.status != 200 {
+        bail!("console registry read failed: {}", registry.raw);
+    }
+    let registry_json: Value = serde_json::from_str(&registry.body)
+        .with_context(|| format!("registry manifest is not JSON: {}", registry.raw))?;
+    let serving_version = registry_json["channels"]
+        .as_array()
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel["channel"] == "serving")
+        })
+        .and_then(|channel| channel["version"].as_str())
+        .map(str::to_string);
+    let reference = serving_version
+        .clone()
+        .unwrap_or_else(|| "__site_manifest__".to_string());
+    let manifest = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/v1/assets/static_site/{site}/{reference}"),
+        &[CLIENT_AUTH],
+        "",
+    )?;
+    if manifest.status != 200 {
+        bail!(
+            "console bundle-manifest read at the serving version failed -- the read the \
+             whole page is built on: {}",
+            manifest.raw
+        );
+    }
+    let manifest_json: Value = serde_json::from_str(&manifest.body)
+        .with_context(|| format!("bundle manifest is not JSON: {}", manifest.raw))?;
+    Ok((serving_version, manifest_json))
+}
+
+/// Compares each field the console DISPLAYS against what the serve path returned
+/// for the same site: the em-dash between "renders a value" and "renders the
+/// truth" is the whole point of #345 box 2.
+fn assert_console_matches_serve(
+    gateway_addr: &str,
+    site: &str,
+    manifest: &Value,
+    serve: &HttpResponse,
+    expected_version: &str,
+) -> Result<()> {
+    if manifest["bundle_version"] != expected_version {
+        bail!(
+            "displayed version {} != served bundle {expected_version}",
+            manifest["bundle_version"]
+        );
+    }
+    // Cache policy: the displayed string must be the header the site actually
+    // answers with.
+    let displayed_cache = manifest["cache_control"]
+        .as_str()
+        .context("manifest carries no cache_control to display")?;
+    let served_cache = serve
+        .raw
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("cache-control")
+                .then(|| value.trim().to_string())
+        })
+        .context("serve response carried no Cache-Control header")?;
+    if displayed_cache != served_cache {
+        bail!("displayed cache policy {displayed_cache:?} != served {served_cache:?}");
+    }
+    // Public: the displayed flag must match anonymous servability, which the
+    // `serve` response (issued with NO credentials) already proves.
+    if manifest["public"] != Value::Bool(true) || serve.status != 200 {
+        bail!(
+            "displayed public flag {} disagrees with anonymous serve status {}",
+            manifest["public"],
+            serve.status
+        );
+    }
+    // Files/bytes/hashes: each displayed entry must be the object the gateway
+    // serves, byte for byte.
+    let files = manifest["files"]
+        .as_array()
+        .context("manifest carries no file list to display")?;
+    let mut total = 0u64;
+    for file in files {
+        let path = file["path"].as_str().context("file entry without a path")?;
+        let size = file["size_bytes"]
+            .as_u64()
+            .context("file entry without a size")?;
+        total += size;
+        let fetched = http_request_addr(
+            gateway_addr,
+            "GET",
+            &format!("/sites/{TENANT}/{site}/{path}"),
+            &[],
+            "",
+        )?;
+        if fetched.status != 200 {
+            bail!("displayed file {path} does not serve: {}", fetched.raw);
+        }
+        if fetched.body.len() as u64 != size {
+            bail!(
+                "displayed size {size} for {path} != {} bytes actually served",
+                fetched.body.len()
+            );
+        }
+        // The manifest hash the drawer prints must be the served object's ETag.
+        let hash = file["content_hash"].as_str().unwrap_or_default();
+        if !fetched.raw.contains(hash) {
+            bail!(
+                "displayed hash {hash} for {path} is not the ETag the gateway serves: {}",
+                fetched.raw
+            );
+        }
+    }
+    if total == 0 {
+        bail!("displayed byte total must be non-zero for a published bundle");
+    }
+    // SPA fallback: the displayed flag must match what an unmatched deep path
+    // actually does.
+    let spa = manifest["spa_fallback"] == Value::Bool(true);
+    let deep = http_request_addr(
+        gateway_addr,
+        "GET",
+        &format!("/sites/{TENANT}/{site}/client/route/does-not-exist"),
+        &[],
+        "",
+    )?;
+    let fell_back = deep.status == 200 && deep.body.contains("<h1>");
+    if spa != fell_back {
+        bail!(
+            "displayed spa_fallback={spa} but an unmatched path returned {} ({})",
+            deep.status,
+            deep.body
+        );
+    }
+    // Publish timestamp: must be present and sane, not a render-time clock.
+    let created = manifest["created_at_unix"].as_i64().unwrap_or_default();
+    if created <= 0 {
+        bail!("displayed publish timestamp is absent or zero: {manifest}");
+    }
     Ok(())
 }
 
@@ -319,6 +769,12 @@ api_keys:
     scopes: ["assets.read", "assets.write"]
     organization_id: "org_site_e2e"
     project_id: "project_site_e2e"
+  - id: "site-e2e-other-tenant"
+    name: "Static site E2E foreign tenant admin"
+    key: "site-e2e-other-secret"
+    scopes: ["admin.read", "admin.write", "assets.read", "assets.write"]
+    organization_id: "org_site_e2e_other"
+    project_id: "project_site_e2e_other"
 "#
     )
 }
