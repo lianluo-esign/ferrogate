@@ -375,4 +375,49 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
       ),
     );
   });
+
+  // #340 acceptance box 5, for the NEW organization_id -> tenant-accounts
+  // picker specifically. Added by the test gate: the box-5 case above covers
+  // only the models and projects pickers, so deleting
+  // `disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE` from the tenant reference
+  // in api-keys.ts left the whole suite green.
+  it("native api-key tenant picker lists a suspended tenant but keeps it unselectable", async () => {
+    const user = userEvent.setup();
+    installCatalogHandlers();
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            { ...tenants[0], status: "active" },
+            { id: "tenant-suspended", name: "Dormant Co", slug: "dormant", status: "suspended" },
+          ],
+          total: 2,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+    );
+
+    const onSubmit = renderForm(apiKeysConfig.fields, {
+      ...defaultFieldValues(apiKeysConfig.fields),
+      name: "native-key",
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    // Listed (inspectable) …
+    const suspended = await screen.findByRole("option", { name: /Dormant Co/ });
+    // … but marked and not newly selectable.
+    expect(suspended).toBeDisabled();
+    await user.click(suspended);
+    await user.click(screen.getByRole("option", { name: /Acme/ }));
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ organization_id: "tenant-1" }),
+      ),
+    );
+  });
 });
