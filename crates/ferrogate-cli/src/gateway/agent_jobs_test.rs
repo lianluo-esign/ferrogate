@@ -614,6 +614,73 @@ fn a_worker_cannot_report_state_onto_another_tenants_run() {
     assert!(state.agent_run_record("job-unknown").is_none());
 }
 
+/// Gate (#474): the run-row-must-exist guard, isolated from the guards that
+/// were masking it. The existing unknown-run assertion in
+/// `a_worker_cannot_report_state_onto_another_tenants_run` names a run with NO
+/// dispatch, so the #503 lease guard rejects it before the existence check is
+/// ever reached -- deleting `let run = self.agent_run_record(run_id)?;` and
+/// fabricating a run row from the report leaves that assertion green.
+///
+/// Here the reporting worker genuinely holds the run's `StartRun` lease and
+/// reports its own tenant, so the lease and tenant guards both PASS; the only
+/// thing standing between the report and a fabricated `agent_runs` row is the
+/// existence check. This is reachable in production whenever a dispatch row
+/// outlives (or precedes) its `agent_runs` row -- a run enqueued through a
+/// non-agent-job path, or a run row pruned while its dispatch is still leased.
+#[test]
+fn a_worker_report_for_a_leased_dispatch_with_no_run_row_fabricates_nothing() {
+    let state = AppState::new(Config::default());
+    let run_id = agent_job_run_id("tenant-a", "no-run-row-474");
+    // Deliberately: NO `record_agent_run` -- the dispatch exists and is leased
+    // to this very worker, but the canonical run row does not exist.
+    lease_start_dispatch_to_worker(&state, &run_id, "tenant-a", "worker-1");
+    assert!(
+        state.agent_run_record(&run_id).is_none(),
+        "precondition: the run row genuinely does not exist"
+    );
+    assert_eq!(
+        crate::gateway::block_on_sync_bridge(state.repositories_arc().self_hosted_run_dispatches())
+            .into_iter()
+            .find(|record| record.run_id == run_id && record.action == "start_run")
+            .and_then(|record| record.assigned_worker_id),
+        Some("worker-1".to_string()),
+        "precondition: the reporting worker holds the lease, so the #503 lease \
+         guard PASSES and cannot mask what this test is proving"
+    );
+
+    let result = state.apply_worker_reported_run_state(&worker_report(
+        &run_id,
+        "tenant-a",
+        "worker-1",
+        "evt-no-run-row",
+        "run.completed",
+        r#"{"state":"completed","turns_executed":3,"output":"fabricated"}"#,
+        200,
+    ));
+    assert_eq!(
+        result, None,
+        "a report naming a run the control plane has no row for must be refused"
+    );
+    assert!(
+        state.agent_run_record(&run_id).is_none(),
+        "the bridge must never fabricate an agent_runs row out of worker telemetry"
+    );
+    // ...and it must not fabricate a timeline for the phantom run either, or
+    // `/events` and `/result` would answer for a job that was never submitted.
+    assert!(
+        state
+            .agent_run_timeline(
+                &run_id,
+                AgentRunFilter {
+                    organization_id: Some("tenant-a".to_string()),
+                    ..AgentRunFilter::default()
+                },
+            )
+            .is_none(),
+        "no run row means no addressable job timeline"
+    );
+}
+
 /// #503: the core regression for the run-state bridge's lease-scope fix.
 /// `worker-1` and `worker-2` both belong to `tenant-a` (a real cross-tenant
 /// report is already covered by `a_worker_cannot_report_state_onto_another_tenants_run`);
