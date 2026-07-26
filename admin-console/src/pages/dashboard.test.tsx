@@ -358,6 +358,81 @@ describe("DashboardPage cockpit", () => {
     ).toBeGreaterThan(0);
   });
 
+  // GATE (#343 box 4/5): the usage section is the ONE section whose failure was
+  // untested. Mutating the token tile to `format.tokens(tokens?.total_tokens ?? 0)`
+  // left the whole 546-test suite green while the headline global total silently
+  // read "0" for an unreachable usage aggregate — the exact fabrication #343
+  // exists to forbid. This case fails on that mutation.
+  it("renders an unavailable usage section as Unavailable, never as zero totals", async () => {
+    mockOverview(
+      adminOverview({
+        usage: overviewSectionUnavailable("usage aggregate unreachable", "control_plane_store"),
+      }),
+    );
+    renderWithProviders(<DashboardPage />);
+
+    const traffic = await screen.findByRole("region", { name: "Traffic and cost" });
+
+    // Tokens, requests, and cost are all Unavailable — not 0 / 0 / $0.00.
+    const tokenTile = within(traffic).getByText("Total tokens").closest("div");
+    expect(tokenTile).not.toBeNull();
+    expect(within(tokenTile as HTMLElement).getByText("Unavailable")).toBeInTheDocument();
+    expect(within(traffic).getAllByText("Unavailable").length).toBeGreaterThanOrEqual(3);
+    expect(within(traffic).queryByText("0")).not.toBeInTheDocument();
+    expect(within(traffic).queryByText("$0.00")).not.toBeInTheDocument();
+    expect(within(traffic).queryByText("12,000,000")).not.toBeInTheDocument();
+
+    // Healthy sections keep their real values (box 5).
+    expect(within(traffic).getByText("3 / 4")).toBeInTheDocument(); // runtime ok
+    expect(within(traffic).getByText("9 / 12")).toBeInTheDocument(); // control-plane ok
+
+    // The failure is surfaced, not swallowed.
+    expect(screen.getByText("Overview section unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText(/usage aggregate unreachable/).length).toBeGreaterThan(0);
+  });
+
+  // GATE (#343 box 2): provenance. The global token total must come from the
+  // overview's durable lifetime aggregate, NOT from the latest usage report.
+  // This asserts both halves: the console never fetches the usage-report list,
+  // and the number on screen is the aggregate even when a latest report with a
+  // different total is available from the gateway.
+  it("takes the global token total from the overview aggregate, not the latest usage report", async () => {
+    const usageReportRequests: string[] = [];
+    mockOverview(adminOverview());
+    // A latest usage report whose token total is deliberately different. If the
+    // cockpit ever regressed to a period-report value it would show 987,654.
+    server.use(
+      http.get(gatewayUrl("/admin/v1/usage-reports"), ({ request }) => {
+        usageReportRequests.push(request.url);
+        return HttpResponse.json({
+          object: "list",
+          data: [
+            {
+              id: "usage-report-latest",
+              period_month: "2026-07",
+              total_tokens: 987_654,
+              cost_usd: 12.34,
+            },
+          ],
+        });
+      }),
+    );
+
+    renderWithProviders(<DashboardPage />);
+    const traffic = await screen.findByRole("region", { name: "Traffic and cost" });
+
+    // The lifetime aggregate, explicitly scoped — never the report's total.
+    expect(within(traffic).getByText("12,000,000")).toBeInTheDocument();
+    expect(within(traffic).getAllByText("All-time totals across the scope").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryByText("987,654")).not.toBeInTheDocument();
+    expect(screen.queryByText("$12.34")).not.toBeInTheDocument();
+
+    // Provenance, not just labelling: the report endpoint is never consulted.
+    expect(usageReportRequests).toEqual([]);
+  });
+
   it("renders a brand-new install as real zeros, distinct from unavailable", async () => {
     mockOverview(emptyOverview());
     renderWithProviders(<DashboardPage />);

@@ -2164,6 +2164,255 @@ fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
             Ok(())
         },
     )?;
+
+    // --- GET /admin/v1/overview (#339 contract, #343 cockpit) ---------------
+    //
+    // The admin console's cockpit renders THIS payload. Its whole honesty rule
+    // ("never render a value it cannot know") is only as good as the wire shape
+    // it parses, and the shape had already drifted once undetected: the console
+    // read a `self_hosted_workers.by_status.active` bucket no gateway code path
+    // writes, and typed `virtual_keys` as a number after #458 made it an object
+    // (rendering "NaN"). Both defects were invisible to every unit test on both
+    // sides, because both sides only ever saw their own fixtures. This case is
+    // the end-to-end check: it asserts the shape against the LIVE gateway.
+    case.expect_json(
+        "GET",
+        "/admin/v1/overview",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "control_plane.overview");
+            assert!(
+                body["generated_at_unix"].as_u64().is_some_and(|at| at > 0),
+                "overview must carry a generated timestamp: {body}"
+            );
+            // A key with no organization sees the global scope.
+            assert_eq!(body["scope"]["kind"], "global");
+
+            // All four sections are present and each declares a status + source, so
+            // the console can distinguish `ok` from `unavailable` per section.
+            for section in ["runtime", "control_plane", "usage", "alerts"] {
+                let status = body[section]["status"].as_str().unwrap_or_default();
+                assert!(
+                    status == "ok" || status == "unavailable",
+                    "overview section {section} must declare ok|unavailable, got {status}: {body}"
+                );
+                assert!(
+                    body[section]["source"].is_string(),
+                    "overview section {section} must name its source: {body}"
+                );
+                if status == "unavailable" {
+                    assert!(
+                        body[section]["data"].is_null(),
+                        "an unavailable section must carry no payload (never a zeroed one): {body}"
+                    );
+                }
+            }
+
+            // Runtime is config-derived and must always be available.
+            assert_eq!(body["runtime"]["status"], "ok");
+            let runtime = &body["runtime"]["data"];
+            assert!(runtime["providers"]["total"].as_u64().is_some());
+            assert!(runtime["providers"]["enabled"].as_u64().is_some());
+            assert!(runtime["mcp_servers"]["connected"].as_u64().is_some());
+            assert!(runtime["mcp_servers"]["disconnected"].as_u64().is_some());
+
+            // Usage carries BOTH a lifetime and a current-month rollup, keyed by an
+            // explicit `YYYY-MM`. This is the #343 box-2 provenance guarantee: the
+            // console's global token total comes from a durable aggregate that also
+            // reports its own period, not from whichever usage report happened to
+            // be latest. A single unlabelled total could not satisfy it.
+            assert_eq!(body["usage"]["status"], "ok");
+            let usage = &body["usage"]["data"];
+            let period = usage["current_period_month"].as_str().unwrap_or_default();
+            assert!(
+                period.len() == 7 && period.as_bytes()[4] == b'-',
+                "usage must state its current period as YYYY-MM, got {period:?}: {body}"
+            );
+            let lifetime = usage["lifetime"]["total_tokens"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("usage.lifetime.total_tokens must be a number: {body}"));
+            let month = usage["current_month"]["total_tokens"]
+                .as_u64()
+                .unwrap_or_else(|| {
+                    panic!("usage.current_month.total_tokens must be a number: {body}")
+                });
+            assert!(
+                month <= lifetime,
+                "the current month must be a subset of lifetime ({month} > {lifetime}): {body}"
+            );
+            for field in [
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "request_count",
+                "error_count",
+            ] {
+                assert!(
+                    usage["lifetime"][field].as_u64().is_some(),
+                    "usage.lifetime.{field} must be a number: {body}"
+                );
+            }
+            assert!(usage["lifetime"]["cost_usd"].as_f64().is_some());
+
+            assert_eq!(body["control_plane"]["status"], "ok");
+            let control_plane = &body["control_plane"]["data"];
+
+            // #343 box 4, the exact defect d68fe9b fixed: the console derives
+            // "healthy workers" from the status labels the gateway REALLY writes
+            // (`registered` on registration, the worker-reported `online` on
+            // heartbeat). It deliberately does not recognize `active`. If the
+            // gateway ever emitted `active`, the console would render N/A for a
+            // healthy fleet — so pin the live label set here rather than in a
+            // fixture that can be edited to agree with the bug.
+            let by_status = control_plane["self_hosted_workers"]["by_status"]
+                .as_object()
+                .unwrap_or_else(|| {
+                    panic!("self_hosted_workers.by_status must be an object: {body}")
+                });
+            assert!(
+                !by_status.contains_key("active"),
+                "the gateway must not emit an `active` worker status (the console cannot \
+             classify it and renders N/A): {body}"
+            );
+            assert!(
+                by_status
+                    .keys()
+                    .any(|status| status == "registered" || status == "online"),
+                "this harness registered self-hosted workers, so the histogram must carry a \
+             `registered`/`online` bucket the console can classify as healthy: {body}"
+            );
+            for (status, count) in by_status {
+                assert!(
+                    count.as_u64().is_some(),
+                    "worker status bucket {status} must be a number: {body}"
+                );
+            }
+            assert!(control_plane["self_hosted_workers"]["total"]
+                .as_u64()
+                .is_some());
+
+            // #458 shapes the console parses. `virtual_keys` is an OBJECT: the day
+            // it was a bare number the cockpit printed "NaN" on screen.
+            assert!(
+                control_plane["virtual_keys"].is_object(),
+                "virtual_keys must be a {{total,enabled}} object, not a bare number: {body}"
+            );
+            assert!(control_plane["virtual_keys"]["total"].as_u64().is_some());
+            assert!(control_plane["virtual_keys"]["enabled"].as_u64().is_some());
+            for field in ["count", "storage_bytes", "referenced", "unreferenced"] {
+                assert!(
+                    control_plane["assets"][field].as_u64().is_some(),
+                    "assets.{field} must be a number: {body}"
+                );
+            }
+            // Not-applicable is NULL, never a fabricated zero: there is no single
+            // per-scope asset-storage quota for the global view.
+            assert!(
+                control_plane["assets"]["storage_quota_bytes"].is_null(),
+                "the global scope has no applicable asset-storage quota; it must be \
+             null, never 0: {body}"
+            );
+            assert!(control_plane["pending_tool_approvals"].as_u64().is_some());
+            assert!(control_plane["quota_pressure"].is_array());
+            // Policy governance is global-only; it is populated here and `null` for
+            // a tenant-scoped caller (distinct from zero).
+            for field in [
+                "guardrail_policy_revisions",
+                "guardrail_policy_bindings",
+                "quota_policies",
+                "policy_rules",
+            ] {
+                assert!(
+                    control_plane["policy_governance"][field].as_u64().is_some(),
+                    "policy_governance.{field} must be a number at global scope: {body}"
+                );
+            }
+            assert!(control_plane["agent_runs"]["total"].as_u64().is_some());
+            assert!(control_plane["agent_runs"]["by_status"].is_object());
+
+            // The alert summary is bounded and every entry is triageable: the
+            // console maps `kind` to a title + pivot link, and an entry it cannot
+            // read is counted as an unreadable alert rather than dropped.
+            assert_eq!(body["alerts"]["status"], "ok");
+            let alerts = &body["alerts"]["data"];
+            assert!(alerts["total"].as_u64().is_some());
+            assert!(alerts["truncated"].is_boolean());
+            assert!(alerts["unavailable_sources"].is_array());
+            let entries = alerts["entries"]
+                .as_array()
+                .unwrap_or_else(|| panic!("alerts.entries must be an array: {body}"));
+            for entry in entries {
+                assert!(
+                    entry["kind"].is_string() && entry["severity"].is_string(),
+                    "every alert must carry a kind + severity the console can title: {body}"
+                );
+                assert!(entry["summary"].is_string());
+                assert!(entry["evidence"].is_array());
+                assert!(entry["evidence_truncated"].is_boolean());
+            }
+            Ok(())
+        },
+    )?;
+
+    // The overview reads the whole control plane, so it is gated on
+    // `admin.read`: an unauthenticated caller and a key without the scope are
+    // both refused rather than served a zeroed payload.
+    case.expect_json("GET", "/admin/v1/overview", &[], "", 401, |body| {
+        assert!(body["error"]["code"].is_string());
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/overview",
+        &[OBSERVER_AUTH],
+        "",
+        403,
+        |body| {
+            assert!(body["error"]["code"].is_string());
+            Ok(())
+        },
+    )?;
+
+    // A TENANT-SCOPED reader (the `client` key holds `admin.read` and declares
+    // `organization_id = org_demo`) gets the same contract narrowed to its own
+    // tenant — and this is where #343's "not-applicable is distinct from zero"
+    // rule is proven against the live gateway rather than a fixture. Guardrail
+    // revisions, quota policies, and policy rules are not per-tenant
+    // attributable, so the gateway sends `policy_governance: null`; the console
+    // renders that whole group as N/A. Were it ever serialized as a zeroed
+    // object, the cockpit would confidently report "0 policy rules" to a tenant
+    // whose platform has many — the precise fabrication the issue forbids.
+    case.expect_json(
+        "GET",
+        "/admin/v1/overview",
+        &[CLIENT_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["scope"]["kind"], "tenant");
+            assert_eq!(body["scope"]["tenant_id"], "org_demo");
+            assert!(
+                body["control_plane"]["data"]["policy_governance"].is_null(),
+                "policy governance is not attributable per tenant; it must be null, \
+             never a zeroed object: {body}"
+            );
+            assert!(
+                body["control_plane"]["data"]["assets"]["storage_quota_bytes"].is_null(),
+                "a tenant without an explicit asset-storage quota override has no \
+             applicable quota; it must be null, never 0: {body}"
+            );
+            // The rest of the contract is unchanged in shape, so the same console
+            // parser handles both scopes.
+            assert!(body["control_plane"]["data"]["virtual_keys"].is_object());
+            assert!(body["usage"]["data"]["current_month"]["total_tokens"]
+                .as_u64()
+                .is_some());
+            Ok(())
+        },
+    )?;
+
     Ok(())
 }
 
