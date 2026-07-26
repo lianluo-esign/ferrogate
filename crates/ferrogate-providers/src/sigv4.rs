@@ -1020,6 +1020,46 @@ mod tests {
         );
     }
 
+    /// The size binding, isolated so it is NOT provable by the checksum.
+    ///
+    /// `bound_presign_rejects_a_different_declared_size` pads the payload, so
+    /// its rejection also follows from the payload hash changing: that test
+    /// stays green with `content-length` removed from the signed set, and
+    /// therefore pins nothing about the size binding (the vacuity shape of
+    /// #461/6bf367c). Here the bytes, the `x-amz-content-sha256` header and the
+    /// received payload are all EXACTLY what was signed -- only the declared
+    /// `content-length` differs, which is the case that matters for the quota
+    /// invariant this issue exists to protect (an S3-compatible verifier that
+    /// trusts the declared length rather than re-hashing). If `content-length`
+    /// were not a signed header this request would verify.
+    #[test]
+    fn bound_presign_rejects_a_lying_content_length_with_the_signed_bytes_and_checksum() {
+        let body = b"the exact approved staging payload";
+        let sha = hex_sha256(body);
+        let request = bound_test_request();
+        let bound = presign_query_bound(
+            &request,
+            &bound_test_credentials(),
+            &PresignBoundPayload {
+                content_length: body.len() as u64,
+                content_sha256_hex: &sha,
+            },
+        );
+
+        let inflated = (body.len() as u64 * 1024).to_string();
+        assert_bucket_rejects(
+            &bound.query,
+            &[
+                ("host", request.host),
+                ("content-length", inflated.as_str()),
+                ("x-amz-content-sha256", sha.as_str()),
+            ],
+            body,
+            "a declared content-length other than the signed one must not verify, even when the \
+             checksum header and the received bytes are exactly what was signed",
+        );
+    }
+
     #[test]
     fn bound_presign_rejects_different_bytes_with_an_honest_checksum() {
         // Same size, different content, checksum header updated to match
