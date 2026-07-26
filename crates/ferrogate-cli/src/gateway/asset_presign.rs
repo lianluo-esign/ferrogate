@@ -31,11 +31,17 @@
 // objects within what S3-compatible services accept in one request).
 //
 // #368 orphan/abort: an intent that is never uploaded can be released
-// explicitly through `POST /v1/assets/presign/abort/...`, which deletes
-// the staging object immediately instead of waiting for the
+// explicitly through `POST /v1/assets/presign/abort/...`, which *attempts*
+// to delete the staging object immediately instead of waiting for the
 // asset-lifecycle GC (`state_asset_lifecycle.rs`, audit action
 // `asset.gc.delete`), which remains the backstop for clients that simply
-// vanish.
+// vanish -- and for aborts whose own delete failed. That attempt can fail
+// (bucket 5xx/403), so its three real outcomes are reported as they
+// happened: `not_staged`, `removed`, `removal_failed`. A failed reclamation
+// is never rendered as a successful one; it is audited as
+// `aborted_reclaim_failed` and counted in
+// `ferrogate_asset_presign_abort_reclaim_failed_total`, mirroring
+// `asset_lifecycle_failed_total` on the GC path.
 //
 // #368 rejection evidence, stated precisely because the boundary matters:
 // the gateway never sees the direct PUT, so it cannot observe a bucket
@@ -156,17 +162,58 @@ impl AbortReason {
     }
 }
 
+/// #368: what this abort actually did to the staging object. Three real
+/// outcomes, kept apart because collapsing them is how a swallowed delete
+/// error becomes a confident lie: the client is told the bytes were reclaimed
+/// while they sit in the bucket consuming the tenant's quota until the
+/// lifecycle sweep. `head_object` says whether bytes were there;
+/// `delete_object` says whether they are gone. Only the second answers the
+/// question the response field asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagingReclamation {
+    /// No object existed under the staging key; there was nothing to reclaim.
+    NotStaged,
+    /// A staging object existed and the bucket confirmed its deletion.
+    Removed,
+    /// A staging object existed and the delete failed. The bytes are still
+    /// there; the lifecycle GC is now the only thing that will reclaim them.
+    RemovalFailed,
+}
+
+impl StagingReclamation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStaged => "not_staged",
+            Self::Removed => "removed",
+            Self::RemovalFailed => "removal_failed",
+        }
+    }
+
+    /// The `staging_object_removed` boolean, which must answer "are the bytes
+    /// gone?" -- not "were there bytes?".
+    fn removed(self) -> bool {
+        matches!(self, Self::Removed)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct PresignAbortResponse {
     object: &'static str,
     upload_id: String,
-    /// True when a staging object existed and was deleted by this abort --
-    /// the bytes were reclaimed now rather than by the lifecycle GC.
+    /// True ONLY when a staging object existed and the bucket confirmed its
+    /// deletion. A delete the bucket refused reports `false` here with
+    /// `staging_reclamation: "removal_failed"` -- the bytes are still
+    /// occupying quota and the client is told so.
     staging_object_removed: bool,
+    /// The tri-state `staging_object_removed` cannot express: nothing was
+    /// staged, the staged bytes were reclaimed, or the reclamation failed and
+    /// the object survives until the lifecycle GC.
+    staging_reclamation: &'static str,
     /// The outcome actually recorded in the audit trail and metrics. This is
     /// NOT an echo of the requested `reason`: a `bucket_rejected` claim that
     /// the gateway contradicts (bytes *are* staged) is downgraded to
-    /// `aborted`, and the response says so.
+    /// `aborted`, and the response says so. A failed reclamation is reported
+    /// as `aborted_reclaim_failed`.
     outcome: &'static str,
 }
 
@@ -625,7 +672,7 @@ impl FerroGateway {
                 }
                 if !existing_asset_uses_upload(&existing, &id, &commit.upload_id) {
                     if let Some(bucket) = state.asset_bucket_client() {
-                        best_effort_delete(&bucket, &staging_key).await;
+                        let _ = best_effort_delete(&bucket, &staging_key).await;
                     }
                 }
                 return write_asset_version_immutable(session, ctx, asset_type, name, version)
@@ -708,7 +755,7 @@ impl FerroGateway {
                         .await;
                     }
                     Ok(CommitWinner::Conflict) => {
-                        best_effort_delete(&bucket, &staging_key).await;
+                        let _ = best_effort_delete(&bucket, &staging_key).await;
                         return write_asset_version_immutable(
                             session, ctx, asset_type, name, version,
                         )
@@ -842,7 +889,7 @@ impl FerroGateway {
         {
             Ok(screening) => screening,
             Err(rejection) => {
-                best_effort_delete(&bucket, &staging_key).await;
+                let _ = best_effort_delete(&bucket, &staging_key).await;
                 state.record_asset_presign_outcome(
                     crate::state::AssetPresignOutcome::CommitRejected,
                 );
@@ -970,7 +1017,7 @@ impl FerroGateway {
                         commit.upload_id
                     ),
                 ));
-                best_effort_delete(&bucket, &final_key).await;
+                let _ = best_effort_delete(&bucket, &final_key).await;
                 self.reject_staging_object(
                     session,
                     ctx,
@@ -1001,7 +1048,7 @@ impl FerroGateway {
                         screening.manifest_json(),
                     ),
                 ));
-                best_effort_delete(&bucket, &staging_key).await;
+                let _ = best_effort_delete(&bucket, &staging_key).await;
                 let body = AssetMutationResponse {
                     object: "asset",
                     asset: asset_summary(&asset),
@@ -1012,8 +1059,8 @@ impl FerroGateway {
                 let winner = match state.get_asset(&id).await {
                     Ok(Some(winner)) => winner,
                     Ok(None) => {
-                        best_effort_delete(&bucket, &final_key).await;
-                        best_effort_delete(&bucket, &staging_key).await;
+                        let _ = best_effort_delete(&bucket, &final_key).await;
+                        let _ = best_effort_delete(&bucket, &staging_key).await;
                         return write_json_error(
                             session,
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -1027,7 +1074,7 @@ impl FerroGateway {
                         // The staging object can never be a durable asset
                         // reference. Preserve the final candidate because an
                         // unreadable winner could theoretically reference it.
-                        best_effort_delete(&bucket, &staging_key).await;
+                        let _ = best_effort_delete(&bucket, &staging_key).await;
                         tracing::warn!(
                             request_id = %ctx.request_id,
                             asset_id = %id,
@@ -1046,9 +1093,9 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                best_effort_delete(&bucket, &staging_key).await;
+                let _ = best_effort_delete(&bucket, &staging_key).await;
                 if winner.storage_uri.as_deref() != Some(final_key.as_str()) {
-                    best_effort_delete(&bucket, &final_key).await;
+                    let _ = best_effort_delete(&bucket, &final_key).await;
                 }
                 if existing_asset_matches_commit(
                     &winner,
@@ -1106,7 +1153,7 @@ impl FerroGateway {
                         // Every error before the commit fence is a definitive
                         // non-publication. Remove only the private final copy;
                         // staging remains available for the same-upload retry.
-                        best_effort_delete(&bucket, &final_key).await;
+                        let _ = best_effort_delete(&bucket, &final_key).await;
                         tracing::warn!(
                             request_id = %ctx.request_id,
                             asset_id = %id,
@@ -1135,21 +1182,33 @@ impl FerroGateway {
     /// Two jobs, deliberately in one endpoint because they share the same
     /// server-derived staging key:
     ///
-    /// 1. **Reclaim now.** If a staging object exists it is deleted here, so a
-    ///    client that knows it failed does not leave bytes occupying bucket
-    ///    capacity until the lifecycle GC's next sweep.
-    /// 2. **Make the bucket-rejection class real.** A client whose direct PUT
-    ///    was refused (the 403 the SigV4 size/checksum binding produces) can
-    ///    say so, and the gateway *corroborates* the claim against the staging
-    ///    key before recording it. A `bucket_rejected` report that the gateway
-    ///    contradicts -- bytes ARE staged, so the bucket accepted the PUT -- is
-    ///    recorded as a plain `aborted`, never as a bucket rejection.
+    /// 1. **Reclaim now.** If a staging object exists, deleting it is
+    ///    *attempted* here, so a client that knows it failed does not leave
+    ///    bytes occupying bucket capacity until the lifecycle GC's next sweep.
+    ///    The attempt can fail, and then it says so: `staging_object_removed`
+    ///    comes from the DELETE's own result, the response carries the
+    ///    tri-state `staging_reclamation`, and a refused delete is audited
+    ///    `aborted_reclaim_failed` with its own counter. Reporting the HEAD
+    ///    result instead would tell a tenant its quota was freed while the
+    ///    bytes sat in the bucket -- the exact class of dishonest output this
+    ///    endpoint exists to remove.
+    /// 2. **Give the bucket-rejection class a surface.** A client whose direct
+    ///    PUT was refused (the 403 the SigV4 size/checksum binding produces)
+    ///    can say so, and the gateway applies a negative consistency check
+    ///    against the staging key before recording it. A `bucket_rejected`
+    ///    report that the gateway contradicts -- bytes ARE staged, so the
+    ///    bucket accepted the PUT -- is recorded as an `aborted`, never as a
+    ///    bucket rejection.
     ///
-    /// The residual limit is stated rather than papered over: this is a
-    /// client-reported signal with a server-side consistency check, not an
-    /// independent observation. The gateway is not in the direct PUT's path, so
-    /// a client that is simply refused and walks away still contributes nothing
-    /// but a `staging_missing` at commit (or nothing at all).
+    /// The residual limit is stated rather than papered over: `rejected_bucket`
+    /// is **caller-asserted** with a server-side consistency check, not an
+    /// independent observation, and must not be read as a security signal on
+    /// its own. Absence under the staging key is the same ambiguity the commit
+    /// path refuses to call a bucket rejection (it audits `staging_missing`),
+    /// so any caller with `assets.write` can register an intent, upload
+    /// nothing, and abort with `bucket_rejected` to mint one. The gateway is
+    /// not in the direct PUT's path; a client that is simply refused and walks
+    /// away contributes at most a `staging_missing` at commit.
     async fn handle_asset_upload_abort(
         &self,
         session: &mut Session,
@@ -1247,41 +1306,60 @@ impl FerroGateway {
                 .await;
             }
         };
-        if staged {
-            best_effort_delete(&bucket, &staging_key).await;
-        }
-
-        let (outcome, metric) = classify_abort(reason, staged);
-        let detail = match (reason, staged) {
-            (AbortReason::BucketRejected, false) => format!(
-                "asset {id} upload {} was reported rejected by the bucket; corroborated -- no object exists under its staging key",
-                abort.upload_id
-            ),
-            (AbortReason::BucketRejected, true) => format!(
-                "asset {id} upload {} claimed a bucket rejection but its staging object existed; recorded as an abort and the object was reclaimed",
-                abort.upload_id
-            ),
-            (AbortReason::Abandoned, staged) => format!(
-                "asset {id} upload {} was abandoned by the client; staging object {}",
-                abort.upload_id,
-                if staged { "reclaimed" } else { "was absent" }
-            ),
+        // The reclamation is reported from the DELETE's own result, never from
+        // the HEAD that preceded it. `best_effort_delete` swallows bucket
+        // errors into a warn! so the abort still answers; what it must not do
+        // is let the response claim bytes were reclaimed when the bucket
+        // refused to remove them.
+        let reclamation = if staged {
+            if best_effort_delete(&bucket, &staging_key).await {
+                StagingReclamation::Removed
+            } else {
+                StagingReclamation::RemovalFailed
+            }
+        } else {
+            StagingReclamation::NotStaged
         };
-        state.record_asset_presign_outcome(metric);
+
+        let record = classify_abort(reason, reclamation);
+        let staging_state = match reclamation {
+            StagingReclamation::NotStaged => "no staging object existed",
+            StagingReclamation::Removed => "its staging object was reclaimed",
+            StagingReclamation::RemovalFailed => {
+                "its staging object could NOT be deleted and still occupies bucket capacity until the lifecycle GC collects it"
+            }
+        };
+        let claim = match (reason, reclamation) {
+            (AbortReason::BucketRejected, StagingReclamation::NotStaged) => {
+                "was reported rejected by the bucket; the report is consistent with the gateway finding nothing under its staging key"
+            }
+            (AbortReason::BucketRejected, _) => {
+                "claimed a bucket rejection but its staging object existed, so the claim is contradicted and recorded as an abort instead"
+            }
+            (AbortReason::Abandoned, _) => "was abandoned by the client",
+        };
+        let detail = format!(
+            "asset {id} upload {} {claim}; {staging_state}",
+            abort.upload_id
+        );
+        for metric in record.metrics {
+            state.record_asset_presign_outcome(*metric);
+        }
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
             &auth,
             "asset.presign_upload_abort",
             &id,
-            outcome,
+            record.outcome,
             detail,
         ));
 
         let body = PresignAbortResponse {
             object: "asset_upload_abort",
             upload_id: abort.upload_id,
-            staging_object_removed: staged,
-            outcome,
+            staging_object_removed: reclamation.removed(),
+            staging_reclamation: reclamation.as_str(),
+            outcome: record.outcome,
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
@@ -1583,7 +1661,18 @@ impl FerroGateway {
     }
 }
 
-/// #368: the audit outcome + metric class an abort is recorded under.
+/// #368: how one abort is recorded -- its audit/response outcome plus every
+/// metric class it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbortRecord {
+    outcome: &'static str,
+    /// More than one when the abort both released an intent and failed to
+    /// reclaim its bytes: the release is still an abort, and the failure is
+    /// separately alertable.
+    metrics: &'static [crate::state::AssetPresignOutcome],
+}
+
+/// #368: the audit outcome + metric classes an abort is recorded under.
 ///
 /// The whole decision is here, in one pure function, because it is the point
 /// where a client's *claim* becomes the gateway's *evidence*. The only way a
@@ -1591,16 +1680,29 @@ impl FerroGateway {
 /// agrees with it; a claim contradicted by a staged object is downgraded to a
 /// plain abort. There is deliberately no path that upgrades an unknown or
 /// absent reason into a bucket rejection.
-fn classify_abort(
-    reason: AbortReason,
-    staged: bool,
-) -> (&'static str, crate::state::AssetPresignOutcome) {
-    match (reason, staged) {
-        (AbortReason::BucketRejected, false) => (
-            "rejected_bucket",
-            crate::state::AssetPresignOutcome::BucketRejected,
-        ),
-        _ => ("aborted", crate::state::AssetPresignOutcome::Aborted),
+///
+/// A reclamation the bucket refused outranks the plain-abort label, because
+/// the operator-visible consequence (bytes still held) is the more important
+/// fact and must be filterable by audit `outcome`, not buried in prose. It can
+/// only ever coincide with a staged object, so it never suppresses a
+/// corroborated `rejected_bucket` -- that class requires the opposite.
+fn classify_abort(reason: AbortReason, reclamation: StagingReclamation) -> AbortRecord {
+    match (reason, reclamation) {
+        (AbortReason::BucketRejected, StagingReclamation::NotStaged) => AbortRecord {
+            outcome: "rejected_bucket",
+            metrics: &[crate::state::AssetPresignOutcome::BucketRejected],
+        },
+        (_, StagingReclamation::RemovalFailed) => AbortRecord {
+            outcome: "aborted_reclaim_failed",
+            metrics: &[
+                crate::state::AssetPresignOutcome::Aborted,
+                crate::state::AssetPresignOutcome::AbortReclaimFailed,
+            ],
+        },
+        _ => AbortRecord {
+            outcome: "aborted",
+            metrics: &[crate::state::AssetPresignOutcome::Aborted],
+        },
     }
 }
 
@@ -1744,7 +1846,7 @@ async fn verify_and_fetch_committed_object(
         return Ok(CommitVerification::NotUploaded);
     };
     if actual_size != expected_size || actual_size > max_object_bytes {
-        best_effort_delete(bucket, staging_key).await;
+        let _ = best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_size_mismatch",
             message: format!(
@@ -1759,7 +1861,7 @@ async fn verify_and_fetch_committed_object(
     };
     let actual_sha256 = sha256_hex(&content);
     if actual_sha256 != expected_sha256 || content.len() as u64 != expected_size {
-        best_effort_delete(bucket, staging_key).await;
+        let _ = best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_commit_hash_mismatch",
             message: "committed object sha256/size does not match the registered intent"
@@ -1769,7 +1871,7 @@ async fn verify_and_fetch_committed_object(
     if let Err(message) =
         super::asset_security::validate_asset_content(asset_type, content_type, &content)
     {
-        best_effort_delete(bucket, staging_key).await;
+        let _ = best_effort_delete(bucket, staging_key).await;
         return Ok(CommitVerification::Rejected(CommitRejection {
             code: "asset_rejected",
             message,
@@ -1782,13 +1884,26 @@ async fn verify_and_fetch_committed_object(
     })
 }
 
-async fn best_effort_delete(bucket: &dyn super::asset_bucket::AssetObjectStore, object_key: &str) {
-    if let Err(error) = bucket.delete_object(object_key).await {
-        tracing::warn!(
-            object_key = %object_key,
-            error = %error,
-            "failed to delete a presigned-upload object; it may be orphaned in the bucket"
-        );
+/// Deletes an object without failing the caller's request, returning whether
+/// the bucket actually accepted the delete. Callers that *report* the
+/// reclamation to a client or an operator (the #368 abort surface) MUST use
+/// the return value: a warn-logged failure rendered as a successful delete is
+/// how a tenant is told bytes were freed that are still consuming its quota.
+#[must_use]
+async fn best_effort_delete(
+    bucket: &dyn super::asset_bucket::AssetObjectStore,
+    object_key: &str,
+) -> bool {
+    match bucket.delete_object(object_key).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                object_key = %object_key,
+                error = %error,
+                "failed to delete a presigned-upload object; it may be orphaned in the bucket"
+            );
+            false
+        }
     }
 }
 

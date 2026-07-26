@@ -434,7 +434,7 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     push_help(
         &mut output,
         "ferrogate_asset_presign_rejected_total",
-        "Total presigned staging uploads rejected, by the stage that rejected them.",
+        "Total presigned staging uploads rejected, by the stage that rejected them; stage=bucket is caller-asserted at abort with a negative gateway check, not an independent observation.",
         "counter",
     );
     output.push_str(&format!(
@@ -462,12 +462,22 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     push_help(
         &mut output,
         "ferrogate_asset_presign_aborted_total",
-        "Total presigned upload intents explicitly aborted, reclaiming their staging object immediately.",
+        "Total presigned upload intents explicitly released through the abort surface (the release, not the reclamation).",
         "counter",
     );
     output.push_str(&format!(
         "ferrogate_asset_presign_aborted_total {}\n",
         snapshot.asset_presign_aborted_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_presign_abort_reclaim_failed_total",
+        "Total aborts that found staged bytes and failed to delete them, leaving them to the lifecycle GC.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_presign_abort_reclaim_failed_total {}\n",
+        snapshot.asset_presign_abort_reclaim_failed_total
     ));
 
     push_help(

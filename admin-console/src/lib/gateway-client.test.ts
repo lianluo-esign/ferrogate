@@ -1,10 +1,12 @@
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   adminDelete,
   adminGet,
   adminPost,
   adminPut,
+  PresignedUploadRejectedError,
+  putPresignedObject,
 } from "@/lib/gateway-client";
 import { ApiError } from "@/types/auth";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
@@ -131,5 +133,97 @@ describe("typed OpenAPI client (adminGet/adminPost/...)", () => {
     const error = await adminGet(API_KEY, "/admin/v1/plans").catch((e) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 429, code: "rate_limited", message: "slow down" });
+  });
+});
+
+/**
+ * #368: the direct-to-bucket PUT is authorized by a SigV4 signature that binds
+ * `content-length` and `x-amz-content-sha256` as SignedHeaders. Forwarding them
+ * is not cosmetic — omit or alter one and every real S3-compatible bucket
+ * answers 403.
+ *
+ * These drive `putPresignedObject` directly against a stubbed `fetch` instead
+ * of through the page, because the page-level assertion on this behavior lives
+ * inside a test that is red on the unrelated `object.stream` jsdom/msw issue
+ * (#510) and therefore never executes. Delete the `requiredHeaders` loop and
+ * these fail.
+ */
+describe("putPresignedObject (#368 bound direct upload)", () => {
+  const UPLOAD_URL = "https://bucket.example.test/staging/obj_1?X-Amz-Signature=abc";
+  const SIGNED_SHA = "a".repeat(64);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubFetch(response: Response): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async () => response);
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("forwards the signed payload hash verbatim and never sets content-length", async () => {
+    const fetchMock = stubFetch(new Response(null, { status: 200 }));
+    const body = new Blob(["0123456789"]);
+
+    await putPresignedObject(UPLOAD_URL, body, "application/gzip", {
+      "content-length": String(body.size),
+      "x-amz-content-sha256": SIGNED_SHA,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(UPLOAD_URL);
+    expect(init.method).toBe("PUT");
+    const headers = init.headers as Record<string, string>;
+    // The signed VALUE, not merely the header's presence: the signature binds
+    // the digest, so a constant or stale hash is a 403.
+    expect(headers["x-amz-content-sha256"]).toBe(SIGNED_SHA);
+    expect(headers["Content-Type"]).toBe("application/gzip");
+    // Fetch forbids a page setting content-length; the browser derives the
+    // signed value from the body instead.
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain(
+      "content-length",
+    );
+  });
+
+  it("refuses to PUT bytes whose length differs from the signed content-length", async () => {
+    const fetchMock = stubFetch(new Response(null, { status: 200 }));
+    const body = new Blob(["0123456789"]);
+
+    await expect(
+      putPresignedObject(UPLOAD_URL, body, "application/gzip", {
+        "content-length": String(body.size + 1),
+        "x-amz-content-sha256": SIGNED_SHA,
+      }),
+    ).rejects.toThrow(/signed for 11 bytes/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes a bucket refusal from a local one so abort cannot over-claim", async () => {
+    stubFetch(
+      new Response("<Error><Code>SignatureDoesNotMatch</Code></Error>", {
+        status: 403,
+        statusText: "Forbidden",
+      }),
+    );
+    const body = new Blob(["0123456789"]);
+
+    const rejected = await putPresignedObject(UPLOAD_URL, body, "application/gzip", {
+      "x-amz-content-sha256": SIGNED_SHA,
+    }).catch((error: unknown) => error);
+
+    // Only THIS error type justifies reporting `reason: "bucket_rejected"` to
+    // the abort endpoint — that class is caller-asserted, and the local
+    // length refusal above must never be able to mint one.
+    expect(rejected).toBeInstanceOf(PresignedUploadRejectedError);
+    expect(rejected).toMatchObject({ status: 403 });
+    expect((rejected as Error).message).toContain("SignatureDoesNotMatch");
+
+    const localRefusal = await putPresignedObject(UPLOAD_URL, body, "application/gzip", {
+      "content-length": String(body.size + 1),
+      "x-amz-content-sha256": SIGNED_SHA,
+    }).catch((error: unknown) => error);
+    expect(localRefusal).not.toBeInstanceOf(PresignedUploadRejectedError);
   });
 });

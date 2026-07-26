@@ -606,6 +606,80 @@ describe("AssetsPage presigned large-object upload", () => {
     expect(putCalls).toBe(0);
   });
 
+  it("aborts an intent it will not commit instead of leaking staging capacity", async () => {
+    // #368: the migration doc tells integrators to release an intent they will
+    // not commit; the first-party console has to follow the contract it
+    // publishes, or every failed upload holds bucket bytes until the lifecycle
+    // GC's next sweep. Driven through the length-mismatch failure because it
+    // reaches the error path without a direct PUT.
+    seedList();
+    let declaredSha256: string | null = null;
+    let intentSize: number | null = null;
+    let abortBody: AdminSchema<"AssetPresignAbortRequest"> | null = null;
+    server.use(
+      http.post(
+        gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            size_bytes: number;
+            sha256: string;
+          };
+          declaredSha256 = body.sha256;
+          intentSize = body.size_bytes;
+          return HttpResponse.json({
+            object: "asset_upload_intent",
+            key: "k",
+            upload_id: UPLOAD_ID,
+            upload_url: UPLOAD_URL,
+            method: "PUT",
+            expires_in_seconds: 900,
+            size_bytes: body.size_bytes,
+            sha256: body.sha256,
+            required_headers: {
+              "content-length": String(body.size_bytes + 1),
+              "x-amz-content-sha256": body.sha256,
+            },
+            max_object_bytes: 5 * 1024 * 1024 * 1024,
+            upload_protocol: "single_put",
+          });
+        },
+      ),
+      http.post(
+        gatewayUrl("/v1/assets/presign/abort/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          abortBody = (await request.json()) as AdminSchema<"AssetPresignAbortRequest">;
+          return HttpResponse.json({
+            object: "asset_upload_abort",
+            upload_id: UPLOAD_ID,
+            staging_object_removed: false,
+            staging_reclamation: "not_staged",
+            outcome: "aborted",
+          });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    await fillPresignDialog(user);
+
+    // The operator still reads the real failure verbatim; the abort is
+    // cleanup, not a verdict.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/signed for \d+ bytes/);
+
+    await waitFor(() => expect(abortBody).not.toBeNull());
+    // The staging key is server-derived from all three declarations, so an
+    // abort that names them wrongly would release nothing.
+    expect(abortBody!.upload_id).toBe(UPLOAD_ID);
+    expect(abortBody!.size_bytes).toBe(intentSize);
+    expect(abortBody!.sha256).toBe(declaredSha256);
+    // The PUT never left the browser, so claiming the bucket refused it would
+    // fabricate a "corroborated" bucket rejection in the gateway's audit trail
+    // and counter — a class any caller can otherwise mint at will.
+    expect(abortBody!.reason).toBe("abandoned");
+  });
+
   it("surfaces a gateway commit error verbatim in an alert", async () => {
     seedList();
     const verbatim =

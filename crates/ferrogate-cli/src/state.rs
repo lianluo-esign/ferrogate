@@ -3096,15 +3096,23 @@ struct GatewayMetricsAccumulator {
     asset_presign_staging_missing_total: u64,
     /// #368: staged objects the gateway refused at commit.
     asset_presign_commit_rejected_total: u64,
-    /// #368: intents explicitly aborted, reclaiming staging immediately.
+    /// #368: intents explicitly aborted through the abort surface.
     asset_presign_aborted_total: u64,
+    /// #368: aborts whose staging delete was refused by the bucket, so the
+    /// bytes were NOT reclaimed. The abort-path twin of
+    /// `asset_lifecycle_failed_total`.
+    asset_presign_abort_reclaim_failed_total: u64,
 }
 
-/// #368: the mutually exclusive outcomes of one presigned staging upload, the
-/// unit the `ferrogate_asset_presign_*` counters are keyed on. Each variant
-/// names *who observed it*, which is the whole point of the acceptance
-/// criterion: intent/commit/abort outcomes are gateway-observed, and the bucket
-/// rejection is client-reported plus gateway-corroborated.
+/// #368: the outcomes of one presigned staging upload, the unit the
+/// `ferrogate_asset_presign_*` counters are keyed on. Each variant names *who
+/// observed it*, which is the whole point of the acceptance criterion:
+/// intent/commit/abort outcomes are gateway-observed, and the bucket rejection
+/// is client-asserted plus a gateway consistency check.
+///
+/// All are mutually exclusive except `AbortReclaimFailed`, which is recorded
+/// *alongside* `Aborted` -- one abort both released the intent and failed to
+/// free its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetPresignOutcome {
     /// A bound presigned PUT URL was handed to the client.
@@ -3112,8 +3120,9 @@ pub(crate) enum AssetPresignOutcome {
     /// The gateway's preflight (per-object ceiling or tenant quota) refused the
     /// intent before any URL existed.
     IntentRejected,
-    /// The client reported the bucket refused the direct PUT and the gateway
-    /// confirmed no object exists under the server-derived staging key.
+    /// The client *asserted* the bucket refused the direct PUT and the gateway
+    /// found no object under the server-derived staging key. Caller-initiated
+    /// with a negative consistency check, not an independent observation.
     BucketRejected,
     /// Commit found no staged object. Ambiguous by construction: never
     /// attempted, URL expired, or bucket-refused without an abort report.
@@ -3122,6 +3131,10 @@ pub(crate) enum AssetPresignOutcome {
     CommitRejected,
     /// The intent was explicitly abandoned through the abort surface.
     Aborted,
+    /// An abort found staged bytes but the bucket refused to delete them, so
+    /// the reclamation the abort surface promises did not happen. Recorded in
+    /// addition to `Aborted`, never instead of it.
+    AbortReclaimFailed,
 }
 
 #[derive(Debug, Clone)]
@@ -3583,6 +3596,7 @@ impl GatewayMetricsAccumulator {
             asset_presign_staging_missing_total: self.asset_presign_staging_missing_total,
             asset_presign_commit_rejected_total: self.asset_presign_commit_rejected_total,
             asset_presign_aborted_total: self.asset_presign_aborted_total,
+            asset_presign_abort_reclaim_failed_total: self.asset_presign_abort_reclaim_failed_total,
         }
     }
 
@@ -3595,6 +3609,9 @@ impl GatewayMetricsAccumulator {
             AssetPresignOutcome::StagingMissing => &mut self.asset_presign_staging_missing_total,
             AssetPresignOutcome::CommitRejected => &mut self.asset_presign_commit_rejected_total,
             AssetPresignOutcome::Aborted => &mut self.asset_presign_aborted_total,
+            AssetPresignOutcome::AbortReclaimFailed => {
+                &mut self.asset_presign_abort_reclaim_failed_total
+            }
         };
         *counter = counter.saturating_add(1);
     }

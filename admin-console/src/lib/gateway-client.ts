@@ -371,6 +371,24 @@ const BROWSER_FORBIDDEN_UPLOAD_HEADERS = new Set(["content-length", "host"]);
  *   `Access-Control-Allow-Headers`, or the preflight fails before the PUT.
  *   See docs/assets/private-bucket-migration.md.
  */
+/**
+ * Thrown ONLY when the bucket itself answered the direct PUT with a non-2xx
+ * (#368). It is the sole ground on which a caller may abort the intent with
+ * `reason: "bucket_rejected"`: that class is caller-asserted, so asserting it
+ * for a failure that happened before any PUT left this process would put a
+ * fabricated bucket rejection into the gateway's audit trail and counter. A
+ * pre-flight refusal (a length mismatch) is a plain abandonment.
+ */
+export class PresignedUploadRejectedError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "PresignedUploadRejectedError";
+    this.status = status;
+  }
+}
+
 export async function putPresignedObject(
   uploadUrl: string,
   body: Blob,
@@ -401,7 +419,8 @@ export async function putPresignedObject(
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).trim();
-    throw new Error(
+    throw new PresignedUploadRejectedError(
+      response.status,
       detail !== ""
         ? `${response.status} ${response.statusText}: ${detail}`
         : `${response.status} ${response.statusText}`,

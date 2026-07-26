@@ -59,6 +59,11 @@ struct BucketState {
     objects: HashMap<String, Vec<u8>>,
     requests: Vec<CapturedBucketRequest>,
     race_gate: Option<Arc<CommitRaceGate>>,
+    /// #368: object paths whose DELETE the bucket refuses with a 503, keeping
+    /// the bytes. A real bucket does this under throttling, an expired role,
+    /// or an object-lock policy -- and the abort surface must report the
+    /// reclamation it actually achieved, not the one it attempted.
+    refuse_delete_paths: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -188,6 +193,11 @@ fn handle_bucket_connection(mut stream: TcpStream, server_state: Arc<Mutex<Bucke
             Some(bytes) => write_http_response(&mut stream, "200 OK", bytes, None),
             None => write_http_response(&mut stream, "404 Not Found", b"", None),
         },
+        "DELETE" if state.refuse_delete_paths.contains(path) => {
+            // The object survives: this is the "the bucket said no" case, not
+            // a no-op. `delete_object` errors on any non-2xx/404.
+            write_http_response(&mut stream, "503 Service Unavailable", b"SlowDown", None);
+        }
         "DELETE" => {
             state.objects.remove(path);
             let delete_gate = state.race_gate.as_ref().and_then(|gate| {
@@ -1602,6 +1612,10 @@ fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_clas
         "a bucket-rejection report corroborated by an absent staging object must be recorded as one"
     );
     assert_eq!(aborted_refused["staging_object_removed"], false);
+    // Nothing was staged, which is a different fact from a delete that failed;
+    // both report `staging_object_removed: false` and only this field tells
+    // them apart.
+    assert_eq!(aborted_refused["staging_reclamation"], "not_staged");
 
     // (2) An intent whose bytes DID reach the bucket. The same claim is now
     // contradicted by the gateway's own lookup, so it must be downgraded.
@@ -1651,6 +1665,7 @@ fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_clas
         aborted_staged["staging_object_removed"], true,
         "abort must reclaim the staging object immediately, not defer it to the lifecycle GC"
     );
+    assert_eq!(aborted_staged["staging_reclamation"], "removed");
     assert!(
         !bucket_state
             .lock()
@@ -1658,6 +1673,84 @@ fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_clas
             .objects
             .contains_key(&staged_path),
         "the aborted intent's staging bytes must be gone from the bucket"
+    );
+
+    // (2b) The same abort against a bucket that REFUSES the delete. Every
+    // observable signal must say the bytes are still there: the delete error
+    // is swallowed so the abort can still answer, and the previous shape of
+    // this handler reported `staging_object_removed: true` from the HEAD that
+    // preceded the delete -- a 200 telling the tenant its quota had been freed
+    // while the object sat in the bucket until the lifecycle sweep.
+    let undeletable = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/abort-undeletable/1.0.0",
+        &json_headers,
+        &intent_body,
+    ));
+    let undeletable_upload_id = undeletable["upload_id"].as_str().unwrap().to_string();
+    let undeletable_url = undeletable["upload_url"].as_str().unwrap().to_string();
+    let undeletable_path = object_path_from_url(&undeletable_url);
+    let upload = direct_bucket_request(
+        "PUT",
+        &undeletable_url,
+        content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+    bucket_state
+        .lock()
+        .unwrap()
+        .refuse_delete_paths
+        .insert(undeletable_path.clone());
+
+    let undeletable_abort = format!(
+        r#"{{"upload_id":"{undeletable_upload_id}","size_bytes":{},"sha256":"{sha256}"}}"#,
+        content.len()
+    );
+    let aborted_undeletable = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/abort/cli_tool/abort-undeletable/1.0.0",
+        &json_headers,
+        &undeletable_abort,
+    );
+    // The abort itself partly succeeded (the intent IS released), so it stays
+    // a 200 rather than becoming a 500 -- but it must not claim the removal.
+    assert_status(&aborted_undeletable, 200);
+    let aborted_undeletable = response_json(&aborted_undeletable);
+    assert_eq!(
+        aborted_undeletable["staging_object_removed"], false,
+        "a delete the bucket refused must NOT be reported as a reclamation"
+    );
+    assert_eq!(
+        aborted_undeletable["staging_reclamation"], "removal_failed",
+        "the client must be able to tell a failed reclamation from nothing-staged"
+    );
+    assert_eq!(
+        aborted_undeletable["outcome"], "aborted_reclaim_failed",
+        "the failure must be filterable in the audit trail, not buried in prose"
+    );
+    assert!(
+        bucket_state
+            .lock()
+            .unwrap()
+            .objects
+            .contains_key(&undeletable_path),
+        "the mock must still hold the bytes -- otherwise this case proves nothing"
+    );
+    assert!(
+        bucket_state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|request| { request.method == "DELETE" && request.path == undeletable_path }),
+        "the abort must have actually attempted the delete"
     );
 
     // A malformed abort is a typed 400, never a silent no-op.
@@ -1758,6 +1851,7 @@ fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_clas
     for (action, outcome) in [
         ("asset.presign_upload_abort", "rejected_bucket"),
         ("asset.presign_upload_abort", "aborted"),
+        ("asset.presign_upload_abort", "aborted_reclaim_failed"),
         ("asset.push", "staging_missing"),
     ] {
         assert!(

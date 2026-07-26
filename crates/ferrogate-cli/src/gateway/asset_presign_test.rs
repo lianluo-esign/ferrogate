@@ -18,9 +18,9 @@ use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
 use super::{
     asset_create_failure_disposition, classify_abort, effective_max_object_bytes,
     existing_asset_matches_commit, final_object_prefix, is_upload_id, new_upload_id,
-    staging_object_key, verify_and_fetch_committed_object, AbortReason,
+    staging_object_key, verify_and_fetch_committed_object, AbortReason, AbortRecord,
     AssetCreateFailureDisposition, CommitVerification, PresignAbortRequest, PresignCommitRequest,
-    PresignUploadIntentRequest,
+    PresignUploadIntentRequest, StagingReclamation,
 };
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
@@ -561,29 +561,80 @@ fn an_unrecognized_abort_reason_never_becomes_a_bucket_rejection_claim() {
 fn a_bucket_rejection_is_recorded_only_when_the_gateway_corroborates_it() {
     use crate::state::AssetPresignOutcome;
 
-    // The client says the bucket refused the PUT and the gateway agrees: no
-    // object exists under the staging key only the gateway can derive. This is
-    // the ONLY input pair that produces bucket-rejection evidence.
+    // The client says the bucket refused the PUT and the gateway does not
+    // contradict it: no object exists under the staging key only the gateway
+    // can derive. This is the ONLY input pair that produces bucket-rejection
+    // evidence -- and even it is caller-asserted, not independently observed.
     assert_eq!(
-        classify_abort(AbortReason::BucketRejected, false),
-        ("rejected_bucket", AssetPresignOutcome::BucketRejected)
+        classify_abort(AbortReason::BucketRejected, StagingReclamation::NotStaged),
+        AbortRecord {
+            outcome: "rejected_bucket",
+            metrics: &[AssetPresignOutcome::BucketRejected],
+        }
     );
     // Contradicted: bytes ARE staged, so the bucket accepted the PUT. The
     // client's claim is downgraded rather than trusted -- without this, any
     // caller could inflate the bucket-rejection counter at will.
     assert_eq!(
-        classify_abort(AbortReason::BucketRejected, true),
-        ("aborted", AssetPresignOutcome::Aborted)
+        classify_abort(AbortReason::BucketRejected, StagingReclamation::Removed),
+        AbortRecord {
+            outcome: "aborted",
+            metrics: &[AssetPresignOutcome::Aborted],
+        }
     );
     // A plain abandonment makes no claim about the bucket either way.
     assert_eq!(
-        classify_abort(AbortReason::Abandoned, false),
-        ("aborted", AssetPresignOutcome::Aborted)
+        classify_abort(AbortReason::Abandoned, StagingReclamation::NotStaged),
+        AbortRecord {
+            outcome: "aborted",
+            metrics: &[AssetPresignOutcome::Aborted],
+        }
     );
     assert_eq!(
-        classify_abort(AbortReason::Abandoned, true),
-        ("aborted", AssetPresignOutcome::Aborted)
+        classify_abort(AbortReason::Abandoned, StagingReclamation::Removed),
+        AbortRecord {
+            outcome: "aborted",
+            metrics: &[AssetPresignOutcome::Aborted],
+        }
     );
+}
+
+#[test]
+fn a_failed_reclamation_is_never_reported_as_a_successful_one() {
+    use crate::state::AssetPresignOutcome;
+
+    // #368: the abort surface exists to make reclamation *evidence*. The HEAD
+    // says bytes were there; only the DELETE says they are gone. Rendering the
+    // HEAD result as `staging_object_removed` told the client -- and the audit
+    // trail, and the counter -- that a bucket 503/403 had freed the tenant's
+    // quota. These three assertions are the whole invariant.
+    assert!(!StagingReclamation::RemovalFailed.removed());
+    assert!(StagingReclamation::Removed.removed());
+    assert!(!StagingReclamation::NotStaged.removed());
+
+    // The tri-state is typed on the wire, so a client can tell "nothing to
+    // reclaim" from "reclaimed" from "still in the bucket".
+    assert_eq!(StagingReclamation::NotStaged.as_str(), "not_staged");
+    assert_eq!(StagingReclamation::Removed.as_str(), "removed");
+    assert_eq!(StagingReclamation::RemovalFailed.as_str(), "removal_failed");
+
+    // A failed reclaim gets its own audit outcome (filterable, not buried in
+    // the detail prose) and a second counter mirroring the GC path's
+    // `asset_lifecycle_failed_total`. It still counts as an abort: the intent
+    // WAS released, it is the bytes that were not.
+    for reason in [AbortReason::Abandoned, AbortReason::BucketRejected] {
+        assert_eq!(
+            classify_abort(reason, StagingReclamation::RemovalFailed),
+            AbortRecord {
+                outcome: "aborted_reclaim_failed",
+                metrics: &[
+                    AssetPresignOutcome::Aborted,
+                    AssetPresignOutcome::AbortReclaimFailed,
+                ],
+            },
+            "a refused delete must not be recorded as a clean abort"
+        );
+    }
 }
 
 #[test]
@@ -602,6 +653,7 @@ fn presign_outcomes_land_in_separate_operator_counters() {
     state.record_asset_presign_outcome(AssetPresignOutcome::StagingMissing);
     state.record_asset_presign_outcome(AssetPresignOutcome::CommitRejected);
     state.record_asset_presign_outcome(AssetPresignOutcome::Aborted);
+    state.record_asset_presign_outcome(AssetPresignOutcome::AbortReclaimFailed);
 
     let snapshot = state.prometheus_metrics_snapshot();
     assert_eq!(snapshot.asset_presign_intent_issued_total, 2);
@@ -610,6 +662,9 @@ fn presign_outcomes_land_in_separate_operator_counters() {
     assert_eq!(snapshot.asset_presign_staging_missing_total, 1);
     assert_eq!(snapshot.asset_presign_commit_rejected_total, 1);
     assert_eq!(snapshot.asset_presign_aborted_total, 1);
+    // A failed reclamation is its own series, so a stuck bucket cannot hide
+    // inside a healthy-looking abort rate.
+    assert_eq!(snapshot.asset_presign_abort_reclaim_failed_total, 1);
 }
 
 #[test]

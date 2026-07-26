@@ -84,11 +84,20 @@ pub struct GatewayMetricsSnapshot {
     /// #368: intents refused by the gateway's own preflight (per-object ceiling
     /// or tenant storage quota) before any URL was issued. Gateway-observed.
     pub asset_presign_intent_rejected_total: u64,
-    /// #368: uploads the client reported as refused by the bucket itself, where
-    /// the gateway independently corroborated the report by finding no object
-    /// under the server-derived staging key. Recorded only through the explicit
-    /// abort surface -- the gateway never sees the direct PUT, so this is the
-    /// strongest evidence available without bucket access logs.
+    /// #368: uploads a *client asserted* were refused by the bucket, via the
+    /// explicit abort surface, and which the gateway did not contradict (no
+    /// object under the server-derived staging key).
+    ///
+    /// NOT an independent observation, and NOT a security signal on its own.
+    /// The gateway is never in the direct PUT's path; the only check applied is
+    /// the negative one, and absence conflates never-attempted, expired-URL and
+    /// genuinely-refused -- the same ambiguity that keeps commit-time absence
+    /// out of this counter and in `asset_presign_staging_missing_total`. Any
+    /// caller holding `assets.write` can register an intent, upload nothing,
+    /// and abort with `reason=bucket_rejected` to increment this counter at
+    /// will. Read it as "clients reporting bucket refusals", alert on it only
+    /// against `asset_presign_intent_issued_total`, and corroborate a suspected
+    /// attack with bucket access logs, which the gateway cannot see.
     pub asset_presign_bucket_rejected_total: u64,
     /// #368: commits that found no staged object. Deliberately NOT counted as a
     /// bucket rejection: absence conflates never-attempted, expired-URL, and
@@ -98,10 +107,18 @@ pub struct GatewayMetricsSnapshot {
     /// #368: staged objects the gateway itself refused at commit -- size/sha256
     /// mismatch, content policy, trust screening, or quota. Gateway-observed.
     pub asset_presign_commit_rejected_total: u64,
-    /// #368: intents explicitly abandoned through the abort surface, whose
-    /// staging object was reclaimed immediately rather than waiting for the
-    /// lifecycle GC (`asset_lifecycle_pruned_total`).
+    /// #368: intents explicitly released through the abort surface. Counts the
+    /// release, not the reclamation -- an abort whose staging delete the bucket
+    /// refused is counted here *and* in
+    /// `asset_presign_abort_reclaim_failed_total`.
     pub asset_presign_aborted_total: u64,
+    /// #368: aborts that found staged bytes and failed to delete them, so the
+    /// promised immediate reclamation did not happen and the lifecycle GC
+    /// (`asset_lifecycle_pruned_total`) is the only remaining path. The
+    /// abort-surface twin of `asset_lifecycle_failed_total`: a non-zero value
+    /// means tenant quota is being held by objects the gateway said it would
+    /// free.
+    pub asset_presign_abort_reclaim_failed_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

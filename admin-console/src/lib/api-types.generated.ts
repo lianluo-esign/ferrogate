@@ -3012,7 +3012,7 @@ export interface paths {
         put?: never;
         /**
          * Release a presigned upload intent that will not be committed.
-         * @description Abort/cancel surface for an unused upload intent (issue #368). Deletes the intent's staging object immediately when one exists, instead of leaving it for the asset-lifecycle GC, and records the release in the audit trail and the ferrogate_asset_presign_* counters. A client whose direct PUT was refused by the bucket may declare reason=bucket_rejected; the gateway corroborates that claim against the server-derived staging key before recording it, and downgrades it to a plain abort when the object turns out to exist. Returns 409 when the upload was already committed: aborting is never a path to deleting a published immutable version. This is a client-reported signal with a server-side consistency check, not an independent observation of the direct PUT, which the gateway is not in the path of.
+         * @description Abort/cancel surface for an unused upload intent (issue #368). Attempts to delete the intent's staging object immediately when one exists, instead of leaving it for the asset-lifecycle GC, and records the release in the audit trail and the ferrogate_asset_presign_* counters. The attempt can fail (bucket 5xx/403), so the response reports what actually happened through staging_reclamation (not_staged / removed / removal_failed) and staging_object_removed is true ONLY for a delete the bucket confirmed; a failed reclamation is audited as aborted_reclaim_failed, counted in ferrogate_asset_presign_abort_reclaim_failed_total, and left to the lifecycle GC. A client whose direct PUT was refused by the bucket may declare reason=bucket_rejected; the gateway corroborates that claim against the server-derived staging key before recording it, and downgrades it to a plain abort when the object turns out to exist. Returns 409 when the upload was already committed: aborting is never a path to deleting a published immutable version. This is a client-reported signal with a server-side consistency check, not an independent observation of the direct PUT, which the gateway is not in the path of.
          */
         post: operations["abortAssetUpload"];
         delete?: never;
@@ -6377,13 +6377,18 @@ export interface components {
             /** @constant */
             object: "asset_upload_abort";
             upload_id: string;
-            /** @description True when a staging object existed and this abort deleted it, reclaiming its bytes immediately instead of leaving them to the lifecycle GC. */
+            /** @description True ONLY when a staging object existed AND the bucket confirmed its deletion, reclaiming its bytes immediately instead of leaving them to the lifecycle GC. A delete the bucket refused reports false here with staging_reclamation=removal_failed: the bytes still occupy the tenant's quota. */
             staging_object_removed: boolean;
             /**
-             * @description The outcome actually recorded in the audit trail and metrics, which is NOT an echo of the requested reason: a bucket_rejected claim the gateway contradicts (bytes ARE staged, so the bucket accepted the PUT) is downgraded to aborted.
+             * @description What this abort actually did to the staging object, which the staging_object_removed boolean cannot express: not_staged (no object existed), removed (the bucket confirmed the delete), or removal_failed (an object existed and the delete was refused, so the bytes remain until the asset-lifecycle GC collects them).
              * @enum {string}
              */
-            outcome: "rejected_bucket" | "aborted";
+            staging_reclamation: "not_staged" | "removed" | "removal_failed";
+            /**
+             * @description The outcome actually recorded in the audit trail and metrics, which is NOT an echo of the requested reason: a bucket_rejected claim the gateway contradicts (bytes ARE staged, so the bucket accepted the PUT) is downgraded to aborted, and an abort whose staging delete the bucket refused is aborted_reclaim_failed.
+             * @enum {string}
+             */
+            outcome: "rejected_bucket" | "aborted" | "aborted_reclaim_failed";
         };
         AssetPresignUploadIntentResponse: {
             /** @constant */

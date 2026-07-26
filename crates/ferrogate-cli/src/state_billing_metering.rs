@@ -952,6 +952,7 @@ impl AppState {
                 asset_presign_staging_missing_total: 0,
                 asset_presign_commit_rejected_total: 0,
                 asset_presign_aborted_total: 0,
+                asset_presign_abort_reclaim_failed_total: 0,
             });
         let pool = self.repositories.postgres_pool_metrics_snapshot();
         snapshot.postgres_pool_acquire_total = pool.acquire_total;

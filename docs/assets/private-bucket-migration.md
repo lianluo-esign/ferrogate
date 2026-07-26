@@ -23,8 +23,11 @@ Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
   `required_headers` must be sent verbatim on the `PUT`. See "Upload contract
   the integrator MUST honor" below.
 - **Abort** - `POST /v1/assets/presign/abort/{asset_type}/{name}/{version}`
-  releases an intent that will never be committed, deleting its staging object
-  immediately instead of leaving it to the orphan GC (#368).
+  releases an intent that will never be committed, *attempting* to delete its
+  staging object immediately instead of leaving it to the orphan GC (#368). The
+  attempt can be refused by the bucket, so the response reports what actually
+  happened in `staging_reclamation` (`not_staged` / `removed` /
+  `removal_failed`), never what it intended.
 - **Commit** - `POST /v1/assets/presign/commit/{asset_type}/{name}/{version}`
   requires that `upload_id`, verifies the staging object's size (HEAD) and
   SHA-256 (fetch), and applies the built-in content/type checks. It then copies
@@ -131,10 +134,21 @@ Integrators must therefore:
 5. **Abort an intent you will not commit.**
    `POST /v1/assets/presign/abort/{asset_type}/{name}/{version}` with the
    intent's `upload_id`, `size_bytes` and `sha256` releases it: any staging
-   object is deleted immediately instead of waiting for the lifecycle GC. Pass
-   `"reason": "bucket_rejected"` when the direct `PUT` was refused. Already
-   committed uploads return `409` — abort is never a way to delete a published
-   immutable version.
+   object is deleted immediately instead of waiting for the lifecycle GC.
+   **Read `staging_reclamation`, not just the HTTP status** — the delete can be
+   refused by the bucket, and the abort still returns `200` because the intent
+   *was* released. `removal_failed` means the bytes still count against the
+   tenant's quota until the lifecycle GC collects them; `staging_object_removed`
+   is `true` only for a delete the bucket confirmed, and the outcome is
+   `aborted_reclaim_failed`. Pass `"reason": "bucket_rejected"` **only** when
+   the direct `PUT` itself came back non-2xx — see the evidence table below for
+   why over-claiming it corrupts an operator signal. Already committed uploads
+   return `409` — abort is never a way to delete a published immutable version.
+6. **Do not rely on the staging object's metadata.** `content-type` and user
+   metadata are not signed, so a URL holder can choose them on the staging
+   object. This is not exploitable: staging objects are never served (reads are
+   gateway-issued presigned `GET`s of *final* keys) and the gateway writes the
+   final object with its own content type after validation.
 
 ### What the rejection evidence does and does not prove
 
@@ -145,10 +159,11 @@ refusal first-hand. Read the audit outcomes and the
 | Class | Evidence | Metric |
 |---|---|---|
 | `rejected_intent` | Gateway-observed preflight refusal (ceiling/quota). | `ferrogate_asset_presign_rejected_total{stage="intent"}` |
-| `rejected_bucket` | Client-reported at abort **and** corroborated by the gateway finding no object under the staging key. A contradicted claim is downgraded to `aborted`. | `ferrogate_asset_presign_rejected_total{stage="bucket"}` |
+| `rejected_bucket` | **Caller-asserted** at abort, with only a negative consistency check (the gateway finds no object under the staging key). A contradicted claim is downgraded to `aborted`. **Not an independent observation and not a security signal on its own**: any holder of `assets.write` can register an intent, upload nothing, and abort with `reason=bucket_rejected` to increment this counter at will. Read it as "clients reporting bucket refusals", against `intents_issued`. | `ferrogate_asset_presign_rejected_total{stage="bucket"}` |
 | `rejected_commit` | Gateway-observed over the staged bytes (size/hash/content/screening/quota). | `ferrogate_asset_presign_rejected_total{stage="commit"}` |
 | `staging_missing` | Commit found nothing staged. **Ambiguous**: never attempted, URL expired, or bucket-refused. Deliberately not counted as a bucket rejection. | `ferrogate_asset_presign_staging_missing_total` |
-| `aborted` | Client released the intent; staging reclaimed now. | `ferrogate_asset_presign_aborted_total` |
+| `aborted` | Client released the intent. Counts the release, not the reclamation. | `ferrogate_asset_presign_aborted_total` |
+| `aborted_reclaim_failed` | The abort found staged bytes and the bucket refused to delete them, so the promised immediate reclamation did **not** happen and the bytes still hold quota. Gateway-observed. Alert on this: non-zero means the abort surface is issuing promises the bucket is not honoring. | `ferrogate_asset_presign_abort_reclaim_failed_total` |
 | orphan GC | Lifecycle sweeper deleted an aged staging/unreferenced object (`asset.gc.delete`). | `ferrogate_asset_lifecycle_pruned_total` |
 
 Fully independent proof of a bucket refusal would require bucket access logs,

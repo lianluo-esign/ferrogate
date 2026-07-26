@@ -54,6 +54,16 @@ interface AssetsState {
   /** Registry manifests keyed by `${asset_type}/${name}`. */
   manifests: Map<string, AssetManifest>;
   uploadCounter: number;
+  /**
+   * #368: the SHA-256 each intent signed, keyed by upload_id. The bucket route
+   * compares the PUT's `x-amz-content-sha256` against it, because a real
+   * S3-compatible bucket verifies the *value* in the signature, not the mere
+   * presence of the header — a console sending a constant or stale digest
+   * would 403 in production while a presence-only mock stayed green.
+   */
+  declaredSha256ByUpload: Map<string, string>;
+  /** #368: upload_ids whose direct PUT the bucket route actually accepted. */
+  stagedUploads: Set<string>;
 }
 
 function manifestKey(assetType: string, name: string): string {
@@ -206,7 +216,13 @@ function buildState(): AssetsState {
     [manifestKey("mcp_manifest", "incident-tools"), incidentToolsManifest],
   ]);
 
-  return { summaries, manifests, uploadCounter: 0 };
+  return {
+    summaries,
+    manifests,
+    uploadCounter: 0,
+    declaredSha256ByUpload: new Map<string, string>(),
+    stagedUploads: new Set<string>(),
+  };
 }
 
 function storageSummary(): AssetStorageSummary {
@@ -311,6 +327,7 @@ async function handleAssetsRequest(
     };
     state.uploadCounter += 1;
     const uploadId = `upload_${state.uploadCounter}`;
+    state.declaredSha256ByUpload.set(uploadId, body.sha256 ?? "");
     await fulfillJson(route, 200, {
       object: "asset_upload_intent",
       key: `${assetType}/${name}/${version}`,
@@ -329,6 +346,35 @@ async function handleAssetsRequest(
       },
       max_object_bytes: 5 * 1024 * 1024 * 1024,
       upload_protocol: "single_put",
+    });
+    return;
+  }
+
+  // POST /v1/assets/presign/abort/{asset_type}/{name}/{version}
+  //
+  // #368: the console releases an intent it will not commit, so the mock must
+  // answer it. `staging_reclamation` is reported as the tri-state the real
+  // gateway returns — it is set from the DELETE's own result there, never from
+  // the preceding HEAD.
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[0] === "presign" &&
+    segments[1] === "abort"
+  ) {
+    const body = (request.postDataJSON() ?? {}) as {
+      upload_id?: string;
+      reason?: string;
+    };
+    const uploadId = body.upload_id ?? "";
+    const staged = state.stagedUploads.delete(uploadId);
+    await fulfillJson(route, 200, {
+      object: "asset_upload_abort",
+      upload_id: uploadId,
+      staging_object_removed: staged,
+      staging_reclamation: staged ? "removed" : "not_staged",
+      outcome:
+        body.reason === "bucket_rejected" && !staged ? "rejected_bucket" : "aborted",
     });
     return;
   }
@@ -507,25 +553,33 @@ export async function installGatewayAssets(
   // SignedHeaders set, so it MUST fail closed the way a real bucket does. The
   // previous unconditional 200 is exactly what hid a console that never sent
   // `x-amz-content-sha256`: the suite stayed green while the real upload path
-  // was dead. Only that header is asserted — `content-length` is signed too,
-  // but the browser supplies it from the body and Playwright's `headers()`
-  // does not reliably surface network-stack-added headers, so asserting it
-  // here would test the harness rather than the console.
+  // was dead. The header's VALUE is compared against the digest the intent
+  // signed, not merely its presence — the signature binds the value, so a
+  // console forwarding a constant or a stale hash 403s against every real
+  // bucket while a presence-only assertion keeps passing. `content-length` is
+  // signed too, but the browser supplies it from the body and Playwright's
+  // `headers()` does not reliably surface network-stack-added headers, so
+  // asserting it here would test the harness rather than the console.
   await page.route(
     (url) => url.pathname.startsWith(BUCKET_PREFIX),
     async (route) => {
       if (options.uploadHoldMs && options.uploadHoldMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, options.uploadHoldMs));
       }
+      const uploadId = new URL(route.request().url()).pathname
+        .slice(BUCKET_PREFIX.length)
+        .replace(/^staging\//, "");
+      const signed = state.declaredSha256ByUpload.get(uploadId);
       const payloadHash = route.request().headers()["x-amz-content-sha256"] ?? "";
-      if (payloadHash === "") {
+      if (payloadHash === "" || (signed !== undefined && payloadHash !== signed)) {
         await route.fulfill({
           status: 403,
           contentType: "application/xml",
-          body: "<Error><Code>SignatureDoesNotMatch</Code><Message>missing signed header: x-amz-content-sha256</Message></Error>",
+          body: `<Error><Code>SignatureDoesNotMatch</Code><Message>x-amz-content-sha256 is a signed header: expected ${signed ?? "(unknown intent)"}, got ${payloadHash === "" ? "(absent)" : payloadHash}</Message></Error>`,
         });
         return;
       }
+      state.stagedUploads.add(uploadId);
       await route.fulfill({ status: 200, contentType: "text/plain", body: "" });
     },
   );
