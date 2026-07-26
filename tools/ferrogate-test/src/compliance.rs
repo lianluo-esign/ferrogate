@@ -252,6 +252,14 @@ pub(crate) fn run_component_compliance_supabase(args: &SupabaseLiveRestartArgs) 
 
 pub(crate) fn run_component_compliance_at(gateway_addr: &str) -> Result<()> {
     let fixture = bootstrap_quota_fixture(gateway_addr)?;
+    // #351: operator config -> Admin API effective policy -> runtime decision,
+    // with allow / approval-required / deny cases proving the declaration the
+    // operator wrote is the one the policy evaluation reads.
+    assert_component_contract(
+        gateway_addr,
+        &crate::x402_spend_policy::X402SpendPolicyContract::new(),
+    )?;
+    crate::x402_spend_policy::assert_x402_spend_policy_surface(gateway_addr)?;
     assert_component_contract(gateway_addr, &QuotaScopeContract::new(&fixture))?;
     assert_component_contract(gateway_addr, &TenantAssetQuotaContract::new(&fixture))?;
     assert_narrow_asset_quota_scopes_are_rejected(gateway_addr, &fixture)?;
@@ -1096,8 +1104,12 @@ api_keys:
     name: "Component compliance admin"
     key: "admin-secret"
     scopes: ["admin.read", "admin.write"]
-"#,
+{}"#,
         crate::constants::BILLING_SERVICE_TOKEN,
+        // #351: the same operator-declared x402 spend policies the local TOML
+        // config carries, so the write-read closure is proved on both storage
+        // backends from one source of truth.
+        crate::x402_spend_policy::x402_spend_policies_yaml(),
     ))
 }
 

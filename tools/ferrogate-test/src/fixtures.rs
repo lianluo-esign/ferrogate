@@ -371,8 +371,14 @@ revision = 1
 enabled = true
 api_key_ids = ["client"]
 cache_enabled = false
+{x402_spend_policies}
 "#,
-        stdio_mcp_path = toml_basic_string(&config.stdio_mcp_path.to_string_lossy())
+        stdio_mcp_path = toml_basic_string(&config.stdio_mcp_path.to_string_lossy()),
+        // #351: the operator-declared typed x402 spend policies the
+        // component-compliance closure reads back through the Admin API. Kept
+        // LAST in the document: a TOML array-of-tables section swallows every
+        // following top-level key.
+        x402_spend_policies = crate::x402_spend_policy::x402_spend_policies_toml(),
     )
 }
 

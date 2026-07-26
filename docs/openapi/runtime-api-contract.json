@@ -489,6 +489,22 @@
     {
       "pattern": "/admin/v1/investigations",
       "group": "admin_request_log"
+    },
+    {
+      "pattern": "/admin/v1/x402-spend-policies",
+      "group": "x402_spend_policy"
+    },
+    {
+      "pattern": "/admin/v1/x402-spend-policies/effective",
+      "group": "x402_spend_policy"
+    },
+    {
+      "pattern": "/admin/v1/x402-spend-policies/evaluate",
+      "group": "x402_spend_policy"
+    },
+    {
+      "pattern": "/admin/v1/x402-spend-policies/{*rest}",
+      "group": "x402_spend_policy"
     }
   ],
   "dynamic_surfaces": [
@@ -3210,6 +3226,39 @@
         "scope": "admin.read"
       },
       "rbac_action": "guardrails.evidence.read"
+    },
+    {
+      "path": "/admin/v1/x402-spend-policies",
+      "method": "get",
+      "operation_id": "listX402SpendPolicies",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/x402-spend-policies/effective",
+      "method": "get",
+      "operation_id": "getEffectiveX402SpendPolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/x402-spend-policies/evaluate",
+      "method": "post",
+      "operation_id": "evaluateX402SpendPolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
     }
   ]
 }

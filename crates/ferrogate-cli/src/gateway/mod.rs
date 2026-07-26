@@ -73,6 +73,9 @@ mod sites;
 mod usage_reports;
 mod virtual_keys;
 mod wallets;
+/// #351: read-only effective x402 spend-policy diagnostics (declarations,
+/// effective policy + revision for a scope chain, and dry-run decisions).
+mod x402_spend_policy;
 
 use anyhow::{Context, Result as AnyResult};
 use http::HeaderMap;

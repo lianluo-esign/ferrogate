@@ -12922,6 +12922,196 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/x402-spend-policies": {
+      "get": {
+        "operationId": "listX402SpendPolicies",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List the operator-declared typed x402 spend policies.",
+        "description": "Returns every x402 spend-policy declaration in the running config (#351), scoped to what the caller may see: a tenant-scoped admin sees only declarations for tenants/projects/workspaces/keys it owns, while run-scoped declarations are visible to the platform operator only (an agent-run id cannot yet be resolved to its tenant). Read-only diagnostics: the response carries allowlists, caps, conversion ratio, approval threshold and revision -- never a signer key, wallet secret, or any credential.",
+        "responses": {
+          "200": {
+            "description": "The declarations visible to the caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402DeclaredSpendPolicyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/x402-spend-policies/effective": {
+      "get": {
+        "operationId": "getEffectiveX402SpendPolicy",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Resolve the effective x402 spend policy and revision for a scope chain.",
+        "description": "Resolves the tenant/project/workspace/key/agent-run chain against the operator-declared policies (#351) and returns the single declaration in force, its revision, and the inheritance evidence explaining why it won. The narrowest declared scope wins; a chain with no declaration anywhere returns declared=false with the disabled deny-all default at revision 0 rather than 404, so an unconfigured scope can never be read as unlimited. Exposes decisions and revisions only -- no signer or secret fields.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "description": "Tenant (organization) id. Required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "description": "Agent-run id. Platform-operator keys only.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The effective policy, its revision, and the inheritance chain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402EffectiveSpendPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/x402-spend-policies/evaluate": {
+      "post": {
+        "operationId": "evaluateX402SpendPolicy",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Dry-run the effective x402 spend policy against a concrete challenge.",
+        "description": "Parses an untrusted x402 PAYMENT-REQUIRED challenge with the frozen x402/SVM wire contract, resolves the effective policy for the scope chain, and returns the pure Allow / ApprovalRequired / Deny decision produced by the SAME policy function the payment path evaluates (#351). Read-only: nothing is paid, signed, or persisted. The response carries the full evidence chain -- stable reason code, policy revision, matched resource rule, ORIGINAL atomic units, computed internal credits, conversion snapshot and challenge hash -- and no signer or secret field. Money math is checked integer arithmetic: overflow or a missing/impossible conversion ratio denies.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/X402SpendPolicyEvaluationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The dry-run decision and the policy that produced it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/X402SpendPolicyEvaluation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "description": "The declared policy in force failed structural validation, so no decision was produced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -27374,6 +27564,419 @@
           }
         },
         "additionalProperties": false
+      },
+      "X402PolicyScopeKind": {
+        "description": "One level of the tenancy chain an x402 spend policy may be declared at, from broadest to narrowest. Precedence is by specificity: the narrowest declared scope in a request's chain is the one in force.",
+        "type": "string",
+        "enum": [
+          "tenant",
+          "project",
+          "workspace",
+          "key",
+          "run"
+        ]
+      },
+      "X402PolicyScopeRef": {
+        "description": "A reference to the scope whose declaration is in force.",
+        "type": "object",
+        "properties": {
+          "scope_type": {
+            "$ref": "#/components/schemas/X402PolicyScopeKind"
+          },
+          "scope_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "scope_type",
+          "scope_id"
+        ]
+      },
+      "X402ScopeChain": {
+        "description": "The tenant/project/workspace/key/agent-run chain a policy lookup or dry-run evaluation is made at. tenant_id is required; narrower levels are optional.",
+        "type": "object",
+        "properties": {
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "tenant_id"
+        ]
+      },
+      "X402DeclaredSpendPolicy": {
+        "description": "One operator-declared x402 spend policy, pinned to a scope. Carries no secret or signer material: the policy model is an allowlist/caps/conversion document only.",
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "x402_spend_policy"
+          },
+          "scope_type": {
+            "$ref": "#/components/schemas/X402PolicyScopeKind"
+          },
+          "scope_id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "policy": {
+            "$ref": "#/components/schemas/X402SpendPolicy"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "scope_type",
+          "scope_id",
+          "enabled",
+          "revision",
+          "policy"
+        ]
+      },
+      "X402DeclaredSpendPolicyList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/X402DeclaredSpendPolicy"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "X402PolicyInheritanceLevel": {
+        "description": "One level of the resolved inheritance chain, broadest first: whether a declaration exists there and whether it is the one in force. This is the 'why did this policy win' evidence.",
+        "type": "object",
+        "properties": {
+          "scope_type": {
+            "$ref": "#/components/schemas/X402PolicyScopeKind"
+          },
+          "scope_id": {
+            "type": "string"
+          },
+          "declared": {
+            "type": "boolean"
+          },
+          "effective": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "scope_type",
+          "scope_id",
+          "declared",
+          "effective"
+        ]
+      },
+      "X402EffectiveSpendPolicy": {
+        "description": "The effective x402 spend policy for a scope chain. Always defined: a chain with no declaration anywhere reports declared=false with the disabled deny-all default at revision 0, so 'no policy' can never read as 'no limit'. Exposes decisions/revisions only -- no signer key, secret, or wallet material.",
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "x402_effective_spend_policy"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/X402ScopeChain"
+          },
+          "declared": {
+            "type": "boolean"
+          },
+          "resolved_scope": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/X402PolicyScopeRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "policy": {
+            "$ref": "#/components/schemas/X402SpendPolicy"
+          },
+          "inheritance": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/X402PolicyInheritanceLevel"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "scope",
+          "declared",
+          "resolved_scope",
+          "policy_revision",
+          "policy",
+          "inheritance"
+        ]
+      },
+      "X402ConversionSnapshot": {
+        "description": "The atomic->credits conversion in effect for one decision. Integer-only; computed_credits is null (never 0) when the conversion overflowed or the ratio was impossible, which denies.",
+        "type": "object",
+        "properties": {
+          "numerator": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "denominator": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "rounding": {
+            "$ref": "#/components/schemas/X402Rounding"
+          },
+          "version": {
+            "type": "string"
+          },
+          "computed_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "numerator",
+          "denominator",
+          "rounding",
+          "version",
+          "computed_credits"
+        ]
+      },
+      "X402PaymentDecision": {
+        "description": "The immutable decision evidence for one payment authorization: three-valued decision, stable reason code, policy revision, matched rule, ORIGINAL atomic units, computed internal credits, conversion snapshot, and the deterministic challenge hash. No signer, secret, or transaction material.",
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "approval_required",
+              "deny"
+            ]
+          },
+          "reason_code": {
+            "description": "Stable x402_* reason code (e.g. x402_allowed, x402_disabled, x402_network_not_allowed, x402_mint_not_allowed, x402_recipient_not_allowed, x402_resource_mismatch, x402_resource_not_allowed, x402_amount_below_min, x402_atomic_cap_exceeded, x402_conversion_unavailable, x402_over_per_payment_cap, x402_over_run_cap, x402_over_window_cap, x402_approval_required).",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "approval_threshold_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "policy_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "network_caip2": {
+            "$ref": "#/components/schemas/X402PolicyNetwork"
+          },
+          "mint": {
+            "type": "string"
+          },
+          "recipient": {
+            "type": "string"
+          },
+          "resource_url": {
+            "type": "string"
+          },
+          "authorized_resource_url": {
+            "type": "string"
+          },
+          "challenge_hash_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "atomic_amount": {
+            "description": "Original on-chain atomic token amount, preserved losslessly as an integer.",
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "computed_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "conversion": {
+            "$ref": "#/components/schemas/X402ConversionSnapshot"
+          },
+          "matched_resource": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/X402ResourceRule"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "decision",
+          "reason_code",
+          "message",
+          "approval_threshold_credits",
+          "policy_revision",
+          "network_caip2",
+          "mint",
+          "recipient",
+          "resource_url",
+          "authorized_resource_url",
+          "challenge_hash_hex",
+          "atomic_amount",
+          "computed_credits",
+          "conversion",
+          "matched_resource"
+        ]
+      },
+      "X402SpendPolicyEvaluationRequest": {
+        "description": "A dry-run payment-authorization request. payment_required is the untrusted merchant PAYMENT-REQUIRED header exactly as received (base64), parsed by the frozen x402/SVM wire contract -- display text and token symbols are never trusted. authorized_resource_url is the egress URL FerroGate already authorized; a challenge whose own resource differs is a payment-redirect attempt and denies.",
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/X402ScopeChain"
+          },
+          "payment_required": {
+            "type": "string"
+          },
+          "authorized_resource_url": {
+            "type": "string"
+          },
+          "spent": {
+            "description": "Already-committed spend read from the durable ledger, so per-run/per-window caps can be dry-run realistically. Defaults to a fresh run/window.",
+            "type": "object",
+            "properties": {
+              "run_spent_credits": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "window_spent_credits": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "payment_required",
+          "authorized_resource_url"
+        ]
+      },
+      "X402SpendPolicyEvaluation": {
+        "description": "The result of a dry-run evaluation: which declaration was in force, at which revision, and the decision it produced.",
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "x402_spend_policy_evaluation"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/X402ScopeChain"
+          },
+          "declared": {
+            "type": "boolean"
+          },
+          "resolved_scope": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/X402PolicyScopeRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "decision": {
+            "$ref": "#/components/schemas/X402PaymentDecision"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "scope",
+          "declared",
+          "resolved_scope",
+          "policy_revision",
+          "decision"
+        ]
       }
     }
   }

@@ -129,6 +129,7 @@ impl Config {
         self.validate_routes(&upstream_names)?;
         self.validate_asset_bucket()?;
         self.validate_x402_reconciler()?;
+        self.validate_x402_spend_policies()?;
         self.validate_cloudflare()?;
         self.validate_asset_bucket_r2()?;
         self.validate_cloudflare_ai_gateway_providers()?;
@@ -339,6 +340,24 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Typed Solana x402 spend policies (issue #351).
+    ///
+    /// Money config fails at load, never at the first payment: every declared
+    /// scope must carry a policy that passes the policy crate's own
+    /// `validate()` (which is what the runtime decision function requires), no
+    /// two declarations may target the same `(scope_type, scope_id)` — that
+    /// would make the effective policy depend on file order — and no `scope_id`
+    /// may be blank. The check itself lives in `ferrogate-config`
+    /// (`validate_scoped_x402_spend_policies`) so config-load validity and
+    /// runtime evaluability are one definition, not two that can drift.
+    ///
+    /// The default (no declarations) always passes: every scope then resolves to
+    /// the disabled deny-all policy.
+    fn validate_x402_spend_policies(&self) -> AnyResult<()> {
+        ferrogate_config::validate_scoped_x402_spend_policies(&self.x402_spend_policies)
+            .map_err(|error| anyhow::anyhow!("field x402_spend_policies: {error}"))
     }
 
     /// Money-safety invariant for the x402 settlement reconciler (issue #400).

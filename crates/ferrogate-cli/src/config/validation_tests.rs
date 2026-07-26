@@ -4521,3 +4521,204 @@ fn rejects_cloudflare_ai_gateway_provider_with_malformed_aig_token_ref() {
         "was: {error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #351: typed Solana x402 spend policies declared in the gateway config.
+// These prove the operator-facing document shape the component-compliance
+// closure writes actually loads, validates, and resolves the same way in both
+// supported config formats -- a broken money-policy document must fail at
+// startup, never at the first payment.
+// ---------------------------------------------------------------------------
+
+const X402_TEST_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const X402_TEST_RECIPIENT: &str = "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4";
+const X402_TEST_DEVNET: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+
+fn x402_spend_policy_toml(scope_type: &str, scope_id: &str, revision: u64, cap: u64) -> String {
+    format!(
+        r#"
+[[x402_spend_policies]]
+scope_type = "{scope_type}"
+scope_id = "{scope_id}"
+
+[x402_spend_policies.policy]
+enabled = true
+revision = {revision}
+allowed_networks = ["{X402_TEST_DEVNET}"]
+allowed_recipients = ["{X402_TEST_RECIPIENT}"]
+allow_insecure_local_resources = false
+
+[[x402_spend_policies.policy.allowed_assets]]
+network = "{X402_TEST_DEVNET}"
+mint = "{X402_TEST_MINT}"
+
+[[x402_spend_policies.policy.allowed_resources]]
+origin = "https://pay.example.com"
+path_prefix = "/weather"
+
+[x402_spend_policies.policy.caps]
+max_credits_per_payment = {cap}
+max_credits_per_run = 5000
+max_credits_per_window = 10000
+window_seconds = 3600
+max_atomic_per_payment = 2000000
+min_atomic_per_payment = 10
+
+[x402_spend_policies.policy.conversion]
+numerator = 1
+denominator = 1000
+rounding = "up"
+version = "usdc-devnet-v1"
+
+[x402_spend_policies.policy.approval]
+threshold_credits = 500
+"#
+    )
+}
+
+#[test]
+fn default_config_declares_no_x402_spend_policy_so_payments_are_off() {
+    let config = Config::default();
+    assert!(config.x402_spend_policies.is_empty());
+    config
+        .validate()
+        .expect("the default config must pass x402 validation");
+
+    let effective = ferrogate_config::resolve_effective_x402_spend_policy(
+        &config.x402_spend_policies,
+        &ferrogate_config::X402ScopeChain::tenant("tenant-1"),
+    );
+    assert!(!effective.is_declared());
+    assert!(!effective.policy.enabled);
+}
+
+#[test]
+fn loads_scoped_x402_spend_policies_from_a_toml_document() {
+    let raw = format!(
+        "listen = \"127.0.0.1:8080\"\n{}{}",
+        x402_spend_policy_toml("tenant", "compliance-tenant", 7, 1000),
+        x402_spend_policy_toml("project", "compliance-project", 11, 2),
+    );
+
+    let config = Config::from_toml_str(&raw).expect("x402 spend policies must load");
+    assert_eq!(config.x402_spend_policies.len(), 2);
+
+    // The narrowest declared scope is what the runtime resolves.
+    let effective = ferrogate_config::resolve_effective_x402_spend_policy(
+        &config.x402_spend_policies,
+        &ferrogate_config::X402ScopeChain {
+            tenant_id: "compliance-tenant",
+            project_id: Some("compliance-project"),
+            workspace_id: None,
+            key_id: None,
+            run_id: None,
+        },
+    );
+    assert_eq!(effective.revision(), 11);
+    assert_eq!(effective.policy.caps.max_credits_per_payment, Some(2));
+    effective
+        .validate()
+        .expect("a loaded policy must be runtime-evaluable");
+}
+
+#[test]
+fn the_yaml_and_toml_forms_of_the_same_x402_policy_load_identically() {
+    let toml_config = Config::from_toml_str(&format!(
+        "listen = \"127.0.0.1:8080\"\n{}",
+        x402_spend_policy_toml("tenant", "compliance-tenant", 7, 1000)
+    ))
+    .expect("TOML x402 policy loads");
+
+    let yaml_config = Config::from_yaml_str(&format!(
+        r#"listen: "127.0.0.1:8080"
+x402_spend_policies:
+  - scope_type: "tenant"
+    scope_id: "compliance-tenant"
+    policy:
+      enabled: true
+      revision: 7
+      allowed_networks: ["{X402_TEST_DEVNET}"]
+      allowed_recipients: ["{X402_TEST_RECIPIENT}"]
+      allow_insecure_local_resources: false
+      allowed_assets:
+        - network: "{X402_TEST_DEVNET}"
+          mint: "{X402_TEST_MINT}"
+      allowed_resources:
+        - origin: "https://pay.example.com"
+          path_prefix: "/weather"
+      caps:
+        max_credits_per_payment: 1000
+        max_credits_per_run: 5000
+        max_credits_per_window: 10000
+        window_seconds: 3600
+        max_atomic_per_payment: 2000000
+        min_atomic_per_payment: 10
+      conversion:
+        numerator: 1
+        denominator: 1000
+        rounding: "up"
+        version: "usdc-devnet-v1"
+      approval:
+        threshold_credits: 500
+"#
+    ))
+    .expect("YAML x402 policy loads");
+
+    assert_eq!(
+        toml_config.x402_spend_policies,
+        yaml_config.x402_spend_policies
+    );
+}
+
+#[test]
+fn rejects_an_x402_spend_policy_whose_mint_is_a_token_symbol() {
+    let raw = format!(
+        "listen = \"127.0.0.1:8080\"\n{}",
+        x402_spend_policy_toml("tenant", "compliance-tenant", 7, 1000)
+    )
+    .replace(X402_TEST_MINT, "USDC");
+
+    let error = format!(
+        "{:#}",
+        Config::from_toml_str(&raw).expect_err("a token-symbol mint must not load")
+    );
+    assert!(
+        error.contains("field x402_spend_policies") && error.contains("canonical base58"),
+        "was: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_x402_spend_policy_declarations_for_one_scope() {
+    let raw = format!(
+        "listen = \"127.0.0.1:8080\"\n{}{}",
+        x402_spend_policy_toml("tenant", "compliance-tenant", 7, 1000),
+        x402_spend_policy_toml("tenant", "compliance-tenant", 8, 500),
+    );
+
+    let error = format!(
+        "{:#}",
+        Config::from_toml_str(&raw).expect_err("a duplicate scope declaration must not load")
+    );
+    assert!(
+        error.contains("duplicate x402 spend policy for tenant compliance-tenant"),
+        "was: {error}"
+    );
+}
+
+#[test]
+fn rejects_an_x402_spend_policy_with_a_zero_cap() {
+    let raw = format!(
+        "listen = \"127.0.0.1:8080\"\n{}",
+        x402_spend_policy_toml("tenant", "compliance-tenant", 7, 0)
+    );
+
+    let error = format!(
+        "{:#}",
+        Config::from_toml_str(&raw).expect_err("a zero cap must not load")
+    );
+    assert!(
+        error.contains("caps.max_credits_per_payment") && error.contains("zero"),
+        "was: {error}"
+    );
+}

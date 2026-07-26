@@ -291,6 +291,10 @@ impl Config {
             asset_lifecycle: crate::config::AssetLifecycleConfig::default(),
             x402_sweeper: crate::config::X402SweeperConfig::default(),
             x402_reconciler: crate::config::X402ReconcilerConfig::default(),
+            // #351: the Caddyfile bridge has no x402 spend-policy surface; every
+            // scope stays on the disabled deny-all default and the policy is
+            // only declarable through the native structured config.
+            x402_spend_policies: Vec::new(),
             asset_egress_price_per_gb: None,
             // #405: the Caddyfile bridge has no Cloudflare surface; it stays
             // disabled here and is only configurable via the native config.

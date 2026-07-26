@@ -295,3 +295,70 @@ tick_interval_secs = 5
 max_catchup_fires = 1
 # IANA timezone applied to a cron schedule that does not set its own.
 default_timezone = "UTC"
+
+# Typed Solana x402 spend policy (#351). Disabled by default: with no
+# `[[x402_spend_policies]]` entry every scope resolves to a deny-all policy, so
+# an agent can never pay an x402 challenge by accident. A declaration is pinned
+# to ONE scope of the `tenant -> project -> workspace -> key -> run` chain; the
+# NARROWEST declared scope in a request's chain wins (no field-level merging, so
+# a child can never silently widen a parent's cap). Inspect what is in force with
+# `GET /admin/v1/x402-spend-policies/effective?tenant_id=...` and dry-run a real
+# merchant challenge against it with
+# `POST /admin/v1/x402-spend-policies/evaluate` -- both expose decisions and
+# revisions only, never signer or secret material.
+#
+# Keep array-of-tables sections like this one LAST in the file: in TOML every
+# following top-level key would otherwise be parsed into the last table.
+#
+# [[x402_spend_policies]]
+# scope_type = "tenant"          # tenant | project | workspace | key | run
+# scope_id = "acme"
+#
+# [x402_spend_policies.policy]
+# enabled = true                 # x402 spending is OFF unless explicitly true
+# revision = 7                   # echoed into every decision for audit
+# # CAIP-2 network ids. Mainnet must be pinned explicitly together with an
+# # explicit mainnet mint -- a wildcard mainnet allow is rejected at load.
+# allowed_networks = ["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"]
+# # Exact payee allowlist (base58). A challenge paying anyone else denies.
+# allowed_recipients = ["2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4"]
+# allow_insecure_local_resources = false   # http:// resources: test mode only
+#
+# # Canonical base58 SPL mint per network. A token SYMBOL such as "USDC" is
+# # rejected: a symbol can be minted by anyone.
+# [[x402_spend_policies.policy.allowed_assets]]
+# network = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+# mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+#
+# # Which HTTPS origin + path prefix a payment may unlock. The challenge's own
+# # resource must equal the egress URL FerroGate already authorized.
+# [[x402_spend_policies.policy.allowed_resources]]
+# origin = "https://api.example.com"
+# path_prefix = "/paid"
+#
+# # Caps are internal credits, except the two atomic bounds which act directly
+# # on the on-chain amount. Omit a field to leave that dimension uncapped; an
+# # explicit 0 is rejected (use `enabled = false` to turn payments off).
+# [x402_spend_policies.policy.caps]
+# max_credits_per_payment = 1000
+# max_credits_per_run = 5000
+# max_credits_per_window = 10000
+# window_seconds = 3600
+# max_atomic_per_payment = 2000000
+# min_atomic_per_payment = 10
+#
+# # Checked-integer bridge from atomic token units to internal credits:
+# # credits = round(atomic * numerator / denominator). No floats anywhere on the
+# # money path; overflow or an impossible ratio denies instead of coercing to 0.
+# # `version` is persisted into every decision so an auditor can tie a charge to
+# # the exact rate that produced it.
+# [x402_spend_policies.policy.conversion]
+# numerator = 1
+# denominator = 1000
+# rounding = "up"                # "up" never under-counts a spend
+# version = "usdc-devnet-v1"
+#
+# # Payments above this many credits return ApprovalRequired instead of Allow.
+# # Omit for auto-allow up to the hard caps.
+# [x402_spend_policies.policy.approval]
+# threshold_credits = 500

@@ -67,6 +67,8 @@ pub(super) enum RouteGroup {
     Rbac,
     Plans,
     Wallets,
+    /// #351: read-only x402 spend-policy diagnostics.
+    X402SpendPolicy,
 }
 
 impl RouteGroup {
@@ -107,6 +109,7 @@ impl RouteGroup {
             "rbac" => Self::Rbac,
             "plans" => Self::Plans,
             "wallets" => Self::Wallets,
+            "x402_spend_policy" => Self::X402SpendPolicy,
             _ => return None,
         })
     }
@@ -194,7 +197,37 @@ impl FerroGateway {
             RouteGroup::Rbac => self.try_rbac_routes(session, ctx, req).await,
             RouteGroup::Plans => self.try_plans_routes(session, ctx, req).await,
             RouteGroup::Wallets => self.try_wallets_routes(session, ctx, req).await,
+            RouteGroup::X402SpendPolicy => {
+                self.try_x402_spend_policy_routes(session, ctx, req).await
+            }
         }
+    }
+
+    /// #351: the three read-only x402 spend-policy diagnostics paths. Anything
+    /// else under the prefix is an explicit 404 from the handler rather than a
+    /// fall-through to dynamic proxy routing, so a typo'd diagnostics path can
+    /// never be silently proxied upstream.
+    async fn try_x402_spend_policy_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/x402-spend-policies"
+            || req.path.starts_with("/admin/v1/x402-spend-policies/")
+        {
+            self.handle_admin_x402_spend_policies(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     async fn try_inference_routes(

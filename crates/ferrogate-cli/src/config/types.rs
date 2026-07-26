@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(crate) use ferrogate_cloudflare::CloudflareConfig;
+pub(crate) use ferrogate_config::X402ScopedSpendPolicy;
 pub(crate) use ferrogate_core::ApprovalPolicy;
 use ferrogate_guardrails::{all_content_sources, ContentSource};
 pub(crate) use ferrogate_mcp::{
@@ -118,6 +119,15 @@ pub(crate) struct Config {
     /// on-chain evidence (or keeps them `outcome_unknown` with bounded backoff).
     #[serde(default)]
     pub(crate) x402_reconciler: X402ReconcilerConfig,
+    /// #351: typed, disabled-by-default Solana x402 spend policies, each pinned
+    /// to one scope of the `tenant -> project -> workspace -> key -> run` chain.
+    /// Empty (the default) means every scope resolves to the disabled deny-all
+    /// policy, so x402 spending is never on by accident. Validated at load by
+    /// [`ferrogate_config::validate_scoped_x402_spend_policies`], which delegates
+    /// to the policy crate's own `validate()` so a config that loads is exactly
+    /// a config the runtime can evaluate.
+    #[serde(default)]
+    pub(crate) x402_spend_policies: Vec<X402ScopedSpendPolicy>,
     /// #262: asset-egress (download bandwidth) rate in USD per GB used to
     /// settle per-download metering events. `None` (the default) leaves
     /// egress metered + audited but unpriced (cost_usd = None, no wallet
@@ -2817,6 +2827,7 @@ impl Default for Config {
             asset_lifecycle: AssetLifecycleConfig::default(),
             x402_sweeper: X402SweeperConfig::default(),
             x402_reconciler: X402ReconcilerConfig::default(),
+            x402_spend_policies: Vec::new(),
             asset_egress_price_per_gb: None,
             cloudflare: None,
         }

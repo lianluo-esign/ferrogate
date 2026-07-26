@@ -27,6 +27,9 @@ mod storage;
 mod supabase_schema;
 mod target_capability;
 mod workers_ai_guardrail;
+/// #351: the component-compliance closure for the typed Solana x402 spend
+/// policy (operator config -> effective policy -> runtime decision).
+mod x402_spend_policy;
 
 use agent_jobs::run_agent_jobs_api;
 use api_contract::run_api_contract;
