@@ -300,7 +300,194 @@ fn invalid_amounts_never_coerce() {
     );
 }
 
+/// Load a positive golden fixture (one directory up from the negative corpus)
+/// as JSON so a single field can be mutated.
+fn golden_json(name: &str) -> serde_json::Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
+fn header_of(doc: &serde_json::Value) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(doc).unwrap())
+}
+
+/// The "Failure contract" requires `UnsupportedScheme` to be distinguishable
+/// from every other rejection. A lone requirement naming a non-`exact` scheme
+/// must surface exactly that variant, not the generic
+/// `NoAcceptableRequirement`.
+#[test]
+fn unsupported_scheme_is_its_own_variant() {
+    let mut doc = golden_json("payment_required_devnet.json");
+    doc["accepts"][0]["scheme"] = serde_json::json!("upto");
+    let err = parse_and_select(&header_of(&doc)).unwrap_err();
+    assert!(
+        matches!(&err, PaymentError::UnsupportedScheme { scheme } if scheme == "upto"),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// Likewise `UnsupportedNetwork` must be reachable from the challenge-parse
+/// path (it was only covered on the settlement path), and a non-Solana CAIP-2
+/// namespace must not be silently treated as Solana.
+#[test]
+fn unsupported_network_is_its_own_variant_on_the_challenge_path() {
+    for bad_network in [
+        "eip155:1",                                // Ethereum mainnet
+        "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvd",  // mainnet id, one char short
+        "SOLANA:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", // wrong case
+        "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z", // testnet, not recognised
+    ] {
+        let mut doc = golden_json("payment_required_devnet.json");
+        doc["accepts"][0]["network"] = serde_json::json!(bad_network);
+        let err = parse_and_select(&header_of(&doc)).unwrap_err();
+        assert!(
+            matches!(&err, PaymentError::UnsupportedNetwork { network } if network == bad_network),
+            "network {bad_network:?}: unexpected error: {err:?}"
+        );
+    }
+}
+
+/// When several entries are each unsupported for different reasons the
+/// adapter must fall back to `NoAcceptableRequirement` rather than picking
+/// one arbitrarily or coercing anything.
+#[test]
+fn several_unsupported_entries_yield_no_acceptable_requirement() {
+    let mut doc = golden_json("payment_required_devnet.json");
+    let mut other = doc["accepts"][0].clone();
+    other["scheme"] = serde_json::json!("upto");
+    doc["accepts"][0]["network"] = serde_json::json!("eip155:1");
+    doc["accepts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(other));
+
+    let err = parse_and_select(&header_of(&doc)).unwrap_err();
+    assert!(
+        matches!(err, PaymentError::NoAcceptableRequirement),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// An unsupported mint must be reported as `UnsupportedMint`, never by
+/// falling through to a different requirement or a zeroed amount.
+#[test]
+fn unsupported_mint_is_its_own_variant() {
+    let doc = golden_json("payment_required_devnet.json");
+    let required = parse_payment_required(&header_of(&doc)).unwrap();
+    let err = select_requirement(
+        &required,
+        &RequirementFilter {
+            networks: &[],
+            allowed_mints: Some(&["11111111111111111111111111111111"]),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, PaymentError::UnsupportedMint { mint }
+            if mint == "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// Every variant the issue's "Failure contract" enumerates must render a
+/// distinct, non-empty Display string so callers can branch without string
+/// matching and logs stay unambiguous.
+#[test]
+fn failure_contract_variants_are_all_distinct() {
+    use std::collections::BTreeSet;
+    let all = [
+        PaymentError::MalformedHeader {
+            header: "PAYMENT-REQUIRED",
+            reason: "r".into(),
+        },
+        PaymentError::OversizedHeader {
+            header: "PAYMENT-REQUIRED",
+            limit: 1,
+            actual: 2,
+        },
+        PaymentError::UnsupportedVersion { found: "1".into() },
+        PaymentError::NoAcceptableRequirement,
+        PaymentError::UnsupportedNetwork {
+            network: "eip155:1".into(),
+        },
+        PaymentError::UnsupportedScheme {
+            scheme: "upto".into(),
+        },
+        PaymentError::UnsupportedMint { mint: "m".into() },
+        PaymentError::InvalidAmount {
+            amount: "0".into(),
+            reason: "zero".into(),
+        },
+        PaymentError::InvalidRecipient {
+            field: "payTo",
+            value: "x".into(),
+        },
+        PaymentError::InvalidTimeout {
+            reason: "zero".into(),
+        },
+        PaymentError::SignerRejected {
+            reason: "denied".into(),
+        },
+        PaymentError::ProofBuildFailed {
+            reason: "empty".into(),
+        },
+        PaymentError::MalformedSettlement {
+            reason: "bad".into(),
+        },
+        PaymentError::SdkIncompatible { detail: "msrv" },
+    ];
+    let rendered: BTreeSet<String> = all.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        rendered.len(),
+        all.len(),
+        "Display strings collide across failure-contract variants: {rendered:?}"
+    );
+    assert!(rendered.iter().all(|s| !s.is_empty()));
+    // Distinct variants must also compare unequal to each other.
+    for (i, a) in all.iter().enumerate() {
+        for (j, b) in all.iter().enumerate() {
+            assert_eq!(i == j, a == b, "variant {i} vs {j} equality is wrong");
+        }
+    }
+}
+
 proptest! {
+    /// Signer secret material never appears in `Debug` or serde output in any
+    /// plausible encoding (raw bytes, hex, base64, or a decimal byte list).
+    #[test]
+    fn secret_bytes_never_leak_in_any_encoding(
+        raw in proptest::collection::vec(any::<u8>(), 8..64)
+    ) {
+        use base64::Engine as _;
+        let secret = ferrogate_payments::SecretBytes::new(raw.clone());
+        let debug = format!("{secret:?}");
+        let json = serde_json::to_string(&secret).unwrap();
+
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let hex_upper = hex.to_uppercase();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let decimals = raw
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lossy = String::from_utf8_lossy(&raw).into_owned();
+
+        for sink in [&debug, &json] {
+            prop_assert!(!sink.contains(&hex), "hex leaked: {}", sink);
+            prop_assert!(!sink.contains(&hex_upper), "HEX leaked: {}", sink);
+            prop_assert!(!sink.contains(&b64), "base64 leaked: {}", sink);
+            prop_assert!(!sink.contains(&decimals), "byte list leaked: {}", sink);
+            prop_assert!(!sink.contains(&lossy), "raw bytes leaked: {}", sink);
+        }
+        prop_assert!(debug.contains("REDACTED"));
+        prop_assert_eq!(json, "\"[REDACTED]\"".to_string());
+    }
+
     /// Arbitrary bytes-as-header never panic anywhere in the pipeline.
     #[test]
     fn arbitrary_header_never_panics(input in proptest::collection::vec(any::<u8>(), 0..2048)) {
