@@ -1291,3 +1291,225 @@ fn confirmed_amount_that_does_not_parse_stays_fail_closed() {
         "the leading `+` never bypasses the underpayment check"
     );
 }
+
+// --------------------------------------------------------------------------
+// #469 test-gate additions: the same money invariants proven END-TO-END through
+// the reconciler (storage + wallet + audit), not only through the pure decision
+// function. `decide_confirmed` can be right while the drive path over-captures,
+// strands the hold, or flattens the evidence, so each of these re-proves the
+// invariant on the durable state the operator actually reads.
+// --------------------------------------------------------------------------
+
+/// [`open_request`] with an explicit OWED atomic amount, so a test can pin the
+/// exact owed/settled pair that trips a lexical string comparison end-to-end.
+fn open_request_owing(attempt_id: &str, credits_amount: i64, owed_atomic: &str) -> PaidEgressOpen {
+    PaidEgressOpen {
+        atomic_amount: owed_atomic.into(),
+        ..open_request(attempt_id, credits_amount)
+    }
+}
+
+/// [`seed_outcome_unknown`] for an attempt owing `owed_atomic`.
+fn seed_outcome_unknown_owing(
+    state: &AppState,
+    attempt_id: &str,
+    credits: i64,
+    signature: &str,
+    owed_atomic: &str,
+) {
+    let loop_ = state.x402_settlement_loop();
+    block_on(loop_.open(
+        &open_request_owing(attempt_id, credits, owed_atomic),
+        OPEN_AT,
+    ))
+    .expect("open");
+    block_on(loop_.submit(attempt_id, None, SUBMIT_AT, SUBMIT_AT)).expect("submit");
+    let header = merchant_success_header(signature, owed_atomic);
+    block_on(loop_.finalize(
+        attempt_id,
+        &SettlementEvidence::Unknown {
+            response: Some(&header),
+            transaction_signature: None,
+        },
+        PARK_AT,
+    ))
+    .expect("park outcome_unknown");
+}
+
+/// Drive one reconcile tick over a single attempt owing `owed` whose chain-
+/// confirmed transfer was `settled`, and return the tick report.
+fn reconcile_owing(
+    state: &AppState,
+    attempt_id: &str,
+    credits: i64,
+    seed: u8,
+    owed: &str,
+    settled: &str,
+) -> X402ReconcileReport {
+    let sig = signature(seed);
+    seed_outcome_unknown_owing(state, attempt_id, credits, &sig, owed);
+    let rpc = FakeOnChainRpc::default().with(
+        &sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: settled.into(),
+        },
+    );
+    block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW))
+}
+
+#[test]
+fn reconcile_lexical_trap_owed_9_settled_10_settles_and_captures_end_to_end() {
+    // THE LEXICAL TRAP, driven all the way to the durable state: a string compare
+    // reads "10" < "9", so a lexical implementation would park confirmed money in
+    // outcome_unknown with the hold stranded -- exactly the #469 bug, one digit
+    // wide. Integer comparison must SETTLE and CAPTURE.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let report = reconcile_owing(&state, "lex1", 500, 60, "9", "10");
+
+    assert_eq!(
+        report.settled, 1,
+        "owed 9, settled 10 is a spec-valid settle"
+    );
+    assert_eq!(report.overpaid, 1);
+    assert_eq!(report.mismatch, 0, "never the fail-closed mismatch");
+    assert_eq!(
+        block_on(attempt_state(&state, "lex1")),
+        PAYMENT_ATTEMPT_SETTLED,
+        "terminal, NOT stranded in outcome_unknown"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "lex1")).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED),
+        "the hold is CAPTURED, not stranded"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 9_500);
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "lex1")).as_deref(),
+        Some("10")
+    );
+    let message = audit_message(&state, "lex1", "x402.settlement.settled");
+    assert!(
+        message.contains("EXCEEDING") && message.contains("excess 1"),
+        "audit names the 1-unit excess: {message}"
+    );
+}
+
+#[test]
+fn reconcile_lexical_trap_owed_10_settled_9_fails_closed_end_to_end() {
+    // The MIRROR of the trap: lexically "9" > "10", so a lexical implementation
+    // would CAPTURE a real underpayment. The hold must stay active and the wallet
+    // untouched.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let report = reconcile_owing(&state, "lex2", 500, 61, "10", "9");
+
+    assert_eq!(report.settled, 0, "owed 10, settled 9 must NEVER settle");
+    assert_eq!(report.mismatch, 1);
+    assert_eq!(
+        block_on(attempt_state(&state, "lex2")),
+        PAYMENT_ATTEMPT_OUTCOME_UNKNOWN
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "lex2")).as_deref(),
+        Some(WALLET_RESERVATION_ACTIVE),
+        "hold RETAINED on a short transfer"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 10_000, "nothing captured");
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "lex2")),
+        None,
+        "a short transfer records no settled amount"
+    );
+}
+
+#[test]
+fn reconcile_u64_max_overpayment_captures_only_the_owed_hold() {
+    // The maximal representable on-chain overpayment against a 1-atomic-unit debt.
+    // If the capture were ever derived from the OBSERVED amount instead of the
+    // reserved hold, this is the input that would drain the wallet; the hold is
+    // 500 credits and 500 credits is all that may move.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let max = u64::MAX.to_string();
+    let report = reconcile_owing(&state, "big1", 500, 62, "1", &max);
+
+    assert_eq!(report.settled, 1);
+    assert_eq!(report.overpaid, 1);
+    assert_eq!(
+        block_on(wallet_balance(&state)),
+        9_500,
+        "the capture debits the RESERVED credits only -- never the observed amount"
+    );
+    assert_eq!(
+        block_on(reservation_status(&state, "big1")).as_deref(),
+        Some(WALLET_RESERVATION_SETTLED)
+    );
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "big1")).as_deref(),
+        Some(max.as_str()),
+        "the observed on-chain amount is persisted verbatim, unclamped"
+    );
+    let message = audit_message(&state, "big1", "x402.settlement.settled");
+    assert!(
+        message.contains(&(u64::MAX as u128 - 1).to_string()),
+        "the excess is computed in u128 and never wraps: {message}"
+    );
+}
+
+#[test]
+fn reconcile_exact_settle_in_non_canonical_form_is_not_recorded_as_an_overpayment() {
+    // A leading-zero form of the owed amount is the SAME integer. The persisted
+    // `settled_atomic_amount` string then differs from the attempt's
+    // `atomic_amount` while the transfer was exactly exact, so the evidence must
+    // not be read by string equality: the audit event is the field that separates
+    // "overpaid" from "exact", and it must say EXACT here.
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let report = reconcile_owing(&state, "zero1", 500, 63, "1000000", "01000000");
+
+    assert_eq!(report.settled, 1);
+    assert_eq!(
+        report.overpaid, 0,
+        "a leading-zero form of the owed amount is EXACT, not an overpayment"
+    );
+    assert_eq!(
+        block_on(stored_settled_atomic_amount(&state, "zero1")).as_deref(),
+        Some("01000000"),
+        "the observed string is persisted verbatim (differs from the owed string)"
+    );
+    let message = audit_message(&state, "zero1", "x402.settlement.settled");
+    assert!(
+        message.contains("exact owed amount") && !message.contains("EXCEEDING"),
+        "the audit event classifies it as exact: {message}"
+    );
+    assert_eq!(block_on(wallet_balance(&state)), 9_500);
+}
+
+#[test]
+fn reconcile_overpaid_settlement_is_never_captured_twice_on_a_later_tick() {
+    // An overpaid attempt reaches a TERMINAL state, so a later tick must not pick
+    // it up again and must not debit the wallet a second time. (A settle that left
+    // the attempt re-reconcilable would double-charge the tenant for one transfer.)
+    let state = seed_state(10_000, reconciler_config(true, 100, 60, 900));
+    let sig = signature(64);
+    seed_outcome_unknown_owing(&state, "twice1", 500, &sig, "1000000");
+    let rpc = FakeOnChainRpc::default().with(
+        &sig,
+        OnChainSettlementStatus::Confirmed {
+            settled_atomic_amount: "1500000".into(),
+        },
+    );
+
+    let first = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW));
+    assert_eq!(first.settled, 1);
+    assert_eq!(block_on(wallet_balance(&state)), 9_500);
+
+    let second = block_on(state.reconcile_x402_settlements_once(&rpc, RECONCILE_NOW + 10_000));
+    assert_eq!(
+        second.scanned, 0,
+        "a settled attempt is no longer reconcilable"
+    );
+    assert_eq!(second.settled, 0);
+    assert_eq!(
+        block_on(wallet_balance(&state)),
+        9_500,
+        "the hold is captured exactly once across ticks"
+    );
+}
