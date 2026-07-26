@@ -202,7 +202,7 @@ async fn exercise(
         || s1.settlement.delta_credits != -600
         || s1.settlement.balance_after_credits != Some(400)
     {
-        return Err(format!("settle debit mismatch: {:?}", s1).into());
+        return Err(format!("settle debit mismatch: {s1:?}").into());
     }
     println!("1 settle_wallet_balance -600 -> newly_applied, balance_after=400");
 
@@ -211,7 +211,7 @@ async fn exercise(
         .settle_wallet_balance("gate456-pay-1", tenant_a, -600, now + 20)
         .await?;
     if s1b.newly_applied || s1b.settlement.balance_after_credits != Some(400) {
-        return Err(format!("settle replay mismatch: {:?}", s1b).into());
+        return Err(format!("settle replay mismatch: {s1b:?}").into());
     }
     println!("2 settle replay -> newly_applied=false (idempotent, no re-debit)");
 
