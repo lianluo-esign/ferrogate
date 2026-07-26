@@ -353,6 +353,7 @@ Options:
 - `--workspace <WORKSPACE>` — Default workspace
 - `--token-env <VAR>` — Name of the environment variable holding the bearer token, read at call time. The token value is never stored in the context
 - `--token-stdin` — Read the bearer token from stdin at call time instead of an env var
+- `--ca-bundle <PATH>` — Path to a PEM CA bundle used to verify this endpoint's TLS certificate in addition to the system trust roots (for a private/internal CA)
 - `--insecure-skip-tls-verify` — Skip TLS certificate verification for this context (opt-in, insecure; intended for local self-signed dev endpoints only)
 - `--use` — After creating, select this context as the current one
 - `--overwrite` — Overwrite an existing context with the same name
@@ -510,6 +511,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -535,6 +538,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -560,6 +565,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -585,6 +592,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -610,6 +619,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -635,6 +646,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -660,6 +673,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -693,6 +708,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -731,6 +748,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -756,6 +775,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -781,6 +802,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -806,6 +829,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -831,6 +856,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -856,6 +883,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -894,6 +923,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -919,6 +950,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -944,6 +977,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -969,6 +1004,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -994,6 +1031,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1019,6 +1058,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1056,6 +1097,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1081,6 +1124,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1106,6 +1151,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1131,6 +1178,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1156,6 +1205,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1194,6 +1245,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1219,6 +1272,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1244,6 +1299,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1269,6 +1326,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1294,6 +1353,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1319,6 +1380,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1359,6 +1422,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1384,6 +1449,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1409,6 +1476,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1434,6 +1503,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1459,6 +1530,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1484,6 +1557,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1509,6 +1584,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1534,6 +1611,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1572,6 +1651,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1597,6 +1678,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1622,6 +1705,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1647,6 +1732,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1672,6 +1759,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1697,6 +1786,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1733,6 +1824,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1758,6 +1851,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1783,6 +1878,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1808,6 +1905,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1844,6 +1943,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1869,6 +1970,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1894,6 +1997,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1919,6 +2024,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1957,6 +2064,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -1982,6 +2091,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2007,6 +2118,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2032,6 +2145,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2057,6 +2172,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2082,6 +2199,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2117,6 +2236,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2142,6 +2263,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2167,6 +2290,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2205,6 +2330,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2230,6 +2357,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2255,6 +2384,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2280,6 +2411,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2305,6 +2438,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2330,6 +2465,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2370,6 +2507,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2395,6 +2534,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2420,6 +2561,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2445,6 +2588,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2470,6 +2615,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2495,6 +2642,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2520,6 +2669,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2545,6 +2696,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2583,6 +2736,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2608,6 +2763,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2633,6 +2790,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2658,6 +2817,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2683,6 +2844,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2708,6 +2871,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2743,6 +2908,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2768,6 +2935,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2793,6 +2962,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2830,6 +3001,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2855,6 +3028,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2880,6 +3055,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2905,6 +3082,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2930,6 +3109,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2971,6 +3152,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -2996,6 +3179,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3021,6 +3206,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3046,6 +3233,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3071,6 +3260,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3096,6 +3287,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3121,6 +3314,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3146,6 +3341,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3171,6 +3368,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3204,6 +3403,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3237,6 +3438,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3270,6 +3473,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3303,6 +3508,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3341,6 +3548,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3366,6 +3575,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3391,6 +3602,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3416,6 +3629,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3441,6 +3656,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3466,6 +3683,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3502,6 +3721,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3527,6 +3748,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3552,6 +3775,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3577,6 +3802,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3610,6 +3837,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3644,6 +3873,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3669,6 +3900,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3706,6 +3939,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3731,6 +3966,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3756,6 +3993,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3781,6 +4020,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3806,6 +4047,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3848,6 +4091,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3873,6 +4118,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3898,6 +4145,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3923,6 +4172,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3948,6 +4199,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3973,6 +4226,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -3998,6 +4253,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4023,6 +4280,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4048,6 +4307,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4073,6 +4334,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4106,6 +4369,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4139,6 +4404,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4181,6 +4448,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4206,6 +4475,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4231,6 +4502,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4256,6 +4529,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4281,6 +4556,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4306,6 +4583,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4331,6 +4610,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4356,6 +4637,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4381,6 +4664,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4406,6 +4691,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4441,6 +4728,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4466,6 +4755,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4491,6 +4782,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4526,6 +4819,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4551,6 +4846,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4576,6 +4873,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4613,6 +4912,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4638,6 +4939,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4663,6 +4966,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4688,6 +4993,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4713,6 +5020,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4752,6 +5061,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4777,6 +5088,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4802,6 +5115,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4827,6 +5142,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4852,6 +5169,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4877,6 +5196,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4902,6 +5223,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4940,6 +5263,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4965,6 +5290,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -4990,6 +5317,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5015,6 +5344,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5040,6 +5371,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5065,6 +5398,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5102,6 +5437,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5127,6 +5464,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5152,6 +5491,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5177,6 +5518,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5202,6 +5545,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5239,6 +5584,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5264,6 +5611,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5289,6 +5638,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5314,6 +5665,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5339,6 +5692,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5374,6 +5729,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5399,6 +5756,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5424,6 +5783,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5463,6 +5824,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5488,6 +5851,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5513,6 +5878,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5538,6 +5905,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5563,6 +5932,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5588,6 +5959,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5613,6 +5986,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5648,6 +6023,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5673,6 +6050,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5698,6 +6077,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5733,6 +6114,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5758,6 +6141,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5783,6 +6168,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5820,6 +6207,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5845,6 +6234,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5870,6 +6261,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5895,6 +6288,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5920,6 +6315,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5954,6 +6351,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -5979,6 +6378,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6012,6 +6413,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6045,6 +6448,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6082,6 +6487,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6107,6 +6514,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6132,6 +6541,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6157,6 +6568,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6182,6 +6595,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6215,6 +6630,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6249,6 +6666,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6274,6 +6693,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6308,6 +6729,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6333,6 +6756,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6371,6 +6796,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6396,6 +6823,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6421,6 +6850,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6446,6 +6877,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6471,6 +6904,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation
@@ -6496,6 +6931,8 @@ Options:
 - `--limit <N>` — Page size for a list verb
 - `--offset <N>` — Starting offset for a list verb
 - `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
 - `--context <CONTEXT>` — Use a specific named context instead of the current one
 - `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
 - `--tenant <TENANT>` — Override the tenant for this invocation

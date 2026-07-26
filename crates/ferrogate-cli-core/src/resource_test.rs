@@ -121,3 +121,36 @@ fn redact_leaves_null_secret_as_null() {
     assert!(value["secret"].is_null());
     assert_eq!(value["key"], "<redacted>");
 }
+
+/// Sort keys reach the server as repeatable, order-preserving `sort` query
+/// parameters alongside pagination and filters — the `--sort` half of the
+/// list surface that was previously unimplemented end to end.
+#[test]
+fn list_forwards_sort_keys_in_declaration_order() {
+    let params = ListParams::new()
+        .with_page(PageRequest::first(10))
+        .with_filter("status", "active")
+        .with_sort("tier")
+        .with_sort("-created_at");
+    let spec = TENANTS.list(&params).unwrap();
+    assert_eq!(
+        spec.query,
+        vec![
+            ("offset".to_string(), "0".to_string()),
+            ("limit".to_string(), "10".to_string()),
+            ("status".to_string(), "active".to_string()),
+            // The leading `-` descending marker is passed through verbatim:
+            // ordering is evaluated server-side over the whole collection.
+            ("sort".to_string(), "tier".to_string()),
+            ("sort".to_string(), "-created_at".to_string()),
+        ]
+    );
+}
+
+/// No sort key means no `sort` parameter at all — the client never invents an
+/// ordering the operator did not ask for.
+#[test]
+fn list_without_sort_sends_no_sort_parameter() {
+    let spec = TENANTS.list(&ListParams::new()).unwrap();
+    assert!(spec.query.is_empty(), "unexpected query: {:?}", spec.query);
+}

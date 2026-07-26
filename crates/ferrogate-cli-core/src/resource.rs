@@ -140,14 +140,15 @@ impl ResourceApi {
     }
 }
 
-/// Query parameters for a list request: optional pagination plus explicit
-/// server-side filters. Filters are never inferred from local config — the
-/// caller passes exactly what it wants sent — which keeps tenant/resource
-/// targeting auditable.
+/// Query parameters for a list request: optional pagination, explicit
+/// server-side filters, and explicit server-side sort keys. None of them are
+/// ever inferred from local config — the caller passes exactly what it wants
+/// sent — which keeps tenant/resource targeting auditable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListParams {
     page: Option<PageRequest>,
     filters: Vec<(String, String)>,
+    sort: Vec<String>,
 }
 
 impl ListParams {
@@ -168,13 +169,30 @@ impl ListParams {
         self
     }
 
-    /// Fold pagination and filters into a request spec.
+    /// Add a server-side sort key, repeatable and order-preserving so
+    /// `sort=tier&sort=-created_at` reaches the server as a stable tie-break
+    /// chain.
+    ///
+    /// The key is passed through verbatim, including a leading `-` descending
+    /// marker: the client deliberately does not reinterpret or apply it. Sort
+    /// order is only meaningful over the whole collection, and the client only
+    /// ever holds the pages it fetched — locally re-sorting a page would
+    /// present a per-page ordering as a collection ordering, which is a lie.
+    pub fn with_sort(mut self, key: impl Into<String>) -> ListParams {
+        self.sort.push(key.into());
+        self
+    }
+
+    /// Fold pagination, filters, and sort keys into a request spec.
     fn apply(&self, mut spec: RequestSpec) -> RequestSpec {
         if let Some(page) = &self.page {
             spec = spec.with_page(page);
         }
         for (key, value) in &self.filters {
             spec = spec.with_query(key.clone(), value.clone());
+        }
+        for key in &self.sort {
+            spec = spec.with_query("sort", key.clone());
         }
         spec
     }

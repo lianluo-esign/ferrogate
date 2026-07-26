@@ -86,5 +86,15 @@ pub(crate) fn report_error(error: &CliError) {
         if let Some(retry_after) = api.retry_after_secs {
             eprintln!("  retry-after: {retry_after}s");
         }
+        // The structured payload is the actionable half of a validation or
+        // conflict failure (`expected_version`, per-field violations, quota
+        // headroom). Decoding it in the transport and then never showing it
+        // would make the "preserve error details" contract a no-op.
+        if let Some(details) = &api.details {
+            match serde_json::to_string(details) {
+                Ok(rendered) => eprintln!("  details: {rendered}"),
+                Err(error) => eprintln!("  details: <unrenderable: {error}>"),
+            }
+        }
     }
 }

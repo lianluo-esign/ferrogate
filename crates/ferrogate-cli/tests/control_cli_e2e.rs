@@ -577,3 +577,325 @@ fn assert_no_secret(output: &Output, secret: &str) {
         stderr(output)
     );
 }
+
+// ----- list pagination through the real binary -------------------------------
+
+/// Spawn a loopback server that answers each request from `pages`, keyed by the
+/// `offset` query parameter, so a multi-page walk is driven by the CLI's own
+/// cursor arithmetic rather than by a fixed canned reply. An offset with no
+/// scripted page yields an empty page, which would end the walk early and fail
+/// the assertions below — the walk cannot pass by accident.
+fn spawn_paged_http(pages: Vec<(u64, String)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let offset = request
+                .split_whitespace()
+                .nth(1)
+                .and_then(|target| target.split('?').nth(1))
+                .and_then(|query| {
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("offset=")?.parse::<u64>().ok())
+                })
+                .unwrap_or(0);
+            let body = pages
+                .iter()
+                .find(|(page_offset, _)| *page_offset == offset)
+                .map(|(_, body)| body.clone())
+                .unwrap_or_else(|| r#"{"items":[],"total":0}"#.to_string());
+            let response = http_response(200, "OK", &[("content-type", "application/json")], &body);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// `--all-pages` walks past the first server page and loses no rows. This is
+/// the CLI-level proof that pagination is wired end to end — the pure
+/// `next_page`/`plan_all_pages` unit tests exercise the arithmetic, this
+/// exercises the binary that calls it.
+#[test]
+fn ctl_list_all_pages_walks_every_page_without_losing_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_paged_http(vec![
+        (
+            0,
+            r#"{"items":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
+        ),
+        (
+            2,
+            r#"{"items":[{"id":"vk-3"},{"id":"vk-4"}],"total":5}"#.to_string(),
+        ),
+        (4, r#"{"items":[{"id":"vk-5"}],"total":5}"#.to_string()),
+    ]);
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--all-pages",
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let body: serde_json::Value = serde_json::from_str(stdout(&output).trim())
+        .unwrap_or_else(|error| panic!("stdout must be JSON ({error}): {}", stdout(&output)));
+    let ids: Vec<&str> = body["items"]
+        .as_array()
+        .expect("merged items array")
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["vk-1", "vk-2", "vk-3", "vk-4", "vk-5"],
+        "every page's rows must survive the merge"
+    );
+    assert_eq!(body["total"], 5);
+    // A complete result never nags about --all-pages.
+    assert!(
+        !stderr(&output).contains("--all-pages"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+/// Without `--all-pages` a list still returns one server page — but it must say
+/// so. A truncated page that looks complete is the failure mode the issue's
+/// "without silently truncating results" bullet forbids.
+#[test]
+fn ctl_list_single_page_announces_the_remaining_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_paged_http(vec![(
+        0,
+        r#"{"items":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
+    )]);
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains("showing 2 of 5") && diagnostics.contains("--all-pages"),
+        "the operator must be told rows were left behind: {diagnostics}"
+    );
+    // The notice is a diagnostic, so a piped JSON payload stays clean.
+    assert!(
+        !stdout(&output).contains("note:"),
+        "stdout must be data only"
+    );
+}
+
+/// Table mode must show the envelope's `total`, otherwise a truncated page is
+/// visually identical to a complete one in the default output format.
+#[test]
+fn ctl_list_table_shows_pagination_metadata() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_paged_http(vec![(
+        0,
+        r#"{"items":[{"id":"vk-1"}],"total":500}"#.to_string(),
+    )]);
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--limit",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("ID") && out.contains("vk-1"), "{out}");
+    assert!(
+        out.contains("total") && out.contains("500"),
+        "the row count must survive table rendering: {out}"
+    );
+}
+
+/// `--sort` reaches the server verbatim, including the leading `-` descending
+/// marker that clap would otherwise swallow as an unknown short flag.
+#[test]
+fn ctl_list_sort_flag_reaches_the_server() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let _ = sender.send(request);
+            let response = http_response(
+                200,
+                "OK",
+                &[("content-type", "application/json")],
+                r#"{"items":[],"total":0}"#,
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}"),
+            "--sort",
+            "tier",
+            "--sort",
+            "-created_at",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let request = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        request.contains("sort=tier"),
+        "request line missing the primary sort key: {request}"
+    );
+    assert!(
+        request.contains("sort=-created_at") || request.contains("sort=%2Dcreated_at"),
+        "request line missing the descending sort key: {request}"
+    );
+}
+
+/// A server error's structured `details` payload reaches the operator. The
+/// transport decoded it from the start; nothing rendered it, so
+/// `expected_version`-style payloads never reached a human.
+#[test]
+fn api_error_details_are_rendered_to_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_http(http_response(
+        409,
+        "Conflict",
+        &[("content-type", "application/json")],
+        r#"{"error":{"message":"version conflict","type":"ferrogate_error","code":"version_conflict","request_id":"rid-9","expected_version":3}}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 4, "409 is the not-found/conflict exit class");
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains("details:") && diagnostics.contains("expected_version"),
+        "structured error details must reach the operator: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("code: version_conflict") && diagnostics.contains("request-id: rid-9"),
+        "{diagnostics}"
+    );
+}
+
+/// A context CA bundle is honored by the client, not silently ignored: a
+/// bundle that is not valid PEM fails the command with an actionable message
+/// instead of quietly falling back to the system trust roots.
+#[test]
+fn context_ca_bundle_is_honored_not_ignored() {
+    let home = tempfile::tempdir().unwrap();
+    let bundle = home.path().join("not-a-bundle.pem");
+    std::fs::write(&bundle, b"this is not a certificate").unwrap();
+    let endpoint = spawn_http(http_response(200, "OK", &[], STATUS_BODY));
+
+    let create = base_cmd(home.path())
+        .args([
+            "context",
+            "create",
+            "ca-ctx",
+            "--endpoint",
+            &endpoint,
+            "--ca-bundle",
+            bundle.to_str().unwrap(),
+            "--use",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&create), 0, "stderr: {}", stderr(&create));
+
+    // The bundle round-trips through the store and is shown back.
+    let show = base_cmd(home.path())
+        .args(["context", "show", "ca-ctx"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&show).contains("ca_bundle") && stdout(&show).contains("not-a-bundle.pem"),
+        "stdout: {}",
+        stdout(&show)
+    );
+
+    let output = base_cmd(home.path())
+        .args(["ops", "status", "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        code(&output),
+        2,
+        "an unusable CA bundle is a configuration error, not a silent fallback: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("CA bundle"),
+        "the diagnostic must name the bundle: {}",
+        stderr(&output)
+    );
+}

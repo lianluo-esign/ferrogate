@@ -46,7 +46,8 @@ use ferrogate_cli_core::output::{render_json, OutputFormat, Table};
 use ferrogate_cli_core::registry_helpers::ResourceInput;
 use ferrogate_cli_core::resource::ListParams;
 use ferrogate_cli_core::transport::{
-    ApiResponse, ControlPlaneClient, PageRequest, ReqwestTransport,
+    page_envelope, ApiResponse, ControlPlaneClient, PageRequest, ReqwestTransport,
+    DEFAULT_PAGE_SIZE, PAGE_ITEM_KEYS,
 };
 use serde_json::{Map, Value};
 
@@ -88,6 +89,20 @@ struct ResourceArgs {
     /// Server-side list filter as `KEY=VALUE` (repeatable).
     #[arg(long = "filter", value_name = "KEY=VALUE")]
     filters: Vec<String>,
+
+    /// Server-side sort key for a list verb; prefix with `-` for descending.
+    /// Repeatable and order-preserving, so the first key is the primary sort.
+    // `allow_hyphen_values` is required, not cosmetic: without it clap reads
+    // the documented descending form `--sort -created_at` as an unknown `-c`
+    // flag, making descending sort unreachable from the command line.
+    #[arg(long = "sort", value_name = "FIELD", allow_hyphen_values = true)]
+    sorts: Vec<String>,
+
+    /// Fetch every page of a list verb instead of a single server page, using
+    /// `--limit` as the page size. Mutually exclusive with `--offset`, which
+    /// selects one page.
+    #[arg(long, conflicts_with = "offset")]
+    all_pages: bool,
 }
 
 impl ResourceArgs {
@@ -95,11 +110,19 @@ impl ResourceArgs {
     /// [`ResourceInput`] the shared request builders consume.
     fn to_input(&self) -> CliResult<ResourceInput> {
         let mut list = ListParams::new();
-        if self.limit.is_some() || self.offset.is_some() {
+        // Under --all-pages the walker owns the cursor, so no offset/limit is
+        // baked into the spec here; `--limit` becomes the walk's page size.
+        if !self.all_pages && (self.limit.is_some() || self.offset.is_some()) {
             list = list.with_page(PageRequest {
                 offset: self.offset.unwrap_or(0),
                 limit: self.limit,
             });
+        }
+        for sort in &self.sorts {
+            if sort.trim().is_empty() {
+                return Err(CliError::usage("--sort key must not be empty".to_string()));
+            }
+            list = list.with_sort(sort.trim());
         }
         for filter in &self.filters {
             let (key, value) = filter.split_once('=').ok_or_else(|| {
@@ -240,11 +263,17 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let credential = resolve_credential(&effective.auth, &ProcessSecretResolver)?;
     let output_format = effective.output;
 
+    let all_pages = resource.all_pages;
+    let page_size = resource.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     let runtime = dispatch::runtime()?;
     let response: ApiResponse = runtime.block_on(async move {
         let transport = ReqwestTransport::new(&effective)?;
         let client = ControlPlaneClient::new(effective, credential, transport);
-        client.send(&spec).await
+        if all_pages {
+            client.send_all_pages(&spec, page_size).await
+        } else {
+            client.send(&spec).await
+        }
     })?;
 
     // Correlation ids are diagnostics → stderr; the payload stays clean on
@@ -265,7 +294,45 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
         OutputFormat::Json => println!("{}", render_json(&body)?),
         OutputFormat::Table => println!("{}", render_table(&body)?),
     }
+
+    // A single-page list must never look complete when it is not. The notice
+    // is a diagnostic → stderr, so it cannot corrupt a piped JSON payload.
+    if !all_pages {
+        if let Some(notice) = truncation_notice(&body, resource.offset.unwrap_or(0), resource.limit)
+        {
+            eprintln!("{notice}");
+        }
+    }
     Ok(())
+}
+
+/// Build the operator-facing notice that a single-page list is — or may be —
+/// incomplete, or `None` when the page is provably the whole collection.
+///
+/// This is what keeps the default one-page list from being the silent
+/// truncation the issue forbids: whenever rows were left behind, or whenever
+/// the server gave us no way to know, the operator is told so and pointed at
+/// `--all-pages`. Pure, so every branch is unit-testable.
+fn truncation_notice(body: &Value, offset: u64, limit: Option<u64>) -> Option<String> {
+    let envelope = page_envelope(body)?;
+    let returned = envelope.items.len() as u64;
+    match envelope.total {
+        Some(total) if offset.saturating_add(returned) < total => Some(format!(
+            "note: showing {returned} of {total} rows (offset {offset}); \
+             re-run with --all-pages to fetch every row"
+        )),
+        Some(_) => None,
+        // With no server-reported total, a page that came back exactly full is
+        // indistinguishable from a truncated one. Say that plainly instead of
+        // implying completeness.
+        None => match limit {
+            Some(limit) if returned > 0 && returned >= limit => Some(format!(
+                "note: returned a full page of {returned} rows and the server reported no total; \
+                 more rows may exist — re-run with --all-pages to be sure"
+            )),
+            _ => None,
+        },
+    }
 }
 
 /// Project an arbitrary Control Plane API response document into a stable
@@ -279,15 +346,38 @@ fn render_table(body: &Value) -> CliResult<String> {
         Value::Null => Ok("(empty)".to_string()),
         Value::Array(items) => array_table(items),
         Value::Object(map) => {
-            for key in ["items", "data", "results", "records"] {
+            for key in PAGE_ITEM_KEYS {
                 if let Some(Value::Array(items)) = map.get(key) {
-                    return array_table(items);
+                    return list_envelope_table(map, key, items);
                 }
             }
             object_table(map)
         }
         other => Ok(render_scalar(other)),
     }
+}
+
+/// Render a list envelope as the item table followed by the envelope's own
+/// metadata (`total`, `next_offset`, …).
+///
+/// Rendering only the item array — as the first cut did — made a truncated
+/// page visually identical to a complete one in the default output format,
+/// because `total` was silently discarded along with every other sibling key.
+fn list_envelope_table(
+    map: &Map<String, Value>,
+    items_key: &str,
+    items: &[Value],
+) -> CliResult<String> {
+    let table = array_table(items)?;
+    let metadata: Map<String, Value> = map
+        .iter()
+        .filter(|(key, _)| key.as_str() != items_key)
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if metadata.is_empty() {
+        return Ok(table);
+    }
+    Ok(format!("{table}\n\n{}", object_table(&metadata)?))
 }
 
 /// Render an array of items. A homogeneous array of objects becomes a columnar

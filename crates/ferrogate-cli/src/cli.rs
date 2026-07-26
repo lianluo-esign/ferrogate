@@ -379,6 +379,10 @@ pub(crate) struct ContextCreateArgs {
     /// Read the bearer token from stdin at call time instead of an env var.
     #[arg(long)]
     pub(crate) token_stdin: bool,
+    /// Path to a PEM CA bundle used to verify this endpoint's TLS certificate
+    /// in addition to the system trust roots (for a private/internal CA).
+    #[arg(long, value_name = "PATH", conflicts_with = "insecure_skip_tls_verify")]
+    pub(crate) ca_bundle: Option<String>,
     /// Skip TLS certificate verification for this context (opt-in, insecure;
     /// intended for local self-signed dev endpoints only).
     #[arg(long)]

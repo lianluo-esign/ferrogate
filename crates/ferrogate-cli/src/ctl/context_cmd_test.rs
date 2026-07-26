@@ -20,6 +20,7 @@ fn base_args() -> ContextCreateArgs {
         workspace: None,
         token_env: None,
         token_stdin: false,
+        ca_bundle: None,
         insecure_skip_tls_verify: false,
         use_now: false,
         overwrite: false,

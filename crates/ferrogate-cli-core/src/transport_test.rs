@@ -278,3 +278,172 @@ fn client_maps_error_envelope_to_cli_error() {
     let error = block_on(client.send(&spec)).unwrap_err();
     assert_eq!(error.exit_class(), ExitClass::Auth);
 }
+
+// ----- list-page recognition and the all-pages walk ---------------------------
+
+#[test]
+fn page_envelope_recognizes_the_list_shapes() {
+    let bare = serde_json::json!([{"id": "a"}, {"id": "b"}]);
+    let envelope = page_envelope(&bare).unwrap();
+    assert_eq!(envelope.items_key, None);
+    assert_eq!(envelope.items.len(), 2);
+    assert_eq!(envelope.total, None);
+
+    let wrapped = serde_json::json!({"items": [{"id": "a"}], "total": 7});
+    let envelope = page_envelope(&wrapped).unwrap();
+    assert_eq!(envelope.items_key, Some("items"));
+    assert_eq!(envelope.items.len(), 1);
+    assert_eq!(envelope.total, Some(7));
+
+    // Alternate envelope/total spellings the Control Plane API uses.
+    let alternate = serde_json::json!({"results": [], "total_count": 0});
+    let envelope = page_envelope(&alternate).unwrap();
+    assert_eq!(envelope.items_key, Some("results"));
+    assert_eq!(envelope.total, Some(0));
+
+    // A single object, a scalar, or null is not a list page.
+    assert!(page_envelope(&serde_json::json!({"id": "a"})).is_none());
+    assert!(page_envelope(&serde_json::json!("hello")).is_none());
+    assert!(page_envelope(&serde_json::Value::Null).is_none());
+}
+
+/// Fake transport that replies with a scripted sequence of responses and
+/// records every request it saw, so a multi-page walk is provable without a
+/// network.
+struct ScriptedTransport {
+    responses: Mutex<std::collections::VecDeque<RawResponse>>,
+    seen: Mutex<Vec<PreparedRequest>>,
+}
+
+impl ScriptedTransport {
+    fn new(bodies: Vec<&str>) -> ScriptedTransport {
+        ScriptedTransport {
+            responses: Mutex::new(
+                bodies
+                    .into_iter()
+                    .map(|body| RawResponse {
+                        status: 200,
+                        headers: vec![("x-request-id".to_string(), "rid-page".to_string())],
+                        body: body.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            ),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.url.clone())
+            .collect()
+    }
+}
+
+impl Transport for ScriptedTransport {
+    fn execute<'a>(
+        &'a self,
+        request: PreparedRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<RawResponse>> + Send + 'a>>
+    {
+        self.seen.lock().unwrap().push(request);
+        let next = self.responses.lock().unwrap().pop_front();
+        Box::pin(async move {
+            next.ok_or_else(|| CliError::transport("scripted transport ran out of responses"))
+        })
+    }
+}
+
+/// The client takes its transport by value; sharing it through an `Arc` lets
+/// the test still inspect the recorded requests afterwards, without adding a
+/// test-only accessor to the production client.
+impl Transport for std::sync::Arc<ScriptedTransport> {
+    fn execute<'a>(
+        &'a self,
+        request: PreparedRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<RawResponse>> + Send + 'a>>
+    {
+        ScriptedTransport::execute(self.as_ref(), request)
+    }
+}
+
+/// The walk visits every page and loses no row. This is the caller `next_page`
+/// and `plan_all_pages` previously lacked: the arithmetic is now executed, not
+/// merely described.
+#[test]
+fn send_all_pages_walks_every_page_and_loses_no_rows() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"{"items":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
+        r#"{"items":[{"id":"c"},{"id":"d"}],"total":5,"offset":2,"limit":2}"#,
+        r#"{"items":[{"id":"e"}],"total":5,"offset":4,"limit":2}"#,
+    ]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+    let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
+
+    let items = response.body["items"].as_array().unwrap();
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c", "d", "e"]);
+    // The server-reported total survives so the operator can cross-check.
+    assert_eq!(response.body["total"], 5);
+    // Per-page cursor keys would misdescribe the merged whole, so they go.
+    assert!(response.body.get("offset").is_none());
+    assert!(response.body.get("limit").is_none());
+    // The first page's correlation metadata identifies the operator's request.
+    assert_eq!(response.request_id.as_deref(), Some("rid-page"));
+
+    let urls = transport.urls();
+    assert_eq!(urls.len(), 3, "expected three page requests: {urls:?}");
+    assert!(urls[0].contains("offset=0") && urls[0].contains("limit=2"));
+    assert!(urls[1].contains("offset=2"));
+    assert!(urls[2].contains("offset=4"));
+}
+
+/// Without a server-reported total the walk still terminates on the first
+/// short page — and still returns every row it fetched.
+#[test]
+fn send_all_pages_stops_on_a_short_page_when_total_is_unknown() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"[{"id":"a"},{"id":"b"}]"#,
+        r#"[{"id":"c"}]"#,
+        // A third response is scripted but must never be requested; asking for
+        // it would exhaust nothing, so the assertion below is the real guard.
+        r#"[{"id":"never"}]"#,
+    ]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+    let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
+
+    let ids: Vec<&str> = response
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c"]);
+    assert_eq!(transport.urls().len(), 2);
+}
+
+/// `--all-pages` against a verb that does not return a list is an explicit
+/// usage error, never a quietly single-page answer.
+#[test]
+fn send_all_pages_rejects_a_non_list_response() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = ScriptedTransport::new(vec![r#"{"service":"ferrogate"}"#]);
+    let client = ControlPlaneClient::new(context, None, transport);
+    let spec = RequestSpec::get("/admin/v1/status");
+    let error = block_on(client.send_all_pages(&spec, 50)).unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(
+        error.to_string().contains("--all-pages"),
+        "message must name the flag: {error}"
+    );
+}

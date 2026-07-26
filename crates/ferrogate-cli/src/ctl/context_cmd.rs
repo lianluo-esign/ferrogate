@@ -64,6 +64,7 @@ fn create(args: ContextCreateArgs) -> CliResult<()> {
     context.tenant = args.tenant.clone();
     context.project = args.project.clone();
     context.workspace = args.workspace.clone();
+    context.ca_bundle_path = args.ca_bundle.clone();
     context.tls_insecure_skip_verify = args.insecure_skip_tls_verify;
     context.auth = auth.clone();
 
@@ -140,6 +141,7 @@ fn show(name: &str) -> CliResult<()> {
         vec!["workspace".to_string(), optional(&context.workspace)],
         // Credential SOURCE only — never the token value.
         vec!["auth".to_string(), context.auth.describe()],
+        vec!["ca_bundle".to_string(), optional(&context.ca_bundle_path)],
         vec![
             "tls_insecure_skip_verify".to_string(),
             context.tls_insecure_skip_verify.to_string(),

@@ -124,6 +124,8 @@ fn malformed_filter_is_a_usage_error() {
         limit: None,
         offset: None,
         filters: vec!["missing-equals".to_string()],
+        sorts: vec![],
+        all_pages: false,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("KEY=VALUE"));
@@ -138,6 +140,8 @@ fn malformed_body_is_a_usage_error() {
         limit: None,
         offset: None,
         filters: vec![],
+        sorts: vec![],
+        all_pages: false,
     };
     let error = args.to_input().unwrap_err();
     assert!(error.to_string().contains("not valid JSON"));
@@ -177,4 +181,169 @@ fn render_table_handles_empty_and_scalar() {
     assert_eq!(render_table(&json!([])).unwrap(), "(no results)");
     assert_eq!(render_table(&Value::Null).unwrap(), "(empty)");
     assert_eq!(render_table(&json!("hello")).unwrap(), "hello");
+}
+
+/// `--sort` is a real flag on every generic verb and folds into the request as
+/// repeatable server-side `sort` query parameters.
+#[test]
+fn sort_flags_reach_the_request_query() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    let matches = command
+        .try_get_matches_from([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--sort",
+            "tier",
+            "--sort",
+            "-created_at",
+        ])
+        .expect("valid invocation parses");
+    let verb_matches = matches
+        .subcommand()
+        .unwrap()
+        .1
+        .subcommand()
+        .unwrap()
+        .1
+        .clone();
+    let input = ResourceArgs::from_arg_matches(&verb_matches)
+        .unwrap()
+        .to_input()
+        .unwrap();
+    let spec = build_request("virtual-keys", "list", &input).unwrap();
+    assert!(
+        spec.query
+            .contains(&("sort".to_string(), "tier".to_string())),
+        "query: {:?}",
+        spec.query
+    );
+    assert!(
+        spec.query
+            .contains(&("sort".to_string(), "-created_at".to_string())),
+        "query: {:?}",
+        spec.query
+    );
+}
+
+#[test]
+fn empty_sort_key_is_a_usage_error() {
+    let args = ResourceArgs {
+        segments: vec![],
+        data: None,
+        file: None,
+        limit: None,
+        offset: None,
+        filters: vec![],
+        sorts: vec!["   ".to_string()],
+        all_pages: false,
+    };
+    let error = args.to_input().unwrap_err();
+    assert!(error.to_string().contains("--sort"));
+}
+
+/// `--all-pages` is a real flag, and it hands the cursor to the walker: the
+/// spec it builds carries no baked-in `offset`/`limit`, because `--limit` is
+/// the walk's page size rather than a one-page window.
+#[test]
+fn all_pages_leaves_the_cursor_to_the_walker() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    let matches = command
+        .try_get_matches_from([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--all-pages",
+            "--limit",
+            "25",
+        ])
+        .expect("valid invocation parses");
+    let verb_matches = matches
+        .subcommand()
+        .unwrap()
+        .1
+        .subcommand()
+        .unwrap()
+        .1
+        .clone();
+    let args = ResourceArgs::from_arg_matches(&verb_matches).unwrap();
+    assert!(args.all_pages);
+    assert_eq!(args.limit, Some(25));
+    let spec = build_request("virtual-keys", "list", &args.to_input().unwrap()).unwrap();
+    assert!(
+        !spec
+            .query
+            .iter()
+            .any(|(key, _)| key == "offset" || key == "limit"),
+        "the walker owns the cursor, spec query: {:?}",
+        spec.query
+    );
+}
+
+/// `--all-pages` and `--offset` are contradictory (every page vs. one page), so
+/// clap rejects the combination instead of silently honoring one.
+#[test]
+fn all_pages_conflicts_with_offset() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    assert!(command
+        .try_get_matches_from([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--all-pages",
+            "--offset",
+            "10"
+        ])
+        .is_err());
+}
+
+#[test]
+fn truncation_notice_flags_a_partial_page_against_a_known_total() {
+    let body = json!({"items": [{"id": "a"}, {"id": "b"}], "total": 9});
+    let notice = truncation_notice(&body, 0, Some(2)).expect("a partial page must be announced");
+    assert!(notice.contains("showing 2 of 9"), "{notice}");
+    assert!(notice.contains("--all-pages"), "{notice}");
+}
+
+#[test]
+fn truncation_notice_is_silent_when_the_page_is_the_whole_collection() {
+    let body = json!({"items": [{"id": "a"}, {"id": "b"}], "total": 2});
+    assert_eq!(truncation_notice(&body, 0, Some(50)), None);
+    // A later page that reaches the total is complete too.
+    let tail = json!({"items": [{"id": "c"}], "total": 3});
+    assert_eq!(truncation_notice(&tail, 2, Some(2)), None);
+}
+
+/// Without a server total, an exactly-full page is indistinguishable from a
+/// truncated one — the operator is told that rather than left to assume.
+#[test]
+fn truncation_notice_warns_on_a_full_page_with_no_total() {
+    let body = json!([{"id": "a"}, {"id": "b"}]);
+    let notice = truncation_notice(&body, 0, Some(2)).expect("a full page must be announced");
+    assert!(notice.contains("more rows may exist"), "{notice}");
+    // A short page under the same conditions is provably the last page.
+    assert_eq!(truncation_notice(&json!([{"id": "a"}]), 0, Some(2)), None);
+}
+
+/// A non-list response never produces a pagination notice.
+#[test]
+fn truncation_notice_ignores_non_list_documents() {
+    assert_eq!(
+        truncation_notice(&json!({"service": "ferrogate"}), 0, Some(10)),
+        None
+    );
+}
+
+/// Envelope metadata (notably `total`) must survive table rendering, otherwise
+/// a truncated page looks identical to a complete one in the default format.
+#[test]
+fn render_table_keeps_list_envelope_metadata() {
+    let body = json!({"items": [{"id": "x"}], "total": 500, "offset": 0});
+    let table = render_table(&body).unwrap();
+    assert!(table.contains("ID") && table.contains('x'));
+    assert!(table.contains("total") && table.contains("500"), "{table}");
+    assert!(table.contains("offset"), "{table}");
 }

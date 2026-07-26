@@ -336,6 +336,83 @@ impl PageRequest {
     }
 }
 
+/// Default page size for an all-pages walk when the caller named none.
+pub const DEFAULT_PAGE_SIZE: u64 = 100;
+
+/// Hard cap on how many pages one all-pages walk will fetch. A server that
+/// never reports a final page is a bug; failing loudly at the cap beats
+/// looping forever or silently returning a partial answer.
+const MAX_PAGES: u32 = 10_000;
+
+/// Response keys under which the Control Plane API returns a list page.
+/// Shared by the all-pages walker and by the table renderer so both agree on
+/// what "a page" looks like instead of each keeping its own list.
+pub const PAGE_ITEM_KEYS: [&str; 4] = ["items", "data", "results", "records"];
+
+/// Response keys carrying the collection-wide row count.
+const PAGE_TOTAL_KEYS: [&str; 3] = ["total", "total_count", "count"];
+
+/// A decoded list page: the item array, the envelope key it lived under
+/// (`None` for a bare top-level array), and the server-reported collection
+/// total when the envelope carried one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageEnvelope<'a> {
+    pub items_key: Option<&'static str>,
+    pub items: &'a [serde_json::Value],
+    pub total: Option<u64>,
+}
+
+/// Recognize a list response shape. Returns `None` when the document is not a
+/// list at all (a single object, a scalar, `null`), which is how callers tell
+/// "this verb does not paginate" apart from "this page is empty". Pure.
+pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
+    match body {
+        serde_json::Value::Array(items) => Some(PageEnvelope {
+            items_key: None,
+            items,
+            total: None,
+        }),
+        serde_json::Value::Object(map) => {
+            let key = PAGE_ITEM_KEYS
+                .iter()
+                .copied()
+                .find(|key| matches!(map.get(*key), Some(serde_json::Value::Array(_))))?;
+            let items = map.get(key)?.as_array()?;
+            let total = PAGE_TOTAL_KEYS
+                .iter()
+                .find_map(|total_key| map.get(*total_key)?.as_u64());
+            Some(PageEnvelope {
+                items_key: Some(key),
+                items,
+                total,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Rebuild one response document from every page's items.
+///
+/// Per-page cursor keys (`offset`/`limit`) are dropped because they describe a
+/// single page and would misdescribe the merged whole; `total` is left exactly
+/// as the server reported it so the operator can still cross-check the row
+/// count the walk produced.
+fn merge_pages(
+    body: serde_json::Value,
+    items_key: Option<&'static str>,
+    merged: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    match (items_key, body) {
+        (Some(key), serde_json::Value::Object(mut map)) => {
+            map.insert(key.to_string(), serde_json::Value::Array(merged));
+            map.remove("offset");
+            map.remove("limit");
+            serde_json::Value::Object(map)
+        }
+        _ => serde_json::Value::Array(merged),
+    }
+}
+
 /// Given how many items the current page returned and an optional known
 /// `total`, compute the next page — or `None` when iteration is complete.
 ///
@@ -406,6 +483,28 @@ impl ReqwestTransport {
     pub fn new(context: &EffectiveContext) -> CliResult<ReqwestTransport> {
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(context.timeout_millis));
+        if let Some(path) = &context.ca_bundle_path {
+            // A configured CA bundle is honored, not decorative: an unreadable
+            // or malformed bundle fails the command rather than silently
+            // falling back to the system roots. A field that deserializes but
+            // never reaches the client is the #188 ignored-field failure mode.
+            let pem = std::fs::read(path).map_err(|error| {
+                CliError::usage(format!("failed to read CA bundle '{path}': {error}"))
+            })?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|error| {
+                CliError::usage(format!(
+                    "CA bundle '{path}' is not a valid PEM certificate bundle: {error}"
+                ))
+            })?;
+            if certificates.is_empty() {
+                return Err(CliError::usage(format!(
+                    "CA bundle '{path}' contains no certificates"
+                )));
+            }
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
         if context.tls_insecure_skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -484,6 +583,70 @@ impl<T: Transport> ControlPlaneClient<T> {
         let prepared = prepare_request(spec, &self.context, self.credential.as_ref())?;
         let raw = self.transport.execute(prepared).await?;
         classify(&raw).map_err(CliError::from)
+    }
+
+    /// Walk every page of a list request and return one merged response.
+    ///
+    /// This is the executable half of the "explicit all-pages behavior without
+    /// silently truncating results" contract — [`next_page`] and
+    /// [`plan_all_pages`] describe the arithmetic, this is what actually runs
+    /// it. `spec` must **not** already carry `offset`/`limit`: the walk owns
+    /// the cursor, and a caller-supplied offset would make "every page"
+    /// ambiguous. Iteration stops only on [`next_page`]'s two honest stop
+    /// conditions (known total reached, or a short page when no total is
+    /// reported), so a partial result is impossible without an error.
+    ///
+    /// A response that is not a list page is a usage error rather than a
+    /// silently single-page answer: `--all-pages` on a non-list verb is a
+    /// mistake worth telling the operator about.
+    pub async fn send_all_pages(
+        &self,
+        spec: &RequestSpec,
+        page_size: u64,
+    ) -> CliResult<ApiResponse> {
+        let mut page = PageRequest::first(page_size.max(1));
+        let mut merged: Vec<serde_json::Value> = Vec::new();
+        let mut first: Option<ApiResponse> = None;
+        let mut items_key: Option<&'static str> = None;
+
+        for _ in 0..MAX_PAGES {
+            let paged = spec.clone().with_page(&page);
+            let response = self.send(&paged).await?;
+            let (returned, total) = {
+                let envelope = page_envelope(&response.body).ok_or_else(|| {
+                    CliError::usage(format!(
+                        "--all-pages requires a list response, but {} returned a non-list document",
+                        spec.path
+                    ))
+                })?;
+                // The first page fixes the envelope shape the merged result is
+                // rebuilt into; later pages only contribute rows.
+                if first.is_none() {
+                    items_key = envelope.items_key;
+                }
+                merged.extend(envelope.items.iter().cloned());
+                (envelope.items.len() as u64, envelope.total)
+            };
+            let next = next_page(&page, returned, total);
+            // Keep the FIRST page's correlation metadata: it identifies the
+            // request the operator actually issued.
+            if first.is_none() {
+                first = Some(response);
+            }
+            match next {
+                Some(next) => page = next,
+                None => {
+                    let mut whole = first.expect("the first page was recorded above");
+                    whole.body = merge_pages(whole.body, items_key, merged);
+                    return Ok(whole);
+                }
+            }
+        }
+
+        Err(CliError::transport(format!(
+            "--all-pages gave up after {MAX_PAGES} pages of {}; the server never reported a final page",
+            spec.path
+        )))
     }
 }
 
