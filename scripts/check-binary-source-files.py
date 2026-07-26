@@ -117,24 +117,12 @@ class ReviewedBinaryFile(NamedTuple):
     reason: str
 
 
-REVIEWED_BINARY_FILES: tuple[ReviewedBinaryFile, ...] = (
-    # Pre-existing offender, frozen so the gate can land without hijacking a
-    # file that another in-flight issue owns. This is a ratchet: delete the
-    # entry when the file is fixed, never add one to let new drift through.
-    ReviewedBinaryFile(
-        path="admin-console/src/pages/assets.tsx",
-        owner="admin-console assets page (#344)",
-        reason=(
-            "two literal NUL bytes are used as a composite-map-key delimiter "
-            "inside template literals (first at byte 5423, line 150). The "
-            "content fix belongs to the in-flight #344 Assets-page rewrite, "
-            "which owns this file; writing the delimiter as the escape "
-            "\\u0000 is byte-identical at runtime. Until then this page is "
-            "invisible to every repo-wide grep -- remove this entry with the "
-            "NUL bytes"
-        ),
-    ),
-)
+# Empty on purpose. The gate's only entry -- `admin-console/src/pages/assets.tsx`,
+# frozen here when #487 landed so the gate could ship without hijacking a file
+# #344 owned -- was removed by #344 when it replaced the NUL-byte composite map
+# key with a JSON-encoded one. The stale-entry check below is what forced that
+# removal, and is what keeps this table from rotting into a permanent exemption.
+REVIEWED_BINARY_FILES: tuple[ReviewedBinaryFile, ...] = ()
 
 
 def git(root: pathlib.Path, *args: str, tolerate_no_match: bool = False) -> bytes:

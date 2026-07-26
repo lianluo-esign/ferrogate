@@ -1841,6 +1841,9 @@ export const enRest = {
   "page.assets.storage.error": "Failed to load storage usage: {message}",
   "page.assets.storage.usageWithQuota": "{used} used of {quota}",
   "page.assets.storage.usageNoQuota": "{used} used (no quota configured)",
+  "page.assets.storage.remaining": "{remaining} remaining ({percent} of quota used).",
+  "page.assets.storage.pressure":
+    "Quota pressure: {percent} of the storage quota is used. Further pushes and presigned commits will be rejected once the quota is reached.",
   "page.assets.push.title": "Push an asset",
   "page.assets.push.description":
     "Content is scanned and type-checked before it's stored (issue #179) -- a push can be rejected with a 422 if it fails those checks.",
@@ -1850,6 +1853,10 @@ export const enRest = {
   "page.assets.field.file": "File",
   "page.assets.push.submit": "Push",
   "page.assets.push.submitting": "Pushing…",
+  "page.assets.push.inlineLimit":
+    "Inline pushes accept files up to {max}; anything larger must use the large-object upload below.",
+  "page.assets.push.tooLargeForInline":
+    "This file is {size}, over the {max} inline push limit. Use the large-object upload below — it presigns a URL and sends the bytes straight to storage.",
   "page.assets.error.chooseFile": "Choose a file to upload",
   "page.assets.error.nameVersionRequired": "Name and version are required",
   "page.assets.error.downloadFailed": "Download failed",
@@ -1874,13 +1881,21 @@ export const enRest = {
   "page.assets.col.updated": "Updated",
   "page.assets.col.state": "State",
   "page.assets.col.variant": "Variant",
+  "page.assets.col.reference": "Pull reference",
   "page.assets.variant.default": "default",
   "page.assets.state.yanked": "Yanked",
   "page.assets.state.active": "Active",
   "page.assets.action.yank": "Yank",
   "page.assets.action.unyank": "Unyank",
   "page.assets.action.setChannel": "Set channel",
-  "page.assets.action.error": "Action failed: {message}",
+  "page.assets.action.preview": "Preview",
+  "page.assets.action.focusVersion": "Focus version {version} (adds it to the URL)",
+  "page.assets.action.clearVersion": "Clear focused version",
+  "page.assets.action.errorHeading": "The gateway rejected this action:",
+  "page.assets.reference.pullLabel": "pull command for {asset}",
+  "page.assets.preview.title": "Preview {asset}",
+  "page.assets.preview.description":
+    "The stored bytes, fetched through the same variant-addressed download the Download button uses. Read-only.",
   "page.assets.detail.description": "Registry manifest — created {created}, updated {updated}.",
   "page.assets.detail.error": "Failed to load the manifest: {message}",
   "page.assets.detail.channels": "Channels",
@@ -1888,6 +1903,8 @@ export const enRest = {
   "page.assets.yank.title": "Yank {asset}?",
   "page.assets.yank.body":
     "Marks every variant of {asset} as yanked. Pinned downloads keep working with a warning header, but channels can no longer point to it. Yank is reversible with unyank.",
+  "page.assets.yank.blocked":
+    "Blocked: the channel(s) {channels} still point at this version. The gateway rejects a yank while a channel references it (409 asset_version_referenced) — move those channels to another version first.",
   "page.assets.yank.success": "Version yanked",
   "page.assets.unyank.title": "Unyank {asset}?",
   "page.assets.unyank.body":
@@ -1918,13 +1935,29 @@ export const enRest = {
   "page.assets.presign.errorHeading": "Upload failed",
   "page.assets.presign.tooLarge":
     "File is {size}, over the {max} presigned limit.",
+  "page.assets.presign.cancelUpload": "Cancel upload",
+  "page.assets.presign.cancelledNoIntent":
+    "Upload cancelled. Nothing was published — no version was registered — and the transfer stopped before any upload intent was created, so no staging capacity is held.",
+  "page.assets.presign.cancelledReleased":
+    "Upload cancelled. Nothing was published — no version was registered — and the presigned upload intent was released, so it holds no staging capacity.",
+  "page.assets.presign.cancelledUnreleased":
+    "Upload cancelled. Nothing was published — no version was registered. The upload intent could NOT be confirmed as released; the storage lifecycle sweeper reclaims any staged bytes it left behind.",
+  "page.assets.presign.inlineWouldDo":
+    "This file is {size}, within the {max} inline push limit — the simpler Push form above also handles it.",
   // Permanent version deletion — destructive, name-typed, distinct from yank (#344).
   "page.assets.delete.action": "Delete permanently",
   "page.assets.delete.title": "Permanently delete {asset}?",
   "page.assets.delete.body":
-    "PERMANENTLY deletes every variant of {asset} and its stored bytes. This is NOT a yank: it cannot be undone, pinned downloads break immediately, and the content hash is freed. The deletion is recorded in the audit log. Type the exact identifier below to confirm.",
+    "PERMANENTLY deletes every variant row of {asset} and its stored bytes, one variant at a time. This is NOT a yank: it cannot be undone, pinned downloads break immediately, and the content hash is freed. The deletion is recorded in the audit log. Type the exact identifier below to confirm.",
   "page.assets.delete.confirmLabel": "Type {asset} to confirm",
   "page.assets.delete.success": "Version permanently deleted",
+  "page.assets.delete.blocked":
+    "Blocked: the channel(s) {channels} still point at {asset}. The gateway refuses to remove the last resolvable variant of a channel-referenced version (409 asset_version_referenced) — move or delete those channels first.",
+  "page.assets.delete.lastVersion":
+    "This is the only version of {name}. Deleting it removes the resource from the registry entirely; its channels stop resolving.",
+  "page.assets.delete.errorHeading": "The gateway rejected this delete:",
+  "page.assets.delete.partial":
+    "Partially applied: {deleted} of {total} variant rows were deleted before the gateway refused. The version still exists with its remaining variants. Gateway response: {message}",
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "Withheld assets",

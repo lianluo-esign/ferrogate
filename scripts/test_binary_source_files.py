@@ -12,6 +12,9 @@ reject something is indistinguishable from no guard at all.
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import pathlib
 import subprocess
 import tempfile
@@ -20,6 +23,15 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "check-binary-source-files.py"
+
+
+def load_checker():
+    """Import the gate as a module (its filename is not a Python identifier)."""
+    spec = importlib.util.spec_from_file_location("check_binary_source_files", CHECKER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class BinarySourceFileTests(unittest.TestCase):
@@ -54,11 +66,52 @@ class BinarySourceFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("are text to git", result.stdout)
 
-    def test_live_offender_is_detected_without_the_allowlist(self) -> None:
-        """The allowlist is the only thing keeping the tree green, not luck."""
+    def test_tree_is_clean_without_any_allowlist(self) -> None:
+        """No tracked source file needs an exemption any more.
+
+        When this gate landed, `admin-console/src/pages/assets.tsx` was its one
+        allowlisted offender. #344 removed the NUL bytes (a JSON-encoded
+        composite map key replaced the NUL delimiter) and deleted the entry, so
+        the tree must now pass with the allowlist disabled entirely — i.e. the
+        table is empty because nothing needs it, not because it was emptied.
+        """
         result = self.run_checker("--no-allowlist")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("admin-console/src/pages/assets.tsx", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_assets_page_holds_no_nul_byte(self) -> None:
+        """Regression lock on the specific file this gate was written for.
+
+        Named directly (rather than only via the tree-wide sweep) because the
+        page's composite map key is the exact construct that reintroduces a NUL
+        byte: a template literal joining an asset type and a name. A failure
+        here points at the cause, not just at "something is binary".
+        """
+        page = ROOT / "admin-console" / "src" / "pages" / "assets.tsx"
+        self.assertEqual(page.read_bytes().count(b"\0"), 0)
+
+    def test_empty_allowlist_is_not_an_empty_table_of_stale_entries(self) -> None:
+        """The stale-entry check still fires — it is what forced #344's fix.
+
+        The live table is empty, so the tree-level run can no longer exercise
+        this branch. Inject a table naming a clean path and assert the gate
+        rejects it, otherwise a future entry could rot unnoticed.
+        """
+        module = load_checker()
+        entry = module.ReviewedBinaryFile(
+            path="admin-console/src/pages/assets.tsx",
+            owner="test",
+            reason="file is clean, so this entry must be reported as stale",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.make_repo(root)
+            self.write(root, "src/ok.ts", b"export const ok = 1;\n")
+            module.REVIEWED_BINARY_FILES = (entry,)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = module.main(["--root", str(root)])
+        self.assertEqual(code, 1, stdout.getvalue())
+        self.assertIn("stale REVIEWED_BINARY_FILES entry", stderr.getvalue())
 
     def test_rejects_tracked_source_file_holding_a_nul_byte(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -111,15 +164,6 @@ class BinarySourceFileTests(unittest.TestCase):
             result = self.run_checker("--root", str(root), "--no-allowlist")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_stale_allowlist_entry_fails(self) -> None:
-        """A reviewed entry whose file is clean must be deleted, not left to rot."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            self.make_repo(root)
-            self.write(root, "src/ok.ts", b"export const ok = 1;\n")
-            result = self.run_checker("--root", str(root))
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("stale REVIEWED_BINARY_FILES entry", result.stderr)
 
 
 if __name__ == "__main__":

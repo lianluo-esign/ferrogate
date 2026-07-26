@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
@@ -114,6 +114,27 @@ function seedList() {
   );
 }
 
+/**
+ * One logical-resource record in the registry list.
+ *
+ * The list renders through the shared responsive data surface
+ * (components/resource/resource-table.tsx, #336): a <table> at >=1024px and
+ * `data-compact-records` <article> cards below it. jsdom's matchMedia stub
+ * reports no match, so these tests exercise the COMPACT view; the desktop table
+ * is covered by the Playwright desktop-1440 project. Anchoring on the record
+ * element rather than on `tr` keeps the assertions valid in either view.
+ */
+function registryRecord(name: string): HTMLElement {
+  const record = screen.getByText(name).closest("article, tr");
+  if (!record) throw new Error(`no registry record for ${name}`);
+  return record as HTMLElement;
+}
+
+async function findRegistryRecord(name: string): Promise<HTMLElement> {
+  await screen.findByText(name);
+  return registryRecord(name);
+}
+
 // Surfaces the live location so URL-state assertions can read the query the
 // registry writes as the operator filters, searches, and opens a resource.
 let currentSearch = "";
@@ -166,7 +187,7 @@ describe("AssetsPage registry list", () => {
     renderPage("en");
 
     // ferrogate collapses its two versions into one logical row (count = 2).
-    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    const ferrogateRow = await findRegistryRecord("ferrogate");
     expect(within(ferrogateRow).getByText("2")).toBeInTheDocument();
     expect(within(ferrogateRow).getByText("2.0.0")).toBeInTheDocument();
     expect(screen.getByText("widget")).toBeInTheDocument();
@@ -209,7 +230,7 @@ describe("AssetsPage registry list", () => {
       await screen.findByRole("heading", { name: zhCN["page.assets.title"] }),
     ).toBeInTheDocument();
     expect(
-      screen.getAllByText(zhCN["page.assets.col.versions"]).length,
+      (await screen.findAllByText(zhCN["page.assets.col.versions"])).length,
     ).toBeGreaterThan(0);
   });
 });
@@ -249,9 +270,13 @@ describe("AssetsPage URL browse state", () => {
     // The mcp_manifest filter is still in force behind the panel: the list
     // shows widget, and ferrogate has no row of its own.
     expect(screen.getByText("widget")).toBeInTheDocument();
+    // ferrogate has no registry record of its own behind the panel; the only
+    // occurrence of its name is inside the open dialog.
     expect(
-      screen.queryByRole("cell", { name: "ferrogate" }),
-    ).not.toBeInTheDocument();
+      screen
+        .queryAllByText("ferrogate", { exact: true })
+        .filter((node) => node.closest("[role='dialog']") === null),
+    ).toEqual([]);
   });
 
   it("writes type, search, and the open resource back into the URL", async () => {
@@ -289,7 +314,7 @@ describe("AssetsPage URL browse state", () => {
     );
 
     // Opening a resource records rtype+rname; closing clears them.
-    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    const ferrogateRow = await findRegistryRecord("ferrogate");
     await user.click(
       within(ferrogateRow).getByRole("button", {
         name: en["resource.table.moreDetails"],
@@ -316,7 +341,7 @@ describe("AssetsPage URL browse state", () => {
 
 describe("AssetsPage detail + lifecycle", () => {
   async function openDetail(user: ReturnType<typeof userEvent.setup>) {
-    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    const ferrogateRow = await findRegistryRecord("ferrogate");
     await user.click(
       within(ferrogateRow).getByRole("button", {
         name: en["resource.table.moreDetails"],
@@ -729,7 +754,7 @@ describe("AssetsPage permanent version deletion", () => {
     user: ReturnType<typeof userEvent.setup>,
     moreDetailsLabel: string = en["resource.table.moreDetails"],
   ) {
-    const ferrogateRow = (await screen.findByText("ferrogate")).closest("tr")!;
+    const ferrogateRow = await findRegistryRecord("ferrogate");
     await user.click(
       within(ferrogateRow).getByRole("button", { name: moreDetailsLabel }),
     );
@@ -789,6 +814,11 @@ describe("AssetsPage permanent version deletion", () => {
     await user.click(confirmButton);
     await waitFor(() => expect(deleteUrl).not.toBeNull());
     expect(deleteUrl).toContain("/v1/assets/cli_tool/ferrogate/1.0.0");
+    // The gateway's DELETE removes ONE variant row and defaults to the "" one
+    // (`deleteAsset`'s `platform` query). ferrogate@1.0.0 has a single
+    // linux-x64 variant, so an unqualified DELETE addresses a row that does not
+    // exist and 404s: the purge must name the variant it is removing.
+    expect(new URL(deleteUrl!).searchParams.get("platform")).toBe("linux-x64");
   });
 
   it("renders the large-object upload and permanent-delete affordances in zh-CN", async () => {
@@ -811,5 +841,684 @@ describe("AssetsPage permanent version deletion", () => {
         name: zhCN["page.assets.delete.action"],
       }).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #344 code-review bounce (2026-07-25): the boxes below were UNMET or unproven.
+// Each test names the behaviour it locks and the failure it would let through.
+// ---------------------------------------------------------------------------
+
+/** A version carrying two variant rows, for the per-variant purge/download paths. */
+const multiVariantManifest: AssetManifest = {
+  object: "asset_manifest",
+  asset_type: "cli_tool",
+  name: "ferrogate",
+  // No channel points at 3.0.0, so the purge is not blocked for the wrong reason.
+  channels: [{ channel: "stable", version: "2.0.0", updated_at_unix: 1500 }],
+  versions: [
+    {
+      version: "3.0.0",
+      yanked: false,
+      variants: [
+        {
+          variant: "",
+          content_type: "application/gzip",
+          content_hash: "d".repeat(64),
+          size_bytes: 300,
+          storage_backed: true,
+        },
+        {
+          variant: "linux-arm64",
+          content_type: "application/gzip",
+          content_hash: "e".repeat(64),
+          size_bytes: 310,
+          storage_backed: true,
+        },
+      ],
+    },
+    ...ferrogateManifest.versions,
+  ],
+};
+
+const yankedManifest: AssetManifest = {
+  ...ferrogateManifest,
+  channels: [],
+  versions: [
+    { ...ferrogateManifest.versions[0], yanked: true },
+    ferrogateManifest.versions[1],
+  ],
+};
+
+function seedManifest(manifest: AssetManifest) {
+  server.use(
+    http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
+      HttpResponse.json(manifest),
+    ),
+  );
+}
+
+async function openFerrogateDetail(user: ReturnType<typeof userEvent.setup>) {
+  const record = await findRegistryRecord("ferrogate");
+  await user.click(
+    within(record).getByRole("button", {
+      name: en["resource.table.moreDetails"],
+    }),
+  );
+  return screen.findByRole("dialog");
+}
+
+/** The dialog containing `text`, for assertions that must not stray into another. */
+function dialogWith(text: string): HTMLElement {
+  return screen.getByText(text).closest("[role='dialog']") as HTMLElement;
+}
+
+function renderKey(key: keyof typeof en, values: Record<string, string>): string {
+  let out: string = en[key];
+  for (const [name, value] of Object.entries(values)) {
+    out = out.replace(`{${name}}`, value);
+  }
+  return out;
+}
+
+/** jsdom-safe object-URL + anchor-click doubles for a download assertion. */
+function stubDownloadPlumbing() {
+  const urlWithBlob = URL as unknown as {
+    createObjectURL?: (obj: Blob) => string;
+    revokeObjectURL?: (url: string) => void;
+  };
+  const originalCreate = urlWithBlob.createObjectURL;
+  const originalRevoke = urlWithBlob.revokeObjectURL;
+  urlWithBlob.createObjectURL = vi.fn(() => "blob:mock-url");
+  urlWithBlob.revokeObjectURL = vi.fn();
+  const saved: string[] = [];
+  const clickSpy = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(function mockClick(this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+  return {
+    saved,
+    restore() {
+      clickSpy.mockRestore();
+      urlWithBlob.createObjectURL = originalCreate;
+      urlWithBlob.revokeObjectURL = originalRevoke;
+    },
+  };
+}
+
+describe("AssetsPage lifecycle mutations without prior coverage", () => {
+  // Box 4 of the acceptance list: `unyank` and `channel delete` shipped with
+  // ZERO coverage in either suite. Both are one-line-deletable without any
+  // other test noticing.
+  it("unyanks a yanked version with DELETE .../yank behind the consequence confirm", async () => {
+    seedList();
+    seedManifest(yankedManifest);
+    let unyankMethod: string | null = null;
+    let unyankUrl: string | null = null;
+    server.use(
+      http.delete(
+        gatewayUrl("/v1/assets/cli_tool/ferrogate/2.0.0/yank"),
+        ({ request }) => {
+          unyankMethod = request.method;
+          unyankUrl = request.url;
+          return HttpResponse.json({ object: "list", data: [] });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    await user.click(
+      within(dialog).getByRole("button", { name: en["page.assets.action.unyank"] }),
+    );
+
+    // Unyank is confirmed too, and its confirm names the exact resource.
+    const confirm = dialogWith(
+      renderKey("page.assets.unyank.title", { asset: "cli_tool/ferrogate@2.0.0" }),
+    );
+    await user.click(
+      within(confirm).getByRole("button", { name: en["page.assets.action.unyank"] }),
+    );
+
+    await waitFor(() => expect(unyankUrl).not.toBeNull());
+    // The verb is the whole contract here: POST yanks, DELETE unyanks, on the
+    // SAME path. A copy-paste that kept POST would still "succeed".
+    expect(unyankMethod).toBe("DELETE");
+    expect(unyankUrl).toContain("/v1/assets/cli_tool/ferrogate/2.0.0/yank");
+  });
+
+  it("deletes a channel pointer with DELETE .../channels/{channel} behind a confirm", async () => {
+    seedList();
+    seedManifest(ferrogateManifest);
+    let channelMethod: string | null = null;
+    let channelUrl: string | null = null;
+    server.use(
+      http.delete(
+        gatewayUrl("/v1/assets/cli_tool/ferrogate/channels/stable"),
+        ({ request }) => {
+          channelMethod = request.method;
+          channelUrl = request.url;
+          return HttpResponse.json({ object: "asset_channel", id: "stable", deleted: true });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    const channelRow = within(dialog).getByText("stable").closest("tr") as HTMLElement;
+    await user.click(
+      within(channelRow).getByRole("button", { name: en["resource.action.delete"] }),
+    );
+
+    const confirm = dialogWith(
+      renderKey("page.assets.channel.deleteTitle", { channel: "stable" }),
+    );
+    await user.click(
+      within(confirm).getByRole("button", { name: en["resource.action.delete"] }),
+    );
+
+    await waitFor(() => expect(channelUrl).not.toBeNull());
+    expect(channelMethod).toBe("DELETE");
+    expect(channelUrl).toContain("/v1/assets/cli_tool/ferrogate/channels/stable");
+    // Only the pointer goes; nothing addresses the version itself.
+    expect(channelUrl).not.toContain("/2.0.0");
+  });
+});
+
+describe("AssetsPage permanent delete reports blockers and failures", () => {
+  // Box 5: "Permanent delete is ... confirmed, and reports blockers/failure."
+  it("names the channels that will block the purge BEFORE it fires", async () => {
+    seedList();
+    seedManifest(ferrogateManifest); // stable -> 2.0.0
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    // 2.0.0 is the first version row; `stable` still points at it.
+    const deleteButtons = within(dialog).getAllByRole("button", {
+      name: en["page.assets.delete.action"],
+    });
+    await user.click(deleteButtons[0]);
+
+    const confirm = dialogWith(
+      renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }),
+    );
+    const blocker = await within(confirm).findByRole("alert");
+    // The blocker is stated, with the channel named and the gateway's own error
+    // code, so the operator knows the remedy before burning a destructive call.
+    expect(blocker).toHaveTextContent("stable");
+    expect(blocker).toHaveTextContent("asset_version_referenced");
+  });
+
+  it("does not warn about a blocker no channel actually creates", async () => {
+    seedList();
+    seedManifest(ferrogateManifest); // stable -> 2.0.0, nothing -> 1.0.0
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    const deleteButtons = within(dialog).getAllByRole("button", {
+      name: en["page.assets.delete.action"],
+    });
+    await user.click(deleteButtons[deleteButtons.length - 1]); // 1.0.0
+
+    const confirm = dialogWith(
+      renderKey("page.assets.delete.title", { asset: "ferrogate@1.0.0" }),
+    );
+    // An unconditional warning would be noise that teaches operators to ignore
+    // the real one, so the absence is part of the contract.
+    expect(within(confirm).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps a 409 asset_version_referenced verdict in the dialog instead of a vanishing toast", async () => {
+    seedList();
+    seedManifest(ferrogateManifest);
+    server.use(
+      http.delete(gatewayUrl("/v1/assets/cli_tool/ferrogate/2.0.0"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "asset_version_referenced",
+              message:
+                "cli_tool/ferrogate/2.0.0 is the last resolvable variant of a channel-referenced version; move or delete the channel first",
+            },
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    await user.click(
+      within(dialog).getAllByRole("button", {
+        name: en["page.assets.delete.action"],
+      })[0],
+    );
+    const confirm = dialogWith(
+      renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }),
+    );
+    await user.type(
+      within(confirm).getByLabelText(
+        renderKey("page.assets.delete.confirmLabel", { asset: "ferrogate@2.0.0" }),
+      ),
+      "ferrogate@2.0.0",
+    );
+    await user.click(
+      within(confirm).getByRole("button", { name: en["page.assets.delete.action"] }),
+    );
+
+    // The verdict is on screen, VERBATIM, with its machine-readable code, and
+    // the dialog is still open holding it.
+    await waitFor(() =>
+      expect(
+        within(confirm)
+          .getAllByRole("alert")
+          .some((alert) =>
+            alert.textContent?.includes("move or delete the channel first"),
+          ),
+      ).toBe(true),
+    );
+    expect(within(confirm).getByRole("button", { name: en["common.cancel"] })).toBeVisible();
+  });
+
+  it("purges every variant row, non-default first, and reports a partial purge as partial", async () => {
+    seedList();
+    seedManifest(multiVariantManifest);
+    const platforms: (string | null)[] = [];
+    server.use(
+      http.delete(gatewayUrl("/v1/assets/cli_tool/ferrogate/3.0.0"), ({ request }) => {
+        const platform = new URL(request.url).searchParams.get("platform");
+        platforms.push(platform);
+        // The gateway blocks the LAST resolvable variant of a referenced
+        // version (#367); model that on the default-variant call.
+        if (platform === null) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: "asset_version_referenced",
+                message: "still referenced by a channel",
+              },
+            },
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json({ object: "asset", id: "x", deleted: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    await user.click(
+      within(dialog).getAllByRole("button", {
+        name: en["page.assets.delete.action"],
+      })[0],
+    );
+    const confirm = dialogWith(
+      renderKey("page.assets.delete.title", { asset: "ferrogate@3.0.0" }),
+    );
+    await user.type(
+      within(confirm).getByLabelText(
+        renderKey("page.assets.delete.confirmLabel", { asset: "ferrogate@3.0.0" }),
+      ),
+      "ferrogate@3.0.0",
+    );
+    await user.click(
+      within(confirm).getByRole("button", { name: en["page.assets.delete.action"] }),
+    );
+
+    // One DELETE per variant row, platform-specific ones first.
+    await waitFor(() => expect(platforms).toEqual(["linux-arm64", null]));
+    // A half-applied purge is reported AS half-applied: claiming plain failure
+    // after a row is already gone would misstate the registry's state.
+    await waitFor(() =>
+      expect(
+        within(confirm)
+          .getAllByRole("alert")
+          .some((alert) => /1 of 2 variant rows/.test(alert.textContent ?? "")),
+      ).toBe(true),
+    );
+  });
+});
+
+describe("AssetsPage presigned upload cancellation", () => {
+  const UPLOAD_ID = `upl_${"1".repeat(32)}`;
+
+  it("cancels an in-flight upload and reports it as cancelled, never as published", async () => {
+    seedList();
+    let intentAborted = false;
+    let commitCalls = 0;
+    server.use(
+      // Hold the intent open so Cancel lands mid-flight. `request.signal`
+      // firing is the proof the console threaded an AbortSignal at all: before
+      // this, Cancel was a disabled button and the request ran to completion.
+      http.post(
+        gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
+        ({ request }) =>
+          new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              intentAborted = true;
+              reject(new Error("aborted"));
+            });
+          }),
+      ),
+      http.post(
+        gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"),
+        () => {
+          commitCalls += 1;
+          return HttpResponse.json({ object: "asset", asset: asset() });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    await user.click(
+      await screen.findByRole("button", { name: en["page.assets.presign.submit"] }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(
+      within(dialog).getByLabelText(en["page.assets.field.name"]),
+      "big-tool",
+    );
+    await user.type(
+      within(dialog).getByLabelText(en["page.assets.field.version"]),
+      "9.0.0",
+    );
+    await user.upload(
+      within(dialog).getByLabelText(en["page.assets.field.file"]),
+      new File(["a very large bundle payload"], "big.tar.gz", {
+        type: "application/gzip",
+      }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: en["page.assets.presign.submit"] }),
+    );
+
+    // Mid-flight the footer offers a REAL cancel, not a disabled placeholder.
+    const cancel = await within(dialog).findByRole("button", {
+      name: en["page.assets.presign.cancelUpload"],
+    });
+    expect(cancel).toBeEnabled();
+    await user.click(cancel);
+
+    await waitFor(() => expect(intentAborted).toBe(true));
+    // The outcome reads as a cancellation and explicitly denies a publish...
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(en["page.assets.presign.cancelledNoIntent"]);
+    // ...the success copy never appears, and nothing was committed.
+    expect(
+      screen.queryByText(en["page.assets.presign.success"]),
+    ).not.toBeInTheDocument();
+    expect(commitCalls).toBe(0);
+    void UPLOAD_ID;
+  });
+});
+
+describe("AssetsPage inline vs presigned upload selection", () => {
+  it("refuses an inline push over inline_upload_max_bytes and points at the large-object path", async () => {
+    // The authoritative ceiling comes from the storage summary (#338); before
+    // this, `inline_upload_max_bytes` was read NOWHERE in src/ and the operator
+    // had to guess which of the two unlinked forms to use.
+    seedList();
+    server.use(
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
+        HttpResponse.json(storageSummary({ inline_upload_max_bytes: 8 })),
+      ),
+    );
+    let pushCalls = 0;
+    server.use(
+      http.put(gatewayUrl("/v1/assets/cli_tool/big/1.0.0"), () => {
+        pushCalls += 1;
+        return HttpResponse.json({ object: "asset" });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    // The limit is stated up front, from the summary.
+    expect(
+      await screen.findByText(
+        renderKey("page.assets.push.inlineLimit", { max: "8 B" }),
+      ),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(en["page.assets.field.name"]), "big");
+    await user.type(screen.getByLabelText(en["page.assets.field.version"]), "1.0.0");
+    await user.upload(
+      screen.getByLabelText(en["page.assets.field.file"]),
+      new File(["0123456789abcdef"], "big.bin", { type: "application/octet-stream" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/over the 8 B inline push limit/);
+    expect(
+      screen.getByRole("button", { name: en["page.assets.push.submit"] }),
+    ).toBeDisabled();
+    expect(pushCalls).toBe(0);
+  });
+});
+
+describe("AssetsPage typed download, references, and version URL state", () => {
+  it("downloads a named variant with its platform selector and a typed filename", async () => {
+    seedList();
+    seedManifest(multiVariantManifest);
+    let downloadUrl: string | null = null;
+    server.use(
+      http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/3.0.0"), ({ request }) => {
+        downloadUrl = request.url;
+        return new HttpResponse("bytes", {
+          headers: { "Content-Type": "application/gzip" },
+        });
+      }),
+    );
+    const plumbing = stubDownloadPlumbing();
+    try {
+      const user = userEvent.setup();
+      renderPage("en");
+
+      const dialog = await openFerrogateDetail(user);
+      const arm64Row = within(dialog)
+        .getByText("linux-arm64")
+        .closest("tr") as HTMLElement;
+      // A per-variant Download button: with one button per VERSION, the
+      // linux-arm64 artifact was unreachable from this page entirely.
+      await user.click(
+        within(arm64Row).getByRole("button", {
+          name: en["page.assets.action.download"],
+        }),
+      );
+
+      await waitFor(() => expect(downloadUrl).not.toBeNull());
+      expect(new URL(downloadUrl!).searchParams.get("platform")).toBe("linux-arm64");
+      // "Typed download": the saved name carries the variant and an extension
+      // derived from the manifest's own content type, not a bare `name-version`.
+      await waitFor(() =>
+        expect(plumbing.saved).toEqual(["ferrogate-3.0.0-linux-arm64.tar.gz"]),
+      );
+    } finally {
+      plumbing.restore();
+    }
+  });
+
+  it("offers a copyable ferrogate assets pull reference for a variant and a channel", async () => {
+    seedList();
+    seedManifest(multiVariantManifest);
+    const copied: string[] = [];
+    const user = userEvent.setup();
+    // AFTER userEvent.setup(), which installs its own clipboard double.
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void copied.push(text) },
+    });
+    renderPage("en");
+
+    const dialog = await openFerrogateDetail(user);
+    const arm64Row = within(dialog)
+      .getByText("linux-arm64")
+      .closest("tr") as HTMLElement;
+    await user.click(
+      within(arm64Row).getByRole("button", {
+        name: renderKey("common.copyLabel", {
+          label: renderKey("page.assets.reference.pullLabel", {
+            asset: "cli_tool/ferrogate@3.0.0",
+          }),
+        }),
+      }),
+    );
+
+    // Mirrors the real CLI surface (AssetsIdentityArgs): --type/--name/--version
+    // plus the --platform variant selector.
+    await waitFor(() =>
+      expect(copied).toEqual([
+        "ferrogate assets pull --type cli_tool --name ferrogate --version 3.0.0 --platform linux-arm64",
+      ]),
+    );
+
+    // The channel row's reference resolves through the channel, which the CLI's
+    // --version accepts verbatim (exact version | channel | semver range).
+    const stableRow = within(dialog).getByText("stable").closest("tr") as HTMLElement;
+    await user.click(
+      within(stableRow).getByRole("button", {
+        name: renderKey("common.copyLabel", {
+          label: renderKey("page.assets.reference.pullLabel", {
+            asset: "cli_tool/ferrogate@stable",
+          }),
+        }),
+      }),
+    );
+    await waitFor(() =>
+      expect(copied[1]).toBe(
+        "ferrogate assets pull --type cli_tool --name ferrogate --version stable",
+      ),
+    );
+  });
+
+  it("preserves the focused version in the URL and hydrates it from a shared link", async () => {
+    seedList();
+    seedManifest(ferrogateManifest);
+    const user = userEvent.setup();
+
+    // Hydrate: a link naming a version opens the panel with that row focused.
+    renderPage("en", "/app/assets?rtype=cli_tool&rname=ferrogate&rver=1.0.0");
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText("linux-x64");
+    const focused = within(dialog)
+      .getAllByRole("row")
+      .filter((row) => row.getAttribute("aria-current") === "true");
+    expect(focused).toHaveLength(1);
+    expect(focused[0]).toHaveTextContent("1.0.0");
+
+    // Write-back: focusing another version moves ?rver=.
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: renderKey("page.assets.action.focusVersion", { version: "2.0.0" }),
+      }),
+    );
+    await waitFor(() =>
+      expect(new URLSearchParams(currentSearch).get("rver")).toBe("2.0.0"),
+    );
+    // Clearing it prunes the param rather than leaving an empty one behind.
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: en["page.assets.action.clearVersion"],
+      }),
+    );
+    await waitFor(() =>
+      expect(new URLSearchParams(currentSearch).has("rver")).toBe(false),
+    );
+  });
+});
+
+describe("AssetsPage localized types and quota pressure", () => {
+  it("localizes the asset type column and falls back to the raw identifier", async () => {
+    server.use(
+      http.get(gatewayUrl("/v1/assets"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            asset(),
+            asset({
+              id: "org-acme:custom_family:oddball:1.0.0",
+              asset_type: "custom_family",
+              name: "oddball",
+            }),
+          ],
+        }),
+      ),
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
+        HttpResponse.json(storageSummary()),
+      ),
+    );
+
+    renderPage("zh-CN");
+
+    // A known type renders its catalog label, not the raw `cli_tool` the filter
+    // directly above it already localizes.
+    const known = await findRegistryRecord("ferrogate");
+    expect(within(known).getByText(zhCN["page.assets.type.cliTool"])).toBeInTheDocument();
+    expect(within(known).queryByText("cli_tool")).not.toBeInTheDocument();
+    // An asset_type the console has no catalog entry for renders VERBATIM;
+    // inventing a label would name a family the API never used.
+    const unknown = registryRecord("oddball");
+    expect(within(unknown).getByText("custom_family")).toBeInTheDocument();
+  });
+
+  it("renders authoritative remaining bytes and raises quota pressure near the ceiling", async () => {
+    server.use(
+      http.get(gatewayUrl("/v1/assets"), () =>
+        HttpResponse.json({ object: "list", data: [asset()] }),
+      ),
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
+        HttpResponse.json(
+          storageSummary({
+            used_bytes: 9_500,
+            quota_bytes: 10_000,
+            remaining_bytes: 500,
+          }),
+        ),
+      ),
+    );
+
+    renderPage("en");
+
+    // remaining_bytes is the gateway's own saturating headroom, not a
+    // subtraction this page performs.
+    expect(
+      await screen.findByText(/500 B remaining/),
+    ).toBeInTheDocument();
+    const meter = screen.getByRole("progressbar", {
+      name: en["page.assets.storage.title"],
+    });
+    expect(meter).toHaveAttribute("aria-valuenow", "95");
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Quota pressure/);
+  });
+
+  it("renders no meter and no fabricated headroom when storage is unlimited", async () => {
+    server.use(
+      http.get(gatewayUrl("/v1/assets"), () =>
+        HttpResponse.json({ object: "list", data: [asset()] }),
+      ),
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
+        HttpResponse.json(
+          storageSummary({ quota_bytes: null, remaining_bytes: null }),
+        ),
+      ),
+    );
+
+    renderPage("en");
+
+    await screen.findByText(/no quota configured/);
+    // No denominator means no percentage: a 0%-used meter would be a
+    // fabricated fact about an unlimited tenant.
+    expect(
+      screen.queryByRole("progressbar", { name: en["page.assets.storage.title"] }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/remaining/)).not.toBeInTheDocument();
   });
 });

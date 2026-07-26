@@ -1,4 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
+import { installGatewayAssets } from "./support/gateway-assets";
 import {
   attachViewportScreenshot,
   expect,
@@ -79,4 +80,24 @@ test("generic and bespoke operator data surfaces expose stable compact actions",
     page.getByRole("button", { name: "Actions for release-tools/deploy_production" }),
   ).toBeVisible();
   await attachViewportScreenshot(page, testInfo, "responsive-approval-queue");
+});
+
+test("the assets registry uses the shared responsive record surface", async ({
+  page,
+}, testInfo) => {
+  // #336 reuse (#344 review finding): the registry list previously rendered a
+  // raw 6-column <Table> at every viewport, so it never appeared in this gate
+  // at all. It now goes through components/resource/resource-table.tsx.
+  await installGatewayAssets(page);
+  await page.goto("/app/assets");
+  await expect(page.getByRole("heading", { name: "Assets" })).toBeVisible();
+  await expect(page.getByText("deploy-cli").first()).toBeVisible();
+  await expectNoDocumentOverflow(page, testInfo);
+
+  if (testInfo.project.name === "desktop-1440") {
+    await expect(page.locator("table").first()).toBeVisible();
+  } else {
+    await expect(page.locator("[data-compact-records]")).toBeVisible();
+  }
+  await attachViewportScreenshot(page, testInfo, "responsive-assets-registry");
 });

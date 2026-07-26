@@ -394,6 +394,11 @@ export async function putPresignedObject(
   body: Blob,
   contentType: string,
   requiredHeaders: Readonly<Record<string, string>> = {},
+  // #344: the direct bucket PUT is the LONGEST leg of the presigned flow (it
+  // carries the whole object), so it is the one an operator most needs to be
+  // able to cancel. Without a signal here a "cancel" could only ever stop the
+  // short JSON legs around it, leaving a multi-gigabyte transfer running.
+  signal?: AbortSignal,
 ): Promise<void> {
   const headers: Record<string, string> = {
     "Content-Type": contentType || "application/octet-stream",
@@ -416,6 +421,7 @@ export async function putPresignedObject(
     method: "PUT",
     headers,
     body,
+    signal,
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).trim();

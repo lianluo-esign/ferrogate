@@ -1,4 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
+import { installGatewayAssets } from "./support/gateway-assets";
 import { chooseTheme } from "./support/theme";
 import {
   expect,
@@ -13,10 +14,15 @@ test.beforeEach(async ({ page }) => {
 test("@desktop representative routes pass serious axe checks in both themes", async ({
   page,
 }, testInfo) => {
+  // /app/assets talks to the tenant GATEWAY surface, not /admin/v1/*, so it
+  // needs its own mock on top of the shared admin one (#344/#348). Installing
+  // it only routes /v1/assets*, leaving the other routes untouched.
+  await installGatewayAssets(page);
   const routes = [
     { path: "/app/projects", heading: "Projects" },
     { path: "/app/tool-approvals", heading: "Tool approvals" },
     { path: "/app/ops/status", heading: "Ops status" },
+    { path: "/app/assets", heading: "Assets" },
   ];
 
   for (const theme of ["light", "dark"] as const) {

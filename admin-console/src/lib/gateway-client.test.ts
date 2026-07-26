@@ -226,4 +226,61 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
     }).catch((error: unknown) => error);
     expect(localRefusal).not.toBeInstanceOf(PresignedUploadRejectedError);
   });
+
+  /**
+   * #344: the direct bucket PUT carries the whole object, so it is the leg an
+   * operator most needs to be able to cancel. Asserted here rather than through
+   * the page because the page-level presigned tests that reach a real PUT are
+   * red on the unrelated `object.stream` jsdom/msw issue (#510).
+   */
+  it("forwards an AbortSignal to the bucket PUT so a cancel stops the transfer", async () => {
+    const fetchMock = stubFetch(new Response(null, { status: 200 }));
+    const controller = new AbortController();
+    const body = new Blob(["0123456789"]);
+
+    await putPresignedObject(
+      UPLOAD_URL,
+      body,
+      "application/gzip",
+      { "x-amz-content-sha256": SIGNED_SHA },
+      controller.signal,
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // Drop the `signal` pass-through and Cancel can only ever stop the short
+    // JSON legs around a multi-gigabyte upload that keeps running.
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it("rejects with an AbortError once the signal is aborted mid-PUT", async () => {
+    const controller = new AbortController();
+    // A fetch double that honours the signal the way the platform does.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              const error = new Error("The operation was aborted.");
+              error.name = "AbortError";
+              reject(error);
+            });
+          }),
+      ),
+    );
+    const pending = putPresignedObject(
+      UPLOAD_URL,
+      new Blob(["0123456789"]),
+      "application/gzip",
+      { "x-amz-content-sha256": SIGNED_SHA },
+      controller.signal,
+    );
+    controller.abort();
+
+    const rejected = await pending.catch((error: unknown) => error);
+    expect((rejected as Error).name).toBe("AbortError");
+    // A cancel is not a bucket refusal: reporting it as one would mint a
+    // fabricated `bucket_rejected` abort in the gateway's audit trail.
+    expect(rejected).not.toBeInstanceOf(PresignedUploadRejectedError);
+  });
 });

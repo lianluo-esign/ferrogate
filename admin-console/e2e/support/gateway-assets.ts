@@ -47,6 +47,7 @@ const HASH_B = "2".repeat(64);
 const HASH_C = "3".repeat(64);
 const HASH_D = "4".repeat(64);
 const HASH_E = "5".repeat(64);
+const HASH_F = "6".repeat(64);
 
 interface AssetsState {
   /** Flat per-version summary rows backing GET /v1/assets (the registry list). */
@@ -108,6 +109,22 @@ function buildState(): AssetsState {
           content_type: "application/gzip",
           content_hash: HASH_C,
           size_bytes: 1_048_576,
+          storage_backed: false,
+        },
+      ],
+    },
+    // Active and referenced by NO channel: the target for the yank and the
+    // permanent-delete cases, which the gateway only permits on an
+    // unreferenced version (#367).
+    {
+      version: "1.2.0",
+      yanked: false,
+      variants: [
+        {
+          variant: "",
+          content_type: "application/gzip",
+          content_hash: HASH_F,
+          size_bytes: 2_097_152,
           storage_backed: false,
         },
       ],
@@ -184,6 +201,18 @@ function buildState(): AssetsState {
       storage_backed: false,
       created_at_unix: 1_751_900_000,
       updated_at_unix: 1_752_000_500,
+    },
+    {
+      id: "asset_deploy_cli_120",
+      asset_type: "cli_tool",
+      name: "deploy-cli",
+      version: "1.2.0",
+      content_type: "application/gzip",
+      content_hash: HASH_F,
+      size_bytes: 2_097_152,
+      storage_backed: false,
+      created_at_unix: 1_751_850_000,
+      updated_at_unix: 1_751_860_000,
     },
     {
       id: "asset_deploy_cli_100",
@@ -475,6 +504,22 @@ async function handleAssetsRequest(
       });
       return;
     }
+    // #367: a yank is REJECTED while a channel still references the version
+    // (VersionYankOutcome::ReferencedByChannel -> 409). Modelling that is the
+    // point: a mock that yanks anything keeps a console green that would 409
+    // against every real gateway. Unyank never coordinates.
+    if (
+      method === "POST" &&
+      manifest.channels.some((entry) => entry.version === version)
+    ) {
+      await fulfillJson(route, 409, {
+        error: {
+          code: "asset_version_referenced",
+          message: `${assetType}/${name}/${version} is still referenced by a channel; move the channel off this version before yanking`,
+        },
+      });
+      return;
+    }
     if (method === "POST" || method === "DELETE") {
       target.yanked = method === "POST";
       await fulfillJson(route, 200, {
@@ -493,6 +538,11 @@ async function handleAssetsRequest(
   ) {
     const [assetType, name, version] = segments;
 
+    // Both verbs are VARIANT-addressed: `platform` selects the row, and an
+    // omitted `platform` means the default ("") variant, exactly as `getAsset`
+    // and `deleteAsset` document it.
+    const platform = url.searchParams.get("platform") ?? "";
+
     if (method === "GET") {
       // The download action: the page issues this GET, wraps the bytes in an
       // object URL, and clicks a synthetic <a download>. Any body suffices; the
@@ -500,21 +550,55 @@ async function handleAssetsRequest(
       await route.fulfill({
         status: 200,
         contentType: "application/gzip",
-        body: Buffer.from(`e2e-asset-bytes:${assetType}/${name}/${version}`),
+        body: Buffer.from(
+          `e2e-asset-bytes:${assetType}/${name}/${version}/${platform}`,
+        ),
       });
       return;
     }
 
     if (method === "DELETE") {
       const manifest = state.manifests.get(manifestKey(assetType, name));
-      if (manifest) {
+      const target = manifest?.versions.find((entry) => entry.version === version);
+      const variantRow = target?.variants.find((entry) => entry.variant === platform);
+      if (!manifest || !target || !variantRow) {
+        await fulfillJson(route, 404, {
+          error: {
+            code: "asset_not_found",
+            message: `no asset at ${assetType}/${name}/${version}${platform === "" ? "" : ` (${platform})`}`,
+          },
+        });
+        return;
+      }
+      // #367 `delete_asset_variant_if_unreferenced`: removing the LAST
+      // resolvable variant of a channel-referenced version is rejected, so a
+      // live channel can never be stranded on an absent version. A mock that
+      // returned 200 for every DELETE is precisely what let the previous round
+      // ship a purge that neither warned about the blocker nor reported it.
+      const isLastResolvable =
+        target.variants.filter((entry) => entry.variant !== platform).length === 0;
+      if (
+        isLastResolvable &&
+        manifest.channels.some((entry) => entry.version === version)
+      ) {
+        await fulfillJson(route, 409, {
+          error: {
+            code: "asset_version_referenced",
+            message: `${assetType}/${name}/${version} is the last resolvable variant of a channel-referenced version; move or delete the channel first`,
+          },
+        });
+        return;
+      }
+      target.variants = target.variants.filter((entry) => entry.variant !== platform);
+      if (target.variants.length === 0) {
         manifest.versions = manifest.versions.filter(
           (entry) => entry.version !== version,
         );
+        state.summaries = state.summaries.filter(
+          (row) =>
+            !(row.asset_type === assetType && row.name === name && row.version === version),
+        );
       }
-      state.summaries = state.summaries.filter(
-        (row) => !(row.asset_type === assetType && row.name === name && row.version === version),
-      );
       await fulfillJson(route, 200, {
         object: "asset",
         id: `${assetType}/${name}/${version}`,

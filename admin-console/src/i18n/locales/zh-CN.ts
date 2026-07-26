@@ -1832,6 +1832,9 @@ export const zhCN = {
   "page.assets.storage.error": "加载存储用量失败：{message}",
   "page.assets.storage.usageWithQuota": "已用 {used} / {quota}",
   "page.assets.storage.usageNoQuota": "已用 {used}（未配置配额）",
+  "page.assets.storage.remaining": "剩余 {remaining}（已使用配额的 {percent}）。",
+  "page.assets.storage.pressure":
+    "配额压力：已使用存储配额的 {percent}。一旦达到配额，后续推送和预签名提交都会被拒绝。",
   "page.assets.push.title": "推送资产",
   "page.assets.push.description":
     "内容在存储前会经过扫描和类型检查（issue #179）——如果未通过这些检查，推送可能会以 422 被拒绝。",
@@ -1841,6 +1844,10 @@ export const zhCN = {
   "page.assets.field.file": "文件",
   "page.assets.push.submit": "推送",
   "page.assets.push.submitting": "推送中…",
+  "page.assets.push.inlineLimit":
+    "内联推送接受最大 {max} 的文件；更大的内容必须使用下方的大对象上传。",
+  "page.assets.push.tooLargeForInline":
+    "该文件为 {size}，超过内联推送上限 {max}。请使用下方的大对象上传——它会预签名一个 URL 并将字节直接发送到存储。",
   "page.assets.error.chooseFile": "请选择要上传的文件",
   "page.assets.error.nameVersionRequired": "名称和版本为必填项",
   "page.assets.error.downloadFailed": "下载失败",
@@ -1865,13 +1872,21 @@ export const zhCN = {
   "page.assets.col.updated": "更新时间",
   "page.assets.col.state": "状态",
   "page.assets.col.variant": "变体",
+  "page.assets.col.reference": "拉取命令",
   "page.assets.variant.default": "默认",
   "page.assets.state.yanked": "已撤回",
   "page.assets.state.active": "有效",
   "page.assets.action.yank": "撤回",
   "page.assets.action.unyank": "恢复",
   "page.assets.action.setChannel": "设置渠道",
-  "page.assets.action.error": "操作失败：{message}",
+  "page.assets.action.preview": "预览",
+  "page.assets.action.focusVersion": "聚焦版本 {version}（写入 URL）",
+  "page.assets.action.clearVersion": "清除聚焦的版本",
+  "page.assets.action.errorHeading": "网关拒绝了此操作：",
+  "page.assets.reference.pullLabel": "{asset} 的拉取命令",
+  "page.assets.preview.title": "预览 {asset}",
+  "page.assets.preview.description":
+    "已存储的字节，通过与「下载」按钮相同的按变体寻址的下载接口获取。只读。",
   "page.assets.detail.description": "注册表清单 — 创建于 {created}，更新于 {updated}。",
   "page.assets.detail.error": "加载清单失败：{message}",
   "page.assets.detail.channels": "渠道",
@@ -1879,6 +1894,8 @@ export const zhCN = {
   "page.assets.yank.title": "撤回 {asset}？",
   "page.assets.yank.body":
     "将 {asset} 的所有变体标记为已撤回。已固定版本的下载仍可进行并附带警告头，但渠道将无法再指向它。撤回可通过恢复操作还原。",
+  "page.assets.yank.blocked":
+    "已阻止：渠道 {channels} 仍指向该版本。当有渠道引用时，网关会拒绝撤回（409 asset_version_referenced）——请先将这些渠道移到其他版本。",
   "page.assets.yank.success": "版本已撤回",
   "page.assets.unyank.title": "恢复 {asset}？",
   "page.assets.unyank.body": "清除 {asset} 所有变体的撤回状态，使其恢复正常解析。",
@@ -1907,13 +1924,29 @@ export const zhCN = {
   "page.assets.presign.success": "大对象已提交",
   "page.assets.presign.errorHeading": "上传失败",
   "page.assets.presign.tooLarge": "文件为 {size}，超过预签名上限 {max}。",
+  "page.assets.presign.cancelUpload": "取消上传",
+  "page.assets.presign.cancelledNoIntent":
+    "上传已取消。未发布任何内容——没有注册任何版本——并且传输在创建上传意向之前就已停止，因此没有占用任何暂存容量。",
+  "page.assets.presign.cancelledReleased":
+    "上传已取消。未发布任何内容——没有注册任何版本——并且预签名上传意向已释放，不再占用暂存容量。",
+  "page.assets.presign.cancelledUnreleased":
+    "上传已取消。未发布任何内容——没有注册任何版本。无法确认上传意向已被释放；存储生命周期清理器会回收其遗留的暂存字节。",
+  "page.assets.presign.inlineWouldDo":
+    "该文件为 {size}，在内联推送上限 {max} 之内——上方更简单的「推送」表单同样可以处理它。",
   // Permanent version deletion — destructive, name-typed, distinct from yank (#344).
   "page.assets.delete.action": "永久删除",
   "page.assets.delete.title": "永久删除 {asset}？",
   "page.assets.delete.body":
-    "永久删除 {asset} 的所有变体及其存储的字节。这不是撤回：无法撤销，已固定版本的下载会立即失效，内容哈希也会被释放。删除操作会记录到审计日志。请在下方输入完整标识符以确认。",
+    "逐个永久删除 {asset} 的所有变体行及其存储的字节。这不是撤回：无法撤销，已固定版本的下载会立即失效，内容哈希也会被释放。删除操作会记录到审计日志。请在下方输入完整标识符以确认。",
   "page.assets.delete.confirmLabel": "输入 {asset} 以确认",
   "page.assets.delete.success": "版本已永久删除",
+  "page.assets.delete.blocked":
+    "已阻止：渠道 {channels} 仍指向 {asset}。网关拒绝删除被渠道引用的版本的最后一个可解析变体（409 asset_version_referenced）——请先移动或删除这些渠道。",
+  "page.assets.delete.lastVersion":
+    "这是 {name} 的唯一版本。删除它会将该资源从注册表中完全移除；其渠道将无法再解析。",
+  "page.assets.delete.errorHeading": "网关拒绝了此删除：",
+  "page.assets.delete.partial":
+    "部分生效：在网关拒绝之前已删除 {total} 个变体行中的 {deleted} 个。该版本连同其余变体仍然存在。网关响应：{message}",
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "扣留的资产",
