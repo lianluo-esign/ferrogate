@@ -119,6 +119,11 @@ fn main() -> Result<()> {
             run_asset_presign_api(local)?;
             run_asset_registry_api(local)?;
             run_agent_jobs_api(local)?;
+            // The #354 cross-component paid-egress chain. Deterministic (fixed
+            // clock, local origin/facilitator double, no Docker, no network),
+            // so it belongs in the always-run set rather than being a command
+            // only a human remembers to type.
+            run_x402_paid_egress_chain(local)?;
             run_workers_ai_llama_guard(local)?;
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
