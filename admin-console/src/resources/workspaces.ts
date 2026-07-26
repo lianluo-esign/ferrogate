@@ -1,5 +1,8 @@
 import { adminGet } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import {
+  DISABLED_WHEN_STATUS_NOT_ACTIVE,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 export interface AdminWorkspace extends Record<string, unknown> {
   id: string;
@@ -44,6 +47,8 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug", "tenant_id"],
+        // #340: a suspended project is listed but marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
       },
       // Immutable after create (#326: the backend rejects project re-attribution
       // with 400 to avoid stranding child rows), so it is hidden on edit.

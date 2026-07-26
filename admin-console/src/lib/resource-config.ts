@@ -81,6 +81,43 @@ export interface EntityReferenceDependency {
   label?: string;
 }
 
+/**
+ * How a target row declares that it is disabled/suspended (#340 acceptance box
+ * 5: "Disabled/deleted targets are visibly marked and cannot be newly
+ * selected"). The *deleted* half is the unresolved badge; this is the *disabled*
+ * half, which the reference layer previously had no way to express — a model
+ * with `enabled: false` or a `status: "suspended"` project listed
+ * indistinguishably from a live one and was freely selectable.
+ *
+ * A row is disabled when the value at `key` is present and outside
+ * `activeValues` (compared case-insensitively on the stringified value). An
+ * absent/empty value means "no signal", never "disabled": several detail
+ * endpoints project fewer fields than their list endpoint, and a missing signal
+ * must not silently lock an operator out of a legitimate target.
+ */
+export interface EntityReferenceDisabledRule {
+  /** Row property carrying the enabled/status signal, e.g. `enabled`/`status`. */
+  key: string;
+  /** Stringified values that mean selectable, e.g. `["true"]` / `["active"]`. */
+  activeValues: string[];
+}
+
+/** Catalog rows gated by a boolean `enabled` flag (models, providers). */
+export const DISABLED_WHEN_NOT_ENABLED: EntityReferenceDisabledRule = {
+  key: "enabled",
+  activeValues: ["true"],
+};
+
+/**
+ * Control-plane hierarchy rows gated by a lifecycle `status`
+ * (tenant-accounts, projects, workspaces — the Admin API defaults each to
+ * `"active"` and lets an operator park a row in any other state).
+ */
+export const DISABLED_WHEN_STATUS_NOT_ACTIVE: EntityReferenceDisabledRule = {
+  key: "status",
+  activeValues: ["active"],
+};
+
 export interface EntityReferenceConfig {
   /** Adapter key from the shared entity-reference registry. */
   target: EntityReferenceTarget;
@@ -100,6 +137,8 @@ export interface EntityReferenceConfig {
   dependencies?: EntityReferenceDependency[];
   /** Escape hatch for references that legitimately have no list/get API. */
   allowRawValue?: boolean;
+  /** Marks disabled/suspended targets so they cannot be newly selected (#340). */
+  disabledWhen?: EntityReferenceDisabledRule;
 }
 
 /**

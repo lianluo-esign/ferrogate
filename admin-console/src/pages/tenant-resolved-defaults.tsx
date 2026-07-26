@@ -7,8 +7,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
@@ -75,14 +75,30 @@ export default function TenantResolvedDefaultsPage() {
               setLookupTenantId(tenantIdInput.trim() || null);
             }}
           >
-            <div className="flex-1">
+            {/* #340 box 7: this lookup used to be a free-text tenant id
+                (`placeholder="tenant-abc123"`), the last entity-backed field in
+                the tenancy module still asking an operator to paste an id. It
+                now uses the same shared #337 tenant-accounts picker as
+                tenant-roles/payment-methods; the canonical `id` still drives
+                `/admin/v1/tenant-accounts/{id}/resolved-defaults`. No
+                `disabledWhen` here on purpose: box 5 forbids *newly selecting* a
+                disabled target in a create/edit form, and inspecting a suspended
+                tenant's effective entitlements is exactly what an operator needs
+                during an incident -- marking it here would only lock the lookup. */}
+            <div className="grid flex-1 gap-2">
               <Label htmlFor="tenant-id">{t("page.resolvedDefaults.field.tenantId")}</Label>
-              <Input
+              <EntityReferencePicker
                 id="tenant-id"
+                label={t("page.resolvedDefaults.field.tenantId")}
+                reference={{
+                  target: "tenant-accounts",
+                  valueKey: "id",
+                  primaryLabelKey: "name",
+                  secondaryLabelKeys: ["slug", "status", "plan_id"],
+                }}
                 value={tenantIdInput}
-                onChange={(event) => setTenantIdInput(event.target.value)}
-                // eslint-disable-next-line ferrogate/no-untranslated-literal -- example tenant ID, identical across locales
-                placeholder="tenant-abc123"
+                dependencyValues={{}}
+                onChange={(value) => setTenantIdInput(typeof value === "string" ? value : "")}
               />
             </div>
             <Button type="submit" disabled={!tenantIdInput.trim()}>

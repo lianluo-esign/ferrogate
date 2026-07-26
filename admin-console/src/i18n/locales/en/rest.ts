@@ -201,6 +201,7 @@ export const enRest = {
   "resource.picker.selectedLabel": "Selected {label}",
   "resource.picker.resolutionUnavailable": "Resolution unavailable",
   "resource.picker.unresolvedReference": "Unresolved reference",
+  "resource.picker.disabledReference": "Disabled",
   "resource.picker.copyValue": "Copy {value}",
   "resource.picker.copyId": "Copy ID",
   "resource.picker.removeOption": "Remove {name}",

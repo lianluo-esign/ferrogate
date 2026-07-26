@@ -291,8 +291,15 @@ function ChargeDialog({
               reference={{
                 target: "payment-methods",
                 valueKey: "id",
-                primaryLabelKey: "provider",
-                secondaryLabelKeys: ["provider_payment_method_id"],
+                // #340 review follow-up: `provider` was the primary label, so
+                // every method of a tenant rendered as the same word ("stripe")
+                // and only the secondary line told them apart. AdminPaymentMethod
+                // carries no operator-chosen name, so the provider's own method
+                // handle is the sole distinguishing label; it is a non-secret
+                // reference token (already displayed on this page's table) and it
+                // is still not what gets submitted -- the canonical `id` is.
+                primaryLabelKey: "provider_payment_method_id",
+                secondaryLabelKeys: ["provider", "provider_customer_id"],
                 dependencies: [{ field: "tenant_id", queryKey: "tenant_id" }],
               }}
               value={paymentMethodId}

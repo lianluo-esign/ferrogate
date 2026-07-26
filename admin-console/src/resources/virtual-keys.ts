@@ -1,5 +1,10 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import {
+  booleanColumn,
+  DISABLED_WHEN_NOT_ENABLED,
+  DISABLED_WHEN_STATUS_NOT_ACTIVE,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 /**
  * Row shape derived from the OpenAPI contract (#314): if
@@ -51,12 +56,19 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug", "project_id"],
+        // #340 box 5: a suspended workspace is marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
       },
     },
     {
-      // Scopes are an enumerated set of Admin API permission strings
-      // (admin.read, admin.write, …), not entity rows backed by a list/get API,
-      // so they stay free text per the #337 escape-hatch guidance (#340).
+      // Scopes stay free text per the #337 escape hatch (#340). Not because no
+      // list/get API exists -- `/admin/v1/permissions` does, and backs
+      // roles.permission_keys -- but because it is a different vocabulary from a
+      // different subsystem: these are the auth-time capability strings matched
+      // in ferrogate-cli/src/auth.rs (a virtual key's are data-plane scopes such
+      // as `chat.completions`, and privileged `admin.*`/`*` values are rejected
+      // outright by the API), whereas the permissions catalog is the #182 RBAC
+      // entitlement table (ferrogate-cli/src/gateway/rbac.rs).
       name: "scopes",
       labelKey: "resource.virtualKeys.field.scopes",
       type: "csv",
@@ -72,6 +84,9 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["provider", "provider_model"],
+        // #340 box 5: a model the operator disabled in the catalog is listed,
+        // marked, and unselectable; an already-stored one stays inspectable.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     {
@@ -84,6 +99,8 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["kind", "base_url"],
+        // #340 box 5: same marking for a disabled provider.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     { name: "monthly_token_budget", labelKey: "resource.virtualKeys.field.monthlyTokenBudget", type: "number" },

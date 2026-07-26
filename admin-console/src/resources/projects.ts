@@ -1,5 +1,8 @@
 import { adminGet } from "@/lib/gateway-client";
-import type { ResourceConfig } from "@/lib/resource-config";
+import {
+  DISABLED_WHEN_STATUS_NOT_ACTIVE,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 export interface AdminProject extends Record<string, unknown> {
   id: string;
@@ -42,6 +45,8 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug"],
+        // #340: a suspended tenant is listed but marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
       },
       // Immutable after create (#326: the backend rejects tenant re-attribution
       // with 400 to avoid stranding child rows), so it is hidden on edit.

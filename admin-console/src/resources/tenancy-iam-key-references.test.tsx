@@ -267,4 +267,70 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     // The workspace list is scoped to the selected project.
     await waitFor(() => expect(workspaceProjectFilter).toBe("project-1"));
   });
+
+  // #340 acceptance box 5, against the SHIPPED config rather than a synthetic
+  // one: the disabled marking has to be declared on the real api-keys fields,
+  // not merely supported by the picker.
+  it("native api-key form marks disabled catalog targets and keeps them unselectable", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get(gatewayUrl("/admin/v1/projects"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            { ...projects[0], status: "active" },
+            {
+              id: "project-retired",
+              tenant_id: "tenant-1",
+              name: "Retired sandbox",
+              slug: "retired",
+              status: "suspended",
+            },
+          ],
+          total: 2,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+      http.get(gatewayUrl("/admin/v1/projects/:id"), ({ params }) =>
+        params.id === "project-1"
+          ? HttpResponse.json({ object: "project", project: { ...projects[0], status: "active" } })
+          : HttpResponse.json({ error: { code: "not_found", message: "x" } }, { status: 404 }),
+      ),
+      http.get(gatewayUrl("/admin/v1/models"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            { ...models[0], enabled: true },
+            { name: "gpt-retired", provider: "openai", provider_model: "gpt-retired", enabled: false },
+          ],
+        }),
+      ),
+    );
+
+    const onSubmit = renderForm(apiKeysConfig.fields, {
+      ...defaultFieldValues(apiKeysConfig.fields),
+      name: "native-key",
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Allowed models" }));
+    expect(await screen.findByRole("option", { name: /gpt-retired/ })).toBeDisabled();
+    await user.click(screen.getByRole("option", { name: /gpt-retired/ }));
+    await user.click(screen.getByRole("option", { name: /gpt-4o/ }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    await user.click(screen.getByRole("combobox", { name: "Project" }));
+    expect(await screen.findByRole("option", { name: /Retired sandbox/ })).toBeDisabled();
+    await user.click(screen.getByRole("option", { name: /Retired sandbox/ }));
+    await user.click(screen.getByRole("option", { name: /Production/ }));
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    // Only the live targets made it into the payload.
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ allowed_models: ["gpt-4o"], project_id: "project-1" }),
+      ),
+    );
+  });
 });

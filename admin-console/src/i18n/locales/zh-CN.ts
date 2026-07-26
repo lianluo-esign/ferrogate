@@ -287,6 +287,7 @@ export const zhCN = {
   "resource.picker.selectedLabel": "已选{label}",
   "resource.picker.resolutionUnavailable": "无法解析",
   "resource.picker.unresolvedReference": "未解析的引用",
+  "resource.picker.disabledReference": "已停用",
   "resource.picker.copyValue": "复制 {value}",
   "resource.picker.copyId": "复制 ID",
   "resource.picker.removeOption": "移除 {name}",

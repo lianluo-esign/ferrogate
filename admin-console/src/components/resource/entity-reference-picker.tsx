@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useQueries } from "@tanstack/react-query";
 import { Check, ChevronsUpDown, Copy, LoaderCircle, Search, X } from "lucide-react";
 import { AsyncStatus } from "@/components/ui/async-status";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -56,9 +56,14 @@ function normalizedValues(value: unknown, multiple: boolean): string[] {
   return single ? [single] : [];
 }
 
+/**
+ * Arrow-key traversal skips disabled options (#340): a disabled `<button>` is
+ * not focusable, so including it in the walk would stall the keyboard at the
+ * first suspended row.
+ */
 function moveOptionFocus(container: HTMLElement | null, current: HTMLElement, delta: number) {
   const options = Array.from(
-    container?.querySelectorAll<HTMLElement>("[role='option']") ?? [],
+    container?.querySelectorAll<HTMLElement>("[role='option']:not([disabled])") ?? [],
   );
   const index = options.indexOf(current);
   options[index + delta]?.focus();
@@ -110,6 +115,7 @@ export function EntityReferencePicker({
     offsetKey: reference.offsetKey,
     limitKey: reference.limitKey,
     pageSize: reference.pageSize,
+    disabledWhen: reference.disabledWhen,
   });
 
   const selectedQueries = useQueries({
@@ -149,13 +155,16 @@ export function EntityReferencePicker({
     staleTime: 30_000,
   });
 
-  const options = useMemo(() => {
+  const optionsByValue = useMemo(() => {
     const unique = new Map<string, EntityReferenceOption>();
     for (const page of listQuery.data?.pages ?? []) {
       for (const option of page.options) unique.set(option.value, option);
     }
-    return [...unique.values()];
+    return unique;
   }, [listQuery.data?.pages]);
+  const options = useMemo(() => [...optionsByValue.values()], [optionsByValue]);
+  const optionsRef = useRef(optionsByValue);
+  optionsRef.current = optionsByValue;
 
   const selectedOptions = selectedValues.map((selectedValue, index) => {
     const query = selectedQueries[index];
@@ -169,6 +178,10 @@ export function EntityReferencePicker({
   });
 
   function selectOption(optionValue: string) {
+    // #340 box 5: the listed option is already `disabled`, so this only guards
+    // programmatic callers (and any future non-button trigger) from newly
+    // selecting a suspended target.
+    if (optionsRef.current.get(optionValue)?.disabled) return;
     if (!multiple) {
       selectedValuesRef.current = [optionValue];
       onChange(optionValue);
@@ -245,7 +258,9 @@ export function EntityReferencePicker({
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
-                  listboxRef.current?.querySelector<HTMLElement>("[role='option']")?.focus();
+                  listboxRef.current
+                    ?.querySelector<HTMLElement>("[role='option']:not([disabled])")
+                    ?.focus();
                 }
               }}
               className="pl-9"
@@ -293,6 +308,11 @@ export function EntityReferencePicker({
                     type="button"
                     role="option"
                     aria-selected={selected}
+                    // #340 box 5: a disabled/suspended target stays listed (so an
+                    // operator can see why their id resolves to nothing) but
+                    // cannot be newly selected. An already-stored value is still
+                    // removable through its chip below.
+                    disabled={option.disabled}
                     onClick={(event) => {
                       selectOption(option.value);
                       if (event.detail === 0) restoreOptionFocus(option.value);
@@ -306,11 +326,21 @@ export function EntityReferencePicker({
                         moveOptionFocus(listboxRef.current, event.currentTarget, -1);
                       }
                     }}
-                    className="flex min-h-11 w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-11 w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                   >
                     <Check className={cn("size-4 shrink-0", selected ? "opacity-100" : "opacity-0")} aria-hidden="true" />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{option.primaryLabel}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate font-medium">{option.primaryLabel}</span>
+                        {/* A `<button>` may only contain phrasing content, so the
+                            marker is a span carrying the Badge styling rather
+                            than the Badge component (which renders a div). */}
+                        {option.disabled ? (
+                          <span className={cn(badgeVariants({ variant: "outline" }), "shrink-0")}>
+                            {t("resource.picker.disabledReference")}
+                          </span>
+                        ) : null}
+                      </span>
                       <span className="block truncate text-xs text-muted-foreground" translate="no">
                         {[option.secondaryLabel, option.value].filter(Boolean).join(" · ")}
                       </span>
@@ -349,6 +379,11 @@ export function EntityReferencePicker({
                     <Badge variant="outline">{t("resource.picker.resolutionUnavailable")}</Badge>
                   ) : option.unresolved ? (
                     <Badge variant="outline">{t("resource.picker.unresolvedReference")}</Badge>
+                  ) : option.disabled ? (
+                    // #340 box 5: a stored value whose target has since been
+                    // disabled stays inspectable and repairable, marked the same
+                    // way a deleted one is.
+                    <Badge variant="outline">{t("resource.picker.disabledReference")}</Badge>
                   ) : null}
                 </div>
                 <code className="block truncate text-xs text-muted-foreground" translate="no">

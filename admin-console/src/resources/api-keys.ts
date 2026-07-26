@@ -1,5 +1,10 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import {
+  booleanColumn,
+  DISABLED_WHEN_NOT_ENABLED,
+  DISABLED_WHEN_STATUS_NOT_ACTIVE,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 /**
  * Native gateway API keys (#321) over `/admin/v1/api-keys` — distinct from the
@@ -60,8 +65,16 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
     },
     { name: "enabled", labelKey: "resource.apiKeys.field.enabled", type: "boolean" },
     {
-      // Scopes are an enumerated set of Admin API permission strings, not entity
-      // rows with a list/get API, so they stay free text (#337 escape hatch, #340).
+      // Scopes stay free text (#337 escape hatch, #340). The justification is
+      // NOT "no list/get API exists" -- `/admin/v1/permissions` exists and backs
+      // roles.permission_keys. It is that these are a different vocabulary from
+      // a different subsystem: `scopes` are the auth-time capability strings
+      // matched in ferrogate-cli/src/auth.rs (plus `*`, and provider-facing
+      // entries like `chat.completions` that are not RBAC rows at all), whereas
+      // the permissions catalog is the #182 RBAC entitlement table
+      // (ferrogate-cli/src/gateway/rbac.rs). Binding this field to that catalog
+      // would silently forbid legal scopes and imply a coupling that does not
+      // exist.
       name: "scopes",
       labelKey: "resource.apiKeys.field.scopes",
       type: "csv",
@@ -77,6 +90,9 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["provider", "provider_model"],
+        // #340 box 5: a model the operator disabled in the catalog is listed,
+        // marked, and unselectable; an already-stored one stays inspectable.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     {
@@ -88,6 +104,9 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["provider", "provider_model"],
+        // #340 box 5: a model the operator disabled in the catalog is listed,
+        // marked, and unselectable; an already-stored one stays inspectable.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     {
@@ -99,6 +118,8 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["kind", "base_url"],
+        // #340 box 5: same marking for a disabled provider.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     {
@@ -110,6 +131,8 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["kind", "base_url"],
+        // #340 box 5: same marking for a disabled provider.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     // organization_id and user_id match the raw identifier the caller presents
@@ -131,6 +154,8 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug", "tenant_id"],
+        // #340 box 5: a suspended project is marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
       },
     },
     {
@@ -149,6 +174,8 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
         valueKey: "id",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["slug", "project_id"],
+        // #340 box 5: a suspended workspace is marked and unselectable.
+        disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
         // No inline `label`: the picker humanizes the field name ("project id")
         // for its "select … first" prompt, so no untranslated literal is baked
         // into the shared config data.

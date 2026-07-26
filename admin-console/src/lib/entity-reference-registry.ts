@@ -12,6 +12,12 @@ export interface EntityReferenceOption {
   secondaryLabel?: string;
   unresolved?: boolean;
   resolutionError?: boolean;
+  /**
+   * The target row exists but is disabled/suspended (#340 acceptance box 5).
+   * Rendered with the same visible marking as `unresolved` and not selectable,
+   * while an already-stored value stays inspectable and removable.
+   */
+  disabled?: boolean;
 }
 
 export interface EntityReferencePage {
@@ -181,6 +187,23 @@ function recordValue(record: Record<string, unknown>, key: string): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
+/**
+ * #340: whether a row declares itself disabled/suspended. An absent or empty
+ * signal is treated as "no signal" (selectable) rather than as disabled — some
+ * detail endpoints project fewer fields than their list endpoint, and a missing
+ * value must never lock an operator out of a legitimate target.
+ */
+export function isDisabledEntityRecord(
+  record: Record<string, unknown>,
+  reference: EntityReferenceConfig,
+): boolean {
+  const rule = reference.disabledWhen;
+  if (!rule) return false;
+  const signal = recordValue(record, rule.key).trim().toLowerCase();
+  if (!signal) return false;
+  return !rule.activeValues.some((active) => active.toLowerCase() === signal);
+}
+
 export function toEntityReferenceOption(
   record: Record<string, unknown>,
   reference: EntityReferenceConfig,
@@ -194,7 +217,12 @@ export function toEntityReferenceOption(
     .filter(Boolean)
     .join(" · ");
 
-  return { value, primaryLabel, secondaryLabel: secondaryLabel || undefined };
+  return {
+    value,
+    primaryLabel,
+    secondaryLabel: secondaryLabel || undefined,
+    disabled: isDisabledEntityRecord(record, reference) || undefined,
+  };
 }
 
 export async function loadEntityReferencePage(

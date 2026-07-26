@@ -230,6 +230,100 @@ describe("EntityReferencePicker", () => {
     expect(screen.getAllByText("missing-project").length).toBeGreaterThan(0);
   });
 
+  // #340 acceptance box 5. Before this, a model with `enabled: false` rendered
+  // as an ordinary selectable option with no badge — only the *deleted* half of
+  // "disabled/deleted targets are visibly marked and cannot be newly selected"
+  // was implemented.
+  it("marks a disabled target and refuses to newly select it", async () => {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/models"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            { name: "gpt-live", provider: "openai", enabled: true },
+            { name: "gpt-retired", provider: "openai", enabled: false },
+          ],
+          total: 2,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+    );
+    const fields: FieldConfig[] = [
+      {
+        name: "allowed_models",
+        label: "Allowed models",
+        type: "entities",
+        reference: {
+          target: "models",
+          valueKey: "name",
+          primaryLabelKey: "name",
+          disabledWhen: { key: "enabled", activeValues: ["true"] },
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    const onSubmit = renderReferenceForm(fields);
+
+    await user.click(screen.getByRole("combobox", { name: "Allowed models" }));
+    const retired = await screen.findByRole("option", { name: /gpt-retired/ });
+    expect(retired).toBeDisabled();
+    expect(retired).toHaveTextContent("Disabled");
+    await user.click(retired);
+    expect(screen.queryByRole("list", { name: "Selected Allowed models" })).not.toBeInTheDocument();
+
+    // The live model in the same catalog is unaffected.
+    await user.click(screen.getByRole("option", { name: /gpt-live/ }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({ allowed_models: ["gpt-live"] }),
+    );
+  });
+
+  it("keeps an already-stored disabled value inspectable and repairable", async () => {
+    server.use(
+      http.get(gatewayUrl("/admin/v1/models"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [{ name: "gpt-retired", provider: "openai", enabled: false }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+    );
+    const fields: FieldConfig[] = [
+      {
+        name: "allowed_models",
+        label: "Allowed models",
+        type: "entities",
+        reference: {
+          target: "models",
+          valueKey: "name",
+          primaryLabelKey: "name",
+          disabledWhen: { key: "enabled", activeValues: ["true"] },
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    const onSubmit = renderReferenceForm(fields, { allowed_models: ["gpt-retired"] });
+
+    // Hydration resolves the stored value against the catalog, so the badge
+    // appears once the lookup lands.
+    expect(await screen.findByText("Disabled")).toBeVisible();
+    expect(screen.getByRole("list", { name: "Selected Allowed models" })).toHaveTextContent(
+      "gpt-retired",
+    );
+
+    // Repairable: the stored value can still be removed.
+    await user.click(screen.getByRole("button", { name: "Remove gpt-retired" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ allowed_models: [] }));
+  });
+
   it("surfaces lookup failures and retries without losing the form", async () => {
     let attempts = 0;
     server.use(

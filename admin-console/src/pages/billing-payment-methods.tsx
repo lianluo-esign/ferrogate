@@ -45,6 +45,7 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { DISABLED_WHEN_STATUS_NOT_ACTIVE } from "@/lib/resource-config";
 
 type AdminPaymentMethod = AdminSchema<"AdminPaymentMethod">;
 
@@ -237,6 +238,8 @@ export default function BillingPaymentMethodsPage() {
               valueKey: "id",
               primaryLabelKey: "name",
               secondaryLabelKeys: ["slug"],
+              // #340 box 5: a suspended tenant is marked and unselectable.
+              disabledWhen: DISABLED_WHEN_STATUS_NOT_ACTIVE,
             }}
             value={tenantId ?? ""}
             dependencyValues={{}}

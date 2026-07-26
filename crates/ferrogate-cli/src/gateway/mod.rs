@@ -12,6 +12,10 @@ mod agent_jobs;
 mod agent_runs;
 mod agent_schedules;
 mod api_contract;
+/// #340: the API-side half of the admin console's project -> workspace
+/// cascade -- the tenancy invariant a native api-key's
+/// `organization_id`/`project_id`/`workspace_id` triple must satisfy.
+mod api_key_tenancy;
 pub(crate) mod asset_bucket;
 mod asset_egress;
 mod asset_inline_publish;

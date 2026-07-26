@@ -69,6 +69,7 @@ use ferrogate_providers::{ProviderHeader, SecretValue};
 use ferrogate_guardrails::{ActionKind as GuardrailActionKind, ManagedActionClass};
 
 use super::admin_list_query::{list_response, matches_search, query_value};
+use super::api_key_tenancy::{check_api_key_tenancy, ApiKeyTenancyRefs};
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
 use super::managed_action_guardrail::{
@@ -8242,6 +8243,121 @@ impl FerroGateway {
                 .await;
             }
         };
+
+        // #340: the console cascades the workspace picker from the selected
+        // project, but that is a UI convention -- any curl/SDK/stale console
+        // could still POST project A paired with a workspace parented by
+        // project B, and the runtime would then resolve quota/attribution
+        // scopes against a hierarchy that does not exist. Validate the triple
+        // authoritatively here, the same way the workspaces and virtual-keys
+        // upserts already validate theirs (gateway/virtual_keys.rs).
+        let refs = ApiKeyTenancyRefs::from_key(&key);
+        if refs.needs_lookup() {
+            let project = match refs.project_id {
+                Some(project_id) => match state.get_project(project_id).await {
+                    Ok(project) => project,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                },
+                None => None,
+            };
+            let workspace = match refs.workspace_id {
+                Some(workspace_id) => match state.get_workspace(workspace_id).await {
+                    Ok(workspace) => workspace,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                },
+                None => None,
+            };
+            match check_api_key_tenancy(refs, project.as_ref(), workspace.as_ref()) {
+                Ok(outcome) => {
+                    // Defence in depth: this endpoint is platform-operator only
+                    // (`require_platform_operator` above, so the caller has no
+                    // `organization_id` today), but if that gate is ever relaxed
+                    // to tenant-scoped admins the resolved owner must still bound
+                    // what they can attach a key to -- exactly as the virtual-keys
+                    // upsert does after `resolve_workspace_scope`.
+                    if let Some(owner_tenant_id) = outcome.owner_tenant_id.as_deref() {
+                        if let Err(error) =
+                            crate::auth::authorize_tenant_scope(&auth, owner_tenant_id)
+                        {
+                            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                                ctx,
+                                &auth,
+                                "api_key.upsert",
+                                &key.id,
+                                "rejected",
+                                error.message.clone(),
+                            ));
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                    // A reference that names no control-plane row is accepted
+                    // (see ApiKeyTenancyOutcome::unresolved) but never silently:
+                    // it lands in the audit trail and the operator log so a typo
+                    // is discoverable instead of becoming a dead scope.
+                    if !outcome.unresolved.is_empty() {
+                        let dangling = outcome.unresolved.join(", ");
+                        tracing::warn!(
+                            api_key_id = %key.id,
+                            unresolved = %dangling,
+                            "api key references control-plane rows that do not exist; the key is \
+                             stored but those scopes resolve to nothing"
+                        );
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "api_key.upsert",
+                            &key.id,
+                            "warning",
+                            format!("api key references unknown control-plane rows: {dangling}"),
+                        ));
+                    }
+                }
+                Err(rejection) => {
+                    let message = rejection.message();
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "api_key.upsert",
+                        &key.id,
+                        "rejected",
+                        message.clone(),
+                    ));
+                    return write_json_error(
+                        session,
+                        rejection.status(),
+                        rejection.code(),
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+        }
 
         let key_id = key.id.clone();
         let response_key = admin_api_key(&key);

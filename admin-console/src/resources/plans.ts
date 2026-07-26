@@ -1,5 +1,9 @@
 import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import {
+  booleanColumn,
+  DISABLED_WHEN_NOT_ENABLED,
+  type ResourceConfig,
+} from "@/lib/resource-config";
 
 /**
  * Row shape derived from the OpenAPI contract (#314): if
@@ -67,6 +71,9 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
         valueKey: "name",
         primaryLabelKey: "name",
         secondaryLabelKeys: ["provider", "provider_model"],
+        // #340 box 5: a model the operator disabled in the catalog is listed,
+        // marked, and unselectable; an already-stored one stays inspectable.
+        disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
     { name: "default_rpm_limit", labelKey: "resource.plans.field.defaultRpmLimit", type: "number" },
