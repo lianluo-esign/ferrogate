@@ -295,11 +295,41 @@ function uploadFile(input: HTMLElement, file: File) {
  *
  * Site-specific handlers are listed FIRST so they win over the generic ones.
  */
+/**
+ * A row of the operator-only withheld listing (`GET /v1/assets/withheld`,
+ * #379): the DURABLE record that screening withheld an asset (#366) rather than
+ * rejecting it. This is what distinguishes the two ways a publish PUT can
+ * answer 200 without publishing anything — screening withheld the bundle, or
+ * the body simply was not a ZIP — so the console can name the real reason
+ * instead of guessing at one.
+ */
+function withheldAsset(
+  overrides: Partial<AdminSchema<"WithheldAssetSummary">> = {},
+): AdminSchema<"WithheldAssetSummary"> {
+  return {
+    id: "tenant-1:static_site:marketing:2.2.0",
+    asset_type: "static_site",
+    name: "marketing",
+    version: "2.2.0",
+    content_type: "application/zip",
+    content_hash: "e".repeat(64),
+    size_bytes: 400,
+    storage_backed: false,
+    created_at_unix: 1_700_000_300,
+    updated_at_unix: 1_700_000_300,
+    visibility: "quarantined",
+    ...overrides,
+  };
+}
+
 function mockBase(options: {
   sites?: SiteFixture[];
   domains?: SiteDomain[];
   /** ACME posture returned by `GET /admin/v1/site-domains/{hostname}`. */
   acmeEnabled?: boolean;
+  /** Rows the withheld listing returns. Empty by default — the ordinary case,
+   * where nothing the tenant pushed was withheld by screening. */
+  withheld?: AdminSchema<"WithheldAssetSummary">[];
 } = {}) {
   const sites = options.sites ?? [];
   const siteHandlers = sites.flatMap((fixture) => [
@@ -327,6 +357,16 @@ function mockBase(options: {
     ),
     http.get(gatewayUrl("/admin/v1/site-domains"), () =>
       HttpResponse.json({ object: "list", data: options.domains ?? [] }),
+    ),
+    // The withheld listing the publish path reads back to explain a 200 that
+    // committed no bundle. Modelled on every fixture, not just the tests that
+    // care, so a publish can never silently fall off the end of the mock.
+    http.get(gatewayUrl("/v1/assets/withheld"), () =>
+      HttpResponse.json({
+        object: "list",
+        data: options.withheld ?? [],
+        total: (options.withheld ?? []).length,
+      }),
     ),
     // Per-hostname detail read: the only endpoint that carries ACME posture and
     // the #488 `verification` block, so the drawer can show both for a binding
@@ -416,6 +456,34 @@ describe("StaticSitesPage", () => {
 
     const notZip = new File(["hello"], "notes.txt", { type: "text/plain" });
     uploadFile(screen.getByLabelText("Bundle (ZIP)"), notZip);
+
+    expect(await screen.findByText("The bundle must be a .zip archive.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
+    expect(putCalled).toBe(false);
+  });
+
+  // How D1 became REACHABLE: the client-side gate used to check only the
+  // filename and the browser-declared MIME type, so `head -c 400 /dev/urandom >
+  // site.zip` passed it, reached the gateway, failed `is_zip_archive`, and came
+  // back as a 200 the console read as a publish. The bytes are the fact; the
+  // name is only the operator's claim.
+  it("blocks a corrupt file NAMED .zip before it is ever uploaded", async () => {
+    mockBase();
+    let putCalled = false;
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/:site/:version"), () => {
+        putCalled = true;
+        return HttpResponse.json({}, { status: 200 });
+      }),
+    );
+    renderWithProviders(<StaticSitesPage />);
+    await screen.findByText("No published static sites.");
+
+    // Correct name, correct MIME type, bytes that are not a ZIP at all.
+    const corrupt = new File([new Uint8Array([0x00, 0xff, 0x13, 0x37])], "site.zip", {
+      type: "application/zip",
+    });
+    uploadFile(screen.getByLabelText("Bundle (ZIP)"), corrupt);
 
     expect(await screen.findByText("The bundle must be a .zip archive.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
@@ -1588,6 +1656,206 @@ describe("StaticSitesPage publish error states", () => {
       expect(alert).toHaveTextContent("network request failed");
     } finally {
       vi.stubGlobal("XMLHttpRequest", original);
+    }
+  });
+
+  // GATE (#345 box 3, "the UI states the ACTUAL outcome"): the gateway only
+  // takes the bundle-publish path when `asset_type == static_site &&
+  // is_zip_archive(body) && screening.is_visible()` (assets.rs:653). A body
+  // that is NOT a real ZIP -- the console's `looksLikeZip` gate was name/MIME
+  // only, so a corrupt file named `site.zip` passed it -- or a bundle whose
+  // supply-chain screening came back pending/quarantined falls THROUGH to the
+  // ordinary blob store, which answers 200 with the AssetMutationResponse
+  // envelope. Observed against a real gateway:
+  //   PUT /v1/assets/static_site/mysite/3.0.0  (400 random bytes, .zip)
+  //   -> 200 {"object":"asset","asset":{...,"content_type":"application/zip"}}
+  //   and /sites/org_a/mysite/ kept serving the PREVIOUS bundle.
+  // Nothing was published, so the console must not claim a publish.
+  it("does not claim a publish when the gateway stored an opaque blob instead", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        // The REAL fallthrough envelope, verbatim from the probe above.
+        HttpResponse.json({
+          object: "asset",
+          asset: {
+            id: "tenant-1:static_site:marketing:2.2.0",
+            asset_type: "static_site",
+            name: "marketing",
+            version: "2.2.0",
+            content_type: "application/zip",
+            content_hash: "0c8c83a298d8cf76f4973c6ed2c09c354b49be64b3f06201aa5e90a1a161be6f",
+            size_bytes: 400,
+            storage_backed: false,
+            created_at_unix: 1785056919,
+            updated_at_unix: 1785056919,
+          },
+        }),
+      ),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const row = await screen.findByTestId("static-site-marketing");
+      await within(row).findByText("2.1.0");
+
+      await fillAndPublish(user, "marketing", "2.2.0");
+
+      // No site bundle was committed, so no success may be claimed.
+      await waitFor(() => expect(successToast).not.toHaveBeenCalled());
+    } finally {
+      successToast.mockRestore();
+    }
+  });
+
+  /** The opaque-blob 200 the gateway answers when it did NOT publish a bundle:
+   * `AssetMutationResponse`, carrying no `site`/`file_count`/`size_bytes`. */
+  function blobEnvelope(site: string, version: string) {
+    return HttpResponse.json({
+      object: "asset",
+      asset: {
+        id: `tenant-1:static_site:${site}:${version}`,
+        asset_type: "static_site",
+        name: site,
+        version,
+        content_type: "application/zip",
+        content_hash: "0c8c83a298d8cf76f4973c6ed2c09c354b49be64b3f06201aa5e90a1a161be6f",
+        size_bytes: 400,
+        storage_backed: false,
+        created_at_unix: 1785056919,
+        updated_at_unix: 1785056919,
+      },
+    });
+  }
+
+  // The other half of D1: the operator must be TOLD what happened, not merely
+  // denied a success toast. The withheld listing is empty here, which is how the
+  // console knows screening passed and the body was therefore not a ZIP.
+  it("states the actual outcome of an opaque-blob 200, with no undefined or NaN", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        blobEnvelope("marketing", "2.2.0"),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+
+    await fillAndPublish(user, "marketing", "2.2.0");
+
+    const alert = await screen.findByRole("alert");
+    // It names the real outcome: stored as an ordinary asset, nothing served.
+    expect(alert).toHaveTextContent("Not published");
+    expect(alert).toHaveTextContent("not a ZIP archive");
+    expect(alert).toHaveTextContent("still serves its previous bundle");
+    // The old code rendered the missing bundle fields into operator copy.
+    expect(alert.textContent).not.toMatch(/undefined|NaN/);
+    // The previously published bundle is untouched and still listed.
+    const stillThere = screen.getByTestId("static-site-marketing");
+    expect(within(stillThere).getByText("2.1.0")).toBeInTheDocument();
+  });
+
+  // Box 6's missing half: the gateway does NOT reject a pending/quarantined
+  // bundle (#366 stores it withheld on purpose, so it is never served before it
+  // is proven clean) — it answers the same 200 blob envelope. A scan rejection
+  // therefore has a 2xx shape as well as the 4xx one already covered.
+  it("names the screening verdict when a bundle was stored withheld, not published", async () => {
+    mockBase({
+      sites: [marketingFixture()],
+      withheld: [withheldAsset({ visibility: "quarantined" })],
+    });
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        blobEnvelope("marketing", "2.2.0"),
+      ),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const row = await screen.findByTestId("static-site-marketing");
+      await within(row).findByText("2.1.0");
+
+      await fillAndPublish(user, "marketing", "2.2.0");
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("screening withheld this bundle");
+      // The DURABLE verdict from the withheld row, not a generic guess.
+      expect(alert).toHaveTextContent("Quarantined");
+      expect(alert).not.toHaveTextContent("not a ZIP archive");
+      expect(successToast).not.toHaveBeenCalled();
+    } finally {
+      successToast.mockRestore();
+    }
+  });
+
+  it("distinguishes a pending scan from a quarantine", async () => {
+    mockBase({
+      sites: [marketingFixture()],
+      withheld: [withheldAsset({ visibility: "pending_scan" })],
+    });
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        blobEnvelope("marketing", "2.2.0"),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.1.0");
+
+    await fillAndPublish(user, "marketing", "2.2.0");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Pending scan");
+    expect(alert).not.toHaveTextContent("Quarantined");
+  });
+
+  // Honesty rule: when the reason cannot be read we report the outcome we DID
+  // observe and surface the unread reason — we never pick one of the two.
+  it("admits it could not read WHY the publish did not commit", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
+        blobEnvelope("marketing", "2.2.0"),
+      ),
+      http.get(gatewayUrl("/v1/assets/withheld"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "forbidden",
+              message: "assets.read permission required",
+              request_id: "req-w",
+            },
+          },
+          { status: 403 },
+        ),
+      ),
+    );
+    const successToast = vi.spyOn(toast, "success");
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<StaticSitesPage />);
+      const row = await screen.findByTestId("static-site-marketing");
+      await within(row).findByText("2.1.0");
+
+      await fillAndPublish(user, "marketing", "2.2.0");
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Not published");
+      expect(alert).toHaveTextContent("the reason could not be read back");
+      // The gateway's own words, verbatim — not a substituted guess.
+      expect(alert).toHaveTextContent("assets.read permission required");
+      // Neither reason is asserted.
+      expect(alert).not.toHaveTextContent("not a ZIP archive");
+      expect(alert).not.toHaveTextContent("screening withheld");
+      expect(successToast).not.toHaveBeenCalled();
+    } finally {
+      successToast.mockRestore();
     }
   });
 

@@ -813,6 +813,12 @@ export const zhCN = {
   "page.staticSites.validation.versionRequired": "版本为必填项",
   "page.staticSites.validation.bundleRequired": "请选择要发布的 ZIP 站点包",
   "page.staticSites.toast.published": "已发布 {site}（{files} 个文件，{bytes}）",
+  "page.staticSites.notPublished.notArchive":
+    "未发布：上传内容不是 ZIP 归档，网关将其作为普通资产存储在 {site}/{version}，并未解包为站点包。{site} 仍在提供此前的站点包。",
+  "page.staticSites.notPublished.withheld":
+    "未发布：供应链扫描扣留了该站点包（{state}），网关已存储但不会对外提供。{site} 仍在提供此前的站点包。请在“扣留资产”中查看。",
+  "page.staticSites.notPublished.unknown":
+    "未发布：网关将上传内容作为普通资产存储在 {site}/{version}，并未发布站点包；且无法读取具体原因：{message}。{site} 仍在提供此前的站点包。",
   "page.staticSites.loadError": "加载静态站点失败：{message}",
   "page.staticSites.manifestError": "清单不可用",
   "page.staticSites.empty": "尚无已发布的静态站点。",

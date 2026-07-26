@@ -789,6 +789,16 @@ export const enRest = {
   "page.staticSites.validation.versionRequired": "Version is required",
   "page.staticSites.validation.bundleRequired": "Choose a ZIP bundle to publish",
   "page.staticSites.toast.published": "Published {site} ({files} files, {bytes})",
+  // A publish PUT can answer 200 WITHOUT committing a site bundle: the gateway
+  // falls through to the opaque-blob asset store when the body is not a ZIP or
+  // when screening withheld it. Nothing was deployed in either case, so these
+  // read as the failures they are and say what the upload actually became.
+  "page.staticSites.notPublished.notArchive":
+    "Not published: the upload is not a ZIP archive, so the gateway stored it as an ordinary asset at {site}/{version} instead of unpacking a site bundle. {site} still serves its previous bundle.",
+  "page.staticSites.notPublished.withheld":
+    "Not published: supply-chain screening withheld this bundle ({state}), so the gateway stored it without serving it. {site} still serves its previous bundle. Review it under Withheld assets.",
+  "page.staticSites.notPublished.unknown":
+    "Not published: the gateway stored the upload as an ordinary asset at {site}/{version} rather than publishing a site bundle, and the reason could not be read back: {message}. {site} still serves its previous bundle.",
   "page.staticSites.loadError": "Failed to load static sites: {message}",
   "page.staticSites.manifestError": "Manifest unavailable",
   "page.staticSites.empty": "No published static sites.",

@@ -241,6 +241,51 @@ interface SiteManifest {
  * so it stays pinned to the gateway's actual response shape. */
 type StaticSitePublishResponse = AdminSchema<"StaticSitePublishResponse">;
 
+/** The OTHER 200 the same publish PUT can answer: the ordinary single-blob
+ * asset push envelope. See `PublishEnvelope`. */
+type AssetMutationResponse = AdminSchema<"AssetMutationResponse">;
+
+/** One withheld (pending_scan / quarantined) asset row, used to explain WHY a
+ * publish fell through to the blob store instead of committing a bundle. */
+type WithheldAssetSummary = AdminSchema<"WithheldAssetSummary">;
+
+/**
+ * THE PUBLISH PUT HAS TWO DIFFERENT 200 ENVELOPES, AND ONLY ONE OF THEM IS A
+ * PUBLISH. The gateway takes the site-bundle path only when ALL THREE of
+ * `asset_type == "static_site"`, `is_zip_archive(body)` and
+ * `screening.is_visible()` hold (assets.rs:653); otherwise the request falls
+ * THROUGH to the ordinary opaque-blob asset store, which answers **200** with
+ * `AssetMutationResponse` — a completely different shape that carries no
+ * `site`, `file_count` or `size_bytes`.
+ *
+ * Both fallthroughs are reachable from this form:
+ *   1. a body that is not a real ZIP (a corrupt or wrong file the operator
+ *      named `.zip`), and
+ *   2. a bundle whose supply-chain screening came back pending/quarantined,
+ *      which #366 DELIBERATELY stores withheld rather than rejecting, so the
+ *      site is never served before it is proven clean.
+ *
+ * In both cases nothing was deployed and the site keeps serving its previous
+ * bundle — so treating any 2xx as a publish printed
+ * `Published undefined (undefined files, NaN)` over a deployment that never
+ * happened. `object` is the `@constant` discriminator the contract gives us for
+ * exactly this, so the publish is narrowed on it and anything else is routed to
+ * the failure path (#345 box 3: the UI states the ACTUAL outcome).
+ */
+type PublishEnvelope = StaticSitePublishResponse | AssetMutationResponse;
+
+/** True only for the envelope that means a site bundle was actually committed.
+ * Written defensively against `unknown` because the transport hands back
+ * whatever the gateway serialized (including `null` for an unparseable body),
+ * not a value TypeScript has checked. */
+function isBundleCommit(body: unknown): body is StaticSitePublishResponse {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { object?: unknown }).object === "static_site"
+  );
+}
+
 /** The generated `putAsset` operation the gateway routes static-site publishes
  * through: a `static_site` `asset_type` whose body is a ZIP archive branches
  * into the bundle-publish path (there is no separate gateway route). The publish
@@ -423,15 +468,75 @@ function serveHref(servePath: string): string {
   }
 }
 
-/** `.zip` by extension or a zip-ish MIME type. The gateway re-checks the ZIP
- * magic bytes on the raw upload, so this is fast feedback, not the gate. */
-function looksLikeZip(file: File): boolean {
-  if (file.name.toLowerCase().endsWith(".zip")) return true;
+/** The ZIP local-file-header magic, byte-for-byte the gateway's `is_zip_archive`
+ * predicate (`data.starts_with(&[0x50, 0x4b, 0x03, 0x04])`, sites.rs:203-205). */
+const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
+
+/**
+ * Reads the bundle's first bytes and reports whether the gateway will see a ZIP
+ * archive — the SAME predicate `is_zip_archive` applies, so the client-side
+ * check cannot disagree with the branch it is predicting.
+ *
+ * This used to trust the FILENAME (`.zip`) or the browser-declared MIME type,
+ * which is not evidence about the bytes at all: `head -c 400 /dev/urandom >
+ * site.zip` sailed straight through to a publish that the gateway then stored as
+ * an opaque blob. The filename is the operator's claim; the magic is the fact.
+ * Still fast feedback rather than the gate — the gateway remains authoritative,
+ * and the envelope check on the response is the real guarantee (see
+ * `PublishEnvelope`) — but it now fails the case it was meant to catch.
+ */
+async function readsAsZipArchive(file: File): Promise<boolean> {
+  const head = new Uint8Array(await file.slice(0, ZIP_MAGIC.length).arrayBuffer());
   return (
-    file.type === "application/zip" ||
-    file.type === "application/x-zip-compressed" ||
-    file.type === "application/x-zip"
+    head.length === ZIP_MAGIC.length &&
+    ZIP_MAGIC.every((byte, index) => head[index] === byte)
   );
+}
+
+/**
+ * Explains a publish PUT that answered 200 WITHOUT committing a site bundle,
+ * for the operator-facing failure message. Never guesses: the reason is read
+ * back from the gateway, and when it cannot be read the message says so.
+ *
+ * The gateway's fallthrough condition is `!is_zip_archive(body) ||
+ * !screening.is_visible()` (assets.rs:653), and a withheld verdict is DURABLE
+ * on the stored row — so the operator-only withheld listing (#379) is the
+ * authoritative answer to "was it withheld, or was it simply not a ZIP?". A row
+ * for this exact `{name}/{version}` means screening withheld it and names the
+ * state; its absence means the screening passed and the body was therefore not a
+ * ZIP archive. If that read fails we report the outcome we DID observe (nothing
+ * was published) and surface the unread reason verbatim, rather than picking one.
+ */
+async function explainUncommittedPublish(
+  t: ReturnType<typeof useI18n>["t"],
+  apiKey: string,
+  site: string,
+  version: string,
+): Promise<string> {
+  let withheld: WithheldAssetSummary | undefined;
+  try {
+    const listing = await adminGet(apiKey, "/v1/assets/withheld", {
+      query: { asset_type: STATIC_SITE_TYPE },
+    });
+    withheld = listing.data.find(
+      (row) => row.name === site && row.version === version,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return t("page.staticSites.notPublished.unknown", { site, version, message });
+  }
+  if (withheld) {
+    return t("page.staticSites.notPublished.withheld", {
+      site,
+      version,
+      state: t(
+        withheld.visibility === "quarantined"
+          ? "page.withheldAssets.visibility.quarantined"
+          : "page.withheldAssets.visibility.pendingScan",
+      ),
+    });
+  }
+  return t("page.staticSites.notPublished.notArchive", { site, version });
 }
 
 /**
@@ -1288,6 +1393,14 @@ export default function StaticSitesPage() {
   const [cacheControl, setCacheControl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  // True while the picked bundle's magic bytes are being read. Publishing is
+  // held during it so the operator cannot beat the check to the button and
+  // upload a bundle we have not yet formed a verdict on.
+  const [archiveChecking, setArchiveChecking] = useState(false);
+  // Reading the archive magic is async, so a fast second pick could otherwise
+  // let the FIRST file's verdict land after it and describe the wrong file.
+  // Each selection takes a ticket and only the current one may write state.
+  const archiveCheckRef = useRef(0);
   const [publishError, setPublishError] = useState<string | null>(null);
   // Real byte-level upload progress, fed by xhr.upload.onprogress.
   const [uploadProgress, setUploadProgress] = useState<{
@@ -1447,6 +1560,10 @@ export default function StaticSitesPage() {
     setCacheControl("");
     setFile(null);
     setArchiveError(null);
+    // Invalidate any archive check still in flight so its verdict cannot land
+    // on the cleared form and re-raise an error about a file that is gone.
+    archiveCheckRef.current += 1;
+    setArchiveChecking(false);
     setPublishError(null);
     setUploadProgress(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1463,26 +1580,39 @@ export default function StaticSitesPage() {
     );
   }
 
-  function onFileChange(next: File | null) {
+  async function onFileChange(next: File | null) {
+    const ticket = ++archiveCheckRef.current;
     setFile(next);
     setPublishError(null);
     if (!next) {
       setArchiveError(null);
+      setArchiveChecking(false);
       return;
     }
-    if (!looksLikeZip(next)) {
-      setArchiveError(t("page.staticSites.validation.notZip"));
-      return;
-    }
+    // Size is known synchronously; check it before reading any bytes.
     if (next.size > MAX_BUNDLE_BYTES) {
       setArchiveError(
         t("page.staticSites.validation.tooLarge", {
           max: format.bytes(MAX_BUNDLE_BYTES),
         }),
       );
+      setArchiveChecking(false);
       return;
     }
     setArchiveError(null);
+    setArchiveChecking(true);
+    let isZip: boolean;
+    try {
+      isZip = await readsAsZipArchive(next);
+    } catch {
+      // The bytes could not be read at all, so we know nothing about them.
+      // Let the upload proceed and let the gateway be the judge, exactly as
+      // before this check existed — never block on an unproven suspicion.
+      isZip = true;
+    }
+    if (ticket !== archiveCheckRef.current) return;
+    setArchiveChecking(false);
+    setArchiveError(isZip ? null : t("page.staticSites.validation.notZip"));
   }
 
   const publishMutation = useMutation({
@@ -1506,7 +1636,7 @@ export default function StaticSitesPage() {
         "x-site-cache-control": cacheControl.trim() || undefined,
         "x-asset-visibility": isPublic ? "public" : undefined,
       } satisfies Partial<Record<keyof PublishHeaders, string | undefined>>;
-      return putBundleWithProgress<StaticSitePublishResponse>(
+      const envelope = await putBundleWithProgress<PublishEnvelope | null>(
         apiKey,
         path,
         file,
@@ -1514,6 +1644,21 @@ export default function StaticSitesPage() {
         publishHeaders,
         (loaded, total) => setUploadProgress({ loaded, total }),
       );
+      // A 2xx is NOT a publish. The gateway answers this same PUT with the
+      // opaque-blob `AssetMutationResponse` envelope — still 200 — whenever the
+      // body is not a real ZIP or screening withheld it, having committed no
+      // manifest and no files; the site keeps serving its previous bundle. Only
+      // the `static_site` envelope means a bundle was committed, so anything
+      // else becomes a FAILURE carrying the gateway's own reason. Throwing here
+      // routes it through the one `onError` path the verbatim gateway verdicts
+      // already use, so the alert, the toast and the untouched form behave
+      // identically to an outright rejection.
+      if (!isBundleCommit(envelope)) {
+        throw new Error(
+          await explainUncommittedPublish(t, apiKey, site.trim(), version.trim()),
+        );
+      }
+      return envelope;
     },
     onMutate: () => {
       setPublishError(null);
@@ -1682,13 +1827,18 @@ export default function StaticSitesPage() {
       setPublishError(archiveError);
       return;
     }
+    // The bundle's own verdict is not in yet; publishing now would upload bytes
+    // we have not checked. The button is disabled during the read, so this only
+    // catches a programmatic submit.
+    if (archiveChecking) return;
     publishMutation.mutate();
   }
 
   // The canonical serve path the bundle WILL be reachable at — always under the
   // session tenant, because that is where the gateway files the publish.
   const serveUrlPreview = `/sites/${tenantId}/${site.trim() || "{site}"}/`;
-  const publishDisabled = publishMutation.isPending || archiveError !== null;
+  const publishDisabled =
+    publishMutation.isPending || archiveChecking || archiveError !== null;
 
   const progressFraction =
     uploadProgress && uploadProgress.total > 0
