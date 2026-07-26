@@ -131,10 +131,16 @@ pub(crate) fn asset_resource_descriptor(asset: &StoredAsset) -> Value {
 }
 
 /// A single MCP resource-contents entry for an asset's verified bytes. Textual
-/// content is inlined as `text`; anything else is inlined as base64 `blob`. The
-/// stored sha256 travels in `_meta` so a client can re-verify the fingerprint.
-/// Inline is acceptable under the current 10MB asset cap (issue #257, slice 1);
-/// slice 3 will add a presigned downloadable reference for larger assets.
+/// content is inlined as `text`; anything else is inlined as base64 `blob` --
+/// which costs ~1.33x the object, on top of the bytes themselves and the
+/// `serde_json` copy of the encoded string.
+///
+/// Inlining is only acceptable because the caller has already been through
+/// [`AppState::read_asset_content`](crate::state::AppState::read_asset_content),
+/// which refuses anything above `[asset_bucket].max_gateway_buffer_bytes`
+/// (10 MiB by default). Issue #259 removed the flat 10 MB asset cap this used
+/// to lean on, so the bound is now the memory budget, not the asset size limit:
+/// larger assets are served by presigned direct download, not inlined here.
 pub(crate) fn asset_resource_content_entry(asset: &StoredAsset, content: &[u8]) -> Value {
     let uri = asset_uri(&asset.asset_type, &asset.name, &asset.version);
     let mut entry = json!({
@@ -220,7 +226,7 @@ pub(crate) async fn execute_fetch_asset(
     })?;
 
     let id = stored_asset_id(tenant_id, &asset_type, &name, &version);
-    match state.read_asset_content(&id).await {
+    match state.read_asset_content(&id, request_id).await {
         Ok((asset, content)) => {
             let latency_ms = elapsed_ms(started);
             let entry = asset_resource_content_entry(&asset, &content);
@@ -251,6 +257,11 @@ pub(crate) async fn execute_fetch_asset(
         Err(AssetReadError::Integrity) => Err(ToolExecutionError::Failed(
             "stored asset content hash does not match recorded hash".to_string(),
         )),
+        // Issue #259: an agent asking for a 5 GiB object over this tool used to
+        // get it -- the full object, a second pass to re-hash it, and a ~1.33x
+        // base64 copy on top. It now gets the refusal and the endpoint that
+        // does work without the gateway in the data path.
+        Err(AssetReadError::TooLarge(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::BucketUnavailable(message)) => Err(ToolExecutionError::Failed(message)),
         Err(AssetReadError::Storage(message)) => Err(ToolExecutionError::Failed(message)),
     }

@@ -22,6 +22,10 @@ use ferrogate_storage::{
 };
 
 use super::admin_list_query::{list_response, matches_search, query_value};
+use super::asset_bucket::{
+    asset_too_large_for_buffering_message, read_object_bounded, BufferedReadRefusal,
+    ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE, BUCKET_READ_UNAVAILABLE_MESSAGE,
+};
 use super::asset_inline_publish;
 use super::asset_registry::{resolve_version, select_variant, VariantChoice};
 use super::body::read_request_body;
@@ -75,8 +79,29 @@ impl AssetError {
 /// single streaming pass whose resident cost is one HTTP chunk, and objects at
 /// or below it are buffered so the whole-file controls (detached-signature
 /// verification, out-of-process malware scanning, `mcp_manifest` transport
-/// parsing) still get their bytes. Nothing on either path buffers a whole
-/// large object in the gateway.
+/// parsing) still get their bytes.
+///
+/// What the memory bound covers, enumerated rather than asserted -- the first
+/// two rounds of #259 each wrote a universal here that a read surface
+/// contradicted, so this list is the claim:
+///
+/// - the presigned commit's verify-and-copy leg (streams, never buffers);
+/// - `GET /v1/assets/{type}/{name}/{version}` (`write_asset_body`);
+/// - the static-site serve (`serve_site_file`);
+/// - the `fetch_asset` built-in tool and MCP `resources/read`
+///   (`AppState::read_asset_content`).
+///
+/// The last three are bucket reads that buffer by nature -- they re-verify the
+/// hash and answer conditional/Range requests -- so above the budget they
+/// return a typed `413 asset_too_large_for_inline_pull` naming the presigned
+/// download instead of materializing the object. They share ONE bound, in
+/// `asset_bucket::read_object_bounded`, and the transport cannot be called
+/// without one; a read surface added later inherits it rather than needing its
+/// own copy.
+///
+/// Not covered: aggregate concurrency. Peak asset-read memory is
+/// `max_gateway_buffer_bytes x in-flight requests`, and nothing caps the
+/// multiplier yet.
 ///
 /// The tenant's cumulative `asset_storage_quota_bytes` is enforced separately,
 /// on top of this.
@@ -1821,74 +1846,15 @@ impl FerroGateway {
         asset: StoredAsset,
         extra_headers: &[(&'static str, String)],
     ) -> PingoraResult<()> {
-        let state = self.state.current();
-        let content = if let Some(storage_uri) = asset.storage_uri.as_deref() {
-            let Some(bucket) = state.asset_bucket_client() else {
-                return write_json_error(
-                    session,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "asset_bucket_unavailable",
-                    "this asset is bucket-backed but no asset_bucket is configured",
-                    &ctx.request_id,
-                )
-                .await;
-            };
-            // Issue #259: the registry pull serves from a full in-memory copy
-            // (it re-verifies the hash and supports conditional/Range replies),
-            // so it MUST NOT be reachable for an object the gateway refuses to
-            // hold. Without this bound a presign-committed object of up to
-            // `presign_max_object_bytes` -- 5 GiB by default -- was buffered in
-            // full on an unauthenticated-size read path, which is the same
-            // OOM/DoS the commit path had. Large objects are pulled the way
-            // they were pushed: directly from the bucket over a gateway-issued
-            // presigned URL.
-            let buffer_limit = state.asset_max_gateway_buffer_bytes();
-            if asset.size_bytes > buffer_limit {
-                return write_json_error(
-                    session,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "asset_too_large_for_inline_pull",
-                    format!(
-                        "asset {}/{}/{} is {} bytes, above the gateway's {buffer_limit}-byte \
-                         in-memory limit; fetch it with GET /v1/assets/presign/download/{}/{}/{} \
-                         and download the returned presigned URL directly",
-                        asset.asset_type,
-                        asset.name,
-                        asset.version,
-                        asset.size_bytes,
-                        asset.asset_type,
-                        asset.name,
-                        asset.version,
-                    ),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-            match bucket.get_object(storage_uri).await {
-                Ok(content) => content,
-                Err(error) => {
-                    // The bucket error's Display embeds the request URL, which
-                    // would leak the internal object key and bucket endpoint to
-                    // the caller (issue #259 review finding 4).
-                    tracing::warn!(
-                        request_id = %ctx.request_id,
-                        asset_id = %asset.id,
-                        error = %error,
-                        "failed to read a bucket-backed asset for the registry pull"
-                    );
-                    return write_json_error(
-                        session,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "asset_bucket_unavailable",
-                        "the asset object bucket is unavailable; retry, or fetch the object \
-                         through GET /v1/assets/presign/download/{asset_type}/{name}/{version}",
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-            }
-        } else {
-            asset.content
+        // Issue #259: the registry pull serves from a full in-memory copy (it
+        // re-verifies the hash and supports conditional/Range replies), so it
+        // MUST NOT be reachable for an object the gateway refuses to hold.
+        // `load_asset_content` owns that bound -- shared with the static-site
+        // serve rather than duplicated here, which is how round 1 left the
+        // site path unbounded.
+        let content = match self.load_asset_content(&asset, &ctx.request_id).await {
+            Ok(content) => content,
+            Err(error) => return error.write(session, &ctx.request_id).await,
         };
         // Re-verify content integrity on every read (#176/#179): a mismatch is
         // storage-layer corruption or tampering, not a client error.
@@ -1935,14 +1901,38 @@ impl FerroGateway {
     /// when the row is bucket-backed (`storage_uri`) and returning the inline
     /// `content` otherwise. Shared by the pull path and the static-site serve
     /// mode (issue #258); integrity re-verification stays with the caller.
+    ///
+    /// This is the gateway-side half of the single gateway memory bound (issue
+    /// #259 round 2). Round 1 put the bound in `write_asset_body`, which left
+    /// the static-site serve reaching this helper with no bound at all; the
+    /// bound now lives here, so `write_asset_body` and `serve_site_file` share
+    /// one refusal instead of one of them having a copy. The size the registry
+    /// row declares is refused BEFORE the bucket client is even resolved --
+    /// there is no work worth doing for an object the gateway will not hold.
     pub(super) async fn load_asset_content(
         &self,
         asset: &StoredAsset,
+        request_id: &str,
     ) -> Result<Vec<u8>, AssetError> {
         let Some(storage_uri) = asset.storage_uri.as_deref() else {
             return Ok(asset.content.clone());
         };
-        let Some(bucket) = self.state.current().asset_bucket_client() else {
+        let state = self.state.current();
+        let buffer_limit = state.asset_max_gateway_buffer_bytes();
+        if asset.size_bytes > buffer_limit {
+            return Err(AssetError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE,
+                message: asset_too_large_for_buffering_message(
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    asset.size_bytes,
+                    buffer_limit,
+                ),
+            });
+        }
+        let Some(bucket) = state.asset_bucket_client() else {
             return Err(AssetError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: "asset_bucket_unavailable",
@@ -1950,14 +1940,41 @@ impl FerroGateway {
                     .to_string(),
             });
         };
-        bucket
-            .get_object(storage_uri)
-            .await
-            .map_err(|error| AssetError {
+        read_object_bounded(
+            &bucket,
+            storage_uri,
+            asset.size_bytes,
+            buffer_limit,
+            &asset.id,
+            request_id,
+        )
+        .await
+        .map_err(|refusal| match refusal {
+            // Unreachable in practice -- the declared size was already checked
+            // above -- but mapped rather than collapsed so the transport's own
+            // over-budget stop (a bucket whose object exceeds what the row
+            // claims) surfaces as the same typed refusal instead of a 503 that
+            // reads like an outage.
+            BufferedReadRefusal::TooLarge {
+                size_bytes,
+                limit_bytes,
+            } => AssetError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE,
+                message: asset_too_large_for_buffering_message(
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    size_bytes,
+                    limit_bytes,
+                ),
+            },
+            BufferedReadRefusal::Transport => AssetError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: "asset_bucket_unavailable",
-                message: error.to_string(),
-            })
+                message: BUCKET_READ_UNAVAILABLE_MESSAGE.to_string(),
+            },
+        })
     }
 
     /// Persists asset bytes to the configured object-storage bucket, returning
@@ -1977,10 +1994,20 @@ impl FerroGateway {
         bucket
             .put_object(id, content, content_type)
             .await
-            .map_err(|error| AssetError {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "asset_bucket_unavailable",
-                message: error.to_string(),
+            .map_err(|error| {
+                // The bucket error's Display embeds the request URL, i.e. the
+                // internal object key and the bucket endpoint (issue #259
+                // review finding 4). Log it, do not serialize it.
+                tracing::warn!(
+                    asset_id = %id,
+                    error = %error,
+                    "failed to write an asset object to the bucket"
+                );
+                AssetError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "asset_bucket_unavailable",
+                    message: BUCKET_READ_UNAVAILABLE_MESSAGE.to_string(),
+                }
             })?;
         Ok((Vec::new(), Some(id.to_string())))
     }

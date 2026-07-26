@@ -28,6 +28,13 @@ use super::FerroGateway;
 /// `tenant_required` 403 that `handle_asset_list` / `handle_asset_pull` return.
 const ASSET_TENANT_REQUIRED_CODE: i64 = -32003;
 
+/// JSON-RPC application error code for an asset above the gateway's in-memory
+/// budget -- the `resources/read` analogue of the REST
+/// `413 asset_too_large_for_inline_pull` (issue #259). Distinct from the
+/// bucket-unavailable code (`-32002`) because it is not an outage: the object
+/// is intact and fetchable, just not through a surface that inlines it.
+const ASSET_TOO_LARGE_CODE: i64 = -32004;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
     #[serde(default)]
@@ -277,8 +284,15 @@ async fn resources_list(
 /// authz + bucket-resolution + sha256 re-verification of `handle_asset_pull`
 /// (via `AppState::read_asset_content`). Content is inlined as `text` (textual
 /// mime types) or base64 `blob`; the stored sha256 travels in `_meta` so the
-/// caller can re-verify the fingerprint. Inline is acceptable under the 10MB
-/// asset cap for this slice.
+/// caller can re-verify the fingerprint.
+///
+/// Inlining is bounded by `[asset_bucket].max_gateway_buffer_bytes`, enforced
+/// inside `read_asset_content` (issue #259). It is NOT bounded by "the 10MB
+/// asset cap" -- that constant was a *push* limit and #259 replaced it with
+/// plan-driven ceilings, so a presign-committed object could be gigabytes.
+/// This comment previously still claimed the old cap, sitting directly above
+/// an unbounded read; an over-budget object now returns
+/// [`ASSET_TOO_LARGE_CODE`] naming the presigned download instead.
 async fn resources_read(
     state: &AppState,
     ctx: &ProxyContext,
@@ -306,7 +320,7 @@ async fn resources_read(
         );
     };
     let asset_id = stored_asset_id(&tenant_id, &asset_type, &name, &version);
-    match state.read_asset_content(&asset_id).await {
+    match state.read_asset_content(&asset_id, &ctx.request_id).await {
         Ok((asset, content)) => {
             state.record_admin_audit_event(audit_event(
                 ctx,
@@ -339,6 +353,10 @@ async fn resources_read(
             -32000,
             "stored asset content hash does not match recorded hash",
         ),
+        // Issue #259: an over-budget object is refused here rather than
+        // materialized (plus a ~1.33x base64 copy) for any caller holding
+        // `assets.read`.
+        Err(AssetReadError::TooLarge(message)) => error(id, ASSET_TOO_LARGE_CODE, message),
         Err(AssetReadError::BucketUnavailable(message)) => error(id, -32002, message),
         Err(AssetReadError::Storage(message)) => {
             error(id, -32000, format!("asset storage unavailable: {message}"))

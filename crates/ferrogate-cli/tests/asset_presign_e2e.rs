@@ -1934,7 +1934,7 @@ scopes = ["admin.read", "admin.write"]
 id = "asset-client"
 name = "Asset client"
 key = "asset-secret"
-scopes = ["assets.read", "assets.write"]
+scopes = ["assets.read", "assets.write", "tools.read", "tools.execute"]
 organization_id = "tenant-presign-e2e"
 "#,
             LARGE_OBJECT_BYTES * 2
@@ -2071,9 +2071,18 @@ fn direct_bucket_get_streaming_sha256(url: &str) -> (u16, String, u64) {
 ///   staged object back to verify its SHA-256 and screen it, and it used to do
 ///   that by materializing the whole object. The sampled RSS ceiling around the
 ///   commit request is the proof that it no longer does.
-/// - The *pull* leg is proven two ways: the registry pull refuses to buffer the
-///   object at all (typed 413 pointing at the presigned endpoint), and the
-///   presigned download returns bytes whose SHA-256 matches what was pushed.
+/// - The *pull* half is driven at EVERY bucket-backed read surface, not just
+///   the REST route. Round 1 of #259 bounded `GET /v1/assets/...` alone and
+///   this test stayed green while the `fetch_asset` built-in tool, MCP
+///   `resources/read` and the static-site serve still buffered whole objects --
+///   the test could not see them because it never called them. It now asserts
+///   that the same key with the same `assets.read` scope is refused on all
+///   three request-driven surfaces, each under its own sampled RSS ceiling, and
+///   that the presigned download returns bytes whose SHA-256 matches what was
+///   pushed. (The static-site serve reaches the identical helper,
+///   `FerroGateway::load_asset_content`; it is pinned by
+///   `gateway::assets_test::the_shared_gateway_read_refuses_an_object_above_the_buffer_budget`
+///   rather than by publishing a 100 MB site bundle here.)
 #[cfg(target_os = "linux")]
 #[test]
 fn a_100mb_object_completes_the_presigned_lifecycle_with_flat_gateway_rss() {
@@ -2219,6 +2228,73 @@ fn a_100mb_object_completes_the_presigned_lifecycle_with_flat_gateway_rss() {
             .unwrap_or_default()
             .contains("/v1/assets/presign/download/"),
         "the refusal must name the endpoint that does work: {inline_pull}"
+    );
+
+    // The two AGENT-FACING read surfaces -- the reason this pillar exists --
+    // must refuse identically. Same key, same `assets.read` scope, same object.
+    // Before this change both returned the full 100 MB `Vec`, re-hashed it, and
+    // (for `fetch_asset`) base64-encoded it into a ~133 MB `String` plus the
+    // serde_json copy: ~350-400 MB resident for one request. The RSS sampler is
+    // what makes that visible; the response assertion alone would also catch it,
+    // but only the sampler proves nothing was buffered on the way to refusing.
+    let mcp_sampler = RssSampler::start(gateway_pid);
+    let resources_read = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"asset://cli_tool/big-binary/1.0.0"}}"#,
+    );
+    let fetch_asset = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"builtin.fetch_asset","arguments":{"uri":"asset://cli_tool/big-binary/1.0.0"}}}"#,
+    );
+    let mcp_peak = mcp_sampler.finish();
+
+    let read_body = response_json(&resources_read);
+    assert!(
+        read_body["result"].is_null(),
+        "MCP resources/read must not inline a 100 MB object: {resources_read}"
+    );
+    let read_message = read_body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        read_message.contains("/v1/assets/presign/download/"),
+        "resources/read must refuse with the endpoint that works: {resources_read}"
+    );
+
+    // `fetch_asset` runs through the governed tool chokepoint, which reports a
+    // backend failure as a tool error rather than a JSON-RPC error, so accept
+    // either shape -- what must not happen is the bytes coming back.
+    let fetched_body = response_json(&fetch_asset);
+    let fetched_text = fetch_asset.clone();
+    assert!(
+        fetched_body["result"]["content"][0]["resource"]["blob"].is_null()
+            && fetched_body["result"]["content"][0]["resource"]["text"].is_null(),
+        "fetch_asset must not inline a 100 MB object: {}",
+        &fetched_text[..fetched_text.len().min(2000)]
+    );
+    assert!(
+        fetched_text.contains("/v1/assets/presign/download/"),
+        "fetch_asset must refuse with the endpoint that works: {}",
+        &fetched_text[..fetched_text.len().min(2000)]
+    );
+
+    let mcp_growth = mcp_peak.saturating_sub(baseline_rss);
+    assert!(
+        mcp_growth < LARGE_RUN_RSS_CEILING_BYTES,
+        "the agent-facing reads (MCP resources/read + fetch_asset) grew gateway RSS by \
+         {mcp_growth} bytes for a {LARGE_OBJECT_BYTES}-byte object (baseline {baseline_rss}, \
+         peak {mcp_peak}); the ceiling is {LARGE_RUN_RSS_CEILING_BYTES}. These are the surfaces \
+         the pull bound missed in round 1."
     );
 
     // ...and the presigned download returns the exact bytes that were pushed,

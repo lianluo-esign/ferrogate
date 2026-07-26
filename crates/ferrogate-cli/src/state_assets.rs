@@ -19,6 +19,11 @@ pub(crate) enum AssetReadError {
     /// The resolved bytes' sha256 does not match the recorded `content_hash`
     /// (storage corruption or tampering) -- fail closed rather than serve it.
     Integrity,
+    /// The object is above the gateway's in-memory budget
+    /// (`[asset_bucket].max_gateway_buffer_bytes`), so this surface refuses to
+    /// materialize it (issue #259). The caller is pointed at the presigned
+    /// direct download, which does not put the gateway in the data path.
+    TooLarge(String),
     /// The asset is bucket-backed but the bucket is unconfigured or unreachable.
     BucketUnavailable(String),
     /// The registry (Postgres/in-memory) itself was unavailable.
@@ -49,11 +54,19 @@ impl AppState {
 
     /// Load an asset and its verified bytes: resolves bucket-backed content
     /// (issue #176) from the configured bucket, then re-verifies the sha256 on
-    /// every read (#176/#179). Shared by the REST pull path and the MCP asset
-    /// read surfaces so they agree on integrity and error mapping.
+    /// every read (#176/#179). Shared by the MCP asset read surfaces -- the
+    /// `fetch_asset` built-in tool and `resources/read` -- so they agree on
+    /// integrity, on the gateway memory bound, and on error mapping.
+    ///
+    /// The bucket fetch goes through [`read_object_bounded`], the one bounded
+    /// buffering read (issue #259 round 2): this helper used to call
+    /// `get_object` directly with no size gate, so an agent holding
+    /// `assets.read` could pull a 5 GiB presign-committed object into gateway
+    /// memory -- and then into a ~1.33x base64 copy -- through either surface.
     pub(crate) async fn read_asset_content(
         &self,
         id: &str,
+        request_id: &str,
     ) -> Result<(StoredAsset, Vec<u8>), AssetReadError> {
         let asset = match self.get_asset(id).await {
             Ok(Some(asset)) => asset,
@@ -69,14 +82,57 @@ impl AppState {
             return Err(AssetReadError::NotFound);
         }
         let content = if let Some(storage_uri) = asset.storage_uri.as_deref() {
+            // The declared size is refused before the bucket client is even
+            // resolved: there is no work worth doing for an object the gateway
+            // will not hold, and the refusal must not be masked by an unrelated
+            // "no bucket configured" 503.
+            let buffer_limit = self.asset_max_gateway_buffer_bytes();
+            if asset.size_bytes > buffer_limit {
+                return Err(AssetReadError::TooLarge(
+                    crate::gateway::asset_bucket::asset_too_large_for_buffering_message(
+                        &asset.asset_type,
+                        &asset.name,
+                        &asset.version,
+                        asset.size_bytes,
+                        buffer_limit,
+                    ),
+                ));
+            }
             let Some(bucket) = self.asset_bucket_client() else {
                 return Err(AssetReadError::BucketUnavailable(
                     "this asset is bucket-backed but no asset_bucket is configured".to_string(),
                 ));
             };
-            match bucket.get_object(storage_uri).await {
+            match crate::gateway::asset_bucket::read_object_bounded(
+                &bucket,
+                storage_uri,
+                asset.size_bytes,
+                buffer_limit,
+                id,
+                request_id,
+            )
+            .await
+            {
                 Ok(content) => content,
-                Err(error) => return Err(AssetReadError::BucketUnavailable(error.to_string())),
+                Err(crate::gateway::asset_bucket::BufferedReadRefusal::TooLarge {
+                    size_bytes,
+                    limit_bytes,
+                }) => {
+                    return Err(AssetReadError::TooLarge(
+                        crate::gateway::asset_bucket::asset_too_large_for_buffering_message(
+                            &asset.asset_type,
+                            &asset.name,
+                            &asset.version,
+                            size_bytes,
+                            limit_bytes,
+                        ),
+                    ))
+                }
+                Err(crate::gateway::asset_bucket::BufferedReadRefusal::Transport) => {
+                    return Err(AssetReadError::BucketUnavailable(
+                        crate::gateway::asset_bucket::BUCKET_READ_UNAVAILABLE_MESSAGE.to_string(),
+                    ))
+                }
             }
         } else {
             asset.content.clone()
@@ -336,11 +392,25 @@ impl AppState {
     /// This is the memory bound that `presign_max_object_bytes` is NOT: the
     /// per-object ceiling caps how large an object may be, this caps how much
     /// of one the gateway may resident-hold. Above it the presigned commit
-    /// verifies and copies in a bounded streaming pass, and the registry pull
-    /// path refuses to buffer at all (the caller uses the presigned direct
-    /// download instead). Defaults to `INLINE_ASSET_MAX_BYTES` so an
-    /// inline-stored asset -- which is already in memory, having come from the
-    /// registry row -- is never affected by the bound.
+    /// verifies and copies in a bounded streaming pass, and every buffering
+    /// bucket-backed read refuses rather than materializing the object (the
+    /// caller uses the presigned direct download instead). Defaults to
+    /// `INLINE_ASSET_MAX_BYTES` so an inline-stored asset -- which is already
+    /// in memory, having come from the registry row -- is never affected by the
+    /// bound.
+    ///
+    /// Scope, stated exactly, because round 1 of #259 claimed this bound
+    /// universally while three read surfaces ignored it. It applies to: the
+    /// presigned commit's verify-and-copy leg, the registry pull
+    /// (`GET /v1/assets/...`), the `fetch_asset` built-in tool, MCP
+    /// `resources/read`, and the static-site serve -- because all of them now
+    /// route their bucket read through
+    /// [`read_object_bounded`](crate::gateway::asset_bucket::read_object_bounded),
+    /// and the transport cannot be called without a budget. It does NOT bound
+    /// aggregate concurrency: peak gateway memory for asset reads is this
+    /// value times the number of in-flight requests, and nothing yet caps that
+    /// multiplier (honestly disclosed on the issue; admission control is a
+    /// follow-up, not a claim made here).
     pub(crate) fn asset_max_gateway_buffer_bytes(&self) -> u64 {
         self.config
             .asset_bucket
@@ -409,3 +479,7 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "state_assets_test.rs"]
+mod state_assets_test;

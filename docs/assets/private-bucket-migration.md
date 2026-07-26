@@ -91,22 +91,50 @@ than degrading:
 | `mcp_manifest` transport | `422 asset_rejected`. The `stdio` check needs the whole JSON document, and an unchecked `stdio` manifest makes a *consuming* agent's MCP client spawn an arbitrary local process. |
 
 Raise `max_gateway_buffer_bytes` to re-enable those controls for larger objects
-and accept the proportional memory cost explicitly. Note the cost is per
-in-flight commit and there is no cap on concurrent commits, so
-`max_gateway_buffer_bytes x expected concurrency` is the number to size against.
+and accept the proportional memory cost explicitly.
 
-The **registry pull** (`GET /v1/assets/{asset_type}/{name}/{version}`) serves
-from a full in-memory copy, so it refuses a bucket-backed object above the same
-bound with `413 asset_too_large_for_inline_pull` and names the presigned
-download endpoint in the message. Large objects are pulled the way they were
-pushed: directly from the bucket.
+### Which reads the bound covers
+
+Every bucket-backed **read** that has to materialize the object refuses one
+above the bound rather than buffering it, returning `413
+asset_too_large_for_inline_pull` (or the JSON-RPC equivalent) and naming the
+presigned download endpoint in the message. Large objects are pulled the way
+they were pushed: directly from the bucket.
+
+| Surface | Above the bound |
+|---|---|
+| `GET /v1/assets/{asset_type}/{name}/{version}` | `413 asset_too_large_for_inline_pull` |
+| `fetch_asset` built-in tool | tool error naming the presigned download |
+| MCP `resources/read` | JSON-RPC error `-32004` naming the presigned download |
+| Static-site serve (`serve_site_file`) | `413 asset_too_large_for_inline_pull` |
+
+They share one implementation (`asset_bucket::read_object_bounded`), and the
+bucket client cannot be asked for a buffering read without a byte budget, so a
+read surface added later inherits the bound instead of needing its own copy.
+This is stated as a table rather than as a sentence because an earlier revision
+of this runbook asserted the bound universally while three of these four
+surfaces ignored it.
+
+### Sizing a box
+
+Peak gateway memory for asset work is
+`max_gateway_buffer_bytes x expected concurrent asset operations` — commits and
+reads alike, since each in-flight request may hold up to the bound. There is
+**no admission control**: nothing caps the concurrency multiplier, so this is a
+sizing input, not an enforced limit. Size for the concurrency you expect plus
+headroom, and keep `max_gateway_buffer_bytes` at the default unless you have a
+specific reason to buy back whole-file controls for larger objects.
+
+### Error bodies
 
 Bucket transport failures are reported to callers as a generic
 `503 asset_bucket_unavailable` with the diagnostic detail (including the
 internal object key) written to the gateway log against the response's
 `request_id`. The underlying HTTP error's text embeds the request URL, so
 returning it verbatim would publish the internal final key and the bucket
-endpoint — the thing this runbook promises never appears in a response.
+endpoint — the thing this runbook promises never appears in a response. This
+holds on the presigned commit/abort exits **and** on every read surface in the
+table above.
 
 ## Replay, retry, and cleanup behavior
 
@@ -155,11 +183,11 @@ authorized download URL encapsulates final-object access.
   path; defaults to 5 GiB. Independent of the tenant-wide
   `asset_storage_quota_bytes`.
 - `max_gateway_buffer_bytes` — the largest object the gateway will hold in
-  memory for an asset operation; defaults to 10 MiB (the inline-push cap, so an
-  inline-stored asset is never affected). This is the bound
+  memory for a **single** asset operation; defaults to 10 MiB (the inline-push
+  cap, so an inline-stored asset is never affected). This is the bound
   `presign_max_object_bytes` is **not**: the ceiling caps how large an object
-  may be, this caps how much of one is ever resident. See "Large objects and
-  the gateway memory bound" above.
+  may be, this caps how much of one a single commit or read may hold. It is a
+  per-operation bound, not a process-wide one — see "Sizing a box" above.
 
 `presign_ttl_secs` is the **URL expiry**: it is signed into `X-Amz-Expires`, so
 the bucket itself refuses a late `PUT` and the client must register a new

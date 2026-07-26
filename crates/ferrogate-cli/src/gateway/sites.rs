@@ -424,7 +424,7 @@ impl FerroGateway {
             }
         };
 
-        let content = match self.load_asset_content(&asset).await {
+        let content = match self.load_asset_content(&asset, &ctx.request_id).await {
             Ok(content) => content,
             Err(response) => {
                 let status = response.status;

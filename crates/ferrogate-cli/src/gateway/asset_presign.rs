@@ -2047,7 +2047,13 @@ async fn verify_committed_object(
     }
 
     // 2. Fetch to verify sha256 and run built-in content checks on real bytes.
-    let Some(content) = bucket.get_object_if_present(request.staging_key).await? else {
+    // The branch above already established `actual_size <= buffer_limit`; the
+    // limit is handed to the transport too (issue #259 round 2) so a bucket
+    // whose GET body disagrees with its own HEAD cannot buffer past the budget.
+    let Some(content) = bucket
+        .get_object_if_present(request.staging_key, request.buffer_limit)
+        .await?
+    else {
         return Ok(CommitVerification::NotUploaded);
     };
     let actual_sha256 = sha256_hex(&content);

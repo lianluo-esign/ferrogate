@@ -298,3 +298,95 @@ fn malformed_percent_escapes_are_left_literal() {
     // A valid escape adjacent to a literal `%` still decodes only the valid one.
     assert_eq!(percent_decode_segment("a%2Fb%zz"), "a/b%zz");
 }
+
+// ---- the gateway memory bound, shared by the pull and site-serve paths ------
+
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+fn gateway_with_buffer_budget(max_gateway_buffer_bytes: u64) -> FerroGateway {
+    FerroGateway {
+        state: crate::state::SharedAppState::with_source_path(
+            crate::config::Config {
+                asset_bucket: crate::config::AssetBucketConfig {
+                    max_gateway_buffer_bytes: Some(max_gateway_buffer_bytes),
+                    ..crate::config::AssetBucketConfig::default()
+                },
+                ..crate::config::Config::default()
+            },
+            None,
+        ),
+    }
+}
+
+fn bucket_backed(size_bytes: u64) -> StoredAsset {
+    let mut asset = asset("1.0.0", "", false, "hash");
+    asset.size_bytes = size_bytes;
+    asset.content = Vec::new();
+    asset.storage_uri = Some(".ferrogate/objects/deadbeef/obj_0123456789abcdef".to_string());
+    asset
+}
+
+/// Issue #259 round 2: `load_asset_content` is where the bound lives now, so
+/// the static-site serve (`serve_site_file`) inherits it instead of being the
+/// one read surface that kept buffering. Round 1 put the check in
+/// `write_asset_body` only, and this exact call -- with this exact asset --
+/// returned the whole object.
+#[test]
+fn the_shared_gateway_read_refuses_an_object_above_the_buffer_budget() {
+    let gateway = gateway_with_buffer_budget(8 * 1024 * 1024);
+    let asset = bucket_backed(100 * 1024 * 1024);
+
+    let error = block_on(gateway.load_asset_content(&asset, "request-1"))
+        .expect_err("an over-budget object must not be materialized");
+    assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error.code, "asset_too_large_for_inline_pull");
+    assert!(
+        error.message.contains("104857600")
+            && error.message.contains("8388608")
+            && error
+                .message
+                .contains("/v1/assets/presign/download/cli_tool/rg/1.0.0"),
+        "the refusal must name the size, the budget and the endpoint that works: {}",
+        error.message
+    );
+}
+
+/// The bound is a memory budget, not a new asset-size limit: at-limit is
+/// inside it, and the read proceeds (failing only on the unconfigured bucket).
+/// Keeps the at-limit/one-over convention identical to the presigned commit's
+/// buffered/streamed split and to the per-object ceiling.
+#[test]
+fn an_object_exactly_at_the_buffer_budget_is_not_refused() {
+    let gateway = gateway_with_buffer_budget(8 * 1024 * 1024);
+    let asset = bucket_backed(8 * 1024 * 1024);
+
+    let error = block_on(gateway.load_asset_content(&asset, "request-1"))
+        .expect_err("no bucket is configured, so this cannot succeed");
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.code, "asset_bucket_unavailable");
+}
+
+/// An inline-stored asset is already in memory (it came from the registry row),
+/// so the bound must not touch it no matter how the budget is set.
+#[test]
+fn an_inline_asset_is_never_refused_by_the_bucket_memory_bound() {
+    let gateway = gateway_with_buffer_budget(1);
+    let mut asset = asset("1.0.0", "", false, "hash");
+    asset.content = b"inline bytes".to_vec();
+    asset.size_bytes = asset.content.len() as u64;
+
+    let content = match block_on(gateway.load_asset_content(&asset, "request-1")) {
+        Ok(content) => content,
+        Err(error) => panic!(
+            "inline content never goes near the bucket: {}",
+            error.message
+        ),
+    };
+    assert_eq!(content, b"inline bytes");
+}

@@ -282,8 +282,22 @@ pub(crate) trait AssetObjectStore: Send + Sync {
         body: Vec<u8>,
         content_type: &str,
     ) -> anyhow::Result<()>;
-    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>>;
-    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>>;
+    /// Buffering read of `key`, refusing to hold more than `max_bytes`.
+    ///
+    /// `max_bytes` is NOT optional and NOT advisory (issue #259 round 2): the
+    /// first round bounded the registry pull at its own call site, and three
+    /// other bucket-backed reads (`fetch_asset`, MCP `resources/read`, the
+    /// static-site serve) kept buffering whole objects because nothing in the
+    /// type forced them to say how much memory they were willing to spend. A
+    /// read surface added tomorrow cannot compile without naming a bound, and
+    /// the bound is enforced against the bytes that actually arrive rather than
+    /// against a size the registry row merely claims.
+    async fn get_object(&self, key: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>>;
+    async fn get_object_if_present(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>>;
     /// Opens a *streaming* read of `key` — the bounded-memory counterpart of
     /// [`get_object_if_present`](Self::get_object_if_present). `Ok(None)` is
     /// the same 404-means-absent result, preserved so the commit-race
@@ -324,6 +338,112 @@ pub(crate) trait AssetObjectStore: Send + Sync {
     ) -> anyhow::Result<String>;
 }
 
+/// Why a buffering read was refused (issue #259 round 2).
+pub(crate) enum BufferedReadRefusal {
+    /// The object is larger than the gateway's in-memory budget. The caller
+    /// must be told to use the presigned direct download instead — never
+    /// served a truncated body, and never quietly buffered anyway.
+    TooLarge { size_bytes: u64, limit_bytes: u64 },
+    /// The bucket could not be reached or refused the read. The diagnostic
+    /// detail has already been logged against the request id; the caller only
+    /// ever sees [`BUCKET_READ_UNAVAILABLE_MESSAGE`].
+    Transport,
+}
+
+/// The error code every read surface returns when an object is above the
+/// gateway's in-memory budget. One constant so the REST pull, the `fetch_asset`
+/// built-in tool, MCP `resources/read` and the static-site serve cannot drift
+/// into three different names for one refusal.
+pub(crate) const ASSET_TOO_LARGE_FOR_INLINE_PULL_CODE: &str = "asset_too_large_for_inline_pull";
+
+/// The single message a caller ever sees when a bucket-backed *read* fails at
+/// the transport (issue #259 review finding 4).
+///
+/// `reqwest::Error`'s `Display` embeds the request URL, so returning it
+/// verbatim published the internal `.ferrogate/objects/<digest>/obj_<rand>` key
+/// and the bucket endpoint — the exact thing the private-bucket runbook
+/// promises is never serialized into a response. Round 1 fixed the four
+/// presigned-commit exits and the registry pull; this constant closes the three
+/// that were left (`AppState::read_asset_content`,
+/// `FerroGateway::load_asset_content`, `FerroGateway::store_asset_bytes`),
+/// which surfaced verbatim through `fetch_asset`, MCP `resources/read` and the
+/// static-site serve.
+pub(crate) const BUCKET_READ_UNAVAILABLE_MESSAGE: &str =
+    "the asset object bucket is unavailable; retry, or fetch the object through GET \
+     /v1/assets/presign/download/{asset_type}/{name}/{version} (see the gateway logs for the \
+     correlated request_id)";
+
+/// The refusal an over-budget object earns, worded so the caller knows which
+/// endpoint does work instead of merely that this one does not.
+pub(crate) fn asset_too_large_for_buffering_message(
+    asset_type: &str,
+    name: &str,
+    version: &str,
+    size_bytes: u64,
+    limit_bytes: u64,
+) -> String {
+    format!(
+        "asset {asset_type}/{name}/{version} is {size_bytes} bytes, above the gateway's \
+         {limit_bytes}-byte in-memory limit; fetch it with GET \
+         /v1/assets/presign/download/{asset_type}/{name}/{version} and download the returned \
+         presigned URL directly"
+    )
+}
+
+fn object_over_buffer_budget(size_bytes: u64, limit_bytes: u64) -> String {
+    format!(
+        "asset bucket GET refused: the object is at least {size_bytes} bytes, above the \
+         {limit_bytes}-byte in-memory budget this read was given"
+    )
+}
+
+/// **The** buffering, bucket-backed read in the gateway (issue #259 round 2).
+///
+/// Round 1 bounded `write_asset_body` at its own call site and left
+/// `AppState::read_asset_content` (reached by the `fetch_asset` built-in tool
+/// and MCP `resources/read`) and `FerroGateway::load_asset_content` (reached by
+/// the static-site serve) buffering objects of up to `presign_max_object_bytes`
+/// — 5 GiB by default — for any caller holding `assets.read`. Adding a second
+/// and third copy of the same check would have left the same hole open for the
+/// fourth surface, so the check lives here, on the one path all of them take:
+///
+/// 1. the size the registry row declares is refused before a byte is requested,
+///    which is what turns into the caller's typed 413; and
+/// 2. `max_bytes` is handed to the transport, which enforces it against the
+///    bytes that actually arrive — so a row that under-reports its object (or a
+///    bucket that lies about `Content-Length`) still cannot make the gateway
+///    hold more than the budget.
+///
+/// The transport's error never reaches the caller; it is logged against
+/// `request_id` and collapsed to [`BufferedReadRefusal::Transport`].
+pub(crate) async fn read_object_bounded(
+    bucket: &dyn AssetObjectStore,
+    key: &str,
+    declared_size_bytes: u64,
+    max_buffer_bytes: u64,
+    asset_id: &str,
+    request_id: &str,
+) -> Result<Vec<u8>, BufferedReadRefusal> {
+    if declared_size_bytes > max_buffer_bytes {
+        return Err(BufferedReadRefusal::TooLarge {
+            size_bytes: declared_size_bytes,
+            limit_bytes: max_buffer_bytes,
+        });
+    }
+    match bucket.get_object(key, max_buffer_bytes).await {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            tracing::warn!(
+                request_id = %request_id,
+                asset_id = %asset_id,
+                error = %error,
+                "failed to read a bucket-backed asset object within the gateway memory budget"
+            );
+            Err(BufferedReadRefusal::Transport)
+        }
+    }
+}
+
 /// Forwarding impl so a `Box<dyn AssetObjectStore>` (what the accessor hands
 /// out) is itself an [`AssetObjectStore`] — this lets the helper functions
 /// that take `&dyn AssetObjectStore` be called with a plain `&boxed_client`
@@ -343,11 +463,15 @@ impl AssetObjectStore for Box<dyn AssetObjectStore> {
             .put_object_owned(key, body, content_type)
             .await
     }
-    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
-        self.as_ref().get_object(key).await
+    async fn get_object(&self, key: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+        self.as_ref().get_object(key, max_bytes).await
     }
-    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        self.as_ref().get_object_if_present(key).await
+    async fn get_object_if_present(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        self.as_ref().get_object_if_present(key, max_bytes).await
     }
     async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
         self.as_ref().get_object_stream(key).await
@@ -415,11 +539,15 @@ impl AssetObjectStore for AssetBucketClient {
     ) -> anyhow::Result<()> {
         AssetBucketClient::put_object_owned(self, key, body, content_type).await
     }
-    async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
-        AssetBucketClient::get_object(self, key).await
+    async fn get_object(&self, key: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+        AssetBucketClient::get_object(self, key, max_bytes).await
     }
-    async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        AssetBucketClient::get_object_if_present(self, key).await
+    async fn get_object_if_present(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        AssetBucketClient::get_object_if_present(self, key, max_bytes).await
     }
     async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
         AssetBucketClient::get_object_stream(self, key).await
@@ -526,15 +654,29 @@ impl AssetBucketClient {
         Ok(())
     }
 
-    pub(crate) async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>> {
-        self.get_object_if_present(key).await?.ok_or_else(|| {
-            anyhow::anyhow!("asset bucket GET failed (HTTP 404 Not Found): object does not exist")
-        })
+    pub(crate) async fn get_object(&self, key: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+        self.get_object_if_present(key, max_bytes)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "asset bucket GET failed (HTTP 404 Not Found): object does not exist"
+                )
+            })
     }
 
     /// GETs an object while preserving a missing-key result for commit-race
     /// reconciliation. Other bucket failures remain explicit errors.
-    pub(crate) async fn get_object_if_present(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    ///
+    /// The body is accumulated under `max_bytes` rather than with a single
+    /// `response.bytes()` (issue #259 round 2). Both the advertised
+    /// `Content-Length` and the bytes that actually arrive are checked, so a
+    /// bucket that under-reports (or omits) the length cannot make the gateway
+    /// hold more than the caller budgeted for.
+    pub(crate) async fn get_object_if_present(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let (scheme, host) = self.scheme_and_host()?;
         let path = self.object_path(key);
         let signed = self.sign("GET", &path, &host, b"");
@@ -556,7 +698,28 @@ impl AssetBucketClient {
             let text = response.text().await.unwrap_or_default();
             anyhow::bail!("asset bucket GET failed (HTTP {status}): {text}");
         }
-        Ok(Some(response.bytes().await?.to_vec()))
+        if let Some(declared) = response.content_length() {
+            anyhow::ensure!(
+                declared <= max_bytes,
+                "{}",
+                object_over_buffer_budget(declared, max_bytes)
+            );
+        }
+        let mut body: Vec<u8> = Vec::with_capacity(
+            usize::try_from(response.content_length().unwrap_or(0).min(max_bytes))
+                .unwrap_or_default(),
+        );
+        let mut chunks = response.bytes_stream();
+        while let Some(chunk) = chunks.try_next().await? {
+            let would_hold = body.len() as u64 + chunk.len() as u64;
+            anyhow::ensure!(
+                would_hold <= max_bytes,
+                "{}",
+                object_over_buffer_budget(would_hold, max_bytes)
+            );
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(body))
     }
 
     /// Opens a streaming GET so the caller can verify and copy an object of
@@ -1380,10 +1543,14 @@ impl AssetObjectStore for WorkersStaticAssetsStore {
     ) -> anyhow::Result<()> {
         self.publish_object(key, &body, content_type).await
     }
-    async fn get_object(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+    async fn get_object(&self, _key: &str, _max_bytes: u64) -> anyhow::Result<Vec<u8>> {
         Err(workers_static_assets_unsupported("object GET by key"))
     }
-    async fn get_object_if_present(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_object_if_present(
+        &self,
+        _key: &str,
+        _max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Err(workers_static_assets_unsupported("object GET by key"))
     }
     async fn get_object_stream(&self, _key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
@@ -1513,6 +1680,12 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
+    /// Read budget for the tests whose subject is NOT the memory bound (request
+    /// shaping, SigV4, round-trips). Deliberately a small, finite number rather
+    /// than `u64::MAX`: a test that accidentally starts depending on an
+    /// unbounded read should fail here rather than pass quietly.
+    const TEST_READ_BUDGET: u64 = 16 * 1024 * 1024;
+
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         method: String,
@@ -1631,13 +1804,318 @@ mod tests {
         assert!(!format!("{request:?}").contains("wJalrXUtnFEMI"));
     }
 
+    // ---- the one bounded buffering read (issue #259 round 2) ---------------
+
+    /// A bucket that answers a GET with an arbitrary number of bytes over
+    /// `Transfer-Encoding: chunked`, i.e. with NO `Content-Length`. This is the
+    /// case the declared-size gate cannot see: the only thing standing between
+    /// the gateway and an unbounded body is the accumulation check.
+    fn spawn_chunked_bucket_mock(total_bytes: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let mut raw = Vec::new();
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    return;
+                }
+                raw.extend_from_slice(&buffer[..read]);
+                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            let chunk = vec![b'x'; 4096];
+            let mut sent = 0;
+            while sent < total_bytes {
+                let size = chunk.len().min(total_bytes - sent);
+                if stream
+                    .write_all(format!("{size:x}\r\n").as_bytes())
+                    .and_then(|()| stream.write_all(&chunk[..size]))
+                    .and_then(|()| stream.write_all(b"\r\n"))
+                    .is_err()
+                {
+                    return;
+                }
+                sent += size;
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        endpoint
+    }
+
+    /// A store whose reads always fail with an error shaped exactly like
+    /// `reqwest::Error`'s `Display` -- the URL embedded in the message is the
+    /// leak issue #259 review finding 4 is about.
+    struct LeakyStore {
+        reads: Arc<Mutex<usize>>,
+    }
+
+    const LEAKY_STORE_URL: &str = "https://acct.r2.cloudflarestorage.com/ferrogate-private/\
+                                   .ferrogate/objects/deadbeefcafe/obj_0123456789abcdef";
+
+    #[async_trait]
+    impl AssetObjectStore for LeakyStore {
+        async fn put_object(
+            &self,
+            _key: &str,
+            _body: &[u8],
+            _content_type: &str,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn put_object_owned(
+            &self,
+            _key: &str,
+            _body: Vec<u8>,
+            _content_type: &str,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn get_object(&self, _key: &str, _max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+            *self.reads.lock().unwrap() += 1;
+            anyhow::bail!("error sending request for url ({LEAKY_STORE_URL})")
+        }
+        async fn get_object_if_present(
+            &self,
+            _key: &str,
+            _max_bytes: u64,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            unimplemented!()
+        }
+        async fn get_object_stream(&self, _key: &str) -> anyhow::Result<Option<ObjectByteStream>> {
+            unimplemented!()
+        }
+        async fn put_object_stream(
+            &self,
+            _key: &str,
+            _content_type: &str,
+            _content_length: u64,
+            _content_sha256_hex: &str,
+            _body: ObjectByteStream,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn delete_object(&self, _key: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn head_object(&self, _key: &str) -> anyhow::Result<Option<u64>> {
+            unimplemented!()
+        }
+        async fn list_objects(&self) -> anyhow::Result<Vec<ferrogate_storage::BucketObject>> {
+            unimplemented!()
+        }
+        fn presign_put(
+            &self,
+            _key: &str,
+            _expires_secs: u64,
+            _timestamp_unix: u64,
+            _size_bytes: u64,
+            _content_sha256_hex: &str,
+        ) -> anyhow::Result<PresignedUpload> {
+            unimplemented!()
+        }
+        fn presign_get(
+            &self,
+            _key: &str,
+            _expires_secs: u64,
+            _timestamp_unix: u64,
+        ) -> anyhow::Result<String> {
+            unimplemented!()
+        }
+    }
+
+    /// The declared size is refused BEFORE the bucket is touched: an
+    /// over-budget object costs the gateway one comparison, not a request.
+    #[tokio::test]
+    async fn an_over_budget_object_is_refused_without_a_bucket_round_trip() {
+        let reads = Arc::new(Mutex::new(0));
+        let store = LeakyStore {
+            reads: Arc::clone(&reads),
+        };
+
+        let refusal = read_object_bounded(&store, "any-key", 100 * 1024 * 1024, 1024, "id", "req")
+            .await
+            .expect_err("an over-budget object must be refused");
+        assert!(matches!(
+            refusal,
+            BufferedReadRefusal::TooLarge {
+                size_bytes: 104_857_600,
+                limit_bytes: 1024
+            }
+        ));
+        assert_eq!(
+            *reads.lock().unwrap(),
+            0,
+            "the refusal must not cost a bucket round trip"
+        );
+    }
+
+    /// Issue #259 review finding 4: the transport's error must never reach the
+    /// caller, because its `Display` carries the internal object key and the
+    /// bucket endpoint.
+    #[tokio::test]
+    async fn a_transport_failure_is_collapsed_and_never_carries_the_bucket_location() {
+        let store = LeakyStore {
+            reads: Arc::new(Mutex::new(0)),
+        };
+
+        let refusal = read_object_bounded(&store, "any-key", 10, 1024, "id", "req")
+            .await
+            .expect_err("a failing bucket cannot produce bytes");
+        assert!(
+            matches!(refusal, BufferedReadRefusal::Transport),
+            "the caller gets an opaque transport refusal, not the bucket's words"
+        );
+        // The single message every read surface renders for that refusal.
+        for fragment in [
+            "r2.cloudflarestorage.com",
+            ".ferrogate/objects",
+            "obj_",
+            "ferrogate-private",
+        ] {
+            assert!(
+                !BUCKET_READ_UNAVAILABLE_MESSAGE.contains(fragment),
+                "the caller-visible message must not carry {fragment}"
+            );
+        }
+        assert!(
+            LEAKY_STORE_URL.contains(".ferrogate/objects"),
+            "the fixture must actually contain what we are asserting is withheld, \
+             or this test proves nothing"
+        );
+    }
+
+    /// The budget binds the bytes that ARRIVE, not just the size the registry
+    /// row claims. A chunked response has no `Content-Length`, so this is the
+    /// accumulation guard on its own.
+    #[tokio::test]
+    async fn a_chunked_response_cannot_exceed_the_budget_it_was_given() {
+        let endpoint = spawn_chunked_bucket_mock(256 * 1024);
+        let bucket = client(endpoint);
+
+        // Matched rather than `expect_err`'d so a regression reports the
+        // failure instead of dumping the whole over-budget body.
+        let error = match bucket
+            .get_object("tenant-a:cli_tool:liar:1.0.0", 64 * 1024)
+            .await
+        {
+            Ok(body) => panic!(
+                "a body larger than the budget must not be buffered, but {} bytes were held",
+                body.len()
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("in-memory budget"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A `Content-Length` above the budget is refused before the body is read.
+    #[tokio::test]
+    async fn a_declared_content_length_above_the_budget_is_refused() {
+        let (endpoint, _captured) = spawn_bucket_mock("200 OK", b"0123456789ABCDEF");
+        let bucket = client(endpoint);
+
+        let error = bucket
+            .get_object("tenant-a:cli_tool:big:1.0.0", 8)
+            .await
+            .expect_err("a declared length above the budget must be refused");
+        assert!(
+            error.to_string().contains("in-memory budget"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The structural half of the #259 round-2 fix, and the answer to "what
+    /// happens when someone adds a fifth read surface".
+    ///
+    /// Round 1 bounded ONE of four bucket-backed reads because the check lived
+    /// at a call site. Two guards now replace that: the transport cannot be
+    /// invoked without a byte budget (a compile error, not a review catch), and
+    /// this test pins WHERE the buffering read may be invoked from. A new
+    /// surface that reaches for `get_object` directly -- rather than going
+    /// through `read_object_bounded` / `read_asset_content` /
+    /// `load_asset_content`, which supply the budget from configuration --
+    /// fails here by name.
+    #[test]
+    fn the_buffering_bucket_read_is_only_called_from_the_bounded_chokepoint() {
+        /// Files allowed to invoke the buffering reads directly.
+        ///
+        /// - `asset_bucket.rs` defines them and hosts `read_object_bounded`.
+        /// - `asset_presign.rs` calls `get_object_if_present` on the commit's
+        ///   buffered leg, which is only reached after `actual_size <=
+        ///   buffer_limit` and passes that same limit to the transport.
+        const ALLOWED: [&str; 2] = ["gateway/asset_bucket.rs", "gateway/asset_presign.rs"];
+
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut scanned = 0_usize;
+        let mut pending = vec![source_root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("readable source directory") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                // Test modules legitimately drive the raw reads with an
+                // explicit budget; the invariant is about production paths.
+                if !name.ends_with(".rs")
+                    || name.ends_with("_test.rs")
+                    || name.ends_with("_tests.rs")
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&source_root)
+                    .expect("path under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if ALLOWED.contains(&relative.as_str()) {
+                    continue;
+                }
+                scanned += 1;
+                let body = std::fs::read_to_string(&path).expect("readable source file");
+                for (index, line) in body.lines().enumerate() {
+                    if line.contains(".get_object(") || line.contains(".get_object_if_present(") {
+                        offenders.push(format!("{relative}:{}: {}", index + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            scanned > 50,
+            "the scan found only {scanned} source files, so it is not actually looking at the \
+             crate and would pass vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these call the buffering bucket read outside the bounded chokepoint -- route them \
+             through asset_bucket::read_object_bounded (or AppState::read_asset_content / \
+             FerroGateway::load_asset_content, which do) so they inherit the gateway memory \
+             bound instead of adding a copy of the check:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[tokio::test]
     async fn get_object_returns_the_response_body() {
         let (endpoint, captured) = spawn_bucket_mock("200 OK", b"fetched bytes");
         let bucket = client(endpoint);
 
         let bytes = bucket
-            .get_object("tenant-a:cli_tool:hello:1.0.0")
+            .get_object("tenant-a:cli_tool:hello:1.0.0", TEST_READ_BUDGET)
             .await
             .unwrap();
         assert_eq!(bytes, b"fetched bytes");
@@ -1653,7 +2131,7 @@ mod tests {
         let bucket = client(endpoint);
 
         let error = bucket
-            .get_object("tenant-a:cli_tool:missing:1.0.0")
+            .get_object("tenant-a:cli_tool:missing:1.0.0", TEST_READ_BUDGET)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("404"));
@@ -2288,7 +2766,7 @@ mod tests {
             "HEAD size mismatch: {size:?} != {}",
             body.len()
         );
-        let fetched = bucket.get_object(key).await?;
+        let fetched = bucket.get_object(key, TEST_READ_BUDGET).await?;
         anyhow::ensure!(fetched == body, "GET bytes must match the PUT bytes");
 
         // 2. Signed ListObjectsV2 must observe the just-written key.
@@ -2338,7 +2816,7 @@ mod tests {
             put_response.status(),
             put_response.text().await.unwrap_or_default()
         );
-        let round_tripped = bucket.get_object(presign_key).await?;
+        let round_tripped = bucket.get_object(presign_key, TEST_READ_BUDGET).await?;
         anyhow::ensure!(
             round_tripped == body,
             "presigned-PUT object bytes must match the declared payload"
@@ -2347,7 +2825,10 @@ mod tests {
         // 5. DELETE removes the object; a follow-up GET sees it gone.
         bucket.delete_object(key).await?;
         anyhow::ensure!(
-            bucket.get_object_if_present(key).await?.is_none(),
+            bucket
+                .get_object_if_present(key, TEST_READ_BUDGET)
+                .await?
+                .is_none(),
             "object must be gone after DELETE"
         );
         Ok(())
@@ -2814,7 +3295,7 @@ mod tests {
         let store_dyn: &dyn AssetObjectStore = &store;
 
         assert!(store_dyn
-            .get_object("k")
+            .get_object("k", TEST_READ_BUDGET)
             .await
             .unwrap_err()
             .to_string()

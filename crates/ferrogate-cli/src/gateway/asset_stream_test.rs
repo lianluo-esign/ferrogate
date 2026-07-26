@@ -80,10 +80,14 @@ impl AssetObjectStore for FakeStreamingStore {
     ) -> anyhow::Result<()> {
         Err(unsupported("put_object_owned"))
     }
-    async fn get_object(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+    async fn get_object(&self, _key: &str, _max_bytes: u64) -> anyhow::Result<Vec<u8>> {
         Err(unsupported("get_object"))
     }
-    async fn get_object_if_present(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_object_if_present(
+        &self,
+        _key: &str,
+        _max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Err(unsupported("get_object_if_present"))
     }
     async fn get_object_stream(&self, key: &str) -> anyhow::Result<Option<ObjectByteStream>> {

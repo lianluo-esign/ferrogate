@@ -350,7 +350,7 @@ fn served(gw: &FerroGateway, req_path: &str) -> Option<(String, Vec<u8>)> {
     let entry = resolve_site_file(&resolved.manifest, req_path)?.clone();
     let id = resolved.file_asset_id(T, SITE, &entry.path);
     let asset = block_on(gw.state.current().get_asset(&id)).expect("get_asset error")?;
-    let bytes = match block_on(gw.load_asset_content(&asset)) {
+    let bytes = match block_on(gw.load_asset_content(&asset, "test-request")) {
         Ok(bytes) => bytes,
         Err(error) => panic!("load content: {}", error.message),
     };
