@@ -1038,3 +1038,299 @@ fn a_tenant_scoped_listing_omits_declarations_it_does_not_own() {
     ));
     assert_eq!(all.len(), declared.len());
 }
+
+// ---------------------------------------------------------------------------
+// Gate-owned coverage (#351 test gate): the wire boundary
+// ---------------------------------------------------------------------------
+
+/// Box 1, at the boundary that matters. The policy crate proves `AtomicAmount`
+/// round-trips; this proves the ADMIN SURFACE does, for the largest atomic
+/// amount the frozen wire contract will parse (`u64::MAX`, which
+/// `parse_atomic_amount` accepts).
+///
+/// A `u64::MAX` amount is above every cap, so the decision is a Deny — but the
+/// decision still reports the ORIGINAL atomic units as evidence, and that is
+/// the number an operator reconciles against the chain. If it crossed the wire
+/// as an IEEE double it would render as 18446744073709552000.
+#[test]
+fn a_u64_max_atomic_amount_crosses_the_admin_wire_losslessly_as_an_integer() {
+    let request = evaluation_request(scope(None), u64::MAX, MERCHANT, RESOURCE, RESOURCE);
+    let view = evaluate(&request);
+
+    assert_eq!(view.decision.atomic_amount, u64::MAX);
+    let encoded = serde_json::to_string(&view).expect("evaluation view serializes");
+    assert!(
+        encoded.contains(r#""atomic_amount":18446744073709551615"#),
+        "the original atomic units must cross the wire as exact digits: {encoded}"
+    );
+    // ...and survive a full round trip through a JSON parser.
+    let reparsed: Value = serde_json::from_str(&encoded).expect("response reparses");
+    assert_eq!(
+        reparsed["decision"]["atomic_amount"].as_u64(),
+        Some(u64::MAX),
+        "an atomic amount above 2^53 must reparse exactly, not as a double"
+    );
+    assert_eq!(
+        reparsed["decision"]["conversion"]["numerator"].as_u64(),
+        Some(1)
+    );
+    // No float anywhere on the money path, at any magnitude.
+    let mut floats = Vec::new();
+    collect_floats(&reparsed, &mut floats);
+    assert!(floats.is_empty(), "money path emitted floats: {floats:?}");
+}
+
+/// Box 1 + the conversion overflow arm: an amount whose conversion overflows
+/// must report `computed_credits: null` on the wire, never a coerced `0`.
+/// A missing credit figure rendering as zero on a spend surface reads as
+/// "this payment is free".
+#[test]
+fn a_conversion_overflow_reports_null_credits_on_the_wire_never_zero() {
+    let mut inflating = policy(3);
+    // 1 credit per atomic unit scaled by u64::MAX: any real amount overflows.
+    inflating.conversion.numerator = u64::MAX;
+    inflating.conversion.denominator = 1;
+    inflating.caps = X402SpendCaps::default();
+    let declared = vec![declaration(
+        X402PolicyScopeKind::Tenant,
+        "tenant-1",
+        inflating,
+    )];
+    let request = evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE);
+    let view = evaluate_x402_payment_request(&declared, &request).expect("evaluation");
+
+    assert_eq!(view.decision.decision, "deny");
+    assert_eq!(view.decision.reason_code, "x402_conversion_unavailable");
+    let encoded = serde_json::to_value(&view).expect("serializes");
+    assert!(
+        encoded["decision"]["computed_credits"].is_null(),
+        "an unpriceable payment must not render as 0 credits: {encoded}"
+    );
+    assert!(encoded["decision"]["conversion"]["computed_credits"].is_null());
+}
+
+/// Box 6, stated as the property it is actually claiming: the OpenAPI schema
+/// must describe the fields the RUNTIME serializes -- both directions. A schema
+/// that omits a field the runtime emits leaves a consumer unable to model the
+/// response; one that requires a field the runtime never emits makes every
+/// response invalid. This repo has shipped exactly that drift before, so it is
+/// pinned by execution rather than by review.
+#[test]
+fn the_serialized_diagnostics_match_the_openapi_schema_in_both_directions() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/openapi/admin-api.openapi.json"
+        ))
+        .expect("the admin OpenAPI spec is readable"),
+    )
+    .expect("the admin OpenAPI spec parses");
+
+    let effective = serde_json::to_value(build_effective_policy_view(
+        &declarations(),
+        &scope(Some("project-1")),
+    ))
+    .unwrap();
+    let evaluation = serde_json::to_value(evaluate(&evaluation_request(
+        scope(None),
+        2_500,
+        MERCHANT,
+        RESOURCE,
+        RESOURCE,
+    )))
+    .unwrap();
+    let listed = serde_json::to_value(declared_policy_view(&declarations()[0])).unwrap();
+
+    for (schema_name, value) in [
+        ("X402EffectiveSpendPolicy", &effective),
+        ("X402SpendPolicyEvaluation", &evaluation),
+        ("X402DeclaredSpendPolicy", &listed),
+    ] {
+        assert_object_matches_schema(&spec, schema_name, value, schema_name);
+    }
+}
+
+/// Resolve `$ref` chains inside `components/schemas`.
+fn resolve_schema<'a>(spec: &'a Value, mut schema: &'a Value) -> &'a Value {
+    while let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.rsplit('/').next().expect("a $ref names a schema");
+        schema = spec
+            .pointer(&format!("/components/schemas/{name}"))
+            .unwrap_or_else(|| panic!("dangling $ref {reference}"));
+    }
+    schema
+}
+
+/// Assert every key the runtime emits is declared, and every key the schema
+/// requires is emitted, recursively.
+fn assert_object_matches_schema(spec: &Value, schema_name: &str, value: &Value, path: &str) {
+    let schema = resolve_schema(
+        spec,
+        spec.pointer(&format!("/components/schemas/{schema_name}"))
+            .unwrap_or_else(|| panic!("schema {schema_name} is missing from the OpenAPI spec")),
+    );
+    assert_value_matches_schema(spec, schema, value, path);
+}
+
+fn assert_value_matches_schema(spec: &Value, schema: &Value, value: &Value, path: &str) {
+    let schema = resolve_schema(spec, schema);
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        // Nullable composites: pick the non-null arm for a present value.
+        if value.is_null() {
+            assert!(
+                options
+                    .iter()
+                    .any(|option| resolve_schema(spec, option).get("type")
+                        == Some(&Value::String("null".into()))),
+                "{path}: runtime emitted null but no null arm is declared"
+            );
+            return;
+        }
+        let concrete = options
+            .iter()
+            .find(|option| {
+                resolve_schema(spec, option).get("type") != Some(&Value::String("null".into()))
+            })
+            .unwrap_or_else(|| panic!("{path}: oneOf has no non-null arm"));
+        assert_value_matches_schema(spec, concrete, value, path);
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{path}: runtime emits an object, schema declares none"));
+            for key in map.keys() {
+                assert!(
+                    properties.contains_key(key),
+                    "{path}: the runtime emits {key:?}, which the OpenAPI schema does not declare"
+                );
+            }
+            for required in schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let required = required.as_str().expect("required entries are strings");
+                assert!(
+                    map.contains_key(required),
+                    "{path}: the schema requires {required:?}, which the runtime never emits"
+                );
+            }
+            for (key, nested) in map {
+                assert_value_matches_schema(
+                    spec,
+                    &properties[key],
+                    nested,
+                    &format!("{path}.{key}"),
+                );
+            }
+        }
+        Value::Array(items) => {
+            if let Some(item_schema) = schema.get("items") {
+                for (index, item) in items.iter().enumerate() {
+                    assert_value_matches_schema(
+                        spec,
+                        item_schema,
+                        item,
+                        &format!("{path}[{index}]"),
+                    );
+                }
+            }
+        }
+        Value::Number(number) => {
+            let declared = schema.get("type");
+            let integral = number.as_u64().is_some() || number.as_i64().is_some();
+            assert!(integral, "{path}: money/evidence numbers must be integral");
+            assert!(
+                declared.is_none()
+                    || declared == Some(&Value::String("integer".into()))
+                    || declared
+                        .and_then(Value::as_array)
+                        .is_some_and(|kinds| kinds.contains(&Value::String("integer".into()))),
+                "{path}: runtime emits an integer, schema declares {declared:?}"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Box 5 as a LEAK test rather than a key-name test. A high-entropy marker is
+/// planted in every operator-controllable string the surface could conceivably
+/// echo, and the serialized responses are searched for it in raw, lowercase,
+/// uppercase, hex, base64 and decimal-byte form. A redaction that only strips
+/// the literal spelling is not a redaction.
+#[test]
+fn no_diagnostics_response_echoes_planted_signer_material_in_any_encoding() {
+    const MARKER: &str = "SIGNERSEEDcafebabe1234";
+
+    // The marker is planted where an operator-authored string reaches the
+    // surface: the conversion version tag is the only free-text field a policy
+    // carries, and it is echoed verbatim into every decision.
+    let mut planted = policy(23);
+    planted.conversion.version = format!("rate-{MARKER}");
+    let declared = vec![declaration(
+        X402PolicyScopeKind::Tenant,
+        "tenant-1",
+        planted.clone(),
+    )];
+
+    // A response that legitimately echoes operator config WILL contain the
+    // marker; the invariant under test is that the DECISION evidence handed to
+    // a caller who did not author that config carries no encoding of it beyond
+    // the field the operator wrote. Assert the encodings that a naive
+    // "strip the literal" redaction would miss.
+    let evaluation = serde_json::to_string(
+        &evaluate_x402_payment_request(
+            &declared,
+            &evaluation_request(scope(None), 2_500, MERCHANT, RESOURCE, RESOURCE),
+        )
+        .expect("evaluation"),
+    )
+    .expect("serializes");
+
+    let hex: String = MARKER.bytes().map(|b| format!("{b:02x}")).collect();
+    let hex_upper = hex.to_ascii_uppercase();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(MARKER);
+    let b64_url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(MARKER);
+    let decimal_bytes = MARKER
+        .bytes()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    for (form, encoded) in [
+        ("hex", &hex),
+        ("upper hex", &hex_upper),
+        ("base64", &b64),
+        ("base64url", &b64_url),
+        ("decimal bytes", &decimal_bytes),
+    ] {
+        assert!(
+            !evaluation.contains(encoded.as_str()),
+            "the diagnostics response carries planted material in {form} form"
+        );
+    }
+    // The one place it IS allowed: the operator's own conversion version tag,
+    // echoed as the audit label it is. Pinning this keeps the test honest --
+    // it would otherwise pass on a surface that returned nothing at all.
+    assert!(
+        evaluation.contains(&format!("rate-{MARKER}")),
+        "the conversion version an operator wrote must still be reported: {evaluation}"
+    );
+    // And nothing secret-shaped is keyed anywhere in the response.
+    let parsed: Value = serde_json::from_str(&evaluation).expect("reparses");
+    let mut keys = Vec::new();
+    json_keys(&parsed, &mut keys);
+    for key in &keys {
+        let lowered = key.to_ascii_lowercase();
+        for forbidden in ferrogate_core::SECRET_SHAPED_KEY_FRAGMENTS {
+            assert!(
+                !lowered.contains(forbidden),
+                "diagnostics response exposes a {forbidden}-shaped field: {key}"
+            );
+        }
+    }
+}

@@ -395,6 +395,107 @@ fn authorize_spend_rejects_a_decision_bound_to_another_intent() {
     }
 }
 
+// --- Gate-owned coverage (#351 test gate): binding canonicalization symmetry ---
+
+/// The method binding is only sound if BOTH sides canonicalize the same way.
+/// `ParsedChallenge::method()` trims and uppercases; `PaymentIntent`'s
+/// `normalize_http_method` trims and uppercases. If either side ever stopped,
+/// a lowercase or padded method would make a legitimate `Allow` un-spendable
+/// (a fail-closed break, but a break), or -- worse, if only the intent
+/// normalized -- would let `get` and `GET` name two different intents for one
+/// request. Neither direction was covered: every existing case uses an already
+/// canonical method.
+#[test]
+fn a_lowercase_or_padded_method_canonicalizes_identically_on_both_sides() {
+    for spelling in ["get", "  GeT  ", "GET"] {
+        let challenge = challenge_for(
+            AuthorizedRequest::new(spelling, RESOURCE_URL).with_body(b"{\"q\":\"weather\"}"),
+        );
+        let (intent, decision) = authorize(&challenge, &allow_policy());
+        assert!(decision.is_allowed(), "policy allows {spelling:?}");
+        assert_eq!(
+            decision.http_method(),
+            "GET",
+            "the decision must name the canonical method for {spelling:?}"
+        );
+        challenge
+            .authorize_spend(&intent, &decision, external_signer())
+            .unwrap_or_else(|error| {
+                panic!("a decision for {spelling:?} must still be spendable: {error:?}")
+            });
+    }
+}
+
+/// A decision computed for `GET` must not become spendable for a *different*
+/// method merely because the two spellings differ in case -- the canonical form
+/// is what is compared, so `post` is still a mismatch against a `GET` decision.
+#[test]
+fn method_canonicalization_does_not_collapse_two_different_methods() {
+    let get = challenge_for(AuthorizedRequest::new("get", RESOURCE_URL));
+    let (intent, decision) = authorize(&get, &allow_policy());
+    let post = challenge_for(AuthorizedRequest::new("  post ", RESOURCE_URL));
+
+    let err = post
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect_err("a lowercase POST must not consume a lowercase GET decision");
+    match err {
+        X402ClientError::BindingMismatch {
+            field,
+            expected,
+            actual,
+        } => {
+            assert_eq!(field, "http_method");
+            assert_eq!(expected, "POST");
+            assert_eq!(actual, "GET");
+        }
+        other => panic!("expected an http_method BindingMismatch, got {other:?}"),
+    }
+}
+
+/// "No body" must be a concrete value on both sides, not an absence. A bodyless
+/// request and one whose body is explicitly empty are the SAME request, so a
+/// decision for either must be spendable for the other -- and both must compare
+/// against the canonical empty-body hash rather than skipping the check.
+#[test]
+fn a_bodyless_request_binds_to_the_canonical_empty_body_hash() {
+    let empty_hex = RequestBodyHash::empty().as_hex();
+
+    let bodyless = challenge_for(AuthorizedRequest::new("GET", RESOURCE_URL));
+    let (intent, decision) = authorize(&bodyless, &allow_policy());
+    assert_eq!(
+        decision.request_body_hash_hex(),
+        empty_hex,
+        "a bodyless request must bind to the empty-body hash, not to an absence"
+    );
+
+    // The bodyless request must be able to spend its OWN decision: both sides
+    // have to reach for the same canonical empty-body value, not just the
+    // decision side.
+    bodyless
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect("a bodyless request must be able to spend its own decision");
+
+    // An explicitly-empty body is the same request and must interoperate.
+    let explicitly_empty =
+        challenge_for(AuthorizedRequest::new("GET", RESOURCE_URL).with_body(b""));
+    explicitly_empty
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect("an explicitly-empty body is the same request as a bodyless one");
+
+    // ...but any real body is not.
+    let with_body = challenge_for(AuthorizedRequest::new("GET", RESOURCE_URL).with_body(b"x"));
+    let err = with_body
+        .authorize_spend(&intent, &decision, external_signer())
+        .expect_err("a bodyless decision must not authorize a request that carries a body");
+    assert!(matches!(
+        err,
+        X402ClientError::BindingMismatch {
+            field: "request_body_hash",
+            ..
+        }
+    ));
+}
+
 #[test]
 fn sign_via_rejects_wrong_signer_address() {
     let challenge = parse_devnet_challenge();

@@ -472,3 +472,91 @@ fn declarations_differing_only_by_padding_are_a_duplicate_scope() {
         Err(X402ScopedPolicyError::DuplicateScope { .. })
     ));
 }
+
+// --- Gate-owned coverage (#351 test gate): the documented tie rule ---
+
+/// `resolve_effective_x402_spend_policy` documents that a tie within one scope
+/// level "resolves to the FIRST declaration, so behaviour is still defined for
+/// a config that somehow bypassed validation". Load validation rejects such a
+/// set, so the rule is only reachable by calling resolution directly — which
+/// means nothing pinned it, and swapping `find` for a reverse search left the
+/// whole suite green. A documented determinism guarantee on a money surface has
+/// to be executable, or it is a comment.
+#[test]
+fn a_tie_at_one_scope_level_deterministically_resolves_to_the_first_declaration() {
+    let first = declaration(X402PolicyScopeKind::Tenant, "tenant-1", 7);
+    let second = declaration(X402PolicyScopeKind::Tenant, "tenant-1", 99);
+    let declared = vec![first, second];
+
+    // The tie is exactly what load validation exists to prevent...
+    assert!(matches!(
+        validate_scoped_x402_spend_policies(&declared),
+        Err(X402ScopedPolicyError::DuplicateScope { .. })
+    ));
+
+    // ...but if one ever reaches resolution, the answer is defined and stable.
+    let chain = X402ScopeChain::tenant("tenant-1");
+    let resolved = resolve_effective_x402_spend_policy(&declared, &chain);
+    assert_eq!(
+        resolved.revision(),
+        7,
+        "the first declaration wins a tie, deterministically"
+    );
+    // Repeat and reverse to show the answer is a property of order, not of
+    // hashing or iteration nondeterminism.
+    assert_eq!(
+        resolve_effective_x402_spend_policy(&declared, &chain).revision(),
+        7
+    );
+    let reversed: Vec<_> = declared.iter().rev().cloned().collect();
+    assert_eq!(
+        resolve_effective_x402_spend_policy(&reversed, &chain).revision(),
+        99,
+        "order is the whole tie-break rule, so reversing it must flip the answer"
+    );
+}
+
+/// Precedence must be a TOTAL order over the five levels: for every declared
+/// level, a request naming the full chain resolves to that level when it is the
+/// narrowest declared one, and every narrower-wins pair is consistent.
+#[test]
+fn precedence_is_a_total_order_over_all_five_levels() {
+    let all = X402PolicyScopeKind::ALL;
+    assert_eq!(all.len(), 5);
+    // Declare at every level with a revision equal to its precedence rank, so
+    // the resolved revision names the level that won.
+    let ids = ["tenant-1", "project-1", "workspace-1", "key-1", "run-1"];
+    let full = X402ScopeChain {
+        tenant_id: ids[0],
+        project_id: Some(ids[1]),
+        workspace_id: Some(ids[2]),
+        key_id: Some(ids[3]),
+        run_id: Some(ids[4]),
+    };
+    // Progressively drop the narrowest declaration; the next-narrowest must win
+    // each time, and the last drop must fall back to the disabled default.
+    for cut in (0..=all.len()).rev() {
+        let declared: Vec<_> = (0..cut)
+            .map(|rank| declaration(all[rank], ids[rank], rank as u64 + 1))
+            .collect();
+        let resolved = resolve_effective_x402_spend_policy(&declared, &full);
+        if cut == 0 {
+            assert!(!resolved.is_declared());
+            assert!(
+                !resolved.policy.enabled,
+                "the fallback must deny everything"
+            );
+            assert_eq!(resolved.revision(), 0);
+        } else {
+            assert_eq!(
+                resolved.revision(),
+                cut as u64,
+                "with {cut} levels declared, the narrowest declared one must win"
+            );
+            assert_eq!(
+                resolved.source.as_ref().map(|s| s.scope_type),
+                Some(all[cut - 1])
+            );
+        }
+    }
+}

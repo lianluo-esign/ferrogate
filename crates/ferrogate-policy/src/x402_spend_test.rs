@@ -581,6 +581,59 @@ fn an_impossible_conversion_ratio_is_rejected_even_when_disabled() {
     ));
 }
 
+// --- Gate-owned coverage (#351 test gate): validators with no failing test ---
+
+/// The other half of "impossible conversion ratios". Only a zero DENOMINATOR
+/// had a test; a zero NUMERATOR is validated by the same guard and was an
+/// untested assumption. It is fail-closed (every conversion would yield `None`
+/// and deny) but the acceptance box claims the CONFIG is rejected, so the
+/// rejection is what gets pinned.
+#[test]
+fn a_zero_conversion_numerator_is_rejected_even_when_disabled() {
+    let mut policy = X402SpendPolicy::disabled();
+    policy.conversion.numerator = 0;
+    let err = policy.validate().unwrap_err();
+    assert_eq!(
+        err,
+        X402PolicyConfigError::ImpossibleConversion {
+            reason: "conversion numerator is zero".to_string()
+        }
+    );
+}
+
+/// The approval arm of the zero-cap class: `threshold_credits = Some(0)` means
+/// "everything needs approval", which validation rejects so the operator must
+/// say so explicitly. No test covered the arm.
+#[test]
+fn a_zero_approval_threshold_is_rejected() {
+    let mut policy = base_policy();
+    policy.approval.threshold_credits = Some(0);
+    let err = policy.validate().unwrap_err();
+    assert_eq!(
+        err,
+        X402PolicyConfigError::ZeroCap {
+            field: "approval.threshold_credits"
+        }
+    );
+}
+
+/// A recipient that is not a canonical base58 address can never match a
+/// wire-validated `payTo`, so an allowlist entry like a display name is dead
+/// config that silently narrows the policy to nothing. Validation rejects it;
+/// nothing tested that it does.
+#[test]
+fn a_recipient_that_is_not_a_base58_address_is_rejected() {
+    let mut policy = base_policy();
+    policy.allowed_recipients = vec!["merchant@example.com".to_string()];
+    let err = policy.validate().unwrap_err();
+    assert_eq!(
+        err,
+        X402PolicyConfigError::InvalidRecipient {
+            value: "merchant@example.com".to_string()
+        }
+    );
+}
+
 #[test]
 fn an_enabled_policy_with_an_empty_allowlist_is_rejected() {
     let mut policy = base_policy();
