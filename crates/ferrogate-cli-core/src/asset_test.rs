@@ -144,6 +144,7 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
         "unyankAssetVersion",
         "createAssetUploadIntent",
         "commitAssetUpload",
+        "abortAssetUpload",
         "getAssetDownloadUrl",
         "listAssetChannels",
         "putAssetChannel",
@@ -156,8 +157,8 @@ fn coverage_manifest_has_exactly_the_declared_operation_ids() {
     ] {
         assert!(manifest.contains(op), "missing operation id {op}");
     }
-    // 10 (assets) + 3 (transfer) + 3 (channels) + 5 (site-domains) = 21 ids.
-    assert_eq!(manifest.len(), 21);
+    // 10 (assets) + 4 (transfer) + 3 (channels) + 5 (site-domains) = 22 ids.
+    assert_eq!(manifest.len(), 22);
 }
 
 #[test]

@@ -16,10 +16,11 @@ use std::time::Duration;
 use ferrogate_storage::{sha256_hex, stored_asset_id, StorageError, StoredAsset};
 
 use super::{
-    asset_create_failure_disposition, effective_max_object_bytes, existing_asset_matches_commit,
-    final_object_prefix, is_upload_id, new_upload_id, staging_object_key,
-    verify_and_fetch_committed_object, AssetCreateFailureDisposition, CommitVerification,
-    PresignCommitRequest, PresignUploadIntentRequest,
+    asset_create_failure_disposition, classify_abort, effective_max_object_bytes,
+    existing_asset_matches_commit, final_object_prefix, is_upload_id, new_upload_id,
+    staging_object_key, verify_and_fetch_committed_object, AbortReason,
+    AssetCreateFailureDisposition, CommitVerification, PresignAbortRequest, PresignCommitRequest,
+    PresignUploadIntentRequest,
 };
 use crate::gateway::asset_bucket::{AssetBucketClient, AssetBucketConfig};
 
@@ -501,6 +502,114 @@ fn presign_control_requests_reject_unknown_json_fields() {
         )
     )
     .is_err());
+}
+
+#[test]
+fn abort_request_requires_the_declarations_that_name_the_staging_object() {
+    // #368: the staging key is H(asset_id|upload_id|size|sha256). A caller that
+    // cannot restate all three cannot name -- and therefore cannot release --
+    // an upload it did not register.
+    let sha = "a".repeat(64);
+    let abort: PresignAbortRequest = serde_json::from_str(&format!(
+        r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42,"sha256":"{sha}","reason":"bucket_rejected"}}"#
+    ))
+    .expect("full abort body parses");
+    assert_eq!(abort.size_bytes, 42);
+    assert_eq!(
+        AbortReason::parse(abort.reason.as_deref()),
+        AbortReason::BucketRejected
+    );
+
+    // Missing declarations and unknown fields are typed failures, not defaults.
+    for body in [
+        format!(r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","sha256":"{sha}"}}"#),
+        r#"{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42}"#.to_string(),
+        format!(
+            r#"{{"upload_id":"upl_0123456789abcdef0123456789abcdef","size_bytes":42,"sha256":"{sha}","extra":true}}"#
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<PresignAbortRequest>(&body).is_err(),
+            "malformed abort body must be rejected: {body}"
+        );
+    }
+}
+
+#[test]
+fn an_unrecognized_abort_reason_never_becomes_a_bucket_rejection_claim() {
+    // #368: the reason decides which rejection class the evidence trail
+    // records, so an absent/garbage value must degrade to the claim that costs
+    // the least evidence -- never silently upgrade to `bucket_rejected`.
+    assert_eq!(AbortReason::parse(None), AbortReason::Abandoned);
+    assert_eq!(AbortReason::parse(Some("")), AbortReason::Abandoned);
+    assert_eq!(
+        AbortReason::parse(Some("abandoned")),
+        AbortReason::Abandoned
+    );
+    assert_eq!(
+        AbortReason::parse(Some("BUCKET_REJECTED")),
+        AbortReason::Abandoned,
+        "the enum is exact-match; a near-miss must not be honored"
+    );
+    assert_eq!(
+        AbortReason::parse(Some("rejected_bucket")),
+        AbortReason::Abandoned
+    );
+}
+
+#[test]
+fn a_bucket_rejection_is_recorded_only_when_the_gateway_corroborates_it() {
+    use crate::state::AssetPresignOutcome;
+
+    // The client says the bucket refused the PUT and the gateway agrees: no
+    // object exists under the staging key only the gateway can derive. This is
+    // the ONLY input pair that produces bucket-rejection evidence.
+    assert_eq!(
+        classify_abort(AbortReason::BucketRejected, false),
+        ("rejected_bucket", AssetPresignOutcome::BucketRejected)
+    );
+    // Contradicted: bytes ARE staged, so the bucket accepted the PUT. The
+    // client's claim is downgraded rather than trusted -- without this, any
+    // caller could inflate the bucket-rejection counter at will.
+    assert_eq!(
+        classify_abort(AbortReason::BucketRejected, true),
+        ("aborted", AssetPresignOutcome::Aborted)
+    );
+    // A plain abandonment makes no claim about the bucket either way.
+    assert_eq!(
+        classify_abort(AbortReason::Abandoned, false),
+        ("aborted", AssetPresignOutcome::Aborted)
+    );
+    assert_eq!(
+        classify_abort(AbortReason::Abandoned, true),
+        ("aborted", AssetPresignOutcome::Aborted)
+    );
+}
+
+#[test]
+fn presign_outcomes_land_in_separate_operator_counters() {
+    // #368 acceptance: operator metrics must distinguish intent rejection,
+    // bucket rejection, and commit rejection (orphan GC has its own
+    // `asset_lifecycle_*` counters). Record one of each plus the ambiguous
+    // `staging_missing` class and assert nothing bleeds across.
+    use crate::state::{AppState, AssetPresignOutcome};
+
+    let state = AppState::new(crate::config::Config::default());
+    state.record_asset_presign_outcome(AssetPresignOutcome::IntentIssued);
+    state.record_asset_presign_outcome(AssetPresignOutcome::IntentIssued);
+    state.record_asset_presign_outcome(AssetPresignOutcome::IntentRejected);
+    state.record_asset_presign_outcome(AssetPresignOutcome::BucketRejected);
+    state.record_asset_presign_outcome(AssetPresignOutcome::StagingMissing);
+    state.record_asset_presign_outcome(AssetPresignOutcome::CommitRejected);
+    state.record_asset_presign_outcome(AssetPresignOutcome::Aborted);
+
+    let snapshot = state.prometheus_metrics_snapshot();
+    assert_eq!(snapshot.asset_presign_intent_issued_total, 2);
+    assert_eq!(snapshot.asset_presign_intent_rejected_total, 1);
+    assert_eq!(snapshot.asset_presign_bucket_rejected_total, 1);
+    assert_eq!(snapshot.asset_presign_staging_missing_total, 1);
+    assert_eq!(snapshot.asset_presign_commit_rejected_total, 1);
+    assert_eq!(snapshot.asset_presign_aborted_total, 1);
 }
 
 #[test]

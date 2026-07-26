@@ -320,6 +320,15 @@ async function handleAssetsRequest(
       expires_in_seconds: 900,
       size_bytes: body.size_bytes ?? 0,
       sha256: body.sha256 ?? "",
+      // #368: the real intent returns the SigV4 SignedHeaders the direct PUT
+      // must carry. Omitting them here is what let a broken console pass:
+      // the bucket route below now enforces them.
+      required_headers: {
+        "content-length": String(body.size_bytes ?? 0),
+        "x-amz-content-sha256": body.sha256 ?? "",
+      },
+      max_object_bytes: 5 * 1024 * 1024 * 1024,
+      upload_protocol: "single_put",
     });
     return;
   }
@@ -493,11 +502,29 @@ export async function installGatewayAssets(
   // The presigned bucket PUT (putPresignedObject): direct-to-storage, no gateway
   // Authorization header. Succeed after the optional hold so the "uploading"
   // progress phase is observable.
+  //
+  // #368: this stands in for an S3-compatible bucket verifying the SigV4
+  // SignedHeaders set, so it MUST fail closed the way a real bucket does. The
+  // previous unconditional 200 is exactly what hid a console that never sent
+  // `x-amz-content-sha256`: the suite stayed green while the real upload path
+  // was dead. Only that header is asserted — `content-length` is signed too,
+  // but the browser supplies it from the body and Playwright's `headers()`
+  // does not reliably surface network-stack-added headers, so asserting it
+  // here would test the harness rather than the console.
   await page.route(
     (url) => url.pathname.startsWith(BUCKET_PREFIX),
     async (route) => {
       if (options.uploadHoldMs && options.uploadHoldMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, options.uploadHoldMs));
+      }
+      const payloadHash = route.request().headers()["x-amz-content-sha256"] ?? "";
+      if (payloadHash === "") {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/xml",
+          body: "<Error><Code>SignatureDoesNotMatch</Code><Message>missing signed header: x-amz-content-sha256</Message></Error>",
+        });
+        return;
       }
       await route.fulfill({ status: 200, contentType: "text/plain", body: "" });
     },

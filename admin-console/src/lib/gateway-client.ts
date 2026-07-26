@@ -340,6 +340,16 @@ export async function gatewayPutBinary<T>(
 }
 
 /**
+ * Headers the browser refuses to let `fetch` set (Fetch spec "forbidden header
+ * names"). `content-length` is in the intent's `required_headers` because the
+ * SigV4 signature binds it, but a browser derives it from the body and silently
+ * drops any explicit value — so we must NOT try to send it, and instead assert
+ * the body length matches what was signed. Node/CLI clients that can set it
+ * should send it verbatim.
+ */
+const BROWSER_FORBIDDEN_UPLOAD_HEADERS = new Set(["content-length", "host"]);
+
+/**
  * PUTs raw bytes DIRECTLY to a presigned bucket URL (the large-object path,
  * #338/#259). Unlike every other helper here this does NOT target the gateway
  * and sends NO gateway `Authorization` header: the presigned URL already
@@ -347,15 +357,46 @@ export async function gatewayPutBinary<T>(
  * point of the flow is to keep a large bundle's bytes off the gateway body.
  * The gateway later verifies size + SHA-256 at the commit step. Bucket errors
  * (often XML, not our JSON envelope) surface verbatim as the thrown message.
+ *
+ * #368: the presigned URL now signs `content-length` and
+ * `x-amz-content-sha256` as SigV4 `SignedHeaders`, so a PUT that omits them is
+ * rejected by the bucket with 403. `requiredHeaders` is the intent's
+ * `required_headers` map and MUST be forwarded verbatim; passing it is not
+ * optional against a real bucket. Two browser-specific consequences:
+ *
+ * - `content-length` cannot be set from `fetch`, so it is filtered out and the
+ *   body length is asserted against the signed value instead — a mismatch is a
+ *   guaranteed 403 and is worth failing on locally with a legible message.
+ * - the bucket's CORS policy must list `x-amz-content-sha256` in
+ *   `Access-Control-Allow-Headers`, or the preflight fails before the PUT.
+ *   See docs/assets/private-bucket-migration.md.
  */
 export async function putPresignedObject(
   uploadUrl: string,
   body: Blob,
   contentType: string,
+  requiredHeaders: Readonly<Record<string, string>> = {},
 ): Promise<void> {
+  const headers: Record<string, string> = {
+    "Content-Type": contentType || "application/octet-stream",
+  };
+  for (const [name, value] of Object.entries(requiredHeaders)) {
+    const lower = name.toLowerCase();
+    if (lower === "content-length") {
+      const signed = Number(value);
+      if (Number.isFinite(signed) && signed !== body.size) {
+        throw new Error(
+          `presigned upload is signed for ${signed} bytes but the selected file is ${body.size}; the bucket would reject this PUT`,
+        );
+      }
+      continue;
+    }
+    if (BROWSER_FORBIDDEN_UPLOAD_HEADERS.has(lower)) continue;
+    headers[name] = value;
+  }
   const response = await fetch(uploadUrl, {
     method: "PUT",
-    headers: { "Content-Type": contentType || "application/octet-stream" },
+    headers,
     body,
   });
   if (!response.ok) {

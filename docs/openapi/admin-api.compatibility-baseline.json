@@ -11850,6 +11850,97 @@
         ]
       }
     },
+    "/v1/assets/presign/abort/{asset_type}/{name}/{version}": {
+      "post": {
+        "operationId": "abortAssetUpload",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Release a presigned upload intent that will not be committed.",
+        "description": "Abort/cancel surface for an unused upload intent (issue #368). Deletes the intent's staging object immediately when one exists, instead of leaving it for the asset-lifecycle GC, and records the release in the audit trail and the ferrogate_asset_presign_* counters. A client whose direct PUT was refused by the bucket may declare reason=bucket_rejected; the gateway corroborates that claim against the server-derived staging key before recording it, and downgrades it to a plain abort when the object turns out to exist. Returns 409 when the upload was already committed: aborting is never a path to deleting a published immutable version. This is a client-reported signal with a server-side consistency check, not an independent observation of the direct PUT, which the gateway is not in the path of.",
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "assets.write"
+          },
+          "rbac_action": null
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded release outcome for this upload intent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetPresignAbortResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/AssetBadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/AssetConflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The upload_id returned by the intent plus the size and checksum it registered, and optionally why it is being released.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetPresignAbortRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "asset_type",
+            "in": "path",
+            "required": true,
+            "description": "Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Tenant-scoped asset name.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "description": "Concrete immutable asset version.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
     "/v1/assets/presign/download/{asset_type}/{name}/{version}": {
       "get": {
         "operationId": "getAssetDownloadUrl",
@@ -24474,6 +24565,73 @@
           "sha256"
         ]
       },
+      "AssetPresignAbortRequest": {
+        "type": "object",
+        "description": "Release a presigned upload intent that will not be committed (issue #368). The staging key is derived server-side from the asset identity plus upload_id, size_bytes and sha256, so all three declarations from the intent are required to name it.",
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "description": "The opaque upload_id the intent returned.",
+            "pattern": "^upl_[0-9a-f]{32}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "The size the intent registered."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[A-Fa-f0-9]{64}$",
+            "description": "The SHA-256 the intent registered."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "bucket_rejected",
+              "abandoned"
+            ],
+            "description": "Why the intent is being released. bucket_rejected asserts the direct PUT was refused by the bucket; the gateway records that class ONLY after corroborating it (no object under the staging key). An absent or unrecognized value is treated as abandoned."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "upload_id",
+          "size_bytes",
+          "sha256"
+        ]
+      },
+      "AssetPresignAbortResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "const": "asset_upload_abort"
+          },
+          "upload_id": {
+            "type": "string",
+            "pattern": "^upl_[0-9a-f]{32}$"
+          },
+          "staging_object_removed": {
+            "type": "boolean",
+            "description": "True when a staging object existed and this abort deleted it, reclaiming its bytes immediately instead of leaving them to the lifecycle GC."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "rejected_bucket",
+              "aborted"
+            ],
+            "description": "The outcome actually recorded in the audit trail and metrics, which is NOT an echo of the requested reason: a bucket_rejected claim the gateway contradicts (bytes ARE staged, so the bucket accepted the PUT) is downgraded to aborted."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "upload_id",
+          "staging_object_removed",
+          "outcome"
+        ]
+      },
       "AssetPresignUploadIntentResponse": {
         "type": "object",
         "properties": {
@@ -24509,6 +24667,26 @@
           "sha256": {
             "type": "string",
             "pattern": "^[A-Fa-f0-9]{64}$"
+          },
+          "required_headers": {
+            "type": "object",
+            "description": "Header name -> value the client MUST send verbatim on the direct PUT. These are SigV4 signed headers of upload_url, so omitting or changing any of them invalidates the upload at the bucket boundary (403). Browser clients must NOT set content-length explicitly (the Fetch spec forbids it); sending exactly size_bytes of body makes the browser emit the signed value. A browser also requires the bucket's CORS Access-Control-Allow-Headers to include x-amz-content-sha256.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "max_object_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Per-object ceiling this intent was admitted against: the tightest of the operator's presign_max_object_bytes, the tenant's per-object ceiling, and the tenant's cumulative asset storage quota. Echoed so a client can fail fast without a rejected round-trip."
+          },
+          "upload_protocol": {
+            "type": "string",
+            "enum": [
+              "single_put"
+            ],
+            "description": "Wire protocol for the direct upload. Always single_put: the whole object goes in ONE PUT bound to required_headers. Multipart is not supported because S3 signs each part separately, so one presigned authorization cannot bind the whole object's length and checksum."
           }
         },
         "additionalProperties": false,
@@ -24520,7 +24698,10 @@
           "method",
           "expires_in_seconds",
           "size_bytes",
-          "sha256"
+          "sha256",
+          "required_headers",
+          "max_object_bytes",
+          "upload_protocol"
         ]
       },
       "AssetPresignDownloadResponse": {

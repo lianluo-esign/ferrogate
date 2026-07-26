@@ -3001,6 +3001,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assets/presign/abort/{asset_type}/{name}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release a presigned upload intent that will not be committed.
+         * @description Abort/cancel surface for an unused upload intent (issue #368). Deletes the intent's staging object immediately when one exists, instead of leaving it for the asset-lifecycle GC, and records the release in the audit trail and the ferrogate_asset_presign_* counters. A client whose direct PUT was refused by the bucket may declare reason=bucket_rejected; the gateway corroborates that claim against the server-derived staging key before recording it, and downgrades it to a plain abort when the object turns out to exist. Returns 409 when the upload was already committed: aborting is never a path to deleting a published immutable version. This is a client-reported signal with a server-side consistency check, not an independent observation of the direct PUT, which the gateway is not in the path of.
+         */
+        post: operations["abortAssetUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/assets/presign/download/{asset_type}/{name}/{version}": {
         parameters: {
             query?: never;
@@ -6274,6 +6294,35 @@ export interface components {
             /** @description Durable tool-approval record used for cross-tenant publication; its status is read server-side, never client-asserted. */
             approval_id?: string | null;
         };
+        /** @description Release a presigned upload intent that will not be committed (issue #368). The staging key is derived server-side from the asset identity plus upload_id, size_bytes and sha256, so all three declarations from the intent are required to name it. */
+        AssetPresignAbortRequest: {
+            /** @description The opaque upload_id the intent returned. */
+            upload_id: string;
+            /**
+             * Format: int64
+             * @description The size the intent registered.
+             */
+            size_bytes: number;
+            /** @description The SHA-256 the intent registered. */
+            sha256: string;
+            /**
+             * @description Why the intent is being released. bucket_rejected asserts the direct PUT was refused by the bucket; the gateway records that class ONLY after corroborating it (no object under the staging key). An absent or unrecognized value is treated as abandoned.
+             * @enum {string}
+             */
+            reason?: "bucket_rejected" | "abandoned";
+        };
+        AssetPresignAbortResponse: {
+            /** @constant */
+            object: "asset_upload_abort";
+            upload_id: string;
+            /** @description True when a staging object existed and this abort deleted it, reclaiming its bytes immediately instead of leaving them to the lifecycle GC. */
+            staging_object_removed: boolean;
+            /**
+             * @description The outcome actually recorded in the audit trail and metrics, which is NOT an echo of the requested reason: a bucket_rejected claim the gateway contradicts (bytes ARE staged, so the bucket accepted the PUT) is downgraded to aborted.
+             * @enum {string}
+             */
+            outcome: "rejected_bucket" | "aborted";
+        };
         AssetPresignUploadIntentResponse: {
             /** @constant */
             object: "asset_upload_intent";
@@ -6290,6 +6339,20 @@ export interface components {
             /** Format: int64 */
             size_bytes: number;
             sha256: string;
+            /** @description Header name -> value the client MUST send verbatim on the direct PUT. These are SigV4 signed headers of upload_url, so omitting or changing any of them invalidates the upload at the bucket boundary (403). Browser clients must NOT set content-length explicitly (the Fetch spec forbids it); sending exactly size_bytes of body makes the browser emit the signed value. A browser also requires the bucket's CORS Access-Control-Allow-Headers to include x-amz-content-sha256. */
+            required_headers: {
+                [key: string]: string;
+            };
+            /**
+             * Format: int64
+             * @description Per-object ceiling this intent was admitted against: the tightest of the operator's presign_max_object_bytes, the tenant's per-object ceiling, and the tenant's cumulative asset storage quota. Echoed so a client can fail fast without a rejected round-trip.
+             */
+            max_object_bytes: number;
+            /**
+             * @description Wire protocol for the direct upload. Always single_put: the whole object goes in ONE PUT bound to required_headers. Multipart is not supported because S3 signs each part separately, so one presigned authorization cannot bind the whole object's length and checksum.
+             * @enum {string}
+             */
+            upload_protocol: "single_put";
         };
         AssetPresignDownloadResponse: {
             /** @constant */
@@ -13371,6 +13434,44 @@ export interface operations {
             413: components["responses"]["AssetPayloadTooLarge"];
             422: components["responses"]["AssetUnprocessableEntity"];
             503: components["responses"]["AssetServiceUnavailable"];
+        };
+    };
+    abortAssetUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Asset family. Built-in families include cli_tool, mcp_manifest, skill_bundle, static_site, and config_file. */
+                asset_type: string;
+                /** @description Tenant-scoped asset name. */
+                name: string;
+                /** @description Concrete immutable asset version. */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description The upload_id returned by the intent plus the size and checksum it registered, and optionally why it is being released. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetPresignAbortRequest"];
+            };
+        };
+        responses: {
+            /** @description The recorded release outcome for this upload intent. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetPresignAbortResponse"];
+                };
+            };
+            400: components["responses"]["AssetBadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            405: components["responses"]["MethodNotAllowed"];
+            409: components["responses"]["AssetConflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getAssetDownloadUrl: {

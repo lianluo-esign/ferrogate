@@ -53,6 +53,7 @@ pub(crate) fn run_api_contract(args: &LocalArgs) -> Result<()> {
         ("PUT", "/v1/assets/skill/example/1.0.0/yank"),
         ("GET", "/v1/assets/presign/upload/skill/example/1.0.0"),
         ("GET", "/v1/assets/presign/commit/skill/example/1.0.0"),
+        ("GET", "/v1/assets/presign/abort/skill/example/1.0.0"),
         ("POST", "/v1/assets/presign/download/skill/example/1.0.0"),
     ];
     for (method, path) in wrong_asset_methods {
@@ -85,6 +86,11 @@ pub(crate) fn run_api_contract(args: &LocalArgs) -> Result<()> {
             "POST",
             "/v1/assets/presign/commit/skill/example/1.0.0",
             r#"{"size_bytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        ),
+        (
+            "POST",
+            "/v1/assets/presign/abort/skill/example/1.0.0",
+            r#"{"upload_id":"upl_00000000000000000000000000000000","size_bytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
         ),
         ("GET", "/v1/assets/presign/download/skill/example/1.0.0", ""),
         ("GET", "/v1/assets/storage/summary", ""),

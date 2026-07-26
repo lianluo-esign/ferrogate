@@ -28,9 +28,27 @@
 // bucket boundary itself, and staging capacity can no longer be burned
 // beyond the approved object. Scope: a single PUT only -- multipart
 // uploads are out of scope (the per-object ceiling keeps single-PUT
-// objects within what S3-compatible services accept in one request), and
-// orphaned staging objects remain the existing asset-lifecycle GC's job
-// (`state_asset_lifecycle.rs`, audit action `asset.gc.delete`).
+// objects within what S3-compatible services accept in one request).
+//
+// #368 orphan/abort: an intent that is never uploaded can be released
+// explicitly through `POST /v1/assets/presign/abort/...`, which deletes
+// the staging object immediately instead of waiting for the
+// asset-lifecycle GC (`state_asset_lifecycle.rs`, audit action
+// `asset.gc.delete`), which remains the backstop for clients that simply
+// vanish.
+//
+// #368 rejection evidence, stated precisely because the boundary matters:
+// the gateway never sees the direct PUT, so it cannot observe a bucket
+// refusal first-hand. Three classes are gateway-observed (`rejected_intent`
+// at preflight, `rejected_commit` over staged bytes, `aborted` at the abort
+// surface). The fourth, `rejected_bucket`, is client-reported at abort and
+// then *corroborated*: the gateway confirms no object exists under the
+// staging key only it can derive. A commit that simply finds nothing staged
+// is audited as `staging_missing`, NOT as a bucket rejection -- absence
+// alone conflates never-attempted, expired-URL and bucket-refused, and
+// calling it a bucket rejection would overstate the evidence. Fully
+// independent proof would require bucket access logs, which no configured
+// S3-compatible backend exposes to the gateway today.
 //
 // Private-bucket operator runbook: docs/assets/private-bucket-migration.md.
 //
@@ -100,6 +118,58 @@ struct PresignCommitRequest {
     approval_id: Option<String>,
 }
 
+/// #368: release an intent whose direct PUT will never be committed. The
+/// staging key is server-derived from `id|upload_id|size_bytes|sha256`, so the
+/// same three declarations the intent registered are required to name it --
+/// a caller cannot abort an upload it did not register.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresignAbortRequest {
+    upload_id: String,
+    size_bytes: u64,
+    sha256: String,
+    /// Why the intent is being released. Typed, because it decides which
+    /// rejection class the audit trail and metrics record; an absent or
+    /// unrecognized value degrades to `abandoned` (the claim that costs the
+    /// least evidence), never up to `bucket_rejected`.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// The two reasons a client can give for releasing an intent (#368).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortReason {
+    /// The direct PUT was refused by the bucket (typically a 403 from the
+    /// SigV4 size/checksum binding). Only ever *recorded* as a bucket
+    /// rejection when the gateway corroborates it by finding no staged object.
+    BucketRejected,
+    /// The client simply gave up; no claim about the bucket is made.
+    Abandoned,
+}
+
+impl AbortReason {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("bucket_rejected") => Self::BucketRejected,
+            _ => Self::Abandoned,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PresignAbortResponse {
+    object: &'static str,
+    upload_id: String,
+    /// True when a staging object existed and was deleted by this abort --
+    /// the bytes were reclaimed now rather than by the lifecycle GC.
+    staging_object_removed: bool,
+    /// The outcome actually recorded in the audit trail and metrics. This is
+    /// NOT an echo of the requested `reason`: a `bucket_rejected` claim that
+    /// the gateway contradicts (bytes *are* staged) is downgraded to
+    /// `aborted`, and the response says so.
+    outcome: &'static str,
+}
+
 impl PresignCommitRequest {
     /// Build the detached-signature input for screening, mirroring the inline
     /// `x-asset-signature*` header parsing. `None` means an unsigned publish.
@@ -146,9 +216,16 @@ struct PresignUploadIntentResponse {
     /// the bucket boundary.
     required_headers: std::collections::BTreeMap<&'static str, String>,
     /// The per-object ceiling the intent was checked against, echoed so
-    /// clients can fail fast without a rejected round-trip. Single PUT
-    /// only: multipart uploads are out of scope.
+    /// clients can fail fast without a rejected round-trip.
     max_object_bytes: u64,
+    /// Wire protocol for the direct upload; always `single_put` today. Typed
+    /// as a named protocol rather than a `multipart: false` boolean so adding
+    /// multipart later is an additive enum value instead of a semantic flip.
+    /// Multipart is deliberately unsupported: S3 signs each part separately,
+    /// so one presigned authorization cannot bind the whole object's size and
+    /// checksum -- exactly the invariant this endpoint exists to enforce. The
+    /// per-object ceiling keeps objects inside what a single PUT accepts.
+    upload_protocol: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,6 +250,7 @@ impl FerroGateway {
     /// with an `{asset_type}` segment):
     /// - `POST /v1/assets/presign/upload/{asset_type}/{name}/{version}`
     /// - `POST /v1/assets/presign/commit/{asset_type}/{name}/{version}`
+    /// - `POST /v1/assets/presign/abort/{asset_type}/{name}/{version}`
     /// - `GET  /v1/assets/presign/download/{asset_type}/{name}/{version}`
     pub(super) async fn try_asset_presign_routes(
         &self,
@@ -205,6 +283,18 @@ impl FerroGateway {
                     .await?;
                 Ok(true)
             }
+            ("abort", &Method::POST) => {
+                self.handle_asset_upload_abort(
+                    session,
+                    ctx,
+                    &req.headers,
+                    asset_type,
+                    name,
+                    version,
+                )
+                .await?;
+                Ok(true)
+            }
             ("download", &Method::GET) => {
                 self.handle_asset_download_url(
                     session,
@@ -217,7 +307,7 @@ impl FerroGateway {
                 .await?;
                 Ok(true)
             }
-            ("upload", _) | ("commit", _) => {
+            ("upload", _) | ("commit", _) | ("abort", _) => {
                 write_json_error(
                     session,
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -326,7 +416,9 @@ impl FerroGateway {
             // #368: outcome `rejected_intent` distinguishes this preflight
             // rejection from bucket-boundary (`rejected_bucket`) and
             // commit-time (`rejected_commit`) rejections, and from orphan
-            // GC (`asset.gc.delete`).
+            // GC (`asset.gc.delete`). The matching counter makes the same
+            // distinction available to alerting without log scraping.
+            state.record_asset_presign_outcome(crate::state::AssetPresignOutcome::IntentRejected);
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,
@@ -366,6 +458,9 @@ impl FerroGateway {
         {
             QuotaStatus::Ok => {}
             QuotaStatus::Exceeded(quota) => {
+                state.record_asset_presign_outcome(
+                    crate::state::AssetPresignOutcome::IntentRejected,
+                );
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -439,6 +534,7 @@ impl FerroGateway {
             }
         };
 
+        state.record_asset_presign_outcome(crate::state::AssetPresignOutcome::IntentIssued);
         state.record_admin_audit_event(admin_audit_event_draft_for_target(
             ctx,
             &auth,
@@ -462,6 +558,7 @@ impl FerroGateway {
             sha256: expected_sha256,
             required_headers: upload.required_headers.into_iter().collect(),
             max_object_bytes,
+            upload_protocol: SINGLE_PUT_UPLOAD_PROTOCOL,
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
@@ -632,18 +729,26 @@ impl FerroGateway {
 
                 match verification_failure {
                     Ok(CommitVerification::NotUploaded) => {
-                        // #368: outcome `rejected_bucket` -- no staged object
-                        // exists, meaning the direct PUT never succeeded at
-                        // the bucket boundary (never attempted, URL expired,
-                        // or rejected by the signed size/checksum binding).
+                        // #368: outcome `staging_missing`, NOT `rejected_bucket`.
+                        // Absence at commit time proves only that no bytes are
+                        // staged -- it cannot distinguish never-attempted from
+                        // expired-URL from bucket-refused, and the gateway never
+                        // observes the direct PUT. Claiming a bucket rejection
+                        // here would be an inference dressed as evidence; a real
+                        // bucket rejection is recorded only via the abort surface,
+                        // where the client's report is corroborated by this same
+                        // staging lookup.
+                        state.record_asset_presign_outcome(
+                            crate::state::AssetPresignOutcome::StagingMissing,
+                        );
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
                             "asset.push",
                             &id,
-                            "rejected_bucket",
+                            "staging_missing",
                             format!(
-                                "asset {id} upload {} has no staged object; the direct PUT never succeeded at the bucket boundary",
+                                "asset {id} upload {} has no staged object at commit; the direct PUT was never attempted, its URL expired, or the bucket refused it (indistinguishable from here -- see POST /v1/assets/presign/abort)",
                                 commit.upload_id
                             ),
                         ));
@@ -660,6 +765,9 @@ impl FerroGateway {
                         // #368: outcome `rejected_commit` -- the staged
                         // object existed but failed the gateway's commit
                         // verification (size, sha256, or content rules).
+                        state.record_asset_presign_outcome(
+                            crate::state::AssetPresignOutcome::CommitRejected,
+                        );
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
                             ctx,
                             &auth,
@@ -735,6 +843,9 @@ impl FerroGateway {
             Ok(screening) => screening,
             Err(rejection) => {
                 best_effort_delete(&bucket, &staging_key).await;
+                state.record_asset_presign_outcome(
+                    crate::state::AssetPresignOutcome::CommitRejected,
+                );
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -845,6 +956,9 @@ impl FerroGateway {
                 // published, so the final candidate is provably unreferenced and
                 // is reclaimed here; the staging object is reclaimed by
                 // reject_staging_object. Same typed rejection shape as before.
+                state.record_asset_presign_outcome(
+                    crate::state::AssetPresignOutcome::CommitRejected,
+                );
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,
                     &auth,
@@ -1014,6 +1128,162 @@ impl FerroGateway {
                 }
             }
         }
+    }
+
+    /// #368 abort/cancel surface for an intent that will never be committed.
+    ///
+    /// Two jobs, deliberately in one endpoint because they share the same
+    /// server-derived staging key:
+    ///
+    /// 1. **Reclaim now.** If a staging object exists it is deleted here, so a
+    ///    client that knows it failed does not leave bytes occupying bucket
+    ///    capacity until the lifecycle GC's next sweep.
+    /// 2. **Make the bucket-rejection class real.** A client whose direct PUT
+    ///    was refused (the 403 the SigV4 size/checksum binding produces) can
+    ///    say so, and the gateway *corroborates* the claim against the staging
+    ///    key before recording it. A `bucket_rejected` report that the gateway
+    ///    contradicts -- bytes ARE staged, so the bucket accepted the PUT -- is
+    ///    recorded as a plain `aborted`, never as a bucket rejection.
+    ///
+    /// The residual limit is stated rather than papered over: this is a
+    /// client-reported signal with a server-side consistency check, not an
+    /// independent observation. The gateway is not in the direct PUT's path, so
+    /// a client that is simply refused and walks away still contributes nothing
+    /// but a `staging_missing` at commit (or nothing at all).
+    async fn handle_asset_upload_abort(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        asset_type: &str,
+        name: &str,
+        version: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let Some((auth, tenant_id)) = self
+            .authorize_asset(session, ctx, headers, "assets.write", true)
+            .await?
+        else {
+            return Ok(());
+        };
+
+        let abort: PresignAbortRequest = match self.read_control_body(session, ctx).await? {
+            Ok(Some(abort)) => abort,
+            Ok(None) => return Ok(()),
+            Err(()) => return Ok(()),
+        };
+        if abort.size_bytes == 0 || !is_hex_sha256(&abort.sha256) || !is_upload_id(&abort.upload_id)
+        {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_abort",
+                "abort requires a valid upload_id, non-zero size_bytes, and 64-char hex sha256",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let reason = AbortReason::parse(abort.reason.as_deref());
+        let expected_sha256 = abort.sha256.to_ascii_lowercase();
+        let id = stored_asset_id(&tenant_id, asset_type, name, version);
+        let staging_key =
+            staging_object_key(&id, &abort.upload_id, abort.size_bytes, &expected_sha256);
+
+        // A published version is immutable: aborting its upload must not be a
+        // back door to deleting anything the commit already promoted.
+        match state.get_asset(&id).await {
+            Ok(Some(existing)) => {
+                if existing_asset_uses_upload(&existing, &id, &abort.upload_id) {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "asset_upload_already_committed",
+                        format!(
+                            "upload {} for {asset_type}/{name}/{version} is already committed and cannot be aborted",
+                            abort.upload_id
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
+
+        let Some(bucket) = state.asset_bucket_client() else {
+            return write_json_error(
+                session,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "asset_bucket_unavailable",
+                "the presigned large-file path requires an [asset_bucket] to be configured",
+                &ctx.request_id,
+            )
+            .await;
+        };
+
+        // The corroboration step. A HEAD transport failure is NOT treated as
+        // "nothing staged" -- an unknown bucket state must never be laundered
+        // into evidence of a bucket rejection, so it fails the request instead.
+        let staged = match bucket.head_object(&staging_key).await {
+            Ok(staged) => staged.is_some(),
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if staged {
+            best_effort_delete(&bucket, &staging_key).await;
+        }
+
+        let (outcome, metric) = classify_abort(reason, staged);
+        let detail = match (reason, staged) {
+            (AbortReason::BucketRejected, false) => format!(
+                "asset {id} upload {} was reported rejected by the bucket; corroborated -- no object exists under its staging key",
+                abort.upload_id
+            ),
+            (AbortReason::BucketRejected, true) => format!(
+                "asset {id} upload {} claimed a bucket rejection but its staging object existed; recorded as an abort and the object was reclaimed",
+                abort.upload_id
+            ),
+            (AbortReason::Abandoned, staged) => format!(
+                "asset {id} upload {} was abandoned by the client; staging object {}",
+                abort.upload_id,
+                if staged { "reclaimed" } else { "was absent" }
+            ),
+        };
+        state.record_asset_presign_outcome(metric);
+        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            ctx,
+            &auth,
+            "asset.presign_upload_abort",
+            &id,
+            outcome,
+            detail,
+        ));
+
+        let body = PresignAbortResponse {
+            object: "asset_upload_abort",
+            upload_id: abort.upload_id,
+            staging_object_removed: staged,
+            outcome,
+        };
+        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
     async fn handle_asset_download_url(
@@ -1312,6 +1582,32 @@ impl FerroGateway {
         }
     }
 }
+
+/// #368: the audit outcome + metric class an abort is recorded under.
+///
+/// The whole decision is here, in one pure function, because it is the point
+/// where a client's *claim* becomes the gateway's *evidence*. The only way a
+/// `bucket_rejected` claim survives is if the gateway's own staging lookup
+/// agrees with it; a claim contradicted by a staged object is downgraded to a
+/// plain abort. There is deliberately no path that upgrades an unknown or
+/// absent reason into a bucket rejection.
+fn classify_abort(
+    reason: AbortReason,
+    staged: bool,
+) -> (&'static str, crate::state::AssetPresignOutcome) {
+    match (reason, staged) {
+        (AbortReason::BucketRejected, false) => (
+            "rejected_bucket",
+            crate::state::AssetPresignOutcome::BucketRejected,
+        ),
+        _ => ("aborted", crate::state::AssetPresignOutcome::Aborted),
+    }
+}
+
+/// #368: the only upload protocol the presigned path issues. Named (not a
+/// `multipart: false` boolean) so multipart support, if it is ever justified,
+/// arrives as an additive enum value in the published contract.
+const SINGLE_PUT_UPLOAD_PROTOCOL: &str = "single_put";
 
 enum QuotaStatus {
     Ok,

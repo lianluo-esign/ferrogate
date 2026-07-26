@@ -19,6 +19,12 @@ Implemented by `crates/ferrogate-cli/src/gateway/asset_presign.rs`,
   a separate staging object bound to the tenant, logical asset identity,
   declared size, and SHA-256. The response `key` is the logical asset ID, not a
   bucket key. Bytes go straight to staging, bypassing the Pingora hot path.
+  The URL is **bound** to the declared size and SHA-256 (#368); the response's
+  `required_headers` must be sent verbatim on the `PUT`. See "Upload contract
+  the integrator MUST honor" below.
+- **Abort** - `POST /v1/assets/presign/abort/{asset_type}/{name}/{version}`
+  releases an intent that will never be committed, deleting its staging object
+  immediately instead of leaving it to the orphan GC (#368).
 - **Commit** - `POST /v1/assets/presign/commit/{asset_type}/{name}/{version}`
   requires that `upload_id`, verifies the staging object's size (HEAD) and
   SHA-256 (fetch), and applies the built-in content/type checks. It then copies
@@ -86,11 +92,69 @@ authorized download URL encapsulates final-object access.
   path; defaults to 5 GiB. Independent of the tenant-wide
   `asset_storage_quota_bytes`.
 
-Current limitation (#368): the presigned `PUT` authorization does not yet bind
-the request's content length or checksum at the bucket boundary. Commit rejects
-and best-effort cleans a staging object that violates its declaration, but the
-bucket may temporarily store those bytes until commit or orphan GC. Treat the
-intent checks as commit admission controls, not as a bucket-enforced hard quota.
+`presign_ttl_secs` is the **URL expiry**: it is signed into `X-Amz-Expires`, so
+the bucket itself refuses a late `PUT` and the client must register a new
+intent. It is echoed as `expires_in_seconds` on the intent response.
+`presign_max_object_bytes` is echoed as `max_object_bytes`, tightened to the
+tenant's per-object ceiling and cumulative quota, so a client can fail fast.
+
+## Upload contract the integrator MUST honor (#368)
+
+The presigned `PUT` authorization is **bound** to the declared content length
+and payload checksum. `content-length` and `x-amz-content-sha256` are SigV4
+`SignedHeaders` of `upload_url`, and the canonical request's payload-hash line
+carries the declared SHA-256 rather than `UNSIGNED-PAYLOAD`. Changing either
+value, or omitting either header, invalidates the signature: the bucket rejects
+the request with `403` **before** storing bytes. This is bucket-enforced, not a
+commit-time admission control.
+
+Integrators must therefore:
+
+1. **Send `required_headers` verbatim.** The intent response returns them as an
+   exact header-name -> value map. A client that sends only `Content-Type` gets
+   a `403` from any real S3-compatible bucket.
+2. **In a browser, do not set `content-length` yourself.** The Fetch spec
+   forbids it; the browser derives it from the body, which is the signed value
+   as long as the body is exactly `size_bytes` long. Send
+   `x-amz-content-sha256` explicitly. Non-browser clients should send both.
+3. **Allow the header through CORS.** A browser preflights the `PUT`, so the
+   bucket's CORS policy must include `x-amz-content-sha256` in
+   `Access-Control-Allow-Headers` (alongside `content-type`) with `PUT` in
+   `Access-Control-Allow-Methods`. Without it the preflight fails and the upload
+   never starts. On Supabase this is the bucket's CORS configuration; on AWS S3
+   it is the bucket CORS rule.
+4. **Upload in a single `PUT`.** `upload_protocol` is always `single_put`.
+   Multipart is deliberately unsupported: S3 signs each part separately, so one
+   presigned authorization cannot bind the whole object's length and checksum —
+   exactly the invariant this endpoint exists to enforce. The per-object ceiling
+   keeps objects inside what a single `PUT` accepts.
+5. **Abort an intent you will not commit.**
+   `POST /v1/assets/presign/abort/{asset_type}/{name}/{version}` with the
+   intent's `upload_id`, `size_bytes` and `sha256` releases it: any staging
+   object is deleted immediately instead of waiting for the lifecycle GC. Pass
+   `"reason": "bucket_rejected"` when the direct `PUT` was refused. Already
+   committed uploads return `409` — abort is never a way to delete a published
+   immutable version.
+
+### What the rejection evidence does and does not prove
+
+The gateway is **not in the direct `PUT`'s path**, so it cannot observe a bucket
+refusal first-hand. Read the audit outcomes and the
+`ferrogate_asset_presign_*` counters with that in mind:
+
+| Class | Evidence | Metric |
+|---|---|---|
+| `rejected_intent` | Gateway-observed preflight refusal (ceiling/quota). | `ferrogate_asset_presign_rejected_total{stage="intent"}` |
+| `rejected_bucket` | Client-reported at abort **and** corroborated by the gateway finding no object under the staging key. A contradicted claim is downgraded to `aborted`. | `ferrogate_asset_presign_rejected_total{stage="bucket"}` |
+| `rejected_commit` | Gateway-observed over the staged bytes (size/hash/content/screening/quota). | `ferrogate_asset_presign_rejected_total{stage="commit"}` |
+| `staging_missing` | Commit found nothing staged. **Ambiguous**: never attempted, URL expired, or bucket-refused. Deliberately not counted as a bucket rejection. | `ferrogate_asset_presign_staging_missing_total` |
+| `aborted` | Client released the intent; staging reclaimed now. | `ferrogate_asset_presign_aborted_total` |
+| orphan GC | Lifecycle sweeper deleted an aged staging/unreferenced object (`asset.gc.delete`). | `ferrogate_asset_lifecycle_pruned_total` |
+
+Fully independent proof of a bucket refusal would require bucket access logs,
+which no configured S3-compatible backend exposes to the gateway today. A client
+that is refused and simply walks away contributes at most a `staging_missing` at
+commit time, or nothing at all.
 
 ## Migration sequence (operator-run, not automated)
 
@@ -108,6 +172,9 @@ intent checks as commit admission controls, not as a bucket-enforced hard quota.
    - A gateway-issued presigned `GET` still returns the object bytes.
    - A direct, unsigned fetch of a bucket object URL now returns `4xx`
      (the security-gap closure this migration exists for).
+   - A presigned `PUT` that omits `x-amz-content-sha256` returns `403`, and one
+     that sends `required_headers` verbatim succeeds (#368). If browser uploads
+     are in scope, confirm the bucket CORS policy allows that header first.
 6. **`dev-migration` bucket** - review separately; keep public only if a
    documented non-tenant use requires it, otherwise flip it too.
 

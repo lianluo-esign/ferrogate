@@ -77,6 +77,31 @@ pub struct GatewayMetricsSnapshot {
     /// Lifecycle prune/GC operations that failed (a bucket or registry delete
     /// error), so an operator can alert on a stuck sweeper (issue #263).
     pub asset_lifecycle_failed_total: u64,
+    /// #368 presigned staging uploads: intents that were authorized and handed
+    /// a size/checksum-bound PUT URL. The denominator every rejection class
+    /// below is read against.
+    pub asset_presign_intent_issued_total: u64,
+    /// #368: intents refused by the gateway's own preflight (per-object ceiling
+    /// or tenant storage quota) before any URL was issued. Gateway-observed.
+    pub asset_presign_intent_rejected_total: u64,
+    /// #368: uploads the client reported as refused by the bucket itself, where
+    /// the gateway independently corroborated the report by finding no object
+    /// under the server-derived staging key. Recorded only through the explicit
+    /// abort surface -- the gateway never sees the direct PUT, so this is the
+    /// strongest evidence available without bucket access logs.
+    pub asset_presign_bucket_rejected_total: u64,
+    /// #368: commits that found no staged object. Deliberately NOT counted as a
+    /// bucket rejection: absence conflates never-attempted, expired-URL, and
+    /// bucket-refused. Kept as its own alertable class instead of being folded
+    /// into `asset_presign_bucket_rejected_total`.
+    pub asset_presign_staging_missing_total: u64,
+    /// #368: staged objects the gateway itself refused at commit -- size/sha256
+    /// mismatch, content policy, trust screening, or quota. Gateway-observed.
+    pub asset_presign_commit_rejected_total: u64,
+    /// #368: intents explicitly abandoned through the abort surface, whose
+    /// staging object was reclaimed immediately rather than waiting for the
+    /// lifecycle GC (`asset_lifecycle_pruned_total`).
+    pub asset_presign_aborted_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

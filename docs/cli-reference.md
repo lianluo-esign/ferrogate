@@ -4711,6 +4711,7 @@ Subcommands:
 
 - `upload-intent` — Request a presigned upload target
 - `commit` — Commit a completed presigned upload
+- `abort` — Release a presigned upload intent that will not be committed
 - `download-url` — Request a presigned download URL
 
 ##### `ferrogate ctl asset-transfer upload-intent`
@@ -4743,6 +4744,33 @@ Options:
 ##### `ferrogate ctl asset-transfer commit`
 
 Commit a completed presigned upload
+
+Arguments:
+
+- `<SEGMENT>...` — Resource id path segment(s) — e.g. a single id, or a `scope_type` `scope_id` pair for composite keys. Omitted for collection verbs (`list`/`create`)
+
+Options:
+
+- `--data <JSON>` — Inline JSON request document for a write verb
+- `--file <PATH>` — Path to a JSON request document for a write verb (`-` reads stdin)
+- `--limit <N>` — Page size for a list verb
+- `--offset <N>` — Starting offset for a list verb
+- `--filter <KEY=VALUE>` — Server-side list filter as `KEY=VALUE` (repeatable)
+- `--sort <FIELD>` — Server-side sort key for a list verb; prefix with `-` for descending. Repeatable and order-preserving, so the first key is the primary sort
+- `--all-pages` — Fetch every page of a list verb instead of a single server page, using `--limit` as the page size. Mutually exclusive with `--offset`, which selects one page
+- `--context <CONTEXT>` — Use a specific named context instead of the current one
+- `--endpoint <ENDPOINT>` — Override the Control Plane API endpoint URL
+- `--tenant <TENANT>` — Override the tenant for this invocation
+- `--token-env <VAR>` — Read the bearer token from this environment variable
+- `--token-stdin` — Read the bearer token from stdin
+- `--timeout-millis <MILLIS>` — Per-request timeout in milliseconds
+- `--output <FORMAT>` — Output format: table or json
+- `--non-interactive` — Do not prompt; fail instead of asking (for scripts/CI)
+
+
+##### `ferrogate ctl asset-transfer abort`
+
+Release a presigned upload intent that will not be committed
 
 Arguments:
 

@@ -1515,3 +1515,262 @@ fn inline_and_presigned_publication_apply_identical_cross_tenant_gate() {
         "a gated presigned commit must record a rejected_commit audit event: {audit}"
     );
 }
+
+/// #368 abort/cancel surface + rejection-class evidence.
+///
+/// Before this, an intent that was never committed had no release path at all
+/// (its staging bytes waited for the lifecycle GC), and the only "bucket
+/// rejection" signal was an *inference* at commit time: "nothing is staged,
+/// therefore the bucket refused it". That inference is unsound — absence also
+/// means never-attempted and expired-URL — and it never fires at all in the
+/// realistic case, where a client gets a 403 from the bucket and abandons the
+/// flow without ever calling commit.
+///
+/// This pins the replacement end to end:
+///
+/// 1. An intent whose PUT really was refused (no staged object) can be aborted
+///    with `reason=bucket_rejected`, and the gateway records the bucket class
+///    only after corroborating the claim against the staging key.
+/// 2. The same claim for an intent whose bytes ARE staged is contradicted by
+///    that lookup, so it is downgraded to a plain abort — a client cannot
+///    inflate the bucket-rejection evidence — and the staging object is
+///    reclaimed immediately rather than left to the GC.
+/// 3. A commit that finds nothing staged is audited as `staging_missing`, not
+///    as a bucket rejection.
+/// 4. Abort is not a deletion back door: an already-committed upload is 409.
+#[test]
+fn aborting_an_intent_reclaims_staging_and_records_a_corroborated_rejection_class() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    let content = b"#!/bin/sh\necho abort surface\n";
+    let sha256 = sha256_hex(content);
+    let intent_body = format!(r#"{{"size_bytes":{},"sha256":"{sha256}"}}"#, content.len());
+    let json_headers: [&str; 2] = [
+        "Authorization: Bearer asset-secret",
+        "Content-Type: application/json",
+    ];
+
+    // (1) An intent whose direct PUT was refused: nothing is ever staged.
+    let refused = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/abort-refused/1.0.0",
+        &json_headers,
+        &intent_body,
+    ));
+    let refused_upload_id = refused["upload_id"].as_str().unwrap().to_string();
+    let refused_staging_path = object_path_from_url(refused["upload_url"].as_str().unwrap());
+    let abort_body = format!(
+        r#"{{"upload_id":"{refused_upload_id}","size_bytes":{},"sha256":"{sha256}","reason":"bucket_rejected"}}"#,
+        content.len()
+    );
+    let aborted_refused = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/abort/cli_tool/abort-refused/1.0.0",
+        &json_headers,
+        &abort_body,
+    );
+    assert_status(&aborted_refused, 200);
+    let aborted_refused = response_json(&aborted_refused);
+    assert_eq!(aborted_refused["object"], "asset_upload_abort");
+    assert_eq!(
+        aborted_refused["outcome"], "rejected_bucket",
+        "a bucket-rejection report corroborated by an absent staging object must be recorded as one"
+    );
+    assert_eq!(aborted_refused["staging_object_removed"], false);
+
+    // (2) An intent whose bytes DID reach the bucket. The same claim is now
+    // contradicted by the gateway's own lookup, so it must be downgraded.
+    let staged = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/abort-staged/1.0.0",
+        &json_headers,
+        &intent_body,
+    ));
+    let staged_upload_id = staged["upload_id"].as_str().unwrap().to_string();
+    let staged_upload_url = staged["upload_url"].as_str().unwrap().to_string();
+    let staged_path = object_path_from_url(&staged_upload_url);
+    let upload = direct_bucket_request(
+        "PUT",
+        &staged_upload_url,
+        content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+    assert!(bucket_state
+        .lock()
+        .unwrap()
+        .objects
+        .contains_key(&staged_path));
+
+    let lying_abort = format!(
+        r#"{{"upload_id":"{staged_upload_id}","size_bytes":{},"sha256":"{sha256}","reason":"bucket_rejected"}}"#,
+        content.len()
+    );
+    let aborted_staged = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/abort/cli_tool/abort-staged/1.0.0",
+        &json_headers,
+        &lying_abort,
+    ));
+    assert_eq!(
+        aborted_staged["outcome"], "aborted",
+        "a bucket-rejection claim the gateway contradicts must not be recorded as a bucket rejection"
+    );
+    assert_eq!(
+        aborted_staged["staging_object_removed"], true,
+        "abort must reclaim the staging object immediately, not defer it to the lifecycle GC"
+    );
+    assert!(
+        !bucket_state
+            .lock()
+            .unwrap()
+            .objects
+            .contains_key(&staged_path),
+        "the aborted intent's staging bytes must be gone from the bucket"
+    );
+
+    // A malformed abort is a typed 400, never a silent no-op.
+    assert_json_error(
+        &http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/assets/presign/abort/cli_tool/abort-staged/1.0.0",
+            &json_headers,
+            r#"{"upload_id":"not-an-upload-id","size_bytes":1,"sha256":"00"}"#,
+        ),
+        400,
+        "invalid_abort",
+    );
+
+    // (3) Committing an intent with nothing staged is `staging_missing`, and
+    // (4) abort refuses to touch an upload that is already committed.
+    let commit_body = format!(
+        r#"{{"upload_id":"{refused_upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"text/plain"}}"#,
+        content.len()
+    );
+    assert_json_error(
+        &http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/assets/presign/commit/cli_tool/abort-refused/1.0.0",
+            &json_headers,
+            &commit_body,
+        ),
+        404,
+        "asset_not_uploaded",
+    );
+    assert!(!bucket_state
+        .lock()
+        .unwrap()
+        .objects
+        .contains_key(&refused_staging_path));
+
+    let committed_intent = response_json(&http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/abort-committed/1.0.0",
+        &json_headers,
+        &intent_body,
+    ));
+    let committed_upload_id = committed_intent["upload_id"].as_str().unwrap().to_string();
+    let committed_url = committed_intent["upload_url"].as_str().unwrap().to_string();
+    let upload = direct_bucket_request(
+        "PUT",
+        &committed_url,
+        content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"));
+    let commit_body = format!(
+        r#"{{"upload_id":"{committed_upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"text/plain"}}"#,
+        content.len()
+    );
+    assert_status(
+        &http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/assets/presign/commit/cli_tool/abort-committed/1.0.0",
+            &json_headers,
+            &commit_body,
+        ),
+        200,
+    );
+    let abort_committed = format!(
+        r#"{{"upload_id":"{committed_upload_id}","size_bytes":{},"sha256":"{sha256}"}}"#,
+        content.len()
+    );
+    assert_json_error(
+        &http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/assets/presign/abort/cli_tool/abort-committed/1.0.0",
+            &json_headers,
+            &abort_committed,
+        ),
+        409,
+        "asset_upload_already_committed",
+    );
+
+    // The audit trail keeps the four classes apart, which is the whole point:
+    // an operator must be able to tell a corroborated bucket refusal from an
+    // ambiguous absence from an ordinary abandonment.
+    let audit = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit["data"]
+        .as_array()
+        .expect("audit-events must return a data array");
+    for (action, outcome) in [
+        ("asset.presign_upload_abort", "rejected_bucket"),
+        ("asset.presign_upload_abort", "aborted"),
+        ("asset.push", "staging_missing"),
+    ] {
+        assert!(
+            events
+                .iter()
+                .any(|event| event["action"] == action && event["outcome"] == outcome),
+            "missing {action}/{outcome} audit evidence: {audit}"
+        );
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["action"] == "asset.push" && event["outcome"] == "rejected_bucket"),
+        "commit-time absence must NOT be audited as a bucket rejection: {audit}"
+    );
+}

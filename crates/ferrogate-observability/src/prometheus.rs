@@ -415,6 +415,61 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         snapshot.asset_lifecycle_failed_total
     ));
 
+    // #368: presigned staging upload lifecycle. `stage` separates the three
+    // rejection classes the acceptance criteria require to be distinguishable;
+    // orphan GC stays on `ferrogate_asset_lifecycle_pruned_total` above.
+    // `staging_missing` is intentionally a stage of its own rather than being
+    // merged into `bucket` -- see the metrics.rs field docs for why absence at
+    // commit time is not proof of a bucket refusal.
+    push_help(
+        &mut output,
+        "ferrogate_asset_presign_intents_issued_total",
+        "Total presigned staging upload intents issued with a size/checksum-bound PUT URL.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_presign_intents_issued_total {}\n",
+        snapshot.asset_presign_intent_issued_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_presign_rejected_total",
+        "Total presigned staging uploads rejected, by the stage that rejected them.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_presign_rejected_total{{stage=\"intent\"}} {}\n",
+        snapshot.asset_presign_intent_rejected_total
+    ));
+    output.push_str(&format!(
+        "ferrogate_asset_presign_rejected_total{{stage=\"bucket\"}} {}\n",
+        snapshot.asset_presign_bucket_rejected_total
+    ));
+    output.push_str(&format!(
+        "ferrogate_asset_presign_rejected_total{{stage=\"commit\"}} {}\n",
+        snapshot.asset_presign_commit_rejected_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_presign_staging_missing_total",
+        "Total presigned commits that found no staged object (never attempted, expired URL, or bucket-refused without an abort report).",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_presign_staging_missing_total {}\n",
+        snapshot.asset_presign_staging_missing_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_asset_presign_aborted_total",
+        "Total presigned upload intents explicitly aborted, reclaiming their staging object immediately.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_asset_presign_aborted_total {}\n",
+        snapshot.asset_presign_aborted_total
+    ));
+
     push_help(
         &mut output,
         "ferrogate_tokens_total",

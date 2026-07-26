@@ -174,6 +174,12 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         asset_lifecycle_scanned_total: 7,
         asset_lifecycle_pruned_total: 5,
         asset_lifecycle_failed_total: 1,
+        asset_presign_intent_issued_total: 11,
+        asset_presign_intent_rejected_total: 2,
+        asset_presign_bucket_rejected_total: 3,
+        asset_presign_staging_missing_total: 4,
+        asset_presign_commit_rejected_total: 5,
+        asset_presign_aborted_total: 6,
     };
 
     let text = render_prometheus_text(&snapshot);
@@ -196,6 +202,14 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_asset_lifecycle_scanned_total 7"));
     assert!(text.contains("ferrogate_asset_lifecycle_pruned_total 5"));
     assert!(text.contains("ferrogate_asset_lifecycle_failed_total 1"));
+    // #368: the three presign rejection classes must stay separately readable,
+    // and `staging_missing` must NOT be folded into the bucket stage.
+    assert!(text.contains("ferrogate_asset_presign_intents_issued_total 11"));
+    assert!(text.contains("ferrogate_asset_presign_rejected_total{stage=\"intent\"} 2"));
+    assert!(text.contains("ferrogate_asset_presign_rejected_total{stage=\"bucket\"} 3"));
+    assert!(text.contains("ferrogate_asset_presign_rejected_total{stage=\"commit\"} 5"));
+    assert!(text.contains("ferrogate_asset_presign_staging_missing_total 4"));
+    assert!(text.contains("ferrogate_asset_presign_aborted_total 6"));
     assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
     assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
     assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));

@@ -2953,6 +2953,17 @@
       "rbac_action": null
     },
     {
+      "path": "/v1/assets/presign/abort/{asset_type}/{name}/{version}",
+      "method": "post",
+      "operation_id": "abortAssetUpload",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "assets.write"
+      },
+      "rbac_action": null
+    },
+    {
       "path": "/v1/assets/presign/download/{asset_type}/{name}/{version}",
       "method": "get",
       "operation_id": "getAssetDownloadUrl",

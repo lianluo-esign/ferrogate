@@ -487,6 +487,8 @@ describe("AssetsPage presigned large-object upload", () => {
     seedList();
     const calls: string[] = [];
     let commitBody: AdminSchema<"AssetPresignCommitRequest"> | null = null;
+    let putSha256Header: string | null = null;
+    let declaredSha256: string | null = null;
     server.use(
       http.post(
         gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
@@ -496,6 +498,7 @@ describe("AssetsPage presigned large-object upload", () => {
             size_bytes: number;
             sha256: string;
           };
+          declaredSha256 = body.sha256;
           return HttpResponse.json({
             object: "asset_upload_intent",
             key: "tenant-1/cli_tool/big-tool/9.0.0",
@@ -505,12 +508,21 @@ describe("AssetsPage presigned large-object upload", () => {
             expires_in_seconds: 900,
             size_bytes: body.size_bytes,
             sha256: body.sha256,
+            // #368: SigV4 SignedHeaders of upload_url. A real bucket 403s a PUT
+            // that omits x-amz-content-sha256, so the console must forward it.
+            required_headers: {
+              "content-length": String(body.size_bytes),
+              "x-amz-content-sha256": body.sha256,
+            },
+            max_object_bytes: 5 * 1024 * 1024 * 1024,
+            upload_protocol: "single_put",
           });
         },
       ),
-      http.put(UPLOAD_URL, () => {
+      http.put(UPLOAD_URL, ({ request }) => {
         // The bytes must go DIRECTLY to storage, only after the intent.
         calls.push("put");
+        putSha256Header = request.headers.get("x-amz-content-sha256");
         return new HttpResponse(null, { status: 200 });
       }),
       http.post(
@@ -539,6 +551,59 @@ describe("AssetsPage presigned large-object upload", () => {
     expect(commitBody!.upload_id).toMatch(/^upl_[0-9a-f]{32}$/);
     expect(commitBody!.size_bytes).toBe(file.size);
     expect(commitBody!.sha256).toMatch(/^[a-f0-9]{64}$/);
+    // #368: the direct PUT carries the intent's signed payload-hash header
+    // verbatim. Drop it and a real bucket returns 403 -- before this assertion
+    // the console sent only Content-Type and nothing in the repo noticed.
+    expect(putSha256Header).toBe(declaredSha256);
+  });
+
+  it("refuses to PUT bytes whose length differs from the signed content-length", async () => {
+    seedList();
+    let putCalls = 0;
+    server.use(
+      http.post(
+        gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
+        async ({ request }) => {
+          const body = (await request.json()) as {
+            size_bytes: number;
+            sha256: string;
+          };
+          return HttpResponse.json({
+            object: "asset_upload_intent",
+            key: "k",
+            upload_id: UPLOAD_ID,
+            upload_url: UPLOAD_URL,
+            method: "PUT",
+            expires_in_seconds: 900,
+            size_bytes: body.size_bytes,
+            sha256: body.sha256,
+            // A gateway that signed a DIFFERENT length than the bytes on hand.
+            // The browser cannot override content-length, so the PUT would be
+            // signed for one length and sent with another: a guaranteed 403.
+            // Fail locally with a legible message instead of burning the
+            // round-trip and leaving an unusable intent behind.
+            required_headers: {
+              "content-length": String(body.size_bytes + 1),
+              "x-amz-content-sha256": body.sha256,
+            },
+            max_object_bytes: 5 * 1024 * 1024 * 1024,
+            upload_protocol: "single_put",
+          });
+        },
+      ),
+      http.put(UPLOAD_URL, () => {
+        putCalls += 1;
+        return new HttpResponse(null, { status: 200 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("en");
+
+    await fillPresignDialog(user);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/signed for \d+ bytes/);
+    expect(putCalls).toBe(0);
   });
 
   it("surfaces a gateway commit error verbatim in an alert", async () => {

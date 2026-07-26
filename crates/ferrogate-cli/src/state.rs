@@ -3085,6 +3085,43 @@ struct GatewayMetricsAccumulator {
     asset_lifecycle_pruned_total: u64,
     /// #263: lifecycle prune/GC delete operations that failed.
     asset_lifecycle_failed_total: u64,
+    /// #368: presigned staging upload intents issued with a bound PUT URL.
+    asset_presign_intent_issued_total: u64,
+    /// #368: intents refused by the gateway's own preflight.
+    asset_presign_intent_rejected_total: u64,
+    /// #368: bucket refusals reported at abort and corroborated by the gateway.
+    asset_presign_bucket_rejected_total: u64,
+    /// #368: commits that found no staged object (an ambiguous absence, kept
+    /// separate from a corroborated bucket rejection).
+    asset_presign_staging_missing_total: u64,
+    /// #368: staged objects the gateway refused at commit.
+    asset_presign_commit_rejected_total: u64,
+    /// #368: intents explicitly aborted, reclaiming staging immediately.
+    asset_presign_aborted_total: u64,
+}
+
+/// #368: the mutually exclusive outcomes of one presigned staging upload, the
+/// unit the `ferrogate_asset_presign_*` counters are keyed on. Each variant
+/// names *who observed it*, which is the whole point of the acceptance
+/// criterion: intent/commit/abort outcomes are gateway-observed, and the bucket
+/// rejection is client-reported plus gateway-corroborated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetPresignOutcome {
+    /// A bound presigned PUT URL was handed to the client.
+    IntentIssued,
+    /// The gateway's preflight (per-object ceiling or tenant quota) refused the
+    /// intent before any URL existed.
+    IntentRejected,
+    /// The client reported the bucket refused the direct PUT and the gateway
+    /// confirmed no object exists under the server-derived staging key.
+    BucketRejected,
+    /// Commit found no staged object. Ambiguous by construction: never
+    /// attempted, URL expired, or bucket-refused without an abort report.
+    StagingMissing,
+    /// A staged object failed the gateway's commit verification.
+    CommitRejected,
+    /// The intent was explicitly abandoned through the abort surface.
+    Aborted,
 }
 
 #[derive(Debug, Clone)]
@@ -3540,7 +3577,26 @@ impl GatewayMetricsAccumulator {
             asset_lifecycle_scanned_total: self.asset_lifecycle_scanned_total,
             asset_lifecycle_pruned_total: self.asset_lifecycle_pruned_total,
             asset_lifecycle_failed_total: self.asset_lifecycle_failed_total,
+            asset_presign_intent_issued_total: self.asset_presign_intent_issued_total,
+            asset_presign_intent_rejected_total: self.asset_presign_intent_rejected_total,
+            asset_presign_bucket_rejected_total: self.asset_presign_bucket_rejected_total,
+            asset_presign_staging_missing_total: self.asset_presign_staging_missing_total,
+            asset_presign_commit_rejected_total: self.asset_presign_commit_rejected_total,
+            asset_presign_aborted_total: self.asset_presign_aborted_total,
         }
+    }
+
+    /// #368: fold one presigned-upload outcome into the cumulative counters.
+    fn record_asset_presign_outcome(&mut self, outcome: AssetPresignOutcome) {
+        let counter = match outcome {
+            AssetPresignOutcome::IntentIssued => &mut self.asset_presign_intent_issued_total,
+            AssetPresignOutcome::IntentRejected => &mut self.asset_presign_intent_rejected_total,
+            AssetPresignOutcome::BucketRejected => &mut self.asset_presign_bucket_rejected_total,
+            AssetPresignOutcome::StagingMissing => &mut self.asset_presign_staging_missing_total,
+            AssetPresignOutcome::CommitRejected => &mut self.asset_presign_commit_rejected_total,
+            AssetPresignOutcome::Aborted => &mut self.asset_presign_aborted_total,
+        };
+        *counter = counter.saturating_add(1);
     }
 
     /// #263: fold one lifecycle sweep's counts into the cumulative metrics.
@@ -4752,6 +4808,18 @@ impl AppState {
             Err(poisoned) => poisoned
                 .into_inner()
                 .record_network_access_decision(decision),
+        }
+    }
+
+    /// #368: record one presigned staging-upload outcome so operators can
+    /// alert on intent / bucket / commit rejections separately (orphan GC has
+    /// its own `ferrogate_asset_lifecycle_*` counters). Lock poisoning must
+    /// never drop evidence, so a poisoned mutex is recovered into rather than
+    /// skipped -- same policy as the network-access decision counters.
+    pub(crate) fn record_asset_presign_outcome(&self, outcome: AssetPresignOutcome) {
+        match self.metrics.lock() {
+            Ok(mut metrics) => metrics.record_asset_presign_outcome(outcome),
+            Err(poisoned) => poisoned.into_inner().record_asset_presign_outcome(outcome),
         }
     }
 

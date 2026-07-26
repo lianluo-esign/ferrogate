@@ -206,6 +206,11 @@ impl CommandGroup for AssetTransferGroup {
                     "commitAssetUpload",
                 ),
                 VerbDescriptor::api(
+                    "abort",
+                    "Release a presigned upload intent that will not be committed",
+                    "abortAssetUpload",
+                ),
+                VerbDescriptor::api(
                     "download-url",
                     "Request a presigned download URL",
                     "getAssetDownloadUrl",
@@ -226,6 +231,13 @@ pub fn build_asset_transfer(verb: &str, input: &ResourceInput) -> CliResult<Requ
         ),
         "commit" => ASSET_PRESIGN.action(
             &["commit", asset_type, name, version],
+            Some(input.require_body(verb)?),
+        ),
+        // #368: releasing an intent needs the same upload_id/size/sha256 body
+        // the commit needs -- the staging key is derived from all three, so the
+        // body is required, never optional.
+        "abort" => ASSET_PRESIGN.action(
+            &["abort", asset_type, name, version],
             Some(input.require_body(verb)?),
         ),
         "download-url" => ASSET_PRESIGN.read(&["download", asset_type, name, version], &input.list),
