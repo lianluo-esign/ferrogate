@@ -2356,3 +2356,424 @@ fn a_100mb_object_completes_the_presigned_lifecycle_with_flat_gateway_rss() {
         "expected exactly the gateway's verification GET and the client's download GET"
     );
 }
+
+// ---- Presigned quota accounting: counted ONCE, at commit (issue #259) --------
+
+/// Reads the tenant's authoritative asset-storage summary.
+fn storage_summary(gateway_addr: &str) -> serde_json::Value {
+    let response = http_request(
+        gateway_addr,
+        "GET",
+        "/v1/assets/storage/summary",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert_status(&response, 200);
+    response_json(&response)
+}
+
+fn used_bytes(gateway_addr: &str) -> u64 {
+    storage_summary(gateway_addr)["used_bytes"]
+        .as_u64()
+        .expect("used_bytes must be a number")
+}
+
+/// Acceptance box 5 of #259: "storage quota accounting remains correct for
+/// presigned uploads (counted at commit)".
+///
+/// The three ways this can be wrong are each asserted separately, because they
+/// fail in opposite directions and a single before/after check catches only
+/// one of them:
+///
+/// 1. **Counted at intent.** Registering an intent reserves nothing durable --
+///    the staged bytes are not a registry row and an intent that is never
+///    committed must not consume the tenant's quota. Asserted after the intent
+///    AND after the direct PUT actually puts bytes in the bucket, so this is
+///    not merely "the gateway didn't write a row it had no reason to write".
+/// 2. **Counted twice.** One commit must move `used_bytes` by exactly the
+///    object's size -- not by twice it (staging + final are two bucket objects
+///    for one logical asset, and an accounting that counted bucket objects
+///    rather than registry rows would double it).
+/// 3. **Counted again on replay.** Re-committing the same `upload_id` is
+///    idempotent and returns the same asset; it must not add the bytes a
+///    second time. This is the assertion a naive "increment a counter at
+///    commit" implementation fails.
+///
+/// A rejected commit is checked too: bytes that never became an asset never
+/// count.
+#[test]
+fn a_presigned_upload_is_counted_once_at_commit_never_at_intent_or_on_replay() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, _bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    const QUOTA_BYTES: u64 = 1_000_000;
+    let quota = http_request(
+        &gateway_addr,
+        "PUT",
+        "/admin/v1/quota-policies/tenant/tenant-presign-e2e",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"asset_storage_quota_bytes":{QUOTA_BYTES},"enabled":true}}"#),
+    );
+    assert_status(&quota, 200);
+
+    // Baseline: nothing published yet, and the summary is the surface the whole
+    // assertion rests on, so pin its shape before trusting its arithmetic.
+    let baseline = storage_summary(&gateway_addr);
+    assert_eq!(baseline["object"], "asset_storage_summary");
+    assert_eq!(baseline["used_bytes"], 0);
+    assert_eq!(baseline["quota_bytes"], QUOTA_BYTES);
+    assert_eq!(baseline["remaining_bytes"], QUOTA_BYTES);
+    assert_eq!(baseline["presigned_upload"]["enabled"], true);
+
+    // A payload whose length is a distinctive, non-round number, so an
+    // off-by-a-multiple accounting bug cannot coincide with the right answer.
+    let content = vec![b'q'; 4_099];
+    let size = content.len() as u64;
+    let sha256 = sha256_hex(&content);
+
+    let intent_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/quota-once/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"size_bytes":{size},"sha256":"{sha256}"}}"#),
+    );
+    assert_status(&intent_response, 200);
+    let intent = response_json(&intent_response);
+    let upload_id = intent["upload_id"].as_str().expect("upload_id").to_string();
+    let upload_url = intent["upload_url"]
+        .as_str()
+        .expect("upload_url")
+        .to_string();
+
+    // (1) NOT counted at intent.
+    assert_eq!(
+        used_bytes(&gateway_addr),
+        0,
+        "registering an upload intent must not consume quota; only a committed \
+         asset does"
+    );
+
+    // Bytes now genuinely exist in the bucket under the staging key...
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        &content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "direct staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+
+    // ...and they still must not count: staged bytes are not a published asset.
+    assert_eq!(
+        used_bytes(&gateway_addr),
+        0,
+        "bytes staged against a presigned URL must not consume quota before commit"
+    );
+
+    let commit_body = format!(
+        r#"{{"upload_id":"{upload_id}","size_bytes":{size},"sha256":"{sha256}","content_type":"application/octet-stream"}}"#
+    );
+    let commit_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/quota-once/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &commit_body,
+    );
+    assert_status(&commit_response, 200);
+    assert_eq!(response_json(&commit_response)["asset"]["size_bytes"], size);
+
+    // (2) Counted exactly ONCE, at commit -- not twice for staging + final.
+    let after_commit = storage_summary(&gateway_addr);
+    assert_eq!(
+        after_commit["used_bytes"], size,
+        "one committed presigned upload must move used_bytes by exactly the \
+         object size (a doubled value means bucket objects are being counted \
+         instead of registry rows): {after_commit}"
+    );
+    assert_eq!(
+        after_commit["remaining_bytes"],
+        QUOTA_BYTES - size,
+        "remaining_bytes must stay consistent with used_bytes: {after_commit}"
+    );
+
+    // (3) Idempotent replay must not count the bytes again.
+    let replay = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/quota-once/1.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &commit_body,
+    );
+    assert_status(&replay, 200);
+    assert_eq!(
+        used_bytes(&gateway_addr),
+        size,
+        "replaying the same commit is idempotent and must not double-count the \
+         object against the tenant quota"
+    );
+
+    // And a commit the gateway REJECTS never counts: stage bytes that
+    // contradict the intent they were registered under, and prove the tenant's
+    // usage is untouched by the failed attempt.
+    let bad_content = vec![b'z'; 512];
+    let bad_sha256 = sha256_hex(&bad_content);
+    let bad_intent = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/quota-once/2.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"size_bytes":{},"sha256":"{bad_sha256}"}}"#,
+            bad_content.len()
+        ),
+    );
+    assert_status(&bad_intent, 200);
+    let bad_upload_id = response_json(&bad_intent)["upload_id"]
+        .as_str()
+        .expect("upload_id")
+        .to_string();
+    // Never uploaded: the commit finds nothing staged and must refuse.
+    let rejected = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/quota-once/2.0.0",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"upload_id":"{bad_upload_id}","size_bytes":{},"sha256":"{bad_sha256}","content_type":"application/octet-stream"}}"#,
+            bad_content.len()
+        ),
+    );
+    assert_json_error(&rejected, 404, "asset_not_uploaded");
+    assert_eq!(
+        used_bytes(&gateway_addr),
+        size,
+        "a refused commit must leave the tenant's asset-storage usage exactly \
+         where the one successful commit left it"
+    );
+}
+
+/// Acceptance box 4 of #259, second half: "issuing [a presigned URL] emits an
+/// audit event with key/tenant/asset identity".
+///
+/// The existing coverage asserted only `action`/`outcome` string pairs, which
+/// is what an audit trail looks like when it has been reduced to a log line:
+/// it proves an event happened, not that the event can answer *who did what to
+/// which asset*. All three identities are asserted here on the SUCCESSFUL
+/// issue path (the one that hands out a capability), and the download issue is
+/// checked too because it mints a read capability against a private bucket.
+#[test]
+fn issuing_a_presigned_url_audits_the_key_tenant_and_asset_identity() {
+    std::env::set_var(SECRET_ENV, SECRET_ACCESS_KEY);
+    let (bucket_endpoint, _bucket_state) = spawn_sigv4_bucket_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    let (gateway, gateway_addr) = start_ready_gateway(&config_path, |gateway_addr| {
+        write_config(&config_path, gateway_addr, &bucket_endpoint);
+    });
+    let _gateway = GatewayGuard(gateway);
+    support::wait_for_gateway(&gateway_addr);
+
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"tenant-presign-e2e","name":"Presign E2E","slug":"presign-e2e"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    let content = b"#!/bin/sh\necho audited presign identity\n";
+    let sha256 = sha256_hex(content);
+    let intent_response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/upload/cli_tool/audited-tool/3.1.4",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(r#"{{"size_bytes":{},"sha256":"{sha256}"}}"#, content.len()),
+    );
+    assert_status(&intent_response, 200);
+    let upload_id = response_json(&intent_response)["upload_id"]
+        .as_str()
+        .expect("upload_id")
+        .to_string();
+
+    let audit = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit["data"]
+        .as_array()
+        .expect("audit-events must return a data array");
+
+    let issued = events
+        .iter()
+        .find(|event| {
+            event["action"] == "asset.presign_upload_intent" && event["outcome"] == "issued"
+        })
+        .unwrap_or_else(|| {
+            panic!("issuing an upload URL must emit an `issued` audit event: {audit}")
+        });
+
+    // KEY identity: the virtual/api key that authorized the capability.
+    assert_eq!(
+        issued["actor_api_key_id"], "asset-client",
+        "the audit event must name the key that was handed the upload URL: {issued}"
+    );
+    // TENANT identity: the tenant the capability was scoped to.
+    assert_eq!(
+        issued["tenant"]["organization_id"], "tenant-presign-e2e",
+        "the audit event must name the tenant the URL was scoped to: {issued}"
+    );
+    // ASSET identity: the logical asset the capability addresses. The target is
+    // the tenant-qualified stored asset id, so every coordinate is recoverable.
+    let target = issued["target"].as_str().unwrap_or_default();
+    for coordinate in ["tenant-presign-e2e", "cli_tool", "audited-tool", "3.1.4"] {
+        assert!(
+            target.contains(coordinate),
+            "the audit target must identify the asset by {coordinate}: {issued}"
+        );
+    }
+    // The event must be correlatable and say what capability was minted.
+    assert!(
+        issued["request_id"].is_string(),
+        "the audit event must carry the request id: {issued}"
+    );
+    let message = issued["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&upload_id),
+        "the audit event must name the upload it authorized: {issued}"
+    );
+
+    // The download side mints a READ capability against a private bucket, so it
+    // must be audited with the same three identities. Commit first so there is
+    // an asset to download.
+    let upload_url = response_json(&intent_response)["upload_url"]
+        .as_str()
+        .expect("upload_url")
+        .to_string();
+    let upload = direct_bucket_request(
+        "PUT",
+        &upload_url,
+        content,
+        &[("x-amz-content-sha256", sha256.as_str())],
+    );
+    assert!(
+        String::from_utf8_lossy(&upload).contains("HTTP/1.1 200"),
+        "direct staging upload failed: {}",
+        String::from_utf8_lossy(&upload)
+    );
+    let commit = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/assets/presign/commit/cli_tool/audited-tool/3.1.4",
+        &[
+            "Authorization: Bearer asset-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"upload_id":"{upload_id}","size_bytes":{},"sha256":"{sha256}","content_type":"application/octet-stream"}}"#,
+            content.len()
+        ),
+    );
+    assert_status(&commit, 200);
+
+    let download = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/presign/download/cli_tool/audited-tool/3.1.4",
+        &["Authorization: Bearer asset-secret"],
+        "",
+    );
+    assert_status(&download, 200);
+
+    let audit = response_json(&http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit["data"]
+        .as_array()
+        .expect("audit-events must return a data array");
+    let download_event = events
+        .iter()
+        .find(|event| {
+            event["action"]
+                .as_str()
+                .is_some_and(|action| action.contains("presign") && action.contains("download"))
+        })
+        .unwrap_or_else(|| panic!("issuing a presigned DOWNLOAD url must be audited too: {audit}"));
+    assert_eq!(
+        download_event["actor_api_key_id"], "asset-client",
+        "the download audit event must name the key: {download_event}"
+    );
+    assert_eq!(
+        download_event["tenant"]["organization_id"], "tenant-presign-e2e",
+        "the download audit event must name the tenant: {download_event}"
+    );
+    let download_target = download_event["target"].as_str().unwrap_or_default();
+    for coordinate in ["cli_tool", "audited-tool", "3.1.4"] {
+        assert!(
+            download_target.contains(coordinate),
+            "the download audit target must identify the asset by {coordinate}: {download_event}"
+        );
+    }
+}

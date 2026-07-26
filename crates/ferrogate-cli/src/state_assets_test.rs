@@ -166,3 +166,62 @@ fn a_bucket_read_failure_never_serializes_the_object_key_or_endpoint() {
         "every read surface must see the one generic transport message"
     );
 }
+
+/// An `AppState` whose presigned-URL TTL is `presign_ttl_secs`, so the
+/// configured value and the enforced bound can be probed independently.
+fn state_with_presign_ttl(presign_ttl_secs: Option<u64>) -> AppState {
+    AppState::new(Config {
+        asset_bucket: crate::config::AssetBucketConfig {
+            presign_ttl_secs,
+            ..crate::config::AssetBucketConfig::default()
+        },
+        ..Config::default()
+    })
+}
+
+/// Acceptance box 4 of #259: "presigned URL TTL is bounded and configurable".
+///
+/// Both halves are asserted here because they are separate claims and the
+/// bound was previously only *documented*: nothing in the tree exercised
+/// `asset_presign_ttl_secs`, so deleting the `.clamp(1, 604_800)` left every
+/// test green while an operator-supplied `presign_ttl_secs = 31536000` would
+/// have been signed into `X-Amz-Expires` verbatim -- a year-long upload
+/// authorization from a config typo, which S3-compatible verifiers reject
+/// outright (the 7-day maximum) so the URL is not merely over-long but
+/// unusable.
+#[test]
+fn the_presigned_url_ttl_is_configurable_and_bounded_to_the_s3_maximum() {
+    /// S3's presigned-URL maximum expiry: 7 days.
+    const S3_MAX_EXPIRES_SECS: u64 = 604_800;
+
+    // Configurable: an in-range value is used exactly as configured.
+    assert_eq!(
+        state_with_presign_ttl(Some(120)).asset_presign_ttl_secs(),
+        120
+    );
+    assert_eq!(
+        state_with_presign_ttl(Some(3_600)).asset_presign_ttl_secs(),
+        3_600
+    );
+    // ...and the default is short-lived by design when unset.
+    assert_eq!(state_with_presign_ttl(None).asset_presign_ttl_secs(), 900);
+
+    // Bounded above: the S3 maximum is admitted, anything past it is clamped
+    // to it rather than signed verbatim.
+    assert_eq!(
+        state_with_presign_ttl(Some(S3_MAX_EXPIRES_SECS)).asset_presign_ttl_secs(),
+        S3_MAX_EXPIRES_SECS
+    );
+    for over_long in [S3_MAX_EXPIRES_SECS + 1, 31_536_000, u64::MAX] {
+        assert_eq!(
+            state_with_presign_ttl(Some(over_long)).asset_presign_ttl_secs(),
+            S3_MAX_EXPIRES_SECS,
+            "a {over_long}s configured TTL must be clamped to S3's {S3_MAX_EXPIRES_SECS}s \
+             maximum, not signed into X-Amz-Expires verbatim"
+        );
+    }
+
+    // Bounded below: a zero TTL would mint an already-expired URL, so it is
+    // raised to the smallest usable window instead.
+    assert_eq!(state_with_presign_ttl(Some(0)).asset_presign_ttl_secs(), 1);
+}
