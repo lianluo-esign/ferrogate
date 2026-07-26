@@ -68,6 +68,27 @@ export default function SiteDomainsPage() {
 
   const domains = useMemo(() => data?.data ?? [], [data]);
 
+  // The session tenant's PUBLISHED static-site slugs, from the same `/v1/assets`
+  // enumeration the Static sites page derives its list from. Only read while the
+  // bind form targets the session tenant (see the field comment below).
+  const sessionTenantId = session!.tenant.id;
+  const bindsSessionTenant = tenantId.trim() === sessionTenantId;
+  const { data: assetData } = useQuery({
+    queryKey: ["assets"],
+    enabled: bindsSessionTenant,
+    queryFn: () => adminGet(apiKey, "/v1/assets"),
+  });
+  const publishedSites = useMemo(() => {
+    if (!bindsSessionTenant) return [];
+    const names = new Set<string>();
+    for (const row of assetData?.data ?? []) {
+      // The reserved marker/per-file rows share the site's `name`, so the
+      // distinct names are exactly the published site slugs.
+      if (row.asset_type === "static_site") names.add(row.name);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [assetData, bindsSessionTenant]);
+
   // Live client-side validation feedback (empty input shows no error yet).
   const hostnameCheck = hostname.trim() === "" ? null : validateSiteDomainHostname(hostname);
   const hostnameInvalid = hostnameCheck !== null && hostnameCheck.error !== null;
@@ -192,16 +213,32 @@ export default function SiteDomainsPage() {
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="bind-site">{t("page.siteDomains.field.site")}</Label>
-            {/* `site` names a published static-site slug within the tenant's
-                hosting bundle, not an entity row the admin API lists/gets, so it
-                stays free-text (no list/get endpoint exists to back a picker). */}
+            {/* `site` names a PUBLISHED static-site slug; a bind against a slug
+                that is not published is 404'd server-side. The slugs are
+                enumerable — they are the distinct `name`s of the tenant's
+                `static_site` asset rows — so the input is backed by that
+                enumeration instead of being blind free text.
+                The suggestions are offered ONLY while the selected tenant is
+                the session tenant: `GET /v1/assets` is scoped to the caller's
+                own tenant, so listing them under a different selected tenant
+                would assert an inventory we have not read. A platform-operator
+                key binding for another tenant still types the slug. */}
             <Input
               id="bind-site"
+              list="bind-site-options"
               value={site}
               onChange={(e) => setSite(e.target.value)}
               // eslint-disable-next-line ferrogate/no-untranslated-literal -- example site slug, identical across locales
               placeholder="marketing"
             />
+            <datalist id="bind-site-options">
+              {publishedSites.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+            <p className="text-xs text-muted-foreground">
+              {t("page.siteDomains.field.site.hint")}
+            </p>
           </div>
           {bindError ? (
             <p className="sm:col-span-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">

@@ -702,6 +702,8 @@ export const enRest = {
   "page.siteDomains.field.tenant": "Tenant",
   "page.siteDomains.field.tenant.select": "Select tenant",
   "page.siteDomains.field.site": "Site",
+  "page.siteDomains.field.site.hint":
+    "A published static-site slug. Slugs published under your own tenant are suggested as you type.",
   "page.siteDomains.bind.submit": "Bind hostname",
   "page.siteDomains.bind.submitting": "Binding…",
   "page.siteDomains.validation.tenantRequired": "Tenant is required",
@@ -739,6 +741,12 @@ export const enRest = {
   "page.staticSites.field.bundle.hint": "A .zip archive of the site's files.",
   "page.staticSites.field.public": "Public access",
   "page.staticSites.field.spa": "SPA fallback",
+  // The publish path carries no tenant — the gateway files the bundle under the
+  // tenant the API key belongs to — so the tenant is stated, never picked.
+  "page.staticSites.field.tenant.hint":
+    "Bundles publish to the tenant your API key belongs to; the publish request carries no tenant.",
+  "page.staticSites.field.site.hint":
+    "Choose a published site to republish, or type a new slug to publish a new site.",
   "page.staticSites.serveUrlPreview": "Serves at",
   "page.staticSites.validation.notZip": "The bundle must be a .zip archive.",
   "page.staticSites.validation.tooLarge": "The bundle exceeds the {max} upload limit.",
@@ -768,6 +776,12 @@ export const enRest = {
   "page.staticSites.domains.description":
     "Bind a custom hostname to {site}. The bind is scoped to this tenant and site, so it cannot target another tenant or an unpublished site.",
   "page.staticSites.domains.empty": "No custom domains are bound to this site.",
+  // ACME posture per BOUND hostname, read from GET /admin/v1/site-domains/
+  // {hostname}, so it shows for long-standing bindings and not only for one
+  // bound in this session.
+  "page.staticSites.domains.acme": "TLS (ACME)",
+  "page.staticSites.acme.enabled": "ACME enabled",
+  "page.staticSites.acme.disabled": "ACME disabled",
   // Per-site detail drawer: the published bundle's file tree, from the manifest.
   "page.staticSites.detail.description":
     "Bundle {version} — {files} files, {bytes}.",
@@ -805,7 +819,7 @@ export const enRest = {
   "page.staticSites.unpublish.action": "Unpublish",
   "page.staticSites.unpublish.title": "Unpublish {site}?",
   "page.staticSites.unpublish.body":
-    "PERMANENTLY removes every published file of {site} and its manifest, so the site stops serving immediately and bound domains resolve to nothing. This is not a republish and cannot be undone; each deletion is recorded in the audit log. Type the exact site name below to confirm.",
+    "PERMANENTLY removes EVERY retained bundle of {site} — each bundle's files and manifest, the serving channel, and the site manifest — so the site stops serving immediately, bound domains resolve to nothing, and none of its bytes keep counting against your asset-storage quota. This is not a republish and cannot be undone; each deletion is recorded in the audit log. Type the exact site name below to confirm.",
   "page.staticSites.unpublish.confirmLabel": "Type {site} to confirm",
   "page.staticSites.unpublish.success": "Unpublished {site}",
 

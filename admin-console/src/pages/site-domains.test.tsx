@@ -26,6 +26,22 @@ function domain(overrides: Partial<SiteDomain> = {}): SiteDomain {
   };
 }
 
+/** One `/v1/assets` summary row for the published-site enumeration. */
+function assetRow(name: string, version: string): AdminSchema<"AssetSummary"> {
+  return {
+    id: `tenant-1:static_site:${name}:${version}`,
+    asset_type: "static_site",
+    name,
+    version,
+    content_type: "application/zip",
+    content_hash: "a".repeat(64),
+    size_bytes: 100,
+    storage_backed: false,
+    created_at_unix: 1000,
+    updated_at_unix: 1000,
+  };
+}
+
 function mockList(domains: SiteDomain[]): void {
   server.use(
     http.get(gatewayUrl("/admin/v1/site-domains"), () =>
@@ -120,6 +136,71 @@ describe("SiteDomainsPage", () => {
     );
     // onSuccess clears the form once the bind (and its ACME posture) is accepted.
     await waitFor(() => expect(hostnameInput).toHaveValue(""));
+  });
+
+  it("backs the site field with the session tenant's published site slugs", async () => {
+    mockList([]);
+    // A bind must name an ALREADY-PUBLISHED site (the gateway 404s otherwise),
+    // and those slugs are enumerable — the distinct `name`s of the tenant's
+    // static_site asset rows — so the field is backed by that enumeration
+    // instead of being blind free text.
+    server.use(
+      http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [{ id: "tenant-1", name: "Acme", slug: "acme" }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+      http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+        }),
+      ),
+      http.get(gatewayUrl("/v1/assets"), () =>
+        HttpResponse.json({
+          object: "list",
+          data: [
+            // The #397 row set: bundle-manifest rows, per-file rows and the
+            // reserved marker all share the site's `name`, so the distinct
+            // names are exactly the published slugs.
+            assetRow("marketing", "2.1.0"),
+            assetRow("marketing", "__site_file__:2.1.0:index.html"),
+            assetRow("marketing", "__site_manifest__"),
+            assetRow("docs", "1.0.0"),
+            // A non-site asset must not leak into the suggestions.
+            { ...assetRow("prompt-pack", "1.0.0"), asset_type: "prompt" },
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("No bound hostnames.");
+
+    const siteInput = screen.getByLabelText("Site");
+    expect(siteInput).toHaveAttribute("list", "bind-site-options");
+    // Suggestions appear only once the form targets the SESSION tenant, because
+    // GET /v1/assets is scoped to the caller's own tenant.
+    expect(
+      document.getElementById("bind-site-options")!.querySelectorAll("option"),
+    ).toHaveLength(0);
+
+    await user.click(screen.getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name: /Acme/ }));
+
+    await waitFor(() =>
+      expect(
+        [
+          ...document
+            .getElementById("bind-site-options")!
+            .querySelectorAll("option"),
+        ].map((option) => option.getAttribute("value")),
+      ).toEqual(["docs", "marketing"]),
+    );
   });
 
   it("blocks an invalid hostname client-side without POSTing", async () => {

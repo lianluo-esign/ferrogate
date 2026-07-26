@@ -44,7 +44,20 @@ function renderAtUrl(initialEntry: string, locale: Locale = "en") {
 type AssetSummary = AdminSchema<"AssetSummary">;
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
-function siteAsset(name: string, version: string): AssetSummary {
+// Reserved `version` keys the gateway writes for a static site (mirrors the
+// constants in static-sites.tsx and the gateway's sites.rs).
+const SITE_MANIFEST_VERSION = "__site_manifest__";
+const SITE_FILE_VERSION_PREFIX = "__site_file__";
+
+function siteFileVersion(bundleVersion: string, path: string): string {
+  return `${SITE_FILE_VERSION_PREFIX}:${bundleVersion}:${path}`;
+}
+
+function siteAsset(
+  name: string,
+  version: string,
+  createdAtUnix = 1000,
+): AssetSummary {
   return {
     id: `tenant-1:static_site:${name}:${version}`,
     asset_type: "static_site",
@@ -54,8 +67,8 @@ function siteAsset(name: string, version: string): AssetSummary {
     content_hash: "a".repeat(64),
     size_bytes: 100,
     storage_backed: false,
-    created_at_unix: 1000,
-    updated_at_unix: 1000,
+    created_at_unix: createdAtUnix,
+    updated_at_unix: createdAtUnix,
   };
 }
 
@@ -87,6 +100,132 @@ function manifest(overrides: Partial<SiteManifestBody> = {}): SiteManifestBody {
   };
 }
 
+/** One RETAINED bundle exactly as gateway #397 stores it: a bare
+ * `{version}` bundle-manifest row plus one `__site_file__:{version}:{path}` row
+ * per file. */
+interface BundleFixture {
+  version: string;
+  files: string[];
+  createdAtUnix: number;
+  /** Body served at `/v1/assets/static_site/{site}/{version}` — this bundle's
+   * own immutable manifest, which is what the console must display when the
+   * `serving` channel points here. */
+  manifest: SiteManifestBody;
+}
+
+/**
+ * A published site's COMPLETE server-side shape, modelled on what
+ * `Gateway::commit_site_bundle` (sites.rs) actually writes:
+ *   - one bare `{bundle_version}` manifest row per retained bundle,
+ *   - one `__site_file__:{bundle_version}:{path}` object row per file of EVERY
+ *     retained bundle (prior bundles are retained, not overwritten),
+ *   - the single MUTABLE `__site_manifest__` marker, refreshed only on publish,
+ *   - a `serving` channel pointing at the active bundle.
+ *
+ * The previous fixture modelled a single legacy pre-#397 path-keyed asset row,
+ * which hid two real behaviours: that a rollback (a channel move) leaves the
+ * marker describing a DIFFERENT bundle than the one served, and that retained
+ * rows — and the bytes they charge to the tenant asset-storage quota — survive
+ * an unpublish that only walks the served bundle's file list.
+ */
+interface SiteFixture {
+  site: string;
+  /** Newest first. */
+  bundles: BundleFixture[];
+  /** Version the `serving` channel points at; `null` models a LEGACY pre-#397
+   * site with no channel, which the gateway serves from the marker instead. */
+  serving: string | null;
+  /** The mutable `__site_manifest__` body. Defaults to the newest bundle's
+   * manifest (what a publish writes); a rollback test sets it apart on purpose,
+   * because a rollback never rewrites the marker. */
+  marker?: SiteManifestBody;
+}
+
+/** Every `/v1/assets` summary row the fixture's site owns. */
+function assetRowsFor(fixture: SiteFixture): AssetSummary[] {
+  const rows = fixture.bundles.flatMap((bundle) => [
+    siteAsset(fixture.site, bundle.version, bundle.createdAtUnix),
+    ...bundle.files.map((path) =>
+      siteAsset(fixture.site, siteFileVersion(bundle.version, path), bundle.createdAtUnix),
+    ),
+  ]);
+  rows.push(
+    siteAsset(
+      fixture.site,
+      SITE_MANIFEST_VERSION,
+      fixture.bundles[0]?.createdAtUnix ?? 1000,
+    ),
+  );
+  return rows;
+}
+
+/** The asset REGISTRY manifest (channels + version rows) for the fixture. */
+function registryFor(fixture: SiteFixture) {
+  return {
+    object: "asset_manifest",
+    asset_type: "static_site",
+    name: fixture.site,
+    channels:
+      fixture.serving === null
+        ? []
+        : [
+            {
+              channel: "serving",
+              version: fixture.serving,
+              updated_at_unix: 1_700_000_200,
+            },
+          ],
+    versions: [
+      ...fixture.bundles.flatMap((bundle) => [
+        { version: bundle.version, yanked: false, variants: [] },
+        ...bundle.files.map((path) => ({
+          version: siteFileVersion(bundle.version, path),
+          yanked: false,
+          variants: [],
+        })),
+      ]),
+      { version: SITE_MANIFEST_VERSION, yanked: false, variants: [] },
+    ],
+  };
+}
+
+/** The default two-bundle `marketing` fixture: 2.1.0 served, 2.0.0 retained. */
+function marketingFixture(overrides: Partial<SiteFixture> = {}): SiteFixture {
+  return {
+    site: "marketing",
+    serving: "2.1.0",
+    bundles: [
+      {
+        version: "2.1.0",
+        files: ["index.html", "app.js"],
+        createdAtUnix: 1_700_000_200,
+        manifest: manifest(),
+      },
+      {
+        version: "2.0.0",
+        files: ["index.html"],
+        createdAtUnix: 1_700_000_100,
+        manifest: manifest({
+          bundle_version: "2.0.0",
+          public: false,
+          spa_fallback: false,
+          cache_control: "public, max-age=60",
+          files: [
+            {
+              path: "index.html",
+              content_type: "text/html",
+              content_hash: "d".repeat(64),
+              size_bytes: 1024,
+            },
+          ],
+          updated_at_unix: 1_699_000_000,
+        }),
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function domain(overrides: Partial<SiteDomain> = {}): SiteDomain {
   return {
     object: "site_domain",
@@ -107,83 +246,64 @@ function uploadFile(input: HTMLElement, file: File) {
   fireEvent.change(input, { target: { files: [file] } });
 }
 
-/** Base handlers: the tenant picker hydrates the seeded tenant, and the two
- * list reads back the page. Individual tests layer manifests / publish. */
+/**
+ * Base handlers backing the page: the tenant asset listing, the site-domains
+ * registry (+ the per-hostname detail read the drawer uses for ACME posture),
+ * and — for every published site fixture — the three reads the console's
+ * active-bundle resolution walks: the asset REGISTRY manifest, each retained
+ * bundle's own manifest row, and the mutable `__site_manifest__` marker.
+ *
+ * Site-specific handlers are listed FIRST so they win over the generic ones.
+ */
 function mockBase(options: {
-  assets?: AssetSummary[];
+  sites?: SiteFixture[];
   domains?: SiteDomain[];
+  /** ACME posture returned by `GET /admin/v1/site-domains/{hostname}`. */
+  acmeEnabled?: boolean;
 } = {}) {
+  const sites = options.sites ?? [];
+  const siteHandlers = sites.flatMap((fixture) => [
+    http.get(gatewayUrl(`/v1/assets/static_site/${fixture.site}/manifest`), () =>
+      HttpResponse.json(registryFor(fixture)),
+    ),
+    http.get(
+      gatewayUrl(`/v1/assets/static_site/${fixture.site}/${SITE_MANIFEST_VERSION}`),
+      () => HttpResponse.json(fixture.marker ?? fixture.bundles[0].manifest),
+    ),
+    ...fixture.bundles.map((bundle) =>
+      http.get(
+        gatewayUrl(`/v1/assets/static_site/${fixture.site}/${bundle.version}`),
+        () => HttpResponse.json(bundle.manifest),
+      ),
+    ),
+  ]);
   server.use(
+    ...siteHandlers,
     http.get(gatewayUrl("/v1/assets"), () =>
-      HttpResponse.json({ object: "list", data: options.assets ?? [] }),
+      HttpResponse.json({
+        object: "list",
+        data: sites.flatMap((fixture) => assetRowsFor(fixture)),
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/site-domains"), () =>
       HttpResponse.json({ object: "list", data: options.domains ?? [] }),
     ),
+    // Per-hostname detail read: the only endpoint that carries ACME posture, so
+    // the drawer can show it for a binding made long before this session.
+    http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), ({ params }) =>
+      HttpResponse.json({
+        object: "site_domain",
+        site_domain: domain({ hostname: params.hostname as string }),
+        acme: {
+          enabled: options.acmeEnabled ?? true,
+          reload_triggered: false,
+        },
+      }),
+    ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
       HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
     ),
-    // Default asset registry manifest read (the drawer's version history reads
-    // it on open); version-history tests override with a populated manifest.
-    http.get(gatewayUrl("/v1/assets/static_site/:site/manifest"), ({ params }) =>
-      HttpResponse.json({
-        object: "asset_manifest",
-        asset_type: "static_site",
-        name: params.site as string,
-        channels: [],
-        versions: [],
-      }),
-    ),
   );
-}
-
-function mockManifest(site: string, body: SiteManifestBody) {
-  server.use(
-    http.get(gatewayUrl(`/v1/assets/static_site/${site}/__site_manifest__`), () =>
-      HttpResponse.json(body),
-    ),
-  );
-}
-
-interface RegistryChannel {
-  channel: string;
-  version: string;
-  updated_at_unix: number;
-}
-interface RegistryVersion {
-  version: string;
-  yanked: boolean;
-  variants: never[];
-}
-
-/** Mocks the asset registry manifest (channels + versions) the drawer reads for
- * version history. `channels`/`versions` mirror gateway #397's keying. */
-function mockRegistry(
-  site: string,
-  channels: RegistryChannel[],
-  versions: RegistryVersion[],
-) {
-  server.use(
-    http.get(gatewayUrl(`/v1/assets/static_site/${site}/manifest`), () =>
-      HttpResponse.json({
-        object: "asset_manifest",
-        asset_type: "static_site",
-        name: site,
-        channels,
-        versions,
-      }),
-    ),
-  );
-}
-
-/** A retained #397 bundle version: the bare `{version}` manifest row plus a
- * companion `__site_file__:{version}:index.html` file row (the structural mark
- * that distinguishes a real bundle version from a legacy path-keyed file row). */
-function bundleVersions(...versions: { version: string; yanked?: boolean }[]): RegistryVersion[] {
-  return versions.flatMap(({ version, yanked = false }) => [
-    { version, yanked, variants: [] },
-    { version: `__site_file__:${version}:index.html`, yanked: false, variants: [] },
-  ]);
 }
 
 beforeEach(() => {
@@ -192,8 +312,7 @@ beforeEach(() => {
 
 describe("StaticSitesPage", () => {
   it("lists published sites with policy, serve URL, and bound domains", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [domain()] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()], domains: [domain()] });
     renderWithProviders(<StaticSitesPage />);
 
     const row = await screen.findByTestId("static-site-marketing");
@@ -210,8 +329,20 @@ describe("StaticSitesPage", () => {
   });
 
   it("renders the list in Simplified Chinese", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest({ public: false, spa_fallback: false }));
+    mockBase({
+      sites: [
+        marketingFixture({
+          bundles: [
+            {
+              version: "2.1.0",
+              files: ["index.html", "app.js"],
+              createdAtUnix: 1_700_000_200,
+              manifest: manifest({ public: false, spa_fallback: false }),
+            },
+          ],
+        }),
+      ],
+    });
     renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
 
     expect(await screen.findByRole("heading", { name: "静态站点" })).toBeInTheDocument();
@@ -337,6 +468,170 @@ describe("StaticSitesPage", () => {
   });
 });
 
+describe("StaticSitesPage served-bundle fidelity", () => {
+  /** The post-rollback state: the `serving` channel has been moved back to
+   * 2.0.0, but the mutable `__site_manifest__` marker still describes 2.1.0 —
+   * because a rollback is a channel move and never rewrites the marker
+   * (sites.rs writes it only on publish). Reading the marker here would
+   * describe a bundle nobody is being served. */
+  function rolledBackFixture(): SiteFixture {
+    const fixture = marketingFixture();
+    return { ...fixture, serving: "2.0.0", marker: fixture.bundles[0].manifest };
+  }
+
+  it("shows the CHANNEL-RESOLVED bundle's policy after a rollback, not the stale marker", async () => {
+    mockBase({ sites: [rolledBackFixture()] });
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    // The served bundle is 2.0.0 — private, no SPA, max-age=60, one file.
+    expect(await within(row).findByText("2.0.0")).toBeInTheDocument();
+    expect(within(row).queryByText("2.1.0")).toBeNull();
+    expect(within(row).getByText("Private")).toBeInTheDocument();
+    expect(within(row).queryByText("SPA")).toBeNull();
+    expect(within(row).getByText("public, max-age=60")).toBeInTheDocument();
+    // …and NOT the marker's 2.1.0 policy (public + SPA + max-age=600).
+    expect(within(row).queryByText("public, max-age=600")).toBeNull();
+  });
+
+  it("does not contradict itself: the drawer header names the version badged Active", async () => {
+    mockBase({ sites: [rolledBackFixture()] });
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText("2.0.0");
+    await user.click(
+      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
+    );
+    const drawer = await screen.findByRole("dialog");
+
+    // Header describes the SERVED bundle (2.0.0, its single file)…
+    expect(within(drawer).getByText(/Bundle 2\.0\.0/)).toBeInTheDocument();
+    // …and the history badges that very same version Active.
+    const activeRow = within(drawer).getByTestId("static-site-version-2.0.0");
+    expect(
+      within(activeRow).getByText(en["page.staticSites.history.active"]),
+    ).toBeInTheDocument();
+    // The file tree is the served bundle's, so a per-file download's bytes match
+    // the hash beside it: 2.1.0's app.js is not listed at all.
+    expect(within(drawer).getByText("index.html")).toBeInTheDocument();
+    expect(within(drawer).queryByText("app.js")).toBeNull();
+  });
+
+  it("falls back to the marker for a LEGACY site that has no serving channel", async () => {
+    // A pre-#397 site: no `serving` channel, so the gateway itself serves from
+    // the mutable marker — and so must the console.
+    mockBase({
+      sites: [marketingFixture({ serving: null, marker: manifest() })],
+    });
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    expect(await within(row).findByText("2.1.0")).toBeInTheDocument();
+    expect(within(row).getByText("public, max-age=600")).toBeInTheDocument();
+  });
+
+  it("says nothing about the cache policy while the manifest is unavailable", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    // The served bundle's manifest read fails: the console knows the site
+    // exists but knows NOTHING about its policy.
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/2.1.0"), () =>
+        HttpResponse.json(
+          { error: { code: "asset_not_found", message: "gone" } },
+          { status: 404 },
+        ),
+      ),
+    );
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    // Access honestly reports the manifest is unavailable…
+    expect(
+      await within(row).findByText(en["page.staticSites.manifestError"]),
+    ).toBeInTheDocument();
+    // …so the Cache cell must NOT assert the `default` policy — it prints the
+    // same em dash the files/bytes/published siblings do (#458/#464/#473).
+    expect(
+      within(row).queryByText(en["page.staticSites.cache.default"]),
+    ).toBeNull();
+    expect(within(row).getAllByText("—").length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("keeps a site whose manifest row is unreadable inspectable and purgeable", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/2.1.0"), () =>
+        HttpResponse.json(
+          { error: { code: "asset_not_found", message: "gone" } },
+          { status: 404 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+
+    const row = await screen.findByTestId("static-site-marketing");
+    await within(row).findByText(en["page.staticSites.manifestError"]);
+    // The registry read succeeded, so the site's retained versions ARE known —
+    // the drawer must open (a site stranded behind a disabled action could
+    // never be purged, which is how retained bytes end up billed forever).
+    await user.click(
+      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
+    );
+    const drawer = await screen.findByRole("dialog");
+    // Version history still renders from the registry…
+    expect(
+      within(drawer).getByTestId("static-site-version-2.1.0"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).queryByText(en["page.staticSites.history.unavailable"]),
+    ).toBeNull();
+    // …and Unpublish is armed, because the purge walks the registry.
+    expect(
+      within(drawer).getByRole("button", {
+        name: en["page.staticSites.unpublish.action"],
+      }),
+    ).toBeEnabled();
+  });
+});
+
+describe("StaticSitesPage publish target", () => {
+  it("states the session tenant read-only and previews the serve URL under it", async () => {
+    mockBase();
+    renderWithProviders(<StaticSitesPage />);
+    await screen.findByText("No published static sites.");
+
+    // No tenant PICKER: the publish path carries no tenant (the gateway takes it
+    // from the API key), so a selectable control could only mislead — it used to
+    // drive the serve-URL preview into naming a tenant the bundle never reaches.
+    expect(screen.queryByRole("combobox", { name: "Tenant" })).toBeNull();
+    // The tenant that will actually own the bundle is stated instead…
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    // …and the serve-URL preview is pinned to it.
+    expect(screen.getByText("/sites/tenant-1/{site}/")).toBeInTheDocument();
+  });
+
+  it("backs the site field with the tenant's published slugs", async () => {
+    mockBase({ sites: [marketingFixture()] });
+    renderWithProviders(<StaticSitesPage />);
+    await screen.findByTestId("static-site-marketing");
+
+    // The published-site selection is no longer blind free text: the input is
+    // bound to a datalist enumerating the tenant's own published site slugs
+    // (it stays an input so a FIRST publish can still name a new slug).
+    const input = screen.getByLabelText("Site");
+    expect(input).toHaveAttribute("list", "site-slug-options");
+    const options = document
+      .getElementById("site-slug-options")!
+      .querySelectorAll("option");
+    expect([...options].map((option) => option.getAttribute("value"))).toEqual([
+      "marketing",
+    ]);
+  });
+});
+
 describe("StaticSitesPage detail drawer", () => {
   async function openDrawer(user: ReturnType<typeof userEvent.setup>, moreDetails: string) {
     const row = await screen.findByTestId("static-site-marketing");
@@ -347,8 +642,7 @@ describe("StaticSitesPage detail drawer", () => {
   }
 
   it("renders the bundle file tree from the manifest", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
 
@@ -367,8 +661,7 @@ describe("StaticSitesPage detail drawer", () => {
   });
 
   it("renders the file tree in Simplified Chinese", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
 
@@ -382,8 +675,7 @@ describe("StaticSitesPage detail drawer", () => {
 
 describe("StaticSitesPage serve-URL affordance", () => {
   it("links each site's serve URL out to a new tab with a safe rel", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     renderWithProviders(<StaticSitesPage />);
 
     const row = await screen.findByTestId("static-site-marketing");
@@ -399,8 +691,7 @@ describe("StaticSitesPage serve-URL affordance", () => {
   });
 
   it("offers the same open-serve-URL affordance inside the detail drawer", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
 
@@ -457,8 +748,7 @@ async function openMarketingDrawer(user: ReturnType<typeof userEvent.setup>) {
 
 describe("StaticSitesPage per-file download", () => {
   it("downloads an individual bundle file via that file's asset-object path", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     let requestedPath: string | null = null;
     server.use(
       http.get(gatewayUrl("/v1/assets/static_site/marketing/app.js"), ({ request }) => {
@@ -494,8 +784,7 @@ describe("StaticSitesPage per-file download", () => {
   });
 
   it("surfaces a download failure verbatim, keyed to the exact file", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     server.use(
       http.get(gatewayUrl("/v1/assets/static_site/marketing/app.js"), () =>
         HttpResponse.json(
@@ -530,8 +819,7 @@ describe("StaticSitesPage per-file download", () => {
   });
 
   it("labels the download + serve-URL affordances in Simplified Chinese", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
 
@@ -555,11 +843,18 @@ describe("StaticSitesPage per-file download", () => {
 });
 
 describe("StaticSitesPage unpublish flow", () => {
-  it("requires the exact typed site name before enabling, then deletes files + manifest", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+  it("requires the exact typed site name, then purges EVERY retained row and the serving channel", async () => {
+    mockBase({ sites: [marketingFixture()] });
     const deleted = new Set<string>();
+    const deletedChannels = new Set<string>();
     server.use(
+      http.delete(
+        gatewayUrl("/v1/assets/static_site/marketing/channels/:channel"),
+        ({ params }) => {
+          deletedChannels.add(params.channel as string);
+          return HttpResponse.json({ object: "asset_channel", deleted: true });
+        },
+      ),
       http.delete(
         gatewayUrl("/v1/assets/static_site/marketing/:version"),
         ({ params }) => {
@@ -568,6 +863,7 @@ describe("StaticSitesPage unpublish flow", () => {
         },
       ),
     );
+    const successToast = vi.spyOn(toast, "success");
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
 
@@ -600,12 +896,33 @@ describe("StaticSitesPage unpublish flow", () => {
 
     await user.click(confirmButton);
 
-    // Every file version PLUS the reserved manifest row is deleted.
+    // EVERY row the gateway retains for this site is deleted, not just the
+    // served bundle's files: both bundle-manifest rows (2.1.0 + the retained
+    // 2.0.0), every `__site_file__:{version}:{path}` object of BOTH bundles,
+    // and the reserved marker. Anything left behind would keep the site in
+    // `GET /v1/assets` forever and keep charging its bytes to the tenant's
+    // asset-storage quota, which would make the success toast a lie.
     await waitFor(() =>
       expect(deleted).toEqual(
-        new Set(["index.html", "app.js", "__site_manifest__"]),
+        new Set([
+          "2.1.0",
+          "__site_file__:2.1.0:index.html",
+          "__site_file__:2.1.0:app.js",
+          "2.0.0",
+          "__site_file__:2.0.0:index.html",
+          "__site_manifest__",
+        ]),
       ),
     );
+    // …and the `serving` channel pointer, a separately stored row that would
+    // otherwise survive and be re-adopted by a later publish of the same slug.
+    await waitFor(() => expect(deletedChannels).toEqual(new Set(["serving"])));
+    await waitFor(() =>
+      expect(successToast).toHaveBeenCalledWith(
+        en["page.staticSites.unpublish.success"].replace("{site}", "marketing"),
+      ),
+    );
+    successToast.mockRestore();
   });
 });
 
@@ -695,17 +1012,6 @@ describe("StaticSitesPage upload progress", () => {
   });
 });
 
-/** Two retained bundle version rows for `marketing`, dated so the newest (the
- * served one) sorts first, plus the reserved manifest marker row the listing
- * also carries. */
-function marketingAssets(): AssetSummary[] {
-  return [
-    { ...siteAsset("marketing", "2.1.0"), created_at_unix: 1_700_000_200 },
-    { ...siteAsset("marketing", "2.0.0"), created_at_unix: 1_700_000_100 },
-    { ...siteAsset("marketing", "__site_manifest__"), created_at_unix: 1_700_000_200 },
-  ];
-}
-
 async function openHistoryDrawer(
   user: ReturnType<typeof userEvent.setup>,
   moreDetails: string,
@@ -718,14 +1024,8 @@ async function openHistoryDrawer(
 
 describe("StaticSitesPage version history", () => {
   it("lists retained bundle versions, marking the served (active) one + publish times", async () => {
-    mockBase({ assets: marketingAssets(), domains: [] });
-    mockManifest("marketing", manifest());
-    // The `serving` channel points at 2.1.0; 2.0.0 is a retained prior bundle.
-    mockRegistry(
-      "marketing",
-      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
-      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
-    );
+    mockBase({ sites: [marketingFixture()] });
+    // The fixture's `serving` channel points at 2.1.0; 2.0.0 is retained.
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
@@ -758,19 +1058,21 @@ describe("StaticSitesPage version history", () => {
   });
 
   it("excludes reserved + legacy-only versions from the bundle history", async () => {
-    mockBase({ assets: marketingAssets(), domains: [] });
-    mockManifest("marketing", manifest());
-    // Registry with: one real #397 bundle (2.1.0, has __site_file__ companion),
-    // the reserved manifest marker, and a LEGACY bare file row `index.html`
-    // (no companion) — only 2.1.0 is a real rollback target.
-    mockRegistry(
-      "marketing",
-      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
-      [
-        ...bundleVersions({ version: "2.1.0" }),
-        { version: "__site_manifest__", yanked: false, variants: [] },
-        { version: "index.html", yanked: false, variants: [] },
-      ],
+    mockBase({ sites: [marketingFixture()] });
+    // Layer a LEGACY bare file row `index.html` (no `__site_file__:` companion)
+    // onto the fixture registry, next to the real #397 bundle rows and the
+    // reserved marker — only the bundles are real rollback targets.
+    const legacyRegistry = registryFor(marketingFixture());
+    server.use(
+      http.get(gatewayUrl("/v1/assets/static_site/marketing/manifest"), () =>
+        HttpResponse.json({
+          ...legacyRegistry,
+          versions: [
+            ...legacyRegistry.versions,
+            { version: "index.html", yanked: false, variants: [] },
+          ],
+        }),
+      ),
     );
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
@@ -789,13 +1091,7 @@ describe("StaticSitesPage version history", () => {
   });
 
   it("renders version history in Simplified Chinese", async () => {
-    mockBase({ assets: marketingAssets(), domains: [] });
-    mockManifest("marketing", manifest());
-    mockRegistry(
-      "marketing",
-      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
-      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
-    );
+    mockBase({ sites: [marketingFixture()] });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
     const drawer = await openHistoryDrawer(user, zhCN["resource.table.moreDetails"]);
@@ -812,23 +1108,15 @@ describe("StaticSitesPage version history", () => {
 
 describe("StaticSitesPage rollback", () => {
   it("moves the serving channel to the selected version behind a confirm, then refreshes", async () => {
-    mockBase({ assets: marketingAssets(), domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     let registryReads = 0;
     let channelUrl: string | null = null;
     let channelMethod: string | null = null;
+    const registry = registryFor(marketingFixture());
     server.use(
       http.get(gatewayUrl("/v1/assets/static_site/marketing/manifest"), () => {
         registryReads += 1;
-        return HttpResponse.json({
-          object: "asset_manifest",
-          asset_type: "static_site",
-          name: "marketing",
-          channels: [
-            { channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 },
-          ],
-          versions: bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
-        });
+        return HttpResponse.json(registry);
       }),
       http.put(
         gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
@@ -888,13 +1176,7 @@ describe("StaticSitesPage rollback", () => {
   });
 
   it("maps a 409 unresolvable target to a localized message, leaving serving unchanged", async () => {
-    mockBase({ assets: marketingAssets(), domains: [] });
-    mockManifest("marketing", manifest());
-    mockRegistry(
-      "marketing",
-      [{ channel: "serving", version: "2.1.0", updated_at_unix: 1_700_000_200 }],
-      bundleVersions({ version: "2.1.0" }, { version: "2.0.0" }),
-    );
+    mockBase({ sites: [marketingFixture()] });
     server.use(
       http.put(
         gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
@@ -971,8 +1253,7 @@ describe("StaticSitesPage URL state", () => {
   });
 
   it("opens a site's detail drawer directly from the detail query param", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     renderAtUrl("/?detail=marketing");
 
     // The drawer opens on mount for the linked site (no click needed).
@@ -1077,8 +1358,7 @@ describe("StaticSitesPage publish error states", () => {
   });
 
   it("a failed republish leaves the prior site listed and claims no success", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     server.use(
       http.put(gatewayUrl("/v1/assets/static_site/marketing/2.2.0"), () =>
         HttpResponse.json(
@@ -1137,8 +1417,7 @@ function bindResponse(
 
 describe("StaticSitesPage domain binding (site context)", () => {
   it("binds a hostname using the session tenant + site slug, then shows ACME posture", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     let body: { hostname?: string; tenant_id?: string; site?: string } | null = null;
     server.use(
       http.post(gatewayUrl("/admin/v1/site-domains"), async ({ request }) => {
@@ -1175,8 +1454,7 @@ describe("StaticSitesPage domain binding (site context)", () => {
   });
 
   it("validates the hostname client-side without issuing a bind", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()] });
     let posted = false;
     server.use(
       http.post(gatewayUrl("/admin/v1/site-domains"), () => {
@@ -1203,8 +1481,7 @@ describe("StaticSitesPage domain binding (site context)", () => {
   });
 
   it("unbinds a domain bound to the site behind a confirm", async () => {
-    mockBase({ assets: [siteAsset("marketing", "index.html")], domains: [domain()] });
-    mockManifest("marketing", manifest());
+    mockBase({ sites: [marketingFixture()], domains: [domain()] });
     let unbound: string | null = null;
     server.use(
       http.delete(
@@ -1230,5 +1507,68 @@ describe("StaticSitesPage domain binding (site context)", () => {
     await user.click(within(confirm).getByRole("button", { name: "Unbind" }));
 
     await waitFor(() => expect(unbound).toBe("app.example.com"));
+  });
+
+  it("shows ACME posture for a PRE-EXISTING binding, with no bind in this session", async () => {
+    // The binding predates this session, so nothing in the bind response is
+    // available; the posture has to come from the per-hostname detail read.
+    mockBase({
+      sites: [marketingFixture()],
+      domains: [domain()],
+      acmeEnabled: true,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    expect(
+      await within(domainRow).findByText(en["page.staticSites.acme.enabled"]),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a disabled-ACME gateway for a pre-existing binding", async () => {
+    mockBase({
+      sites: [marketingFixture()],
+      domains: [domain()],
+      acmeEnabled: false,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    expect(
+      await within(domainRow).findByText(en["page.staticSites.acme.disabled"]),
+    ).toBeInTheDocument();
+  });
+
+  it("says Unknown rather than guessing when the ACME read fails", async () => {
+    mockBase({ sites: [marketingFixture()], domains: [domain()] });
+    server.use(
+      http.get(gatewayUrl("/admin/v1/site-domains/:hostname"), () =>
+        HttpResponse.json(
+          { error: { code: "backend_unavailable", message: "down" } },
+          { status: 503 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<StaticSitesPage />);
+    const drawer = await openMarketingDrawer(user);
+
+    const domainRow = within(drawer).getByTestId(
+      "static-site-domain-app.example.com",
+    );
+    expect(
+      await within(domainRow).findByText(en["common.unknown"]),
+    ).toBeInTheDocument();
+    expect(
+      within(domainRow).queryByText(en["page.staticSites.acme.enabled"]),
+    ).toBeNull();
   });
 });

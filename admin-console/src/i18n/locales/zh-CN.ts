@@ -735,6 +735,8 @@ export const zhCN = {
   "page.siteDomains.field.tenant": "租户",
   "page.siteDomains.field.tenant.select": "选择租户",
   "page.siteDomains.field.site": "站点",
+  "page.siteDomains.field.site.hint":
+    "已发布的静态站点标识。输入时会提示当前租户下已发布的站点标识。",
   "page.siteDomains.bind.submit": "绑定",
   "page.siteDomains.bind.submitting": "正在绑定…",
   "page.siteDomains.validation.tenantRequired": "租户为必填项",
@@ -770,6 +772,11 @@ export const zhCN = {
   "page.staticSites.field.bundle.hint": "包含站点文件的 .zip 归档。",
   "page.staticSites.field.public": "公开访问",
   "page.staticSites.field.spa": "SPA 回退",
+  // 发布路径不携带租户——网关按 API 密钥所属租户归档站点包——因此租户只做展示，不可选择。
+  "page.staticSites.field.tenant.hint":
+    "站点包将发布到您的 API 密钥所属的租户；发布请求本身不携带租户。",
+  "page.staticSites.field.site.hint":
+    "选择一个已发布的站点以重新发布，或输入新的标识以发布新站点。",
   "page.staticSites.serveUrlPreview": "服务地址",
   "page.staticSites.validation.notZip": "站点包必须是 .zip 归档。",
   "page.staticSites.validation.tooLarge": "站点包超过 {max} 的上传上限。",
@@ -798,6 +805,11 @@ export const zhCN = {
   "page.staticSites.domains.description":
     "为 {site} 绑定自定义主机名。绑定仅限于当前租户与该站点，因此无法指向其他租户或未发布的站点。",
   "page.staticSites.domains.empty": "该站点尚未绑定自定义域名。",
+  // 每个已绑定主机名的 ACME 状态，读取自 GET /admin/v1/site-domains/{hostname}，
+  // 因此对早已存在的绑定同样可见，而不只是本次会话中新绑定的主机名。
+  "page.staticSites.domains.acme": "TLS（ACME）",
+  "page.staticSites.acme.enabled": "已启用 ACME",
+  "page.staticSites.acme.disabled": "未启用 ACME",
   // 单站点详情抽屉：来自清单的已发布包文件树。
   "page.staticSites.detail.description": "包 {version} — {files} 个文件，{bytes}。",
   "page.staticSites.detail.files": "包文件",
@@ -832,7 +844,7 @@ export const zhCN = {
   "page.staticSites.unpublish.action": "取消发布",
   "page.staticSites.unpublish.title": "取消发布 {site}？",
   "page.staticSites.unpublish.body":
-    "将永久删除 {site} 的每个已发布文件及其清单，站点会立即停止提供服务，已绑定域名将无法解析到任何内容。这不是重新发布，且无法撤销；每次删除都会记录到审计日志。请在下方输入准确的站点名称以确认。",
+    "将永久删除 {site} 的所有保留版本包——每个版本包的文件与清单、serving 通道以及站点清单，站点会立即停止提供服务，已绑定域名将无法解析到任何内容，其占用的字节也不再计入资产存储配额。这不是重新发布，且无法撤销；每次删除都会记录到审计日志。请在下方输入准确的站点名称以确认。",
   "page.staticSites.unpublish.confirmLabel": "输入 {site} 以确认",
   "page.staticSites.unpublish.success": "已取消发布 {site}",
 

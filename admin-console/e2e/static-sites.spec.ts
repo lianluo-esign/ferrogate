@@ -6,9 +6,10 @@
 // (src/pages/site-domains.tsx) are built on main; this is their first e2e spec.
 //
 // The crux (same as #344/#348): these pages drive the tenant GATEWAY surface
-// (`/v1/assets` list, the `__site_manifest__` serving-policy read, the registry
-// `/manifest`, the raw-bytes publish PUT, and the `serving` channel-move
-// rollback) plus the Admin API site-domains bind/unbind — NOT the plain
+// (`/v1/assets` list, the registry `/manifest` + the `serving`-channel-resolved
+// bundle manifest read the page derives every displayed policy from, the
+// raw-bytes publish PUT, and the `serving` channel-move rollback) plus the
+// Admin API site-domains bind/unbind — NOT the plain
 // `/admin/v1/*` shell that installAuthenticatedAdminApi covers. So each test
 // pairs the shared admin mock (session + app shell) with the bespoke, stateful
 // installGatewayStaticSites mock (support/gateway-static-sites.ts) whose shapes
@@ -67,8 +68,8 @@ test("publish drives the static_site bundle PUT with x-site-* policy headers, by
   await page.goto("/app/static-sites");
   await expect(page.getByRole("heading", { name: "Static sites" })).toBeVisible();
 
-  // Fill the publish form for a brand-new site slug (tenant is pre-selected to
-  // the session tenant and rides the API key server-side, not the publish path).
+  // Fill the publish form for a brand-new site slug. The tenant is stated
+  // read-only: it rides the API key server-side, not the publish path.
   await page.locator("#site-slug").fill("landing");
   await page.locator("#site-version").fill("1.0.0");
   await page.locator("#site-cache").fill("public, max-age=300");

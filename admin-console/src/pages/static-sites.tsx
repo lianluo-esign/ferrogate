@@ -17,16 +17,27 @@
 //     / quota rejections are surfaced VERBATIM and accessibly — and reporting
 //     REAL byte-level upload progress via XHR `upload.onprogress` (fetch has no
 //     upload-progress event) into a determinate `role="progressbar"`;
-//   - a per-site DETAIL drawer that inspects the published bundle's file tree
-//     (paths, content types, hashes, sizes) straight from the manifest; and
-//   - an UNPUBLISH flow that permanently removes a site (every per-file object
-//     plus the reserved manifest row) behind a name-typed destructive confirm,
-//     each underlying delete recorded in the gateway audit log.
+//   - a per-site DETAIL drawer that inspects the served bundle's file tree
+//     (paths, content types, hashes, sizes) straight from that bundle's
+//     manifest; and
+//   - an UNPUBLISH flow that permanently removes a site (every retained bundle
+//     manifest row, every per-file object of every retained bundle, the
+//     `serving` channel, and the reserved marker row) behind a name-typed
+//     destructive confirm, each underlying delete recorded in the audit log.
 //
-// The manifest JSON (public/spa_fallback/cache_control/bundle_version/files) is
-// read back from the reserved `__site_manifest__` version the gateway writes at
-// publish time; it is the authoritative source for a site's serving policy and
-// its file tree.
+// EVERY displayed policy/file field describes the bundle the gateway ACTUALLY
+// SERVES, resolved exactly the way `Gateway::resolve_active_site_bundle` does
+// (sites.rs): read the asset registry manifest, take the version the `serving`
+// channel points at, and read THAT bundle's immutable manifest row
+// (`/v1/assets/static_site/{site}/{servingVersion}`). Only a legacy site with no
+// `serving` channel (published before #397) falls back to the MUTABLE
+// `__site_manifest__` marker, which is exactly the gateway's own fallback.
+// Reading the marker unconditionally would be a lie after a rollback: a rollback
+// is a channel move only and never rewrites the marker, so the marker keeps
+// describing the last-PUBLISHED bundle while a different one is served — the
+// drawer would badge one version "Active" while its header named another, and
+// the file tree's hashes would not match the bytes a per-file download returns
+// (the gateway remaps a bare per-file path onto the ACTIVE bundle).
 //
 // This slice (#345) adds the remaining static-site affordances the runtime now
 // actually backs: (a) per-file DOWNLOAD of any published file (a plain asset GET
@@ -103,7 +114,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { APP_ROUTES } from "@/lib/app-routes";
@@ -229,10 +239,38 @@ const PUBLISH_PATH = "/v1/assets/{asset_type}/{name}/{version}" as const;
 type PublishOp = OpFor<typeof PUBLISH_PATH, "put">;
 type PublishHeaders = HeaderParamsFor<PublishOp>;
 
-/** One published site's fully-joined row (list + manifest + bound domains). */
+/** The bundle a site ACTUALLY serves right now, plus the registry manifest the
+ * resolution went through (so the version history and the unpublish purge work
+ * off the same single read). */
+interface ActiveSiteBundle {
+  /** Asset registry manifest: channels + every retained version row. */
+  registry: AssetManifest;
+  /** Version the `serving` channel points at. `undefined` for a legacy site
+   * (published before #397) that has no `serving` channel — such a site serves
+   * from the mutable marker, which is then also what we display. */
+  servingVersion: string | undefined;
+  /** Manifest of the SERVED bundle (policy + file tree); `undefined` when that
+   * row could not be read — see `manifestError`. */
+  manifest: SiteManifest | undefined;
+  /** Why the served bundle's manifest could not be read, if it could not. The
+   * REGISTRY read is what fails the query outright; a manifest failure is
+   * carried instead of thrown so the row still knows its stored versions, and
+   * so an operator can still open the drawer and purge a site whose manifest
+   * row is gone or corrupt. */
+  manifestError: Error | undefined;
+}
+
+/** One published site's fully-joined row (list + served bundle + domains). */
 interface SiteRow {
   name: string;
+  /** Manifest of the bundle currently SERVED (never the stale marker for a
+   * #397 site) — see the module header. */
   manifest: SiteManifest | undefined;
+  /** Version the `serving` channel resolves to; `undefined` for a legacy site
+   * or while the read is in flight. */
+  servingVersion: string | undefined;
+  /** Registry manifest (channels + retained versions) behind that resolution. */
+  registry: AssetManifest | undefined;
   manifestLoading: boolean;
   manifestError: Error | undefined;
   domains: SiteDomain[];
@@ -245,14 +283,62 @@ interface SiteRow {
 const ASSETS_QUERY_KEY = ["assets"] as const;
 const SITE_DOMAINS_QUERY_KEY = ["site-domains"] as const;
 
-function manifestPath(site: string): string {
-  return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/${encodeURIComponent(SITE_MANIFEST_VERSION)}`;
+/** React-query key for one site's active-bundle resolution. Shared by the list
+ * and the drawer so both render the same served bundle from one read. */
+function siteBundleQueryKey(site: string) {
+  return ["static-site-active-bundle", site] as const;
 }
 
-// The gateway serves the reserved manifest version as its stored JSON body; a
-// plain JSON GET parses it regardless of the stored content type.
-async function fetchSiteManifest(apiKey: string, site: string): Promise<SiteManifest> {
-  return gatewayGet<SiteManifest>(apiKey, manifestPath(site));
+/** Asset-object path for ONE stored row of a site: a bundle-version manifest,
+ * the reserved `__site_manifest__` marker, or an individual published file
+ * (whose bare `{path}` the gateway remaps onto the ACTIVE bundle). Kept as a
+ * manually-encoded string (not the typed `params` client) so it lines up
+ * byte-for-byte with the publish/unpublish addressing in this module. */
+function siteObjectPath(site: string, versionOrPath: string): string {
+  return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/${encodeURIComponent(versionOrPath)}`;
+}
+
+/**
+ * Resolves the bundle a site actually serves, mirroring the gateway's
+ * `resolve_active_site_bundle` (sites.rs) step for step so the console reads
+ * exactly what serve-mode reads (write-path == read-path, #188):
+ *   1. read the asset REGISTRY manifest (channels + retained versions);
+ *   2. take the version the well-known `serving` channel points at;
+ *   3. read THAT bundle's immutable manifest row.
+ * A site with no `serving` channel is a legacy (pre-#397) site whose serve path
+ * falls back to the mutable `__site_manifest__` marker — so we read the marker
+ * too, and only then. The two reads are inherently dependent (step 3 needs the
+ * channel target), but sites resolve in parallel with each other.
+ *
+ * The gateway serves a manifest row as its stored JSON body, so a plain JSON GET
+ * parses it regardless of the stored content type.
+ */
+async function fetchActiveSiteBundle(
+  apiKey: string,
+  site: string,
+): Promise<ActiveSiteBundle> {
+  const registry = await adminGet(
+    apiKey,
+    "/v1/assets/{asset_type}/{name}/manifest",
+    { params: { asset_type: STATIC_SITE_TYPE, name: site } },
+  );
+  const servingVersion = registry.channels.find(
+    (channel) => channel.channel === SITE_SERVE_CHANNEL,
+  )?.version;
+  try {
+    const manifest = await gatewayGet<SiteManifest>(
+      apiKey,
+      siteObjectPath(site, servingVersion ?? SITE_MANIFEST_VERSION),
+    );
+    return { registry, servingVersion, manifest, manifestError: undefined };
+  } catch (error) {
+    return {
+      registry,
+      servingVersion,
+      manifest: undefined,
+      manifestError: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
 }
 
 /** Total stored bytes across a manifest's files. */
@@ -263,15 +349,6 @@ function manifestBytes(manifest: SiteManifest): number {
 /** First 12 hex chars of a content hash, ellipsized (mirrors the Assets page). */
 function shortHash(hash: string): string {
   return `${hash.slice(0, 12)}…`;
-}
-
-/** Asset-object path for ONE published file. Each file's `version` key IS its
- * bundle path (the same convention publish writes and unpublish deletes), so a
- * plain asset GET streams that individual file back. Kept as a manual encoded
- * string (not the typed `params` client) so it lines up byte-for-byte with the
- * publish/unpublish addressing in this module. */
-function siteFilePath(site: string, filePath: string): string {
-  return `/v1/assets/${STATIC_SITE_TYPE}/${encodeURIComponent(site)}/${encodeURIComponent(filePath)}`;
 }
 
 /** PUT target that moves the `serving` channel of `site` to `version`. Kept as a
@@ -381,13 +458,17 @@ function putBundleWithProgress<T>(
 }
 
 /**
- * Per-site detail drawer: the published bundle's file tree straight from the
- * manifest (path, content type, content hash, size), the retained bundle
- * VERSION HISTORY (with a truthful channel-move rollback), plus the destructive
- * Unpublish trigger. The site manifest is already loaded by the list's parallel
- * reads; the version history additionally reads the asset REGISTRY manifest
- * (channels + versions) on open, so it knows which version the `serving`
- * channel points at and which retained bundles exist to roll back to.
+ * Per-site detail drawer: the SERVED bundle's file tree (path, content type,
+ * content hash, size), the retained bundle VERSION HISTORY (with a truthful
+ * channel-move rollback), the site's bound custom domains with their live ACME
+ * posture, plus the destructive Unpublish trigger.
+ *
+ * Everything here is derived from the ONE active-bundle resolution the list
+ * already performed for this row (`fetchActiveSiteBundle`) — the served
+ * bundle's manifest AND the registry manifest behind it. Sharing that single
+ * read is what keeps the header ("Bundle X") and the history's Active badge
+ * from contradicting each other: both name the version the `serving` channel
+ * points at.
  */
 function SiteDetailSheet({
   row,
@@ -422,22 +503,17 @@ function SiteDetailSheet({
   // consequence-named confirmation; null when no rollback is armed.
   const [rollbackVersion, setRollbackVersion] = useState<string | null>(null);
 
-  // Asset REGISTRY manifest (channels + versions) for this site — the
-  // authoritative source for which version the `serving` channel serves and
-  // which retained bundles exist. Read only while the drawer is open.
-  const registryQueryKey = ["static-site-registry", row?.name] as const;
-  const {
-    data: registry,
-    isLoading: registryLoading,
-    error: registryError,
-  } = useQuery({
-    queryKey: registryQueryKey,
-    enabled: row !== null,
-    queryFn: () =>
-      adminGet(apiKey, "/v1/assets/{asset_type}/{name}/manifest", {
-        params: { asset_type: STATIC_SITE_TYPE, name: row!.name },
-      }),
-  });
+  // Asset REGISTRY manifest (channels + versions) + the version the `serving`
+  // channel points at: both come from the row's single active-bundle read, so
+  // the history's Active badge and the header's bundle version cannot disagree.
+  const registry = row?.registry;
+  const registryLoading = row?.manifestLoading ?? false;
+  // The history is unavailable only when the REGISTRY itself could not be read;
+  // a failed served-bundle manifest leaves the retained versions perfectly
+  // knowable (and is what lets an operator still purge such a site).
+  const registryError =
+    row !== null && row.registry === undefined ? row.manifestError : undefined;
+  const servingVersion = row?.servingVersion;
 
   // Publish time per bundle version, from the tenant asset listing rows.
   const publishedAtByVersion = useMemo(() => {
@@ -447,15 +523,6 @@ function SiteDetailSheet({
     }
     return map;
   }, [row?.assetVersions]);
-
-  // Which version the `serving` channel resolves to right now (the served
-  // bundle). Undefined for a legacy site that has no `serving` channel yet.
-  const servingVersion = useMemo(
-    () =>
-      registry?.channels.find((channel) => channel.channel === SITE_SERVE_CHANNEL)
-        ?.version,
-    [registry],
-  );
 
   // Retained bundle versions, newest first, each marked active/yanked/dated.
   const bundleRows = useMemo<BundleVersionRow[]>(() => {
@@ -497,13 +564,11 @@ function SiteDetailSheet({
         t("page.staticSites.rollback.success", { site: row!.name, version }),
       );
       setRollbackVersion(null);
-      // The served version changed: refresh the registry (channel pointer) and
-      // the tenant asset listing so the drawer and list re-derive.
-      queryClient.invalidateQueries({ queryKey: registryQueryKey });
+      // The served version changed: re-resolve the active bundle (channel
+      // pointer AND the served bundle's manifest, which is now a DIFFERENT row)
+      // plus the tenant asset listing, so the list and drawer both re-derive.
+      queryClient.invalidateQueries({ queryKey: siteBundleQueryKey(row!.name) });
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
-      queryClient.invalidateQueries({
-        queryKey: ["static-site-manifest", row!.name],
-      });
     },
     onError: (error: unknown, version) =>
       toast.error(rollbackErrorMessage(t, error, version)),
@@ -519,6 +584,28 @@ function SiteDetailSheet({
   const [bindError, setBindError] = useState<string | null>(null);
   const [bindAcmeNote, setBindAcmeNote] = useState<string | null>(null);
   const [pendingUnbind, setPendingUnbind] = useState<SiteDomain | null>(null);
+
+  // ACME posture for EVERY bound hostname, not just one bound in this session.
+  // The list endpoint (`GET /admin/v1/site-domains`) carries no ACME field, so
+  // each binding's posture comes from its own detail read
+  // (`GET /admin/v1/site-domains/{hostname}` -> `acme`, site_domains.rs). Read
+  // in parallel while the drawer is open; a read that has not landed or that
+  // failed prints "Unknown" rather than asserting a posture we do not know.
+  const domainDetailQueries = useQueries({
+    queries: (row?.domains ?? []).map((domain) => ({
+      queryKey: ["site-domain-detail", domain.hostname] as const,
+      queryFn: () =>
+        adminGet(apiKey, "/admin/v1/site-domains/{hostname}", {
+          params: { hostname: domain.hostname },
+        }),
+    })),
+  });
+  const acmeByHostname = new Map<string, boolean | undefined>(
+    (row?.domains ?? []).map((domain, index) => [
+      domain.hostname,
+      domainDetailQueries[index]?.data?.acme.enabled,
+    ]),
+  );
 
   const hostnameCheck =
     bindHostname.trim() === "" ? null : validateSiteDomainHostname(bindHostname);
@@ -590,7 +677,11 @@ function SiteDetailSheet({
     if (!row) return;
     setDownloadingPath(entry.path);
     try {
-      const blob = await gatewayGetBinary(apiKey, siteFilePath(row.name, entry.path));
+      // Address the file by its BARE bundle path: the gateway remaps that onto
+      // the ACTIVE bundle (sites.rs `resolve_site_asset_version`). Because the
+      // tree above is now the active bundle's own manifest, the bytes that come
+      // back are the ones whose hash/size sit beside the button.
+      const blob = await gatewayGetBinary(apiKey, siteObjectPath(row.name, entry.path));
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -844,6 +935,7 @@ function SiteDetailSheet({
                         <TableHead>{t("page.siteDomains.col.hostname")}</TableHead>
                         <TableHead>{t("page.siteDomains.col.servePath")}</TableHead>
                         <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
+                        <TableHead>{t("page.staticSites.domains.acme")}</TableHead>
                         <TableHead className="w-24">
                           {t("resource.table.actionsColumn")}
                         </TableHead>
@@ -866,6 +958,16 @@ function SiteDetailSheet({
                               dateStyle: "medium",
                               timeStyle: "short",
                             })}
+                          </TableCell>
+                          {/* Live ACME posture for THIS binding, however long
+                            ago it was bound. Unknown until its detail read
+                            lands (or if it failed) — never a guessed posture. */}
+                          <TableCell className="text-xs">
+                            {acmeByHostname.get(domain.hostname) === undefined
+                              ? t("common.unknown")
+                              : acmeByHostname.get(domain.hostname)
+                                ? t("page.staticSites.acme.enabled")
+                                : t("page.staticSites.acme.disabled")}
                           </TableCell>
                           <TableCell>
                             <Button
@@ -998,7 +1100,10 @@ function SiteDetailSheet({
                 type="button"
                 variant="destructive"
                 onClick={onUnpublish}
-                disabled={!manifest}
+                // Gated on the REGISTRY, not the served manifest: a site whose
+                // manifest row is gone or corrupt is exactly the one an
+                // operator most needs to be able to purge.
+                disabled={registry === undefined}
               >
                 {t("page.staticSites.unpublish.action")}
               </Button>
@@ -1064,9 +1169,13 @@ export default function StaticSitesPage() {
   const { t, format } = useI18n();
   const apiKey = session!.gatewayApiKey;
   const tenantId = session!.tenant.id;
+  // Label for the read-only publish-target tenant: the session tenant is the
+  // ONLY tenant a publish from this console can land in (the publish path
+  // carries no tenant; the gateway takes it from the API key).
+  const tenantName = session!.tenant.name || tenantId;
   const queryClient = useQueryClient();
 
-  // The tenant/site/version selection and the open site are mirrored to the URL
+  // The site/version selection and the open site are mirrored to the URL
   // (#345) so a selection is a shareable DIRECT LINK: a deep link seeds these on
   // mount, and edits write through. Local state stays the immediate source for
   // snappy text input; `updateParam` writes the change back with `replace` so it
@@ -1088,10 +1197,7 @@ export default function StaticSitesPage() {
     [setSearchParams],
   );
 
-  // Publish form state (tenant/site/version seeded from + mirrored to the URL).
-  const [formTenant, setFormTenantState] = useState(
-    () => searchParams.get("tenant") ?? tenantId,
-  );
+  // Publish form state (site/version seeded from + mirrored to the URL).
   const [site, setSiteState] = useState(() => searchParams.get("site") ?? "");
   const [version, setVersionState] = useState(
     () => searchParams.get("version") ?? "",
@@ -1109,15 +1215,6 @@ export default function StaticSitesPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const setFormTenant = useCallback(
-    (value: string) => {
-      setFormTenantState(value);
-      // The session tenant is the default, so omit it from the URL to keep links
-      // clean; any other selection is recorded.
-      updateParam("tenant", value === tenantId ? null : value);
-    },
-    [updateParam, tenantId],
-  );
   const setSite = useCallback(
     (value: string) => {
       setSiteState(value);
@@ -1184,12 +1281,15 @@ export default function StaticSitesPage() {
     [assetVersionsBySite],
   );
 
-  // One parallel manifest read per site (no waterfall): each carries the
-  // authoritative serving policy the flat asset listing cannot express.
-  const manifestQueries = useQueries({
+  // One ACTIVE-BUNDLE resolution per site, all in parallel (no waterfall
+  // BETWEEN sites). Each resolves the bundle the gateway actually serves the
+  // same way serve-mode does — registry manifest -> `serving` channel -> that
+  // bundle's manifest row — so the policy, file count, bytes and publish time in
+  // this table describe the SERVED bundle, not whatever was published last.
+  const bundleQueries = useQueries({
     queries: siteNames.map((name) => ({
-      queryKey: ["static-site-manifest", name] as const,
-      queryFn: () => fetchSiteManifest(apiKey, name),
+      queryKey: siteBundleQueryKey(name),
+      queryFn: () => fetchActiveSiteBundle(apiKey, name),
     })),
   });
 
@@ -1204,14 +1304,17 @@ export default function StaticSitesPage() {
     return map;
   }, [domainData]);
 
-  // manifestQueries identity changes each render; depend on a derived status
-  // signature so rows only rebuild when a manifest read actually transitions.
-  const manifestStatusSignature = manifestQueries.map((q) => q.status).join(",");
+  // bundleQueries identity changes each render; depend on a derived signature
+  // (status + resolved serving version) so rows only rebuild when a resolution
+  // actually transitions or the served version moves.
+  const bundleStatusSignature = bundleQueries
+    .map((q) => `${q.status}:${q.data?.servingVersion ?? ""}`)
+    .join(",");
 
   const rows = useMemo<SiteRow[]>(
     () =>
       siteNames.map((name, index) => {
-        const query = manifestQueries[index];
+        const query = bundleQueries[index];
         const domains = domainsBySite.get(name) ?? [];
         // Canonical serve URL: a bound hostname's serve_path when one exists,
         // else the tenant-scoped /sites/{tenant}/{site}/ browse path.
@@ -1219,9 +1322,14 @@ export default function StaticSitesPage() {
           domains[0]?.serve_path ?? `/sites/${tenantId}/${name}/`;
         return {
           name,
-          manifest: query.data,
+          manifest: query.data?.manifest,
+          servingVersion: query.data?.servingVersion,
+          registry: query.data?.registry,
           manifestLoading: query.isLoading,
-          manifestError: query.error as Error | undefined,
+          // A registry failure fails the whole resolution; a manifest-row
+          // failure is carried on the result so the row keeps its registry.
+          manifestError:
+            (query.error as Error | undefined) ?? query.data?.manifestError,
           domains,
           serveUrl,
           assetVersions: assetVersionsBySite.get(name) ?? [],
@@ -1233,7 +1341,7 @@ export default function StaticSitesPage() {
       domainsBySite,
       assetVersionsBySite,
       tenantId,
-      manifestStatusSignature,
+      bundleStatusSignature,
     ],
   );
 
@@ -1334,7 +1442,10 @@ export default function StaticSitesPage() {
       );
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
-      queryClient.invalidateQueries({ queryKey: ["static-site-manifest", response.site] });
+      // A publish moves the `serving` channel to the new bundle, so re-resolve.
+      queryClient.invalidateQueries({
+        queryKey: siteBundleQueryKey(response.site),
+      });
       resetForm();
     },
     // Surface the gateway verdict VERBATIM (scan / zip-bomb / quota / immutable).
@@ -1345,38 +1456,59 @@ export default function StaticSitesPage() {
     },
   });
 
-  // Unpublish = purge every per-file object PLUS the reserved manifest row.
-  // The gateway offers no single "delete site" endpoint, so this deletes each
-  // asset version (each file's `version` key IS its path) and finally the
-  // manifest; every DELETE is audit-logged by the assets registry.
+  // Unpublish = purge EVERY stored row of the site, driven off the asset
+  // registry manifest (the complete, authoritative row list for this
+  // `(asset_type, name)`) rather than off the served bundle's file list.
+  //
+  // Deleting only the ACTIVE bundle's files plus the marker — what this used to
+  // do — leaves a site that #397 retains: every prior bundle's
+  // `__site_file__:{version}:{path}` objects, every bare `{bundle_version}`
+  // bundle-manifest row, and the `serving` channel all survive. The site then
+  // keeps appearing in `GET /v1/assets` forever (listed as "Manifest
+  // unavailable") and its retained bytes keep counting against the tenant's
+  // asset-storage quota — so the "Site unpublished" toast would be a lie.
+  //
+  // Every version row is addressed by its EXACT registry key, which the
+  // gateway's bare-path remap (`resolve_site_asset_version`) passes through
+  // untouched. The reserved marker goes LAST so a partial failure leaves the
+  // site describable instead of orphaning objects behind a gone manifest.
+  // Every DELETE is audit-logged by the assets registry.
   const unpublishMutation = useMutation({
     mutationFn: async ({
       name,
-      manifest,
+      registry,
     }: {
       name: string;
-      manifest: SiteManifest;
+      registry: AssetManifest;
     }) => {
+      const deleteVersion = (version: string) =>
+        adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
+          params: { asset_type: STATIC_SITE_TYPE, name, version },
+        });
       await Promise.all(
-        manifest.files.map((entry) =>
-          adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
-            params: {
-              asset_type: STATIC_SITE_TYPE,
-              name,
-              version: entry.path,
+        registry.versions
+          .filter((entry) => entry.version !== SITE_MANIFEST_VERSION)
+          .map((entry) => deleteVersion(entry.version)),
+      );
+      // Drop the `serving` channel too: it is a separate stored pointer, so a
+      // leftover would keep resolving (to a now-missing target) and would be
+      // re-adopted by a later publish of the same slug.
+      await Promise.all(
+        registry.channels.map((channel) =>
+          adminDelete(
+            apiKey,
+            "/v1/assets/{asset_type}/{name}/channels/{channel}",
+            {
+              params: {
+                asset_type: STATIC_SITE_TYPE,
+                name,
+                channel: channel.channel,
+              },
             },
-          }),
+          ),
         ),
       );
-      // Remove the manifest LAST so a partial file failure leaves the site
-      // describable rather than orphaning file objects behind a gone manifest.
-      await adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
-        params: {
-          asset_type: STATIC_SITE_TYPE,
-          name,
-          version: SITE_MANIFEST_VERSION,
-        },
-      });
+      await deleteVersion(SITE_MANIFEST_VERSION);
     },
     onSuccess: (_result, variables) => {
       toast.success(
@@ -1385,7 +1517,7 @@ export default function StaticSitesPage() {
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
       queryClient.invalidateQueries({
-        queryKey: ["static-site-manifest", variables.name],
+        queryKey: siteBundleQueryKey(variables.name),
       });
       setUnpublishSite(null);
       setUnpublishConfirm("");
@@ -1415,7 +1547,9 @@ export default function StaticSitesPage() {
     publishMutation.mutate();
   }
 
-  const serveUrlPreview = `/sites/${formTenant || tenantId}/${site.trim() || "{site}"}/`;
+  // The canonical serve path the bundle WILL be reachable at — always under the
+  // session tenant, because that is where the gateway files the publish.
+  const serveUrlPreview = `/sites/${tenantId}/${site.trim() || "{site}"}/`;
   const publishDisabled = publishMutation.isPending || archiveError !== null;
 
   const progressFraction =
@@ -1425,8 +1559,12 @@ export default function StaticSitesPage() {
   const progressPercent = Math.round(progressFraction * 100);
 
   // Exact site slug the operator must retype to arm the destructive unpublish.
-  const unpublishArmed =
+  const unpublishNameMatches =
     unpublishSite !== null && unpublishConfirm === unpublishSite;
+  // …and the registry row list the purge walks must have loaded, so the action
+  // can never fire a partial delete set.
+  const unpublishArmed =
+    unpublishNameMatches && unpublishRow?.registry !== undefined;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1450,32 +1588,50 @@ export default function StaticSitesPage() {
               submitPublish();
             }}
           >
+            {/* Publish target tenant — READ-ONLY on purpose. The publish path
+              is /v1/assets/{asset_type}/{name}/{version}: it carries no tenant,
+              and the gateway takes the owning tenant from the API key
+              (`auth.organization_id`, assets.rs). A tenant PICKER here would be
+              inert — worse, it would drive the serve-URL preview below into
+              naming a tenant the bundle does not publish to (the inert-control
+              pattern #395 rejected for the project field). So we state the
+              tenant the bundle will actually land in and let it be. */}
             <div className="grid gap-1.5">
               <Label htmlFor="site-tenant">{t("page.siteDomains.field.tenant")}</Label>
-              <EntityReferencePicker
+              <p
                 id="site-tenant"
-                label={t("page.siteDomains.field.tenant")}
-                reference={{
-                  target: "tenant-accounts",
-                  valueKey: "id",
-                  primaryLabelKey: "name",
-                  secondaryLabelKeys: ["slug"],
-                }}
-                value={formTenant}
-                dependencyValues={{}}
-                placeholder={t("page.siteDomains.field.tenant.select")}
-                onChange={(value) => setFormTenant(typeof value === "string" ? value : "")}
-              />
+                className="rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm"
+              >
+                {tenantName}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {t("page.staticSites.field.tenant.hint")}
+              </p>
             </div>
+            {/* Published-site selection, backed by the tenant's OWN published
+              sites (the same `/v1/assets` enumeration this page's list is built
+              from) rather than blind free text. It stays an input because a
+              first publish must be able to name a slug that does not exist yet;
+              the datalist turns the existing slugs into real, selectable
+              suggestions for the republish case. */}
             <div className="grid gap-1.5">
               <Label htmlFor="site-slug">{t("page.siteDomains.field.site")}</Label>
               <Input
                 id="site-slug"
+                list="site-slug-options"
                 value={site}
                 onChange={(event) => setSite(event.target.value)}
                 // eslint-disable-next-line ferrogate/no-untranslated-literal -- example site slug, identical across locales
                 placeholder="marketing"
               />
+              <datalist id="site-slug-options">
+                {siteNames.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <p className="text-xs text-muted-foreground">
+                {t("page.staticSites.field.site.hint")}
+              </p>
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="site-version">{t("page.assets.field.version")}</Label>
@@ -1652,8 +1808,18 @@ export default function StaticSitesPage() {
                       </span>
                     )}
                   </TableCell>
+                  {/* `default` is a REAL policy claim (the gateway's built-in
+                    Cache-Control when the manifest sets none), so it may only be
+                    printed once a manifest has actually been read. While the
+                    read is in flight or after it failed we know nothing about
+                    the policy, and say so with the same em dash the sibling
+                    cells use — asserting "default" there would be a lie
+                    (#458/#464/#473). */}
                   <TableCell className="font-mono text-xs">
-                    {row.manifest?.cache_control ?? t("page.staticSites.cache.default")}
+                    {row.manifest
+                      ? (row.manifest.cache_control ??
+                        t("page.staticSites.cache.default"))
+                      : "—"}
                   </TableCell>
                   <TableCell>{row.manifest ? row.manifest.files.length : "—"}</TableCell>
                   <TableCell>
@@ -1699,10 +1865,13 @@ export default function StaticSitesPage() {
                     )}
                   </TableCell>
                   <TableCell>
+                    {/* Openable as soon as the site's stored versions are
+                      known — a site whose served manifest failed to read must
+                      still be inspectable and unpublishable, not stranded. */}
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={!row.manifest}
+                      disabled={!row.registry}
                       onClick={() => setDetailSite(row.name)}
                     >
                       {t("resource.table.moreDetails")}
@@ -1747,10 +1916,12 @@ export default function StaticSitesPage() {
             <form
               onSubmit={(event) => {
                 event.preventDefault();
-                if (unpublishArmed && unpublishRow?.manifest)
+                // The registry manifest is the row list the purge walks, so the
+                // action is unavailable until it has actually loaded.
+                if (unpublishArmed && unpublishRow?.registry)
                   unpublishMutation.mutate({
                     name: unpublishSite,
-                    manifest: unpublishRow.manifest,
+                    registry: unpublishRow.registry,
                   });
               }}
             >
@@ -1775,7 +1946,7 @@ export default function StaticSitesPage() {
                   autoComplete="off"
                   autoCapitalize="off"
                   spellCheck={false}
-                  aria-invalid={unpublishConfirm !== "" && !unpublishArmed}
+                  aria-invalid={unpublishConfirm !== "" && !unpublishNameMatches}
                 />
               </div>
               <DialogFooter>

@@ -4,15 +4,20 @@
 // the Admin API shell that installAuthenticatedAdminApi covers:
 //
 //   * the LIST of sites is derived from the tenant gateway asset listing
-//     (GET /v1/assets), one per-site serving-policy manifest read
-//     (GET /v1/assets/static_site/{site}/__site_manifest__), and the site-domains
-//     registry (GET /admin/v1/site-domains);
+//     (GET /v1/assets), a per-site ACTIVE-BUNDLE resolution that mirrors the
+//     gateway's own serve path — the registry manifest
+//     (GET /v1/assets/static_site/{site}/manifest) for the `serving` channel,
+//     then that bundle's own manifest row
+//     (GET /v1/assets/static_site/{site}/{servingVersion}), falling back to the
+//     mutable GET .../__site_manifest__ marker only for a legacy site with no
+//     channel — and the site-domains registry (GET /admin/v1/site-domains) plus
+//     a per-hostname detail read (GET /admin/v1/site-domains/{hostname}) for the
+//     ACME posture of every bound domain;
 //   * PUBLISH/republish is a single raw-bytes PUT
 //     (PUT /v1/assets/static_site/{site}/{version}) carrying the serving policy in
 //     x-site-* request headers (public / spa-fallback / cache-control);
-//   * the detail drawer reads the asset REGISTRY manifest
-//     (GET /v1/assets/static_site/{site}/manifest) for its version history and
-//     rolls back by moving the well-known `serving` asset channel
+//   * the detail drawer reuses that same registry read for its version history
+//     and rolls back by moving the well-known `serving` asset channel
 //     (PUT /v1/assets/static_site/{site}/channels/serving?version=…);
 //   * bind/unbind hit the Admin API site-domains surface
 //     (POST /admin/v1/site-domains, DELETE /admin/v1/site-domains/{hostname}).
@@ -46,10 +51,10 @@ const SITE_MANIFEST_VERSION = "__site_manifest__";
 const SITE_FILE_VERSION_PREFIX = "__site_file__";
 const SITE_SERVE_CHANNEL = "serving";
 
-// The session tenant installAuthenticatedAdminApi seeds. The publish form's
-// tenant picker pre-selects it and hydrates its label by id, so this module also
-// answers that one Admin API detail read (the shared mock only lists tenant-1…24
-// and would 404 the session tenant).
+// The session tenant installAuthenticatedAdminApi seeds. It owns every published
+// site here, and is the tenant a publish from the console lands in (the publish
+// path carries no tenant). This module also answers that one Admin API tenant
+// detail read, since the shared mock only lists tenant-1…24.
 const SESSION_TENANT_ID = "tenant-e2e";
 
 const HASH = "a".repeat(64);
@@ -88,8 +93,14 @@ interface StaticSitesState {
   /** Asset REGISTRY manifests keyed by `${asset_type}/${name}` (channels +
    * versions, incl. the `__site_file__:{v}:{path}` retained-bundle markers). */
   registry: Map<string, AssetManifest>;
-  /** Per-site serving-policy manifests keyed by site slug. */
+  /** Per-site serving-policy manifests keyed by site slug — the MUTABLE
+   * `__site_manifest__` marker, refreshed only on publish. */
   siteManifests: Map<string, SiteManifestBody>;
+  /** Each RETAINED bundle's own immutable manifest row, keyed
+   * `${site}@${bundle_version}`. This is what the console reads once it has
+   * resolved the `serving` channel — the same row `resolve_active_site_bundle`
+   * reads — so a rollback changes what the console displays. */
+  bundleManifests: Map<string, SiteManifestBody>;
   /** Bound custom hostnames backing GET /admin/v1/site-domains. */
   domains: AdminSiteDomain[];
   clock: number;
@@ -213,6 +224,21 @@ function buildState(): StaticSitesState {
     updated_at_unix: 1_751_900_000,
   };
 
+  // marketing's prior retained bundle: a DIFFERENT policy from the served one,
+  // so a test that rolls the channel back sees the display actually change.
+  const marketingPriorManifest: SiteManifestBody = {
+    site: "marketing",
+    bundle_version: "1.0.0",
+    public: false,
+    spa_fallback: false,
+    cache_control: "public, max-age=60",
+    files: [
+      { path: "index.html", content_type: "text/html", content_hash: HASH, size_bytes: 2048 },
+    ],
+    created_at_unix: 1_751_800_000,
+    updated_at_unix: 1_751_800_000,
+  };
+
   const domains: AdminSiteDomain[] = [
     {
       object: "site_domain",
@@ -238,6 +264,11 @@ function buildState(): StaticSitesState {
     siteManifests: new Map([
       ["marketing", marketingManifest],
       ["docs", docsManifest],
+    ]),
+    bundleManifests: new Map([
+      ["marketing@2.0.0", marketingManifest],
+      ["marketing@1.0.0", marketingPriorManifest],
+      ["docs@1.0.0", docsManifest],
     ]),
     domains,
     clock: 1_752_100_000,
@@ -282,9 +313,13 @@ async function handlePublish(
   const cacheControl = cacheHeader && cacheHeader !== "" ? cacheHeader : null;
   const now = (state.clock += 1_000);
 
-  state.summaries = [staticSiteSummary(name, version, now), ...state.summaries];
+  state.summaries = [
+    staticSiteSummary(name, version, now),
+    staticSiteSummary(name, `${SITE_FILE_VERSION_PREFIX}:${version}:index.html`, now),
+    ...state.summaries,
+  ];
 
-  state.siteManifests.set(name, {
+  const published: SiteManifestBody = {
     site: name,
     bundle_version: version,
     public: isPublic,
@@ -295,7 +330,11 @@ async function handlePublish(
     ],
     created_at_unix: now,
     updated_at_unix: now,
-  });
+  };
+  // A publish writes BOTH the new bundle's immutable manifest row and the
+  // mutable marker, then moves the `serving` channel (sites.rs).
+  state.bundleManifests.set(`${name}@${version}`, published);
+  state.siteManifests.set(name, published);
 
   let manifest = state.registry.get(regKey(STATIC_SITE_TYPE, name));
   if (!manifest) {
@@ -394,6 +433,21 @@ async function handleGatewayRequest(
       });
       return;
     }
+    // DELETE — the unpublish purge drops the `serving` channel pointer too, so a
+    // later publish of the same slug does not inherit a stale one.
+    if (method === "DELETE") {
+      manifest.channels = manifest.channels.filter(
+        (entry) => entry.channel !== channel,
+      );
+      await fulfillJson(route, 200, {
+        object: "asset_channel",
+        asset_type: assetType,
+        name,
+        channel,
+        deleted: true,
+      });
+      return;
+    }
   }
 
   // PUT /v1/assets/static_site/{name}/{version} — the publish/republish upload.
@@ -422,6 +476,14 @@ async function handleGatewayRequest(
       return;
     }
 
+    // GET a retained bundle version — that bundle's own immutable manifest,
+    // which is what the console reads once it has resolved the `serving`
+    // channel (the same row the gateway's serve path resolves).
+    if (method === "GET" && state.bundleManifests.has(`${name}@${tail}`)) {
+      await fulfillJson(route, 200, state.bundleManifests.get(`${name}@${tail}`));
+      return;
+    }
+
     // GET any other version key — an individual published file's bytes (the
     // drawer's per-file download). Any body suffices; the spec asserts the action.
     if (method === "GET") {
@@ -439,6 +501,13 @@ async function handleGatewayRequest(
       state.summaries = state.summaries.filter(
         (row) => !(row.asset_type === assetType && row.name === name && row.version === tail),
       );
+      state.bundleManifests.delete(`${name}@${tail}`);
+      const registryManifest = state.registry.get(regKey(assetType, name));
+      if (registryManifest) {
+        registryManifest.versions = registryManifest.versions.filter(
+          (entry) => entry.version !== tail,
+        );
+      }
       if (tail === SITE_MANIFEST_VERSION) {
         state.siteManifests.delete(name);
         state.registry.delete(regKey(assetType, name));
@@ -472,6 +541,28 @@ async function handleSiteDomainsRequest(
   // admin mock's empty stub so the fixture domain is present + mutations reflect).
   if (method === "GET" && pathname === "/admin/v1/site-domains") {
     await fulfillJson(route, 200, { object: "list", data: state.domains });
+    return;
+  }
+
+  // GET /admin/v1/site-domains/{hostname} — the per-binding detail read. It is
+  // the ONLY endpoint carrying ACME posture, so the site drawer calls it for
+  // every bound hostname (a pre-existing binding has no bind response to read).
+  if (method === "GET" && pathname.startsWith("/admin/v1/site-domains/")) {
+    const hostname = decodeURIComponent(
+      pathname.slice("/admin/v1/site-domains/".length),
+    );
+    const binding = state.domains.find((domain) => domain.hostname === hostname);
+    if (!binding) {
+      await fulfillJson(route, 404, {
+        error: { code: "site_domain_not_found", message: "binding not found" },
+      });
+      return;
+    }
+    await fulfillJson(route, 200, {
+      object: "site_domain",
+      site_domain: binding,
+      acme: { enabled: true, reload_triggered: false },
+    });
     return;
   }
 
@@ -553,9 +644,8 @@ export async function installGatewayStaticSites(
     (route) => handleSiteDomainsRequest(route, state),
   );
 
-  // The publish form pre-selects the session tenant; its picker hydrates the
-  // label by id. The shared mock only knows tenant-1…24, so answer this one read
-  // here to keep the tenant chip resolved (and off the console-error path).
+  // The shared mock only knows tenant-1…24, so answer the session tenant's
+  // detail read here to keep any by-id hydration off the console-error path.
   await page.route(
     (url) => url.pathname === `/admin/v1/tenant-accounts/${SESSION_TENANT_ID}`,
     (route) =>
