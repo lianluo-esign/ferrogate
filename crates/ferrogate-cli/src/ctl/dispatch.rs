@@ -20,6 +20,7 @@ use ferrogate_cli_core::args::GlobalArgs;
 use ferrogate_cli_core::auth::SecretResolver;
 use ferrogate_cli_core::context::{self, EffectiveContext, EnvOverrides};
 use ferrogate_cli_core::error::{CliError, CliResult};
+use ferrogate_cli_core::resource::redact_secret_fields;
 
 use super::store;
 
@@ -72,7 +73,26 @@ pub(crate) fn runtime() -> CliResult<tokio::runtime::Runtime> {
 /// Render a client error to stderr (never stdout — stdout is data only),
 /// preserving the server's error code, request id, and retry hint when the
 /// failure carried an API error envelope.
+///
+/// Callers that know which resource group they invoked should use
+/// [`report_error_for`] so the error's structured `details` payload gets the
+/// same secret redaction a success body gets.
 pub(crate) fn report_error(error: &CliError) {
+    report_error_for(error, &[]);
+}
+
+/// Render a client error, redacting `secret_fields` from the structured
+/// `details` payload.
+///
+/// Why redaction belongs on the error path too: the transport's
+/// `collect_extra_details` forwards **every** error-object key except
+/// `message`/`type`/`code`/`request_id`, while a success body is filtered
+/// through `redact_response`/`redact_secret_fields`. A server error that echoes
+/// the offending request — a rejected virtual-key create carrying `key`, an
+/// asset-transfer failure carrying `upload_url` — therefore reached stderr in
+/// clear while the same field on the 200 path was blanked. Redaction that only
+/// covers the happy path is not redaction.
+pub(crate) fn report_error_for(error: &CliError, secret_fields: &[&str]) {
     eprintln!("error: {error}");
     if let CliError::Api(api) = error {
         eprintln!("  code: {}", api.code);
@@ -91,10 +111,23 @@ pub(crate) fn report_error(error: &CliError) {
         // headroom). Decoding it in the transport and then never showing it
         // would make the "preserve error details" contract a no-op.
         if let Some(details) = &api.details {
-            match serde_json::to_string(details) {
-                Ok(rendered) => eprintln!("  details: {rendered}"),
-                Err(error) => eprintln!("  details: <unrenderable: {error}>"),
-            }
+            eprintln!("  details: {}", render_details(details, secret_fields));
         }
     }
 }
+
+/// Render an error envelope's structured `details` payload for stderr with the
+/// invoked group's one-time secret fields blanked. Pure, so the redaction is
+/// unit-testable without capturing process stderr.
+pub(crate) fn render_details(details: &serde_json::Value, secret_fields: &[&str]) -> String {
+    let mut details = details.clone();
+    if !secret_fields.is_empty() {
+        redact_secret_fields(&mut details, secret_fields);
+    }
+    serde_json::to_string(&details)
+        .unwrap_or_else(|error| format!("<unrenderable details: {error}>"))
+}
+
+#[cfg(test)]
+#[path = "dispatch_test.rs"]
+mod dispatch_test;

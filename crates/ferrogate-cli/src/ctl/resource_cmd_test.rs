@@ -162,7 +162,7 @@ fn render_table_projects_an_array_of_objects() {
 
 #[test]
 fn render_table_unwraps_a_list_envelope() {
-    let body = json!({"items": [{"id": "x"}], "total": 1});
+    let body = json!({"object": "list", "data": [{"id": "x"}], "total": 1});
     let table = render_table(&body).unwrap();
     assert!(table.contains("ID"));
     assert!(table.contains('x'));
@@ -243,6 +243,42 @@ fn empty_sort_key_is_a_usage_error() {
     assert!(error.to_string().contains("--sort"));
 }
 
+/// `--sort --output json` must not silently sort by "--output".
+///
+/// `allow_hyphen_values` is required so the documented descending form
+/// `--sort -created_at` parses, but it also makes clap hand the *next flag* to
+/// `--sort`: `--output` becomes the sort key and `json` a stray positional
+/// segment, so the command targets the wrong resource path with a nonsense sort
+/// and no complaint. A field name never begins with `--`, so this is a
+/// forgotten value.
+#[test]
+fn a_flag_swallowed_as_a_sort_key_is_a_usage_error() {
+    let registry = registry();
+    let command = build_ctl_command(&registry);
+    let matches = command
+        .try_get_matches_from(["ctl", "virtual-keys", "list", "--sort", "--output", "json"])
+        .expect("allow_hyphen_values means clap itself accepts this");
+    let verb_matches = matches
+        .subcommand()
+        .unwrap()
+        .1
+        .subcommand()
+        .unwrap()
+        .1
+        .clone();
+    let args = ResourceArgs::from_arg_matches(&verb_matches).unwrap();
+    assert_eq!(
+        args.sorts,
+        vec!["--output".to_string()],
+        "this test is only meaningful while clap still swallows the flag"
+    );
+    let error = args.to_input().unwrap_err();
+    assert!(
+        error.to_string().contains("--output"),
+        "the message must name the flag that was swallowed: {error}"
+    );
+}
+
 /// `--all-pages` is a real flag, and it hands the cursor to the walker: the
 /// spec it builds carries no baked-in `offset`/`limit`, because `--limit` is
 /// the walk's page size rather than a one-page window.
@@ -302,7 +338,7 @@ fn all_pages_conflicts_with_offset() {
 
 #[test]
 fn truncation_notice_flags_a_partial_page_against_a_known_total() {
-    let body = json!({"items": [{"id": "a"}, {"id": "b"}], "total": 9});
+    let body = json!({"object": "list", "data": [{"id": "a"}, {"id": "b"}], "total": 9});
     let notice = truncation_notice(&body, 0, Some(2)).expect("a partial page must be announced");
     assert!(notice.contains("showing 2 of 9"), "{notice}");
     assert!(notice.contains("--all-pages"), "{notice}");
@@ -310,10 +346,10 @@ fn truncation_notice_flags_a_partial_page_against_a_known_total() {
 
 #[test]
 fn truncation_notice_is_silent_when_the_page_is_the_whole_collection() {
-    let body = json!({"items": [{"id": "a"}, {"id": "b"}], "total": 2});
+    let body = json!({"object": "list", "data": [{"id": "a"}, {"id": "b"}], "total": 2});
     assert_eq!(truncation_notice(&body, 0, Some(50)), None);
     // A later page that reaches the total is complete too.
-    let tail = json!({"items": [{"id": "c"}], "total": 3});
+    let tail = json!({"object": "list", "data": [{"id": "c"}], "total": 3});
     assert_eq!(truncation_notice(&tail, 2, Some(2)), None);
 }
 
@@ -326,6 +362,31 @@ fn truncation_notice_warns_on_a_full_page_with_no_total() {
     assert!(notice.contains("more rows may exist"), "{notice}");
     // A short page under the same conditions is provably the last page.
     assert_eq!(truncation_notice(&json!([{"id": "a"}]), 0, Some(2)), None);
+}
+
+/// The default `list` — no `--limit` at all — against an endpoint that applies
+/// a server-side page size and reports no total must still warn.
+///
+/// This is the most likely invocation in practice and was the one silent case
+/// left: the notice consulted only the operator's `--limit`, so with none
+/// passed the no-total arm returned `None` and a truncated page looked
+/// complete. The envelope's own `limit` — carried by every paginated list
+/// schema in the contract — is what closes it.
+#[test]
+fn truncation_notice_uses_the_envelope_page_size_when_no_limit_was_passed() {
+    let body = json!({"object": "list", "data": [{"id": "a"}, {"id": "b"}], "limit": 2});
+    let notice =
+        truncation_notice(&body, 0, None).expect("a server-capped full page must be announced");
+    assert!(notice.contains("more rows may exist"), "{notice}");
+    // A page under the server's own limit is provably the last page.
+    assert_eq!(
+        truncation_notice(
+            &json!({"object": "list", "data": [{"id": "a"}], "limit": 2}),
+            0,
+            None
+        ),
+        None
+    );
 }
 
 /// A non-list response never produces a pagination notice.
@@ -341,7 +402,7 @@ fn truncation_notice_ignores_non_list_documents() {
 /// a truncated page looks identical to a complete one in the default format.
 #[test]
 fn render_table_keeps_list_envelope_metadata() {
-    let body = json!({"items": [{"id": "x"}], "total": 500, "offset": 0});
+    let body = json!({"object": "list", "data": [{"id": "x"}], "total": 500, "offset": 0});
     let table = render_table(&body).unwrap();
     assert!(table.contains("ID") && table.contains('x'));
     assert!(table.contains("total") && table.contains("500"), "{table}");

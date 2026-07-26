@@ -611,7 +611,7 @@ fn spawn_paged_http(pages: Vec<(u64, String)>) -> String {
                 .iter()
                 .find(|(page_offset, _)| *page_offset == offset)
                 .map(|(_, body)| body.clone())
-                .unwrap_or_else(|| r#"{"items":[],"total":0}"#.to_string());
+                .unwrap_or_else(|| r#"{"object":"list","data":[],"total":0}"#.to_string());
             let response = http_response(200, "OK", &[("content-type", "application/json")], &body);
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
@@ -630,13 +630,16 @@ fn ctl_list_all_pages_walks_every_page_without_losing_rows() {
     let endpoint = spawn_paged_http(vec![
         (
             0,
-            r#"{"items":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
+            r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
         ),
         (
             2,
-            r#"{"items":[{"id":"vk-3"},{"id":"vk-4"}],"total":5}"#.to_string(),
+            r#"{"object":"list","data":[{"id":"vk-3"},{"id":"vk-4"}],"total":5}"#.to_string(),
         ),
-        (4, r#"{"items":[{"id":"vk-5"}],"total":5}"#.to_string()),
+        (
+            4,
+            r#"{"object":"list","data":[{"id":"vk-5"}],"total":5}"#.to_string(),
+        ),
     ]);
 
     let output = base_cmd(home.path())
@@ -658,7 +661,7 @@ fn ctl_list_all_pages_walks_every_page_without_losing_rows() {
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     let body: serde_json::Value = serde_json::from_str(stdout(&output).trim())
         .unwrap_or_else(|error| panic!("stdout must be JSON ({error}): {}", stdout(&output)));
-    let ids: Vec<&str> = body["items"]
+    let ids: Vec<&str> = body["data"]
         .as_array()
         .expect("merged items array")
         .iter()
@@ -686,7 +689,7 @@ fn ctl_list_single_page_announces_the_remaining_rows() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = spawn_paged_http(vec![(
         0,
-        r#"{"items":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
+        r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}],"total":5}"#.to_string(),
     )]);
 
     let output = base_cmd(home.path())
@@ -706,7 +709,7 @@ fn ctl_list_single_page_announces_the_remaining_rows() {
 
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
-    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
     let diagnostics = stderr(&output);
     assert!(
         diagnostics.contains("showing 2 of 5") && diagnostics.contains("--all-pages"),
@@ -726,7 +729,7 @@ fn ctl_list_table_shows_pagination_metadata() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = spawn_paged_http(vec![(
         0,
-        r#"{"items":[{"id":"vk-1"}],"total":500}"#.to_string(),
+        r#"{"object":"list","data":[{"id":"vk-1"}],"total":500}"#.to_string(),
     )]);
 
     let output = base_cmd(home.path())
@@ -773,7 +776,7 @@ fn ctl_list_sort_flag_reaches_the_server() {
                 200,
                 "OK",
                 &[("content-type", "application/json")],
-                r#"{"items":[],"total":0}"#,
+                r#"{"object":"list","data":[],"total":0}"#,
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
@@ -898,4 +901,441 @@ fn context_ca_bundle_is_honored_not_ignored() {
         "the diagnostic must name the bundle: {}",
         stderr(&output)
     );
+}
+
+/// A private CA the operator configured is actually **trusted**, not merely
+/// parsed.
+///
+/// The rejection test above proves an unusable bundle fails closed, but it
+/// would stay green if `add_root_certificate` were replaced by a no-op after
+/// the parse: nothing asserted the certificate reached the TLS trust store.
+/// This closes that by serving a leaf signed by a freshly generated private CA
+/// — a certificate the system roots cannot possibly validate — and requiring
+/// the handshake to succeed with `--ca-bundle` and only with it.
+#[test]
+fn context_ca_bundle_is_actually_trusted_for_the_handshake() {
+    let home = tempfile::tempdir().unwrap();
+    let (ca_pem, port) = spawn_tls_signed_by_private_ca(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        STATUS_BODY,
+    ));
+    let bundle = home.path().join("private-ca.pem");
+    std::fs::write(&bundle, ca_pem).unwrap();
+    let endpoint = format!("https://localhost:{port}");
+
+    // Control: without the bundle the leaf chains to an unknown root, so
+    // verification fails. This is what makes the success below load-bearing.
+    let untrusted = base_cmd(home.path())
+        .args(["ops", "status", "--endpoint", &endpoint, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        code(&untrusted),
+        6,
+        "an unknown private CA must fail verification without the bundle: {}",
+        stderr(&untrusted)
+    );
+
+    let create = base_cmd(home.path())
+        .args([
+            "context",
+            "create",
+            "private-ca",
+            "--endpoint",
+            &endpoint,
+            "--ca-bundle",
+            bundle.to_str().unwrap(),
+            "--use",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&create), 0, "stderr: {}", stderr(&create));
+
+    let trusted = base_cmd(home.path())
+        .args(["ops", "status", "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        code(&trusted),
+        0,
+        "the configured CA must complete the handshake: {}",
+        stderr(&trusted)
+    );
+    assert!(
+        stdout(&trusted).contains("\"service\""),
+        "stdout: {}",
+        stdout(&trusted)
+    );
+}
+
+/// Serve TLS with a leaf signed by a generated private CA. Returns the CA's PEM
+/// (for `--ca-bundle`) and the port; connect with `https://localhost:PORT`.
+fn spawn_tls_signed_by_private_ca(response: String) -> (String, u16) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "ferrogate-cli-test-ca");
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_pem = ca_cert.pem();
+    let issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    leaf_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        leaf_key.serialize_der(),
+    ));
+    let config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf_cert.der().clone(), ca_cert.der().clone()], key)
+            .unwrap(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let Ok(connection) = rustls::ServerConnection::new(config.clone()) else {
+                continue;
+            };
+            let mut tls = rustls::StreamOwned::new(connection, stream);
+            let mut buffer = [0_u8; 2048];
+            let _ = tls.read(&mut buffer);
+            let _ = tls.write_all(response.as_bytes());
+            let _ = tls.flush();
+        }
+    });
+    (ca_pem, port)
+}
+
+// ----- the ways --all-pages must refuse rather than mislead ------------------
+
+/// **The blocker, through the real binary.** An empty page in the middle of a
+/// collection the server says holds 5 rows must not produce 2 rows and exit 0.
+///
+/// The walk's stop conditions alone could not prevent this: `next_page` ends
+/// iteration on any empty page, before consulting the known total, so a
+/// concurrent delete (or a server filtering after paging) truncated the answer
+/// silently — under the very flag whose purpose is to never truncate, and with
+/// the truncation notice suppressed because `--all-pages` was passed.
+#[test]
+fn ctl_all_pages_fails_loudly_when_a_mid_collection_page_is_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_paged_http(vec![
+        (
+            0,
+            r#"{"object":"list","data":[{"id":"vk-1"},{"id":"vk-2"}],"total":5,"offset":0,"limit":2}"#
+                .to_string(),
+        ),
+        (
+            2,
+            r#"{"object":"list","data":[],"total":5,"offset":2,"limit":2}"#.to_string(),
+        ),
+    ]);
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--all-pages",
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_ne!(
+        code(&output),
+        0,
+        "a truncated all-pages walk must not exit 0; stdout: {}",
+        stdout(&output)
+    );
+    let diagnostics = stderr(&output);
+    assert!(
+        diagnostics.contains("fetched 2 of the 5 rows"),
+        "the operator must be told the walk came up short: {diagnostics}"
+    );
+    // A partial payload must not be presented as the answer either.
+    assert!(
+        !stdout(&output).contains("vk-1"),
+        "a short walk must not print rows as if complete: {}",
+        stdout(&output)
+    );
+}
+
+/// `--all-pages` on a destructive verb is refused **before** the request goes
+/// out. The mock counts requests, so "nothing was sent" is measured, not
+/// assumed: previously the DELETE was issued, the server deleted the project,
+/// and only then did the CLI report "usage error" — the operator was told their
+/// command was malformed after the damage was done.
+#[test]
+fn ctl_all_pages_on_a_mutating_verb_sends_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            let response = http_response(200, "OK", &[], r#"{"deleted":true}"#);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "projects",
+            "delete",
+            "proj-1",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}"),
+            "--all-pages",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&output),
+        2,
+        "--all-pages on a mutation is a usage error: {}",
+        stderr(&output)
+    );
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(750)).is_err(),
+        "the DELETE must never have reached the server"
+    );
+}
+
+/// `--all-pages` on a cursor-paginated verb refuses after one page instead of
+/// firing up to MAX_PAGES (10 000) identical requests. The mock counts the
+/// requests it served, so the refusal is proven by the request count, not only
+/// by the message.
+#[test]
+fn ctl_all_pages_on_a_cursor_endpoint_refuses_after_one_page() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = sender.send(());
+            // A cursor page: no total, no usable offset — the server ignores
+            // offset/limit entirely, so every request returns this same page.
+            let response = http_response(
+                200,
+                "OK",
+                &[("content-type", "application/json")],
+                r#"{"object":"list","data":[{"id":"ev-1"}],"limit":1,"has_more":true,"next_after_event_id":"ev-1"}"#,
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "agent-jobs",
+            "events",
+            "job-1",
+            "--endpoint",
+            &format!("http://127.0.0.1:{port}"),
+            "--all-pages",
+            "--limit",
+            "1",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        code(&output),
+        2,
+        "a cursor endpoint is a usage error under --all-pages: {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("cursor-paginated"),
+        "the rule must be stated, not implied: {}",
+        stderr(&output)
+    );
+    let mut served = 0;
+    while receiver.recv_timeout(Duration::from_millis(250)).is_ok() {
+        served += 1;
+    }
+    assert_eq!(served, 1, "exactly one page may be fetched before refusing");
+}
+
+/// `--sort` says out loud that the server does not honor it. Zero operations in
+/// the OpenAPI contract declare a `sort` query parameter, so a flag advertised
+/// on 200+ verb blocks that provably changes nothing is the ignored-field
+/// anti-pattern wearing the server's clothes. The key is still forwarded
+/// verbatim (a client must not fake a collection ordering from one page), but
+/// the operator is told not to trust the order.
+#[test]
+fn ctl_list_sort_warns_that_the_api_does_not_honor_it() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_http(http_response(
+        200,
+        "OK",
+        &[("content-type", "application/json")],
+        r#"{"object":"list","data":[],"total":0}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--sort",
+            "-created_at",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--sort") && stderr(&output).contains("sort"),
+        "the operator must be warned the order is the server's default: {}",
+        stderr(&output)
+    );
+    // The warning is a diagnostic; a piped JSON payload stays clean.
+    assert!(!stdout(&output).contains("note:"), "{}", stdout(&output));
+
+    // And a list WITHOUT --sort must not be nagged.
+    let quiet = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            &endpoint,
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !stderr(&quiet).contains("--sort"),
+        "stderr: {}",
+        stderr(&quiet)
+    );
+}
+
+/// A `--sort` value that swallowed the next flag is rejected instead of
+/// silently sorting by "--output" and treating `json` as a resource id.
+#[test]
+fn ctl_list_sort_rejects_a_swallowed_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "list",
+            "--endpoint",
+            "http://127.0.0.1:1",
+            "--sort",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--output"),
+        "the diagnostic must name the swallowed flag: {}",
+        stderr(&output)
+    );
+}
+
+/// A server error that echoes key material is redacted on the way to stderr,
+/// exactly as a success body is.
+///
+/// The transport forwards every unknown error-object key into `details`, and
+/// `details` was printed verbatim — so a rejected virtual-key create echoing
+/// the offending document put the live key on stderr in clear, while the same
+/// field on the 200 path was blanked by `redact_response`. Redaction that
+/// covers only the happy path is not redaction.
+#[test]
+fn ctl_error_details_do_not_leak_secret_fields() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = spawn_http(http_response(
+        400,
+        "Bad Request",
+        &[("content-type", "application/json")],
+        r#"{"error":{"message":"invalid virtual key document","type":"ferrogate_error","code":"invalid_request","request_id":"rid-leak","echo":{"key":"vk_live_LEAKED_SECRET","name":"broken"}}}"#,
+    ));
+
+    let output = base_cmd(home.path())
+        .args([
+            "ctl",
+            "virtual-keys",
+            "create",
+            "--endpoint",
+            &endpoint,
+            "--data",
+            r#"{"name":"broken"}"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 5, "400 is the validation exit class");
+    let diagnostics = stderr(&output);
+    assert!(
+        !diagnostics.contains("vk_live_LEAKED_SECRET"),
+        "key material must never reach stderr: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("<redacted>"),
+        "the field must be shown as redacted, not dropped: {diagnostics}"
+    );
+    // The actionable half of the payload survives.
+    assert!(
+        diagnostics.contains("details:") && diagnostics.contains("broken"),
+        "{diagnostics}"
+    );
+    assert!(!stdout(&output).contains("vk_live"), "{}", stdout(&output));
 }

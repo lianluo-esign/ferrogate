@@ -388,7 +388,7 @@ fn asset_channels_list_json_with_pagination_and_filter() {
         200,
         "OK",
         &[("content-type", "application/json")],
-        r#"{"items":[{"channel":"stable","version":"1.0.0"}]}"#,
+        r#"{"object":"list","data":[{"channel":"stable","version":"1.0.0"}]}"#,
     ));
 
     // asset-channels `list` is a nested read under the asset item; the id
@@ -425,7 +425,7 @@ fn asset_channels_list_json_with_pagination_and_filter() {
         "filter param: {request}"
     );
     let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
-    assert_eq!(body["items"][0]["channel"], "stable");
+    assert_eq!(body["data"][0]["channel"], "stable");
 }
 
 // ----- #364 billing/usage + operator-action ----------------------------------
@@ -437,7 +437,7 @@ fn billing_usage_reports_json_round_trip() {
         200,
         "OK",
         &[("content-type", "application/json")],
-        r#"{"items":[{"period":"2026-07","total_tokens":1000}]}"#,
+        r#"{"object":"list","data":[{"period":"2026-07","total_tokens":1000}]}"#,
     ));
 
     let output = base_cmd(home.path())
@@ -456,7 +456,7 @@ fn billing_usage_reports_json_round_trip() {
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert_eq!(mock.last_request(), "GET /admin/v1/usage-reports");
     let body: serde_json::Value = serde_json::from_str(stdout(&output).trim()).unwrap();
-    assert_eq!(body["items"][0]["total_tokens"], 1000);
+    assert_eq!(body["data"][0]["total_tokens"], 1000);
 }
 
 #[test]

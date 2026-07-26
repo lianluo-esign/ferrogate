@@ -30,6 +30,19 @@ jobs:
           - slice: cli_slices
             package: ferrogate-cli
             args: --all-features --test check_command --test workspace_skeleton
+          # The Control Plane CLI end-to-end suites. `cargo test -p
+          # ferrogate-cli` is never run unfiltered anywhere in CI, so before
+          # this slice existed these two targets — the ONLY proof that table/
+          # JSON output, error envelopes, exit classes 3/4/5/6/7, timeout, TLS
+          # failure, request-id propagation and the whole list/pagination
+          # surface behave (#360), and the only lifecycle proof against a live
+          # in-process gateway (#362) — compiled but never executed. A
+          # regression across the entire list surface would have shipped green.
+          - slice: cli_e2e
+            package: ferrogate-cli
+            args: >-
+              --all-features --test control_cli_e2e --test control_cli_resource_e2e
+              --test ctl_lifecycle_e2e
           - slice: cli_core
             package: ferrogate-cli-core
             args: --all-features

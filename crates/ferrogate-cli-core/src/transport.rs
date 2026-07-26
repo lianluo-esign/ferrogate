@@ -347,19 +347,58 @@ const MAX_PAGES: u32 = 10_000;
 /// Response keys under which the Control Plane API returns a list page.
 /// Shared by the all-pages walker and by the table renderer so both agree on
 /// what "a page" looks like instead of each keeping its own list.
-pub const PAGE_ITEM_KEYS: [&str; 4] = ["items", "data", "results", "records"];
+///
+/// This list is deliberately **one entry**, derived from a structural parse of
+/// `docs/openapi/admin-api.openapi.json` rather than from guesswork: every
+/// schema in the contract that carries an array-typed page property spells it
+/// `data`, and none spells it `items`, `results`, or `records`. A speculative
+/// alias list reads as generosity but is the opposite: it lets the walker, the
+/// truncation notice, and the envelope-metadata table be "proven" against a
+/// payload shape no endpoint emits, so deleting the one real key would leave
+/// every test green while the feature died in production.
+/// `page_item_keys_match_the_openapi_contract` in `transport_test.rs` re-derives
+/// the list from the spec and fails if the contract ever grows another spelling.
+pub const PAGE_ITEM_KEYS: [&str; 1] = ["data"];
 
-/// Response keys carrying the collection-wide row count.
-const PAGE_TOTAL_KEYS: [&str; 3] = ["total", "total_count", "count"];
+/// Response keys carrying the collection-wide row count. Also spec-derived:
+/// `total` is the only collection-count property in the contract. `count` was
+/// removed because it is the natural spelling of a *per-page* count — reading
+/// one as the collection total would stop the walk after page one.
+const PAGE_TOTAL_KEYS: [&str; 1] = ["total"];
+
+/// Envelope keys that describe the *window* one page covers rather than the
+/// collection, so they misdescribe a merged multi-page document.
+const PAGE_WINDOW_KEYS: [&str; 2] = ["offset", "limit"];
+
+/// Envelope keys that mark a **cursor**-paginated endpoint. The walker speaks
+/// `offset`/`limit` only; a cursor endpoint ignores those parameters and would
+/// return page one forever, so their presence is a hard stop rather than an
+/// accidental fallback (see [`ControlPlaneClient::send_all_pages`]).
+const PAGE_CURSOR_KEYS: [&str; 5] = [
+    "after_event_id",
+    "next_after_event_id",
+    "has_more",
+    "next_cursor",
+    "cursor_reset",
+];
 
 /// A decoded list page: the item array, the envelope key it lived under
-/// (`None` for a bare top-level array), and the server-reported collection
-/// total when the envelope carried one.
+/// (`None` for a bare top-level array), the server-reported collection total
+/// when the envelope carried one, the server-applied page size, and whether the
+/// envelope is cursor- rather than offset-paginated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageEnvelope<'a> {
     pub items_key: Option<&'static str>,
     pub items: &'a [serde_json::Value],
     pub total: Option<u64>,
+    /// The page size the *server* applied, from the envelope's own `limit`.
+    /// Distinct from any `--limit` the operator passed: an endpoint with a
+    /// server-side default page size reports one here even when the caller
+    /// named none, which is what lets the truncation notice fire on a default
+    /// `list` instead of staying silent.
+    pub limit: Option<u64>,
+    /// True when the envelope carries cursor-pagination markers.
+    pub cursor: bool,
 }
 
 /// Recognize a list response shape. Returns `None` when the document is not a
@@ -371,6 +410,8 @@ pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
             items_key: None,
             items,
             total: None,
+            limit: None,
+            cursor: false,
         }),
         serde_json::Value::Object(map) => {
             let key = PAGE_ITEM_KEYS
@@ -381,10 +422,14 @@ pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
             let total = PAGE_TOTAL_KEYS
                 .iter()
                 .find_map(|total_key| map.get(*total_key)?.as_u64());
+            let limit = map.get("limit").and_then(serde_json::Value::as_u64);
+            let cursor = PAGE_CURSOR_KEYS.iter().any(|key| map.contains_key(*key));
             Some(PageEnvelope {
                 items_key: Some(key),
                 items,
                 total,
+                limit,
+                cursor,
             })
         }
         _ => None,
@@ -393,10 +438,11 @@ pub fn page_envelope(body: &serde_json::Value) -> Option<PageEnvelope<'_>> {
 
 /// Rebuild one response document from every page's items.
 ///
-/// Per-page cursor keys (`offset`/`limit`) are dropped because they describe a
-/// single page and would misdescribe the merged whole; `total` is left exactly
-/// as the server reported it so the operator can still cross-check the row
-/// count the walk produced.
+/// Per-page window keys (`offset`/`limit`) **and** per-page cursor keys
+/// (`next_offset`, `has_more`, `next_after_event_id`, …) are dropped because
+/// they describe a single page and would misdescribe the merged whole; `total`
+/// is left exactly as the server reported it so the operator can still
+/// cross-check the row count the walk produced.
 fn merge_pages(
     body: serde_json::Value,
     items_key: Option<&'static str>,
@@ -405,8 +451,13 @@ fn merge_pages(
     match (items_key, body) {
         (Some(key), serde_json::Value::Object(mut map)) => {
             map.insert(key.to_string(), serde_json::Value::Array(merged));
-            map.remove("offset");
-            map.remove("limit");
+            for stale in PAGE_WINDOW_KEYS
+                .iter()
+                .chain(PAGE_CURSOR_KEYS.iter())
+                .chain(["next_offset"].iter())
+            {
+                map.remove(*stale);
+            }
             serde_json::Value::Object(map)
         }
         _ => serde_json::Value::Array(merged),
@@ -414,13 +465,23 @@ fn merge_pages(
 }
 
 /// Given how many items the current page returned and an optional known
-/// `total`, compute the next page — or `None` when iteration is complete.
+/// `total`, compute the next page — or `None` when iteration should stop.
 ///
-/// Two stop conditions, so `--all-pages` never silently truncates *and* never
-/// loops forever: when `total` is known, stop once the next offset reaches it;
-/// when it is unknown, stop as soon as a page returns fewer items than the
-/// requested limit (a short page is the last page). A page that returns zero
-/// items always ends iteration.
+/// Three stop conditions, so a walk never loops forever: a page that returned
+/// **zero** items cannot advance the cursor (the next request would be
+/// byte-identical to the one that just came back empty); when `total` is known,
+/// stop once the next offset reaches it; when it is unknown, stop as soon as a
+/// page returns fewer items than the requested limit (a short page is the last
+/// page).
+///
+/// Note carefully what this function does **not** decide: whether stopping was
+/// *legitimate*. An empty page in the middle of a collection the server said
+/// held 500 rows stops iteration here and is nonetheless a truncated answer.
+/// Deciding that is [`ControlPlaneClient::send_all_pages`]'s job — it compares
+/// the merged row count against the reported total after the walk and fails
+/// rather than returning a short answer with exit 0. Claiming the stop
+/// conditions alone make truncation impossible (as the previous comment here
+/// did) was wrong: this arm is exactly how the silent truncation got in.
 pub fn next_page(current: &PageRequest, returned: u64, total: Option<u64>) -> Option<PageRequest> {
     if returned == 0 {
         return None;
@@ -592,22 +653,50 @@ impl<T: Transport> ControlPlaneClient<T> {
     /// [`plan_all_pages`] describe the arithmetic, this is what actually runs
     /// it. `spec` must **not** already carry `offset`/`limit`: the walk owns
     /// the cursor, and a caller-supplied offset would make "every page"
-    /// ambiguous. Iteration stops only on [`next_page`]'s two honest stop
-    /// conditions (known total reached, or a short page when no total is
-    /// reported), so a partial result is impossible without an error.
+    /// ambiguous.
     ///
-    /// A response that is not a list page is a usage error rather than a
-    /// silently single-page answer: `--all-pages` on a non-list verb is a
-    /// mistake worth telling the operator about.
+    /// Four refusals, each preferring a loud failure to a plausible-looking
+    /// partial answer:
+    ///
+    /// 1. **A non-`GET` spec is rejected before anything is sent.** `--all-pages`
+    ///    on `delete` is a malformed invocation; discovering that *after* the
+    ///    DELETE committed would tell the operator their command was invalid
+    ///    while the destructive change had already happened.
+    /// 2. **A non-list response** is a usage error rather than a silently
+    ///    single-page answer: `--all-pages` on a non-list verb is a mistake
+    ///    worth telling the operator about.
+    /// 3. **A cursor-paginated endpoint is refused.** The walk speaks
+    ///    `offset`/`limit`; an endpoint paginating by cursor ignores both and
+    ///    would hand back page one on every iteration until `MAX_PAGES`,
+    ///    buffering 10 000 pages of duplicated rows. Refusing states the rule
+    ///    instead of leaving a request storm as the accidental behavior.
+    /// 4. **A walk that ends short of a reported `total` fails.** Iteration
+    ///    itself stops on [`next_page`]'s conditions, one of which is an empty
+    ///    page — and an empty page can arrive in the *middle* of a collection
+    ///    (a concurrent delete, or a server that filters after paging). Without
+    ///    this check that path returned fewer rows than the server said existed,
+    ///    with exit 0 and no diagnostic, which is precisely the silent
+    ///    truncation this code exists to prevent.
     pub async fn send_all_pages(
         &self,
         spec: &RequestSpec,
         page_size: u64,
     ) -> CliResult<ApiResponse> {
+        if spec.method != Method::GET {
+            return Err(CliError::usage(format!(
+                "--all-pages only applies to a list read, but this verb issues {} {}; \
+                 re-run without --all-pages",
+                spec.method, spec.path
+            )));
+        }
         let mut page = PageRequest::first(page_size.max(1));
         let mut merged: Vec<serde_json::Value> = Vec::new();
         let mut first: Option<ApiResponse> = None;
         let mut items_key: Option<&'static str> = None;
+        // The freshest total the server stated. Later pages win, so a
+        // collection that legitimately shrank mid-walk is judged against the
+        // count the server most recently reported, not a stale one.
+        let mut reported_total: Option<u64> = None;
 
         for _ in 0..MAX_PAGES {
             let paged = spec.clone().with_page(&page);
@@ -619,6 +708,15 @@ impl<T: Transport> ControlPlaneClient<T> {
                         spec.path
                     ))
                 })?;
+                if envelope.cursor {
+                    return Err(CliError::usage(format!(
+                        "--all-pages cannot walk {}: it is cursor-paginated, and the walk only \
+                         speaks offset/limit — every iteration would re-fetch the first page. \
+                         Page it explicitly with --filter and the cursor field the endpoint \
+                         documents",
+                        spec.path
+                    )));
+                }
                 // The first page fixes the envelope shape the merged result is
                 // rebuilt into; later pages only contribute rows.
                 if first.is_none() {
@@ -627,6 +725,9 @@ impl<T: Transport> ControlPlaneClient<T> {
                 merged.extend(envelope.items.iter().cloned());
                 (envelope.items.len() as u64, envelope.total)
             };
+            if let Some(total) = total {
+                reported_total = Some(total);
+            }
             let next = next_page(&page, returned, total);
             // Keep the FIRST page's correlation metadata: it identifies the
             // request the operator actually issued.
@@ -636,6 +737,17 @@ impl<T: Transport> ControlPlaneClient<T> {
             match next {
                 Some(next) => page = next,
                 None => {
+                    let fetched = merged.len() as u64;
+                    if let Some(total) = reported_total {
+                        if fetched < total {
+                            return Err(CliError::transport(format!(
+                                "--all-pages fetched {fetched} of the {total} rows {} reports; \
+                                 the walk ended early (an empty or short page mid-collection), so \
+                                 the result would have been silently truncated",
+                                spec.path
+                            )));
+                        }
+                    }
                     let mut whole = first.expect("the first page was recorded above");
                     whole.body = merge_pages(whole.body, items_key, merged);
                     return Ok(whole);

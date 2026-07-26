@@ -40,7 +40,7 @@ use clap::{ArgMatches, Args, Command, FromArgMatches};
 use ferrogate_cli_core::args::GlobalArgs;
 use ferrogate_cli_core::auth::resolve_credential;
 use ferrogate_cli_core::command::Registry;
-use ferrogate_cli_core::dispatch::{build_request, redact_response};
+use ferrogate_cli_core::dispatch::{build_request, redact_response, secret_fields_for};
 use ferrogate_cli_core::error::{CliError, CliResult};
 use ferrogate_cli_core::output::{render_json, OutputFormat, Table};
 use ferrogate_cli_core::registry_helpers::ResourceInput;
@@ -51,7 +51,7 @@ use ferrogate_cli_core::transport::{
 };
 use serde_json::{Map, Value};
 
-use super::dispatch::{self, report_error, ProcessSecretResolver};
+use super::dispatch::{self, report_error_for, ProcessSecretResolver};
 
 /// Top-level namespace command that hosts every registered resource family.
 pub(crate) const CTL_COMMAND: &str = "ctl";
@@ -92,6 +92,9 @@ struct ResourceArgs {
 
     /// Server-side sort key for a list verb; prefix with `-` for descending.
     /// Repeatable and order-preserving, so the first key is the primary sort.
+    /// NOT HONORED BY THE SERVER TODAY: no Control Plane API operation declares
+    /// a `sort` query parameter, so the key is forwarded verbatim and currently
+    /// ignored; a note is printed to stderr on every use.
     // `allow_hyphen_values` is required, not cosmetic: without it clap reads
     // the documented descending form `--sort -created_at` as an unknown `-c`
     // flag, making descending sort unreachable from the command line.
@@ -119,10 +122,22 @@ impl ResourceArgs {
             });
         }
         for sort in &self.sorts {
-            if sort.trim().is_empty() {
+            let key = sort.trim();
+            if key.is_empty() {
                 return Err(CliError::usage("--sort key must not be empty".to_string()));
             }
-            list = list.with_sort(sort.trim());
+            // `allow_hyphen_values` (needed for the descending `-created_at`
+            // form) also makes clap hand a following *flag* to `--sort`:
+            // `--sort --output json` parses `--output` as the sort key and
+            // `json` as a stray positional segment. A field name never begins
+            // with `--`, so this is a forgotten value, not a sort key.
+            if key.starts_with("--") {
+                return Err(CliError::usage(format!(
+                    "--sort expected a field name but got the flag '{key}'; \
+                     a sort key never begins with '--' (did you mean `--sort <FIELD> {key}`?)"
+                )));
+            }
+            list = list.with_sort(key);
         }
         for filter in &self.filters {
             let (key, value) = filter.split_once('=').ok_or_else(|| {
@@ -227,9 +242,24 @@ pub(crate) fn run_resource(registry: &Registry, matches: &ArgMatches) -> i32 {
     match execute(registry, matches) {
         Ok(()) => 0,
         Err(error) => {
-            report_error(&error);
+            // The invoked group's one-time secret fields are redacted from the
+            // error's `details` payload exactly as they are from a success
+            // body: a server error that echoes the rejected request must not be
+            // the one path that leaks key material to stderr.
+            report_error_for(&error, invoked_secret_fields(matches));
             error.exit_class().code()
         }
+    }
+}
+
+/// The one-time secret fields of the group named on the command line, or an
+/// empty slice when no group was matched (a bare `ferrogate ctl` usage error).
+/// Read straight off the parsed matches so it is available on the error path,
+/// where `execute`'s locals are gone.
+fn invoked_secret_fields(matches: &ArgMatches) -> &'static [&'static str] {
+    match matches.subcommand() {
+        Some((group, _)) => secret_fields_for(group),
+        None => &[],
     }
 }
 
@@ -252,6 +282,25 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
     let resource = ResourceArgs::from_arg_matches(verb_matches)
         .map_err(|error| CliError::usage(error.to_string()))?;
     let input = resource.to_input()?;
+
+    // `--sort` is honest about being unhonored. A structural parse of
+    // `docs/openapi/admin-api.openapi.json` finds **zero** operations declaring
+    // a `sort` query parameter (pinned by `sort_is_not_yet_an_openapi_query_
+    // parameter` in `ferrogate-cli-core`), so the key reaches the server and is
+    // ignored. Forwarding it verbatim is the right client design — sort order is
+    // only meaningful over the whole collection, so re-sorting a page locally
+    // would be a lie — but a flag documented as working that provably does
+    // nothing is the same ignored-field anti-pattern as a silently dropped
+    // `ca_bundle_path`, just wearing the server's clothes. Saying so on stderr
+    // costs one line and keeps the operator from trusting an order they did not
+    // get.
+    if !resource.sorts.is_empty() {
+        eprintln!(
+            "note: --sort is forwarded to the server verbatim, but no Control Plane API \
+             operation declares a 'sort' query parameter yet — the returned order is the \
+             server's default, not the one you asked for"
+        );
+    }
 
     // Build the request from the shared metadata-driven router — no hand-rolled
     // path. A clone is kept for the read-only redaction decision because the
@@ -313,7 +362,16 @@ fn execute(registry: &Registry, matches: &ArgMatches) -> CliResult<()> {
 /// truncation the issue forbids: whenever rows were left behind, or whenever
 /// the server gave us no way to know, the operator is told so and pointed at
 /// `--all-pages`. Pure, so every branch is unit-testable.
-fn truncation_notice(body: &Value, offset: u64, limit: Option<u64>) -> Option<String> {
+///
+/// `requested_limit` is the operator's `--limit`, which is frequently absent.
+/// The page size that actually applied then comes from the envelope's own
+/// `limit` field — carried by every paginated list schema in the contract.
+/// Consulting only the flag (as the first cut did) meant a bare `ferrogate ctl
+/// <group> list` against an endpoint with a server-side default page size and
+/// no `total` produced no notice at all: the exact default invocation an
+/// operator is most likely to run, and the one where a truncated page is least
+/// likely to be suspected.
+fn truncation_notice(body: &Value, offset: u64, requested_limit: Option<u64>) -> Option<String> {
     let envelope = page_envelope(body)?;
     let returned = envelope.items.len() as u64;
     match envelope.total {
@@ -325,7 +383,7 @@ fn truncation_notice(body: &Value, offset: u64, limit: Option<u64>) -> Option<St
         // With no server-reported total, a page that came back exactly full is
         // indistinguishable from a truncated one. Say that plainly instead of
         // implying completeness.
-        None => match limit {
+        None => match requested_limit.or(envelope.limit) {
             Some(limit) if returned > 0 && returned >= limit => Some(format!(
                 "note: returned a full page of {returned} rows and the server reported no total; \
                  more rows may exist — re-run with --all-pages to be sure"

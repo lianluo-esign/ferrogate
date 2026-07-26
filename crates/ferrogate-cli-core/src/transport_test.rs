@@ -289,22 +289,129 @@ fn page_envelope_recognizes_the_list_shapes() {
     assert_eq!(envelope.items.len(), 2);
     assert_eq!(envelope.total, None);
 
-    let wrapped = serde_json::json!({"items": [{"id": "a"}], "total": 7});
+    // The real Control Plane API list envelope, verbatim from the contract:
+    // `{"object":"list","data":[…],"total":N,"offset":O,"limit":L}`.
+    let wrapped = serde_json::json!({
+        "object": "list",
+        "data": [{"id": "a"}],
+        "total": 7,
+        "offset": 0,
+        "limit": 1,
+    });
     let envelope = page_envelope(&wrapped).unwrap();
-    assert_eq!(envelope.items_key, Some("items"));
+    assert_eq!(envelope.items_key, Some("data"));
     assert_eq!(envelope.items.len(), 1);
     assert_eq!(envelope.total, Some(7));
+    assert_eq!(envelope.limit, Some(1));
+    assert!(!envelope.cursor);
 
-    // Alternate envelope/total spellings the Control Plane API uses.
-    let alternate = serde_json::json!({"results": [], "total_count": 0});
-    let envelope = page_envelope(&alternate).unwrap();
-    assert_eq!(envelope.items_key, Some("results"));
-    assert_eq!(envelope.total, Some(0));
+    // Spellings the contract does NOT use are not list envelopes. Accepting
+    // them would let the pagination surface be "proven" against a payload no
+    // endpoint emits.
+    assert!(page_envelope(&serde_json::json!({"items": [{"id": "a"}], "total": 1})).is_none());
+    assert!(page_envelope(&serde_json::json!({"results": [], "total_count": 0})).is_none());
+    assert!(page_envelope(&serde_json::json!({"records": []})).is_none());
+
+    // A per-page `count` is not a collection total: reading one as the total
+    // would stop a walk after page one.
+    let counted = serde_json::json!({"data": [{"id": "a"}], "count": 1});
+    assert_eq!(page_envelope(&counted).unwrap().total, None);
 
     // A single object, a scalar, or null is not a list page.
     assert!(page_envelope(&serde_json::json!({"id": "a"})).is_none());
     assert!(page_envelope(&serde_json::json!("hello")).is_none());
     assert!(page_envelope(&serde_json::Value::Null).is_none());
+}
+
+/// The envelope keys the walker and the renderer recognize are re-derived from
+/// the enforced OpenAPI contract, not asserted from memory.
+///
+/// This is the test that makes the shape claim falsifiable in the direction it
+/// actually failed: previously `PAGE_ITEM_KEYS` carried three spellings the API
+/// never emits, so deleting the one real key (`data`) left every pagination
+/// test green while the feature died on 100% of endpoints. Here, a contract
+/// that grows a page property this client cannot read fails the suite.
+#[test]
+fn page_item_keys_match_the_openapi_contract() {
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    let schemas = spec["components"]["schemas"]
+        .as_object()
+        .expect("component schemas");
+
+    // A list envelope: an object schema with an array-typed property AND at
+    // least one pagination marker. Collected structurally rather than by
+    // grepping for "items", which in an OpenAPI document is overwhelmingly
+    // JSON Schema's own array keyword.
+    let markers = ["total", "limit", "offset", "has_more", "after_event_id"];
+    let mut array_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for schema in schemas.values() {
+        let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        if !markers
+            .iter()
+            .any(|marker| properties.contains_key(*marker))
+        {
+            continue;
+        }
+        for (name, property) in properties {
+            if property.get("type").and_then(|t| t.as_str()) == Some("array") {
+                array_keys.insert(name.clone());
+            }
+        }
+    }
+
+    assert!(
+        array_keys.contains("data"),
+        "the contract must still carry `data` page arrays: {array_keys:?}"
+    );
+    for key in &array_keys {
+        // `events` is a timeline projection, not a paginated page: it carries
+        // no page cursor of its own. Every *paginated* array is `data`.
+        if key == "events" {
+            continue;
+        }
+        assert!(
+            PAGE_ITEM_KEYS.contains(&key.as_str()),
+            "the contract grew a '{key}' page array the CLI pagination surface cannot read; \
+             add it to PAGE_ITEM_KEYS (found: {array_keys:?})"
+        );
+    }
+}
+
+/// `--sort` is documented as unhonored, and this pins that claim to the
+/// contract instead of to a comment. When the server does implement sorting,
+/// this test fails and forces the flag help, `docs/cli-reference.md`, and the
+/// stderr note in `resource_cmd.rs` to be corrected together.
+#[test]
+fn sort_is_not_yet_an_openapi_query_parameter() {
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/openapi/admin-api.openapi.json"))
+            .expect("the OpenAPI contract parses");
+    let mut declaring: Vec<String> = Vec::new();
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        let Some(operations) = item.as_object() else {
+            continue;
+        };
+        for (method, operation) in operations {
+            let Some(parameters) = operation.get("parameters").and_then(|p| p.as_array()) else {
+                continue;
+            };
+            if parameters
+                .iter()
+                .any(|parameter| parameter.get("name").and_then(|n| n.as_str()) == Some("sort"))
+            {
+                declaring.push(format!("{method} {path}"));
+            }
+        }
+    }
+    assert!(
+        declaring.is_empty(),
+        "the API now declares a `sort` query parameter on {declaring:?} — update the --sort flag \
+         help, docs/cli-reference.md, and drop the 'not honored' stderr note in resource_cmd.rs"
+    );
 }
 
 /// Fake transport that replies with a scripted sequence of responses and
@@ -376,15 +483,15 @@ impl Transport for std::sync::Arc<ScriptedTransport> {
 fn send_all_pages_walks_every_page_and_loses_no_rows() {
     let context = context_with_endpoint("https://prod.example.com", None);
     let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
-        r#"{"items":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
-        r#"{"items":[{"id":"c"},{"id":"d"}],"total":5,"offset":2,"limit":2}"#,
-        r#"{"items":[{"id":"e"}],"total":5,"offset":4,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"c"},{"id":"d"}],"total":5,"offset":2,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"e"}],"total":5,"offset":4,"limit":2}"#,
     ]));
     let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
     let spec = RequestSpec::get("/admin/v1/tenant-accounts");
     let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
 
-    let items = response.body["items"].as_array().unwrap();
+    let items = response.body["data"].as_array().unwrap();
     let ids: Vec<&str> = items
         .iter()
         .map(|item| item["id"].as_str().unwrap())
@@ -446,4 +553,173 @@ fn send_all_pages_rejects_a_non_list_response() {
         error.to_string().contains("--all-pages"),
         "message must name the flag: {error}"
     );
+}
+
+/// **The blocker this rework exists for.** An empty page in the middle of a
+/// collection the server says holds 5 rows ends iteration — and the walk must
+/// then FAIL, not hand back 2 rows with a success exit.
+///
+/// This is reachable in production, not a contrived shape: a concurrent delete,
+/// or a server that applies a post-paging filter, produces exactly this. Before
+/// the completeness check, `next_page`'s `returned == 0` arm returned `None`
+/// before consulting the known total and the CLI printed 2 of 5 rows, exit 0,
+/// no diagnostic — the silent truncation the Scope bullet forbids, inside the
+/// code written to prevent it.
+#[test]
+fn send_all_pages_fails_on_an_empty_page_inside_a_known_total() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
+        r#"{"object":"list","data":[],"total":5,"offset":2,"limit":2}"#,
+    ]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+    let error = block_on(client.send_all_pages(&spec, 2)).unwrap_err();
+
+    assert_ne!(
+        error.exit_class(),
+        ExitClass::Success,
+        "a short walk must not be a success"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("fetched 2 of the 5 rows"),
+        "the operator must be told how many rows were missed: {message}"
+    );
+    assert_eq!(
+        transport.urls().len(),
+        2,
+        "the walk still stops at the empty page rather than spinning"
+    );
+}
+
+/// A short *final* page against a known total is still a completed walk: the
+/// completeness check must not turn every legitimate walk into an error. The
+/// negative twin of the test above.
+#[test]
+fn send_all_pages_accepts_a_walk_that_reaches_the_reported_total() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":3,"offset":0,"limit":2}"#,
+        r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
+    ]);
+    let client = ControlPlaneClient::new(context, None, transport);
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+    let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
+    assert_eq!(response.body["data"].as_array().unwrap().len(), 3);
+}
+
+/// A collection that legitimately shrank mid-walk is judged against the total
+/// the server most recently reported, not a stale one — otherwise a concurrent
+/// delete would make an honest, complete walk fail.
+#[test]
+fn send_all_pages_honors_the_freshest_reported_total() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"a"},{"id":"b"}],"total":5,"offset":0,"limit":2}"#,
+        // Two rows were deleted between pages; the server now says 3.
+        r#"{"object":"list","data":[{"id":"c"}],"total":3,"offset":2,"limit":2}"#,
+    ]);
+    let client = ControlPlaneClient::new(context, None, transport);
+    let spec = RequestSpec::get("/admin/v1/tenant-accounts");
+    let response = block_on(client.send_all_pages(&spec, 2)).unwrap();
+    assert_eq!(response.body["data"].as_array().unwrap().len(), 3);
+}
+
+/// `--all-pages` on a mutating verb is rejected **before** a byte is sent.
+///
+/// The flag is augmented onto every verb, so `ctl projects delete p-1
+/// --all-pages` used to issue the DELETE, have the server delete the project,
+/// and only then report "usage error" — telling the operator the invocation was
+/// malformed after the destructive change had already committed. The scripted
+/// transport records every request it saw, so "nothing was sent" is asserted,
+/// not assumed.
+#[test]
+fn send_all_pages_rejects_a_mutating_verb_before_sending_it() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![r#"{"deleted":true}"#]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::new(http::Method::DELETE, "/admin/v1/projects/proj-1");
+
+    let error = block_on(client.send_all_pages(&spec, 50)).unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(
+        error.to_string().contains("DELETE"),
+        "the message must name the method that was refused: {error}"
+    );
+    assert!(
+        transport.urls().is_empty(),
+        "the mutation must NOT have been sent: {:?}",
+        transport.urls()
+    );
+}
+
+/// A cursor-paginated endpoint is refused after one page instead of becoming a
+/// 10 000-request storm.
+///
+/// The walk speaks `offset`/`limit`; the event-stream endpoints paginate by
+/// `after_event_id`/`has_more` and ignore both. Every iteration therefore
+/// re-fetched page one: never a short page, never a total, so the loop ran to
+/// `MAX_PAGES` and buffered 10 000 pages of duplicated rows before erroring.
+/// Detection is on the response envelope, not on a hard-coded list of resource
+/// nouns, so a future cursor endpoint is covered by the same rule.
+#[test]
+fn send_all_pages_refuses_a_cursor_paginated_endpoint() {
+    let context = context_with_endpoint("https://prod.example.com", None);
+    let transport = std::sync::Arc::new(ScriptedTransport::new(vec![
+        r#"{"object":"list","data":[{"id":"e1"}],"limit":1,"has_more":true,"next_after_event_id":"e1"}"#,
+    ]));
+    let client = ControlPlaneClient::new(context, None, std::sync::Arc::clone(&transport));
+    let spec = RequestSpec::get("/admin/v1/agent-jobs/job-1/events");
+
+    let error = block_on(client.send_all_pages(&spec, 1)).unwrap_err();
+    assert_eq!(error.exit_class(), ExitClass::Usage);
+    assert!(
+        error.to_string().contains("cursor-paginated"),
+        "the message must state the rule: {error}"
+    );
+    assert_eq!(
+        transport.urls().len(),
+        1,
+        "exactly one page is fetched before refusing, not MAX_PAGES"
+    );
+}
+
+/// Merging must not leave per-page cursor keys describing the merged whole: a
+/// `has_more`/`next_offset` copied off page one is false about the union.
+#[test]
+fn merged_pages_drop_every_per_page_cursor_key() {
+    let merged = merge_pages(
+        serde_json::json!({
+            "object": "list",
+            "data": [],
+            "total": 2,
+            "offset": 0,
+            "limit": 1,
+            "next_offset": 1,
+            "has_more": true,
+            "next_after_event_id": "e1",
+        }),
+        Some("data"),
+        vec![
+            serde_json::json!({"id": "a"}),
+            serde_json::json!({"id": "b"}),
+        ],
+    );
+    assert_eq!(merged["data"].as_array().unwrap().len(), 2);
+    // The collection-wide count survives so the operator can cross-check.
+    assert_eq!(merged["total"], 2);
+    assert_eq!(merged["object"], "list");
+    for stale in [
+        "offset",
+        "limit",
+        "next_offset",
+        "has_more",
+        "next_after_event_id",
+    ] {
+        assert!(
+            merged.get(stale).is_none(),
+            "'{stale}' describes one page and must not survive the merge: {merged}"
+        );
+    }
 }
