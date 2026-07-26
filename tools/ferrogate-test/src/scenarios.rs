@@ -2007,7 +2007,163 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         },
     )?;
 
+    assert_api_key_tenancy_enforcement(&case)?;
+
     println!("admin-api scenario passed");
+    Ok(())
+}
+
+/// #340 acceptance box 4 -- "cross-tenant combinations are blocked client-side
+/// AND rejected authoritatively by the API" -- as a runnable harness scenario.
+///
+/// The admin console cascades its workspace picker from the selected project,
+/// but a UI convention is not an invariant: any curl, SDK or stale console build
+/// posts straight to `/admin/v1/api-keys`. This drives the enforcement through a
+/// real gateway process with the console entirely out of the loop, so the box
+/// stays proved in `ferrogate-test ci` (which calls `run_admin_api`) and not only
+/// in the crate's own integration test.
+fn assert_api_key_tenancy_enforcement(case: &LocalHarness) -> Result<()> {
+    for tenant in ["tenancy-box4-a", "tenancy-box4-b"] {
+        case.expect_json(
+            "POST",
+            "/admin/v1/tenant-accounts",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &format!(r#"{{"id":"{tenant}","name":"{tenant}","slug":"{tenant}"}}"#),
+            201,
+            |_| Ok(()),
+        )?;
+    }
+    for (project, tenant) in [
+        ("box4-project-a", "tenancy-box4-a"),
+        ("box4-project-b", "tenancy-box4-b"),
+    ] {
+        case.expect_json(
+            "POST",
+            "/admin/v1/projects",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &format!(
+                r#"{{"id":"{project}","tenant_id":"{tenant}","name":"{project}","slug":"{project}"}}"#
+            ),
+            201,
+            |_| Ok(()),
+        )?;
+    }
+    for (workspace, project) in [
+        ("box4-workspace-a", "box4-project-a"),
+        ("box4-workspace-b", "box4-project-b"),
+    ] {
+        case.expect_json(
+            "POST",
+            "/admin/v1/workspaces",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &format!(
+                r#"{{"id":"{workspace}","project_id":"{project}","name":"{workspace}","slug":"{workspace}"}}"#
+            ),
+            201,
+            |_| Ok(()),
+        )?;
+    }
+
+    // A consistent triple is the control: the rejections below must come from the
+    // tenancy check, not from some unrelated validation of this payload shape.
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"box4-consistent","name":"Consistent","key":"box4-consistent-secret","organization_id":"tenancy-box4-a","project_id":"box4-project-a","workspace_id":"box4-workspace-a"}"#,
+        201,
+        |body| {
+            assert_eq!(body["key"]["project_id"], "box4-project-a");
+            assert_eq!(body["key"]["workspace_id"], "box4-workspace-a");
+            Ok(())
+        },
+    )?;
+
+    // Project A paired with project B's workspace: the exact combination the
+    // console cascade prevents, refused server-side with the same payload.
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"box4-cross-project","name":"Cross project","key":"box4-cross-secret","project_id":"box4-project-a","workspace_id":"box4-workspace-b"}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("box4-workspace-b"),
+                "rejection must name the offending workspace: {body}"
+            );
+            Ok(())
+        },
+    )?;
+
+    // A project owned by a tenant other than the key's declared organization.
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"box4-cross-tenant","name":"Cross tenant","key":"box4-cross-tenant-secret","organization_id":"tenancy-box4-a","project_id":"box4-project-b"}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+            Ok(())
+        },
+    )?;
+
+    // Neither rejected key reached the runtime snapshot.
+    for rejected in ["box4-cross-project", "box4-cross-tenant"] {
+        case.expect_json(
+            "GET",
+            &format!("/admin/v1/api-keys/{rejected}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |_| Ok(()),
+        )?;
+    }
+
+    // The update path enforces the same invariant: a key stored with a legal
+    // pair cannot be walked into an illegal one.
+    case.expect_json(
+        "PUT",
+        "/admin/v1/api-keys/box4-consistent",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"box4-consistent","name":"Consistent","key":"box4-consistent-secret","project_id":"box4-project-a","workspace_id":"box4-workspace-b"}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/api-keys/box4-consistent",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(
+                body["key"]["workspace_id"], "box4-workspace-a",
+                "the refused update must not have been persisted: {body}"
+            );
+            Ok(())
+        },
+    )?;
+
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/api-keys/box4-consistent",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
